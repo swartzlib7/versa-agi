@@ -1,0 +1,69 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────
+# agictl — Wrapper for transparent sudo elevation
+#
+# When called by an agent user (e.g. coa), automatically
+# re-executes as the watchdog user via sudo. This ensures
+# the agent can never directly access the SQLite database.
+#
+# The actual binary lives at /usr/local/lib/versa-agi/agictl
+# and is the only command the agent is allowed to sudo.
+# ─────────────────────────────────────────────────────
+
+REAL_BINARY="/usr/local/lib/versa-agi/agictl"
+
+# Determine if the caller is an agent user
+CALLER="$(whoami)"
+
+# ── Auto-detect defaults when env vars are not set ──
+# For agent users (coa, watchdog), detect from their own paths via -f/-d.
+# For the Primary User (any other user), set COA defaults unconditionally.
+# The calling user (s7) can't stat /home/coa/ or /var/lib/versa-agi/,
+# but watchdog (the sudo elevation target) can — so the paths are correct.
+
+_is_agent_user=false
+[ "${CALLER}" = "coa" ] || [ "${CALLER}" = "watchdog" ] || [ "${CALLER}" = "root" ] && _is_agent_user=true
+
+if [ -z "${AGICTL_CONFIG:-}" ]; then
+  if [ "${_is_agent_user}" = true ] && [ -f "/etc/versa-agi/${CALLER}_config.json" ]; then
+    export AGICTL_CONFIG="/etc/versa-agi/${CALLER}_config.json"
+  else
+    export AGICTL_CONFIG="/etc/versa-agi/coa_config.json"
+  fi
+fi
+if [ -z "${AGICTL_DB:-}" ]; then
+  if [ "${_is_agent_user}" = true ] && [ -f "/var/lib/versa-agi/${CALLER}/agent_memory.db" ]; then
+    export AGICTL_DB="/var/lib/versa-agi/${CALLER}/agent_memory.db"
+  else
+    export AGICTL_DB="/var/lib/versa-agi/coa/agent_memory.db"
+  fi
+fi
+if [ -z "${AGICTL_AGENT_DIR:-}" ]; then
+  _found=""
+  if [ "${_is_agent_user}" = true ]; then
+    for _d in "${HOME}/.agent" "${HOME}"/*/.agent; do
+      if [ -d "${_d}" ]; then
+        export AGICTL_AGENT_DIR="${_d}"
+        _found=1
+        break
+      fi
+    done
+  fi
+  if [ -z "${_found}" ]; then
+    export AGICTL_AGENT_DIR="/home/coa/coa-env/.agent"
+  fi
+fi
+
+# If running as root or watchdog, execute directly
+if [ "${CALLER}" = "root" ] || [ "${CALLER}" = "watchdog" ]; then
+  exec "${REAL_BINARY}" "$@"
+fi
+
+# For any other user (agent users), elevate to watchdog via sudo.
+# Explicitly forward AGICTL_* env vars — sudo strips the environment.
+exec sudo -u watchdog \
+  AGICTL_DB="${AGICTL_DB:-}" \
+  AGICTL_AGENT_DIR="${AGICTL_AGENT_DIR:-}" \
+  AGICTL_CONFIG="${AGICTL_CONFIG:-}" \
+  AGICTL_AGENT_USER="${CALLER}" \
+  "${REAL_BINARY}" "$@"

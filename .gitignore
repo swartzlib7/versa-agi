@@ -1,0 +1,42 @@
+# MCP Dependencies
+src/versa-agi-mcp/dist
+src/versa-agi-mcp/node_modules
+src/coa-env/node_modules
+
+# Python cache
+src/core-infra/agitop/__pycache__
+src/core-infra/agitop/data/__pycache__
+src/core-infra/agitop/panels/__pycache__
+src/core-infra/agictl/__pycache__
+
+# Runtime databases (created during setup)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Runtime state files
+*.lock
+*.cooldown
+*.debounce
+
+# Logs
+*.log
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+.sfdx
+
+# IDE
+.vscode/
+.idea/
+
+# Local config dirs
+.vscrof
+.versavoiceai
+
+Sensitive configuration (may contain API keys)
+setup.ini
+src/setup.ini
+GEMINI.md

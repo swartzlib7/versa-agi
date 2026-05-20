@@ -1,0 +1,606 @@
+/* agitop — Versa AGi Mission Control Dashboard
+ * Textual CSS Stylesheet
+ */
+
+Screen {
+    background: $surface;
+}
+
+#dashboard {
+    height: auto;
+    min-height: 1fr;
+    overflow-y: auto;
+    padding: 0 1;
+}
+
+.panel-header {
+    height: auto;
+    max-height: 5;
+    margin-bottom: 0;
+}
+
+#channel-filters {
+    width: 1fr;
+    height: auto;
+    align-vertical: middle;
+}
+
+.action-link {
+    width: auto;
+    color: $primary-lighten-2;
+    padding-top: 1;
+    padding-right: 1;
+}
+
+.action-link:hover {
+    color: $accent;
+}
+
+.panel-title {
+    content-align: left middle;
+    text-style: bold;
+    color: $accent;
+    margin-right: 2;
+    padding-top: 1;
+}
+
+.panel-btn {
+    min-width: 20;
+    margin-right: 1;
+}
+
+.panel-btn-sm {
+    width: auto;
+    min-width: 8;
+    margin-left: 0;
+    margin-right: 0;
+}
+
+.filter-label {
+    padding-top: 1;
+    color: $text-muted;
+}
+
+/* ─── System Panel ─────────────────────────────── */
+
+#system-panel {
+    height: auto;
+    border: solid $primary;
+    border-title-color: $text;
+    padding: 1;
+    background: $surface-darken-1;
+}
+
+#system-columns {
+    height: auto;
+    width: 100%;
+}
+
+.sys-col {
+    width: 1fr;
+    height: auto;
+}
+
+.col-header {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+.clock-col {
+    width: auto;
+    min-width: 26;
+    content-align: center middle;
+    text-align: center;
+    height: auto;
+}
+
+#m-clock {
+    text-align: center;
+    content-align: center middle;
+    text-style: bold;
+    min-height: 5;
+    padding: 1 2;
+}
+
+.controls-col {
+    width: 2fr;
+    min-width: 40;
+}
+
+.btn-grid-row {
+    height: auto;
+    width: 100%;
+}
+
+.btn-grid-row > .panel-btn {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+.panel-btn-sm {
+    width: auto;
+    min-width: 8;
+    height: auto;
+}
+
+/* ─── Agents + Projects Row ────────────────────── */
+
+#agents-projects-row {
+    height: auto;
+    min-height: 5;
+    max-height: 10;
+    margin-top: 1;
+}
+
+#agents-panel {
+    width: 2fr;
+    height: 1fr;
+    border: solid $accent;
+    padding: 0 1;
+    background: $surface-darken-1;
+}
+
+#projects-panel {
+    width: 1fr;
+    height: 1fr;
+    border: solid $success;
+    padding: 0 1;
+    background: $surface-darken-1;
+    margin-left: 1;
+}
+
+/* ─── Tasks Panel ────────────────────────────── */
+
+#tasks-collapsible {
+    margin-top: 1;
+}
+
+#tasks-panel {
+    width: 1fr;
+    height: auto;
+    min-height: 10;
+    border: solid $warning;
+    padding: 0 1;
+    background: $surface-darken-1;
+}
+
+/* ─── Messages Panel ──────────────────────────── */
+
+#messages-collapsible {
+    margin-top: 1;
+}
+
+#messages-panel {
+    height: auto;
+    min-height: 15;
+    border: solid $primary;
+    padding: 0 1;
+    background: $surface-darken-1;
+}
+
+/* ─── Footer Stats ─────────────────────────────── */
+
+#footer-stats-panel {
+    height: 3;
+    margin-top: 1;
+    border: heavy $primary;
+    background: $surface-darken-2;
+    content-align: center middle;
+}
+
+#footer-row {
+    height: 100%;
+    align: center middle;
+}
+
+#footer-label {
+    width: 1fr;
+    text-align: center;
+    text-style: bold;
+    color: $text;
+}
+
+#footer-reset-link {
+    width: auto;
+    color: $warning;
+}
+
+#footer-reset-link:hover {
+    color: $error;
+}
+
+#footer-session-link {
+    width: auto;
+    padding-right: 2;
+    color: $accent;
+}
+
+#footer-session-link:hover {
+    color: $primary-lighten-2;
+}
+
+SessionViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ResetConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+TechnicalSetupModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#settings-json-view {
+    height: 14;
+    min-height: 8;
+}
+
+PromptViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+AgentPromptMenu {
+    align: center middle;
+    background: $surface 80%;
+}
+
+AgentEditModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+MemoryViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DeleteTaskModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+/* ─── Modals ───────────────────────────────────── */
+
+TaskEditModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#task-dialog {
+    width: 60%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+}
+
+#task-dialog-title {
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    content-align: center middle;
+}
+
+#task-dialog-desc {
+    height: auto;
+    max-height: 8;
+    overflow-y: auto;
+    margin-bottom: 1;
+}
+
+#task-edit-status {
+    margin-bottom: 1;
+}
+
+#task-edit-due {
+    margin-bottom: 1;
+}
+
+#task-edit-error {
+    height: auto;
+}
+
+.task-dialog-buttons {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+.task-dialog-buttons Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ─── Message Viewer Modal ────────────────────── */
+
+MessageViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ThreadManagerModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DrainConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+RemovalConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+SystemSettingsModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#msg-dialog {
+    width: 70%;
+    height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+}
+
+#msg-dialog-header {
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#msg-dialog > Button {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+}
+
+
+#msg-dialog-body {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#msg-dialog-scroll {
+    height: 1fr;
+    min-height: 5;
+    margin-bottom: 1;
+}
+
+#msg-dialog-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#msg-dialog-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 16;
+    height: 3;
+}
+
+#msg-attachments {
+    margin-top: 1;
+    padding: 1;
+    border: dashed $accent;
+}
+
+/* ─── Compose Modal ──────────────────────────── */
+
+ComposeModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#compose-dialog {
+    width: 60%;
+    height: auto;
+    max-height: 70%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $success;
+}
+
+#compose-title {
+    margin-bottom: 1;
+    border-bottom: solid $success;
+    padding-bottom: 1;
+}
+
+#compose-body {
+    height: 10;
+    min-height: 5;
+    margin-bottom: 1;
+}
+
+#compose-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#compose-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ─── Green Action Links ─────────────────────── */
+
+.action-link-green {
+    width: auto;
+    color: $success;
+    padding-top: 1;
+    padding-right: 1;
+}
+
+.action-link-green:hover {
+    color: $success-lighten-2;
+    text-style: underline;
+}
+
+.dimmed {
+    opacity: 40%;
+}
+
+.header-sep {
+    width: auto;
+    color: $text-muted;
+    padding-top: 1;
+}
+
+#chk-vv-enabled {
+    width: auto;
+    height: 3;
+    margin: 0;
+}
+
+/* ─── Project Members Modal ──────────────────── */
+
+ProjectMembersModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DeleteProjectModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#project-dialog {
+    width: 80%;
+    height: auto;
+    max-height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $success;
+}
+
+#project-dialog-title {
+    margin-bottom: 1;
+    border-bottom: solid $success;
+    padding-bottom: 1;
+}
+
+/* project-dialog-close styling handled by .task-dialog-buttons Button */
+
+.project-field-row {
+    height: auto;
+    width: 100%;
+}
+
+.project-field-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+#members-table {
+    height: auto;
+    max-height: 12;
+    border: solid $accent;
+}
+
+/* ─── API Keys Modal ─────────────────────────── */
+
+.api-keys-btn {
+    background: #7c3aed;
+    color: #ffffff;
+}
+
+.api-keys-btn:hover {
+    background: #6d28d9;
+}
+
+ApiKeysModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#api-keys-dialog {
+    width: 65%;
+    height: auto;
+    max-height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #7c3aed;
+}
+
+#api-keys-dialog Input {
+    margin-bottom: 0;
+}
+
+#api-keys-dialog > Static {
+    margin-top: 1;
+}
+
+#api-keys-feedback {
+    margin-top: 1;
+    padding: 1;
+}
+
+/* ─── Cycle Log Modal ────────────────────────── */
+
+CycleLogModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#cycle-log-body {
+    height: 1fr;
+    min-height: 10;
+    margin-bottom: 1;
+    scrollbar-gutter: stable;
+}
+
+/* ─── Skill Viewer Modal ─────────────────────── */
+
+SkillViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#skill-dialog {
+    width: 70%;
+    height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+}
+
+#skill-dialog-header {
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#skill-content-scroll {
+    height: 1fr;
+    min-height: 5;
+    margin-bottom: 1;
+}
+
+#skill-dialog-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#skill-dialog-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 16;
+    height: 3;
+}

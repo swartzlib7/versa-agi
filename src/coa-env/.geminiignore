@@ -1,0 +1,5 @@
+# Versa AGi — Gemini CLI Ignore File
+# Prevents Gemini CLI from scanning restricted directories
+
+# Node modules (read-only, large, no need to scan)
+node_modules/

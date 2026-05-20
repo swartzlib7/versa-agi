@@ -1,0 +1,30 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────
+# agictl — Versa AGi CLI Wrapper (V3)
+# ─────────────────────────────────────────────────────
+
+set -euo pipefail
+
+# ─── Check Python ──────────────────────
+PYTHON=""
+if [ -x "/opt/versa-agi/venv/bin/python3" ]; then
+    PYTHON="/opt/versa-agi/venv/bin/python3"
+elif command -v python3 &>/dev/null; then
+    PYTHON="python3"
+fi
+
+if [ -z "${PYTHON}" ]; then
+    echo "ERROR: Python 3 not found" >&2
+    exit 1
+fi
+
+# Locate core infra path via environment configuration
+PATHS_ENV="/etc/versa-agi/paths.env"
+if [ -f "${PATHS_ENV}" ]; then
+  source "${PATHS_ENV}"
+fi
+CORE_INFRA="${VERSA_CORE_INFRA:-/home/watchdog/core-infra}"
+
+# Execute the python CLI module
+export PYTHONPATH="${CORE_INFRA}:${PYTHONPATH:-}"
+exec ${PYTHON} "${CORE_INFRA}/agictl/cli.py" "$@"
