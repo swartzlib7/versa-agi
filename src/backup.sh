@@ -2,25 +2,18 @@
 # ─────────────────────────────────────────────────────
 # Versa AGi — System Backup
 #
-# ⛔ MANIFEST: Any file path changes MUST be reflected in
-#    design/Versa AGi - System Design.md §IX
+# ⛔ MANIFEST: This script is governed by:
+#    design/Versa AGi - Backup Manifest.md
+#    All capture/exclude changes MUST be reflected there first.
 #
 # Creates a complete system-level backup of all Versa AGi
 # infrastructure, enabling hardware migration without data loss.
 #
-# Captures:
-#   - SQLite databases (agents, messages, tasks, cycles)
-#   - Configuration (/etc/versa-agi/)
-#   - User homes (watchdog, coa, sub-agents)
-#   - System binaries, sudoers, systemd units, CRON
-#   - Primary User symlinks and ~/.versa-agi/
+# Captures entire directories with a global exclude list.
+# Warns and aborts if any home directory exceeds 200MB (after excludes).
 #
-# Does NOT capture:
-#   - Python venvs (platform-specific, rebuilt by restore)
-#   - npm caches (.npm, node_modules — rebuilt by setup)
-#   - Ollama models (re-pullable)
-#   - SYCL models (/opt/versa-agi/sycl-models/ — re-pullable)
-#   - /tmp ephemeral files
+# POST-RESTORE: sudo ./setup.sh MUST be re-run to rebuild
+# excluded platform-specific artifacts (venvs, models, deps).
 #
 # Usage:
 #   sudo versa-agi-backup                           # Default output
@@ -32,7 +25,15 @@
 
 set -euo pipefail
 
-VERSION="1.0"
+VERSION="2.0"
+
+# ─── Global Exclude List ────────────────────────────
+# See: design/Versa AGi - Backup Manifest.md § Global Exclude List
+# These patterns are excluded from ALL home directory captures.
+GLOBAL_EXCLUDES=".ollama .gemini .cache .npm node_modules __pycache__ .local venv .vagrant .vagrant.d VirtualBox VMs"
+
+# ─── Size Gate Threshold ────────────────────────────
+SIZE_GATE_MB=200
 
 # ─── UI Library ──────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -289,6 +290,57 @@ capture() {
   return 0
 }
 
+# Helper: size gate — warns and aborts if a home directory is too large
+# Usage: size_gate "/home/coa" "coa" "exclude1 exclude2"
+size_gate() {
+  local dir_path="$1"
+  local user_label="$2"
+  local excludes="$3"
+
+  if [ ! -d "${dir_path}" ]; then
+    return 0
+  fi
+
+  # Build rsync-compatible du with excludes
+  local du_excludes=()
+  for _exc in ${excludes}; do
+    du_excludes+=(--exclude="${_exc}")
+  done
+
+  local size_bytes
+  size_bytes=$(du -sb "${du_excludes[@]+${du_excludes[@]}}" "${dir_path}" 2>/dev/null | tail -1 | cut -f1)
+  size_bytes=${size_bytes:-0}
+
+  local size_mb=$(( size_bytes / 1048576 ))
+  local size_human
+  size_human=$(numfmt --to=iec "${size_bytes}" 2>/dev/null || echo "${size_mb}MB")
+
+  if [ "${size_mb}" -gt "${SIZE_GATE_MB}" ]; then
+    echo ""
+    warn "${user_label} home is ${size_human} (after excludes) — exceeds ${SIZE_GATE_MB}MB threshold"
+    info "Top 5 largest subdirectories:"
+    du -h "${du_excludes[@]+${du_excludes[@]}}" --max-depth=2 "${dir_path}" 2>/dev/null | \
+      sort -rh | head -6 | tail -5 | while read -r _sz _dir; do
+        info "  ${_sz}  ${_dir}"
+      done
+    echo ""
+
+    if [ "${DRY_RUN}" = true ]; then
+      warn "DRY-RUN: Would prompt for confirmation here"
+      return 0
+    fi
+
+    read -p "  Continue with backup? [y/N]: " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      echo ""
+      error "Backup ABORTED. Please investigate and free space in ${dir_path}, then re-run the backup."
+    fi
+  else
+    ok "${user_label} home: ${size_human} (within ${SIZE_GATE_MB}MB threshold)"
+  fi
+}
+
 # ── 3a: SQLite Databases ──
 info "3a: Databases..."
 capture "/var/lib/versa-agi/" "Persistent data (/var/lib/versa-agi/)"
@@ -305,18 +357,21 @@ capture "/var/log/versa-agi-archive/" "Archived logs"
 
 # ── 3d: Watchdog home ──
 info "3d: Watchdog home..."
-capture "${WATCHDOG_HOME}/" "Watchdog home (${WATCHDOG_HOME}/)" ".ollama .cache .npm node_modules __pycache__ core-infra/venv"
+size_gate "${WATCHDOG_HOME}" "Watchdog" "${GLOBAL_EXCLUDES}"
+capture "${WATCHDOG_HOME}/" "Watchdog home (${WATCHDOG_HOME}/)" "${GLOBAL_EXCLUDES}"
 
 # ── 3e: COA home ──
 info "3e: COA home..."
-capture "${COA_HOME}/" "COA home (${COA_HOME}/)" ".npm .cache node_modules __pycache__"
+size_gate "${COA_HOME}" "COA" "${GLOBAL_EXCLUDES}"
+capture "${COA_HOME}/" "COA home (${COA_HOME}/)" "${GLOBAL_EXCLUDES}"
 
 # ── 3f: Sub-agent homes ──
 info "3f: Sub-agent homes..."
 for sa_user in "${SUB_AGENT_USERS[@]+${SUB_AGENT_USERS[@]}}"; do
   SA_HOME="/home/agi-${sa_user}"
   [ -d "${SA_HOME}" ] || SA_HOME="/home/${sa_user}"
-  capture "${SA_HOME}/" "Sub-agent: ${sa_user} (${SA_HOME}/)"
+  size_gate "${SA_HOME}" "Sub-agent ${sa_user}" "${GLOBAL_EXCLUDES}"
+  capture "${SA_HOME}/" "Sub-agent: ${sa_user} (${SA_HOME}/)" "${GLOBAL_EXCLUDES}"
 done
 
 # ── 3g: System binaries ──
@@ -331,13 +386,32 @@ for bin_path in \
   /usr/local/bin/versa-agi-rekey; do
   capture "${bin_path}"
 done
-capture "/usr/local/lib/versa-agi/" "Persisted lib (/usr/local/lib/versa-agi/)"
+capture "/usr/local/lib/versa-agi/" "Persisted lib (/usr/local/lib/versa-agi/)" "${GLOBAL_EXCLUDES}"
 ok "System binaries captured"
 
 # ── 3h: Systemd units ──
 info "3h: Systemd units..."
 capture "/etc/systemd/system/versa-agi-sentinel.service" "Sentinel service unit"
+capture "/etc/systemd/system/versa-agi-tunnel.service" "SSH tunnel service unit"
 
+# ── 3i: Sudoers ──
+info "3i: Sudoers..."
+capture "/etc/sudoers.d/versa_agi_watchdog" "Watchdog sudoers"
+capture "/etc/sudoers.d/versa_agi_agictl" "agictl sudoers"
+
+# ── 3j: CRON tab ──
+info "3j: CRON tab..."
+if [ "${DRY_RUN}" = true ]; then
+  info "Would capture watchdog CRON tab"
+else
+  _cron_out=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
+  if [ -n "${_cron_out}" ]; then
+    echo "${_cron_out}" > "${STAGING_DIR}/cron_watchdog.txt"
+    ok "Captured: watchdog CRON tab → cron_watchdog.txt"
+  else
+    info "No CRON tab for ${WATCHDOG_USER}"
+  fi
+fi
 
 
 # ── 3k: Primary User data ──
@@ -561,13 +635,15 @@ if [ "${DRY_RUN}" = false ]; then
 echo -e "  ${BCYAN:-}${BOLD:-}│${RESET:-}  Archive           ${OUTPUT_PATH}"
 echo -e "  ${BCYAN:-}${BOLD:-}│${RESET:-}  Size              ${ARCHIVE_SIZE:-n/a}"
 fi
+echo -e "  ${BCYAN:-}${BOLD:-}├────────────────────────────────────────┤${RESET:-}"
+echo -e "  ${BCYAN:-}${BOLD:-}│${RESET:-}  ${YELLOW:-}⚠ CRON is PAUSED.${RESET:-}"
+echo -e "  ${BCYAN:-}${BOLD:-}│${RESET:-}  ${DIM:-}Resume: agitop → Controls → Resume CRON${RESET:-}"
+echo -e "  ${BCYAN:-}${BOLD:-}├────────────────────────────────────────┤${RESET:-}"
+echo -e "  ${BCYAN:-}${BOLD:-}│${RESET:-}  ${YELLOW:-}⚠ POST-RESTORE: You MUST re-run${RESET:-}"
+echo -e "  ${BCYAN:-}${BOLD:-}│${RESET:-}  ${BOLD:-}  sudo ./setup.sh${RESET:-}"
+echo -e "  ${BCYAN:-}${BOLD:-}│${RESET:-}  ${DIM:-}  to rebuild venvs, models, and deps.${RESET:-}"
 echo -e "  ${BCYAN:-}${BOLD:-}╰────────────────────────────────────────╯${RESET:-}"
 
-echo ""
-echo -e "  ${YELLOW:-}${BOLD:-}⚠  CRON is PAUSED.${RESET:-}"
-echo -e "  ${DIM:-}Agents will not spawn until you re-enable the Lifeline.${RESET:-}"
-echo -e "  ${DIM:-}To resume:${RESET:-}"
-echo -e "  ${BOLD:-}  sudo agitop${RESET:-}  ${DIM:-}→ Controls → Resume CRON${RESET:-}"
 echo ""
 
 if [ "${DRY_RUN}" = false ]; then

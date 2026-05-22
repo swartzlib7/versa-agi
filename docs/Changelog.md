@@ -4,6 +4,30 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
+## [0.11.3] — 2026-05-21
+
+### Backup v2.0 (Manifest-Governed)
+
+#### Added
+- **Backup FS Path Manifest** — `design/Versa AGi - Backup Manifest.md` now governs all backup capture and exclusion decisions. The backup script references this document as its authoritative source of truth.
+- **Global exclude list** — unified exclusion patterns applied to all home directory captures: `.ollama/`, `.gemini/`, `.cache/`, `.npm/`, `node_modules/`, `__pycache__/`, `.local/`, `venv/`, `.vagrant/`, `.vagrant.d/`, `VirtualBox VMs/`. Previously, each capture group had inconsistent ad-hoc exclusions (COA notably missing `.ollama/` and `.gemini/`).
+- **200MB size gate** — each home directory is measured after excludes. If over 200MB, displays top 5 largest subdirectories and prompts for confirmation. Declining aborts the entire backup with instructions to investigate.
+- **Sudoers capture** — `/etc/sudoers.d/versa_agi_watchdog` and `/etc/sudoers.d/versa_agi_agictl` now included.
+- **CRON tab capture** — `crontab -u watchdog -l` saved to `cron_watchdog.txt` in the archive.
+- **SSH tunnel service capture** — `versa-agi-tunnel.service` included for client topology.
+- **Post-restore warning** — summary card now displays mandatory `sudo ./setup.sh` requirement.
+
+#### Changed
+- **Backup version** — bumped from `1.0` to `2.0`.
+- **Sub-agent excludes** — previously had zero exclusions; now uses the same global exclude list as all other homes.
+- **`/usr/local/lib/versa-agi/` capture** — now excludes `venv/` (LangGraph harness Python environment, rebuilt by `setup.sh`).
+- **Summary card redesigned** — CRON pause warning and post-restore instructions now embedded in the card border instead of separate text.
+
+#### Fixed
+- **8GB backup bloat** — root cause: COA and sub-agent homes captured `.ollama/` (model blobs) and `.gemini/` (session caches) without exclusion. Typical backup size now < 500MB.
+
+---
+
 ## [0.11.2] — 2026-05-20
 
 ### Agent Halt (Manual Cycle Control)
