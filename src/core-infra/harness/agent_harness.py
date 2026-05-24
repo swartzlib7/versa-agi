@@ -656,43 +656,37 @@ def main():
                 snapshot = agent.get_state(config)
                 if snapshot and snapshot.values.get("messages"):
                     saved_msgs = snapshot.values["messages"]
-                    # Only scan the tail — dangling tool calls can only be at the very end.
-                    # 10 messages is generous; in practice, it's the last 2-3 (AI + pending Tools).
-                    REPAIR_SCAN_DEPTH = 10
-                    tail_start = max(0, len(saved_msgs) - REPAIR_SCAN_DEPTH)
-                    tail = saved_msgs[tail_start:]
+                    # Scan the FULL message history for dangling tool calls.
+                    # Previously only scanned the last 10, but corrupted calls can
+                    # exist deeper in the history if a previous kill left orphans
+                    # that were then buried by subsequent resume messages.
+                    total_dangling = set()
+                    repair_msgs = []
 
-                    # Find the last AIMessage with tool_calls in the tail
-                    last_ai_idx = None
-                    for i in range(len(tail) - 1, -1, -1):
-                        if isinstance(tail[i], AIMessage) and getattr(tail[i], "tool_calls", None):
-                            last_ai_idx = tail_start + i  # Absolute index
-                            break
+                    for i, msg in enumerate(saved_msgs):
+                        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                            tool_call_ids = {tc["id"] for tc in msg.tool_calls}
+                            answered_ids = set()
+                            for subsequent in saved_msgs[i + 1:]:
+                                if isinstance(subsequent, ToolMessage) and hasattr(subsequent, "tool_call_id"):
+                                    answered_ids.add(subsequent.tool_call_id)
+                            dangling = tool_call_ids - answered_ids
+                            if dangling:
+                                total_dangling |= dangling
+                                for tc in msg.tool_calls:
+                                    if tc["id"] in dangling:
+                                        repair_msgs.append(ToolMessage(
+                                            content="[Cycle terminated before this tool call completed. Result unavailable.]",
+                                            tool_call_id=tc["id"],
+                                            name=tc.get("name", "unknown"),
+                                        ))
 
-                    if last_ai_idx is not None:
-                        ai_msg = saved_msgs[last_ai_idx]
-                        tool_call_ids = {tc["id"] for tc in ai_msg.tool_calls}
-                        answered_ids = set()
-                        for msg in saved_msgs[last_ai_idx + 1:]:
-                            if isinstance(msg, ToolMessage) and hasattr(msg, "tool_call_id"):
-                                answered_ids.add(msg.tool_call_id)
-                        dangling = tool_call_ids - answered_ids
-                        if dangling:
-                            tlog(f"CHECKPOINT REPAIR: Patching {len(dangling)} dangling tool call(s) from previous crashed cycle")
-                            repair_msgs = []
-                            for tc in ai_msg.tool_calls:
-                                if tc["id"] in dangling:
-                                    repair_msgs.append(ToolMessage(
-                                        content="[Cycle terminated before this tool call completed. Result unavailable.]",
-                                        tool_call_id=tc["id"],
-                                        name=tc.get("name", "unknown"),
-                                    ))
-                            agent.update_state(config, {"messages": repair_msgs})
-                            tlog(f"CHECKPOINT REPAIR: State repaired — {len(repair_msgs)} placeholder ToolMessage(s) injected")
-                        else:
-                            tlog(f"CHECKPOINT: Clean resume — no dangling calls (thread: {args.thread_id})")
+                    if repair_msgs:
+                        tlog(f"CHECKPOINT REPAIR: Patching {len(repair_msgs)} dangling tool call(s) from previous crashed cycle")
+                        agent.update_state(config, {"messages": repair_msgs})
+                        tlog(f"CHECKPOINT REPAIR: State repaired — {len(repair_msgs)} placeholder ToolMessage(s) injected")
                     else:
-                        tlog(f"CHECKPOINT: Clean resume — no pending tool calls in tail (thread: {args.thread_id})")
+                        tlog(f"CHECKPOINT: Clean resume — no dangling calls (thread: {args.thread_id})")
                 else:
                     tlog(f"CHECKPOINT: Resume with empty state (thread: {args.thread_id})")
             except Exception as e:
@@ -719,7 +713,6 @@ def main():
                         max_msgs = args.resume_max_messages
                         if msg_count > max_msgs:
                             # Preserve the first SystemMessage if present
-                            from langchain_core.messages import SystemMessage
                             first_sys = None
                             if isinstance(saved_msgs[0], SystemMessage):
                                 first_sys = saved_msgs[0]

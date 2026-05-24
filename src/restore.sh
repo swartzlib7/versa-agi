@@ -290,7 +290,7 @@ jq -c '.agents[]' "${MANIFEST}" | while read -r agent_json; do
   _os_user=$(echo "${agent_json}" | jq -r '.os_user')
   # Skip system agents (restored via watchdog/coa home)
   if [ "${_name}" = "coa" ] || [ "${_name}" = "watchdog" ]; then continue; fi
-  SA_HOME="/home/agi-${_os_user}"
+  SA_HOME="/home/${_os_user}"
   restore_path "${SA_HOME}" "Sub-agent: ${_name} (${SA_HOME}/)"
 done
 
@@ -361,8 +361,10 @@ else
   for cfg in /etc/versa-agi/*_config.json; do
     if [ -f "${cfg}" ]; then
       _agent_name=$(basename "${cfg}" _config.json)
-      if id "${_agent_name}" &>/dev/null; then
-        chown "${WATCHDOG_USER}:${_agent_name}" "${cfg}"
+      # Resolve os_user from manifest (name → os_user)
+      _cfg_os_user=$(jq -r --arg name "${_agent_name}" '.agents[] | select(.name == $name) | .os_user // empty' "${MANIFEST}")
+      if [ -n "${_cfg_os_user}" ] && id "${_cfg_os_user}" &>/dev/null; then
+        chown "${WATCHDOG_USER}:${_cfg_os_user}" "${cfg}"
       else
         chown "${WATCHDOG_USER}:${COA_USER}" "${cfg}"
       fi
@@ -407,9 +409,10 @@ else
     fi
 
     # Sub-agent data directories: full ownership correction
-    # Parent dir: watchdog:{agent} 750 — agent must traverse to write cycles.
+    # Parent dir: watchdog:{os_user} 750 — agent must traverse to write cycles.
     # cycles/: agent-writable (lifeline spawns harness as agent user).
     # poise + duties: watchdog-readable (lifeline cat's poise for system.md generation).
+    # Resolve os_user from manifest for each sub-agent data dir
     for agent_dir in /var/lib/versa-agi/*/; do
       [ -d "${agent_dir}" ] || continue
       _dir_name=$(basename "${agent_dir}")
@@ -417,16 +420,19 @@ else
       [ "${_dir_name}" = "coa" ] && continue
       [ "${_dir_name}" = "archive" ] && continue
       [ "${_dir_name}" = "config" ] && continue
-      # Parent dir: watchdog:{agent} 750
-      if id "${_dir_name}" &>/dev/null; then
-        chown "${WATCHDOG_USER}:${_dir_name}" "${agent_dir}" && chmod 750 "${agent_dir}"
+      # Resolve os_user from manifest (name → os_user)
+      _resolved_os_user=$(jq -r --arg name "${_dir_name}" '.agents[] | select(.name == $name) | .os_user // empty' "${MANIFEST}")
+      [ -z "${_resolved_os_user}" ] && continue
+      # Parent dir: watchdog:{os_user} 750
+      if id "${_resolved_os_user}" &>/dev/null; then
+        chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}" && chmod 750 "${agent_dir}"
         # cycles/: agent-writable (lifeline spawns gemini as agent user)
         if [ -d "${agent_dir}cycles" ]; then
-          chown -R "${_dir_name}:${_dir_name}" "${agent_dir}cycles" && chmod 755 "${agent_dir}cycles"
+          chown -R "${_resolved_os_user}:${_resolved_os_user}" "${agent_dir}cycles" && chmod 755 "${agent_dir}cycles"
         fi
-        [ -f "${agent_dir}last_prompt.txt" ] && chown "${WATCHDOG_USER}:${_dir_name}" "${agent_dir}last_prompt.txt" && chmod 640 "${agent_dir}last_prompt.txt"
-        [ -f "${agent_dir}poise.md" ]  && chown "${WATCHDOG_USER}:${_dir_name}" "${agent_dir}poise.md"  && chmod 640 "${agent_dir}poise.md"
-        [ -f "${agent_dir}duties.md" ] && chown "${WATCHDOG_USER}:${_dir_name}" "${agent_dir}duties.md" && chmod 640 "${agent_dir}duties.md"
+        [ -f "${agent_dir}last_prompt.txt" ] && chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}last_prompt.txt" && chmod 640 "${agent_dir}last_prompt.txt"
+        [ -f "${agent_dir}poise.md" ]  && chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}poise.md"  && chmod 640 "${agent_dir}poise.md"
+        [ -f "${agent_dir}duties.md" ] && chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}duties.md" && chmod 640 "${agent_dir}duties.md"
       fi
     done
 
@@ -488,7 +494,7 @@ else
     _name=$(echo "${agent_json}" | jq -r '.name')
     _os_user=$(echo "${agent_json}" | jq -r '.os_user')
     if [ "${_name}" = "coa" ] || [ "${_name}" = "watchdog" ]; then continue; fi
-    SA_HOME="/home/agi-${_os_user}"
+    SA_HOME="/home/${_os_user}"
     if [ -d "${SA_HOME}" ]; then
       chown -R "${_os_user}:agi_agents" "${SA_HOME}"
       chmod 770 "${SA_HOME}"

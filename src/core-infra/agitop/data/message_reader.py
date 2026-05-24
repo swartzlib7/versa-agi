@@ -38,7 +38,7 @@ class MessageReader:
         """Get most recent messages. Optional channel filter: 'vv', 'internal', or None (all)."""
         base = ("SELECT id, message_id, direction, display_name, from_user_id, to_user_id, "
                 "text, original_text, mode, created_at, status, "
-                "has_attachments, attachment_path, cycle_id, channel_id, "
+                "has_attachments, attachment_path, raw_payload, cycle_id, channel_id, "
                 "COALESCE(channel, 'vv') as channel "
                 "FROM messages ")
         if channel:

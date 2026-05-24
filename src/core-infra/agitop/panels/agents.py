@@ -7,7 +7,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Button, Static, Input
+from textual.widgets import DataTable, Button, Static, Input, TextArea
 
 from agitop.data import AgentReader
 from agitop.data.system_reader import SystemReader
@@ -33,19 +33,31 @@ class PromptViewModal(ModalScreen):
     def __init__(self, title: str, content: str, **kwargs):
         super().__init__(**kwargs)
         self.prompt_title = title
-        self.prompt_content = content
+        self.prompt_content = content or "(empty)"
 
     def compose(self) -> ComposeResult:
-        # Escape Rich markup in prompt content
-        safe_content = self.prompt_content.replace("[", "\\[") if self.prompt_content else "[dim](empty)[/]"
         with Vertical(id="msg-dialog"):
-            yield Static(f"[bold]{self.prompt_title}[/]", id="msg-dialog-header")
-            with VerticalScroll(id="msg-dialog-scroll"):
-                yield Static(safe_content)
-            yield Button("Close", variant="primary", id="msg-dialog-close")
+            yield Static(f"[bold]{self.prompt_title}[/]  [dim](select text + Ctrl+C to copy)[/]", id="msg-dialog-header")
+            yield TextArea(self.prompt_content, id="prompt-view-body", read_only=True)
+            with Horizontal(id="msg-dialog-actions"):
+                yield Button("📋 Copy All", variant="default", id="prompt-copy-all")
+                yield Button("Close", variant="primary", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "msg-dialog-close":
+        import subprocess
+        if event.button.id == "prompt-copy-all":
+            try:
+                subprocess.run(["xclip", "-selection", "clipboard"], input=self.prompt_content.encode(), check=True)
+                self.app.notify("Prompt copied to clipboard", title="Clipboard")
+            except FileNotFoundError:
+                try:
+                    subprocess.run(["xsel", "--clipboard", "--input"], input=self.prompt_content.encode(), check=True)
+                    self.app.notify("Prompt copied to clipboard", title="Clipboard")
+                except Exception:
+                    self.app.notify("Install xclip or xsel for clipboard support", severity="warning")
+            except Exception:
+                self.app.notify("Clipboard copy failed", severity="warning")
+        elif event.button.id == "msg-dialog-close":
             self.app.pop_screen()
 
 
@@ -324,7 +336,11 @@ class AgentPromptMenu(ModalScreen):
             self.app.push_screen(MemoryViewModal(name))
         elif event.button.id == "btn-cycle-log":
             from agitop.panels.cycle_log_modal import CycleLogModal
-            self.app.push_screen(CycleLogModal(name, system_reader=self.app.query_one(AgentsPanel).system_reader))
+            agents_panel = self.app.query_one(AgentsPanel)
+            agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
+            agent = next((a for a in agents if a.get("name") == name), {})
+            os_user = agent.get("os_user") or name
+            self.app.push_screen(CycleLogModal(name, system_reader=agents_panel.system_reader, os_user=os_user))
         elif event.button.id == "btn-unfreeze-tasks":
             if hasattr(self.app, 'tasks_reader') and self.app.tasks_reader:
                 count = self.app.tasks_reader.unfreeze_agent_tasks(name)
@@ -523,11 +539,11 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
       [context_windows]     — Context window sizes (read by model_context.py)
     """
     import configparser, os
-    ini = configparser.ConfigParser()
-    # Try deployed path first, then source path
-    for path in ["/var/lib/versa-agi/config/models.ini",
-                 os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              "..", "config", "models.ini")]:
+    ini = configparser.ConfigParser(delimiters=('=',))
+    # Canonical: /etc/versa-agi/models.ini, dev fallback: src/models.ini
+    for path in ["/etc/versa-agi/models.ini",
+                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__)))), "..", "models.ini")]:
         if os.path.exists(path):
             ini.read(path)
             break
@@ -620,12 +636,15 @@ class TechnicalSetupModal(ModalScreen):
             triage_kwargs["value"] = current_triage_model
 
         # Load num_ctx picklist options filtered by model's max context
+        # and capped to the server's configured ctx-size for Intel/remote
         try:
-            from harness.model_context import get_num_ctx_options, get_model_context, is_cloud_model
+            from harness.model_context import get_num_ctx_options, get_model_context, is_cloud_model, get_server_ctx_ceiling
             is_cloud = is_cloud_model(current_model)
-            ctx_options = get_num_ctx_options(current_model)
+            server_ceiling = get_server_ctx_ceiling()
+            ctx_options = get_num_ctx_options(current_model, server_ctx_ceiling=server_ceiling)
         except ImportError:
             is_cloud = False
+            server_ceiling = None
             ctx_options = [("32K", 32768)]
 
         with VerticalScroll(id="msg-dialog"):
@@ -641,7 +660,12 @@ class TechnicalSetupModal(ModalScreen):
                     **triage_kwargs,
                 )
                 if not is_cloud and ctx_options:
-                    yield Static("[cyan]Context Window (num_ctx)[/] — Ollama context window size in tokens")
+                    ctx_label = "[cyan]Context Window (num_ctx)[/]"
+                    if server_ceiling:
+                        ctx_label += f" — capped to server ctx-size: {server_ceiling:,}"
+                    else:
+                        ctx_label += " — Ollama context window size in tokens"
+                    yield Static(ctx_label)
                     num_ctx_select_options = [("Auto (model default)", 0)] + [(label, value) for label, value in ctx_options]
                     yield Select(
                         num_ctx_select_options,
@@ -938,7 +962,10 @@ class AgentEditModal(ModalScreen):
                         if not isinstance(model_val, str) or not model_val:
                             ok_model = reader.update_agent_field(self.agent_name, "model", None)
                         else:
-                            # Check if this is a SYCL model change — defer DB write if so
+                            # Check if this is a SYCL model change — defer DB write if so.
+                            # On "remote" (client) topology, SYCL activation is only needed
+                            # when the selected model is NOT already active on the server.
+                            # The server's active model(s) are in VERSA_LOCAL_MODELS.
                             needs_sycl = False
                             if model_val != self._original_model:
                                 try:
@@ -946,12 +973,16 @@ class AgentEditModal(ModalScreen):
                                     if not is_cloud_model(model_val):
                                         system_reader = agents_panel.system_reader
                                         if system_reader and system_reader.get_gpu_backend() in ("intel", "remote"):
-                                            needs_sycl = True
-                                            sycl_activation_needed = True
-                                            new_model = model_val
-                                            topology = system_reader.get_topology()
-                                            recommended, _ = get_model_context(model_val)
-                                            pending_num_ctx = recommended
+                                            # Check if model is already active on the server
+                                            active_models = set(system_reader.get_local_models())
+                                            if model_val not in active_models:
+                                                # Model not running on server — requires SYCL activation
+                                                needs_sycl = True
+                                                sycl_activation_needed = True
+                                                new_model = model_val
+                                                topology = system_reader.get_topology()
+                                                recommended, _ = get_model_context(model_val)
+                                                pending_num_ctx = recommended
                                 except Exception:
                                     pass
 

@@ -366,10 +366,28 @@ def send_message(token, sub_account_id, recipient_id, text, mode, messages_db, a
         c = conn.cursor()
         cycle_id = os.environ.get("VERSA_CYCLE_ID") or None
         has_attach = 1 if attachments else 0
+
+        # Build attachment_path as JSON array of human-readable summaries
+        attach_path = None
+        if attachments:
+            summaries = []
+            for att in attachments:
+                att_type = att.get("type", "unknown")
+                meta = att.get("meta") or {}
+                if att_type == "media":
+                    summaries.append(f"📷 {meta.get('fileName', 'media')}")
+                elif att_type == "markdown":
+                    summaries.append(f"📄 {meta.get('title', 'markdown')}.md")
+                elif att_type == "url":
+                    summaries.append(f"🔗 {att.get('value', 'url')}")
+                else:
+                    summaries.append(f"📎 {att_type}")
+            attach_path = json.dumps(summaries)
+
         c.execute('''INSERT INTO messages 
-            (message_id, direction, status, from_user_id, to_user_id, text, original_text, mode, has_attachments, cycle_id, created_at)
-            VALUES (?, 'sent', 'processed', ?, ?, ?, ?, ?, ?, ?, datetime('now'))''',
-            (msg_id, sub_account_id, recipient_id, text, text, mode, has_attach, cycle_id)
+            (message_id, direction, status, from_user_id, to_user_id, text, original_text, mode, has_attachments, attachment_path, raw_payload, cycle_id, created_at)
+            VALUES (?, 'sent', 'processed', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))''',
+            (msg_id, sub_account_id, recipient_id, text, text, mode, has_attach, attach_path, json.dumps(attachments) if attachments else None, cycle_id)
         )
         conn.commit()
         conn.close()

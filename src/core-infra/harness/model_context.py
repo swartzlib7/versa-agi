@@ -9,11 +9,12 @@
 import configparser
 import os
 
-# Paths to models.ini (deployed → source fallback)
+# Canonical models.ini path (deployed alongside setup.ini)
+# Dev fallback: src/models.ini (next to src/setup.ini)
 _MODELS_INI_PATHS = [
-    "/var/lib/versa-agi/config/models.ini",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                 "config", "models.ini"),
+    "/etc/versa-agi/models.ini",
+    os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "models.ini"),
 ]
 
 # Built-in fallback map — used only when models.ini is unavailable.
@@ -64,7 +65,7 @@ def _load_context_map() -> dict[str, tuple[int, int]]:
     Returns the parsed map, or the built-in fallback if models.ini
     is unavailable or the section is missing.
     """
-    ini = configparser.ConfigParser()
+    ini = configparser.ConfigParser(delimiters=('=',))
     for path in _MODELS_INI_PATHS:
         if os.path.exists(path):
             ini.read(path)
@@ -117,16 +118,49 @@ def get_model_context(model_name: str) -> tuple[int, int]:
     return (DEFAULT_NUM_CTX, DEFAULT_NUM_CTX)
 
 
-def get_num_ctx_options(model_name: str) -> list[tuple[str, int]]:
+def get_server_ctx_ceiling() -> int | None:
+    """Read the server's configured per-slot context size from setup.ini.
+
+    For Intel/remote backends, sycl_ctx_size is the per-slot context ceiling.
+    The server's --ctx-size is total (per_slot × parallel), but each agent
+    request occupies one slot with at most sycl_ctx_size tokens.
+    Returns None for standard (Ollama) backend where ctx is managed
+    per-request dynamically.
+    """
+    import configparser
+    setup_ini_paths = [
+        "/etc/versa-agi/setup.ini",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                     "setup.ini"),
+    ]
+    for path in setup_ini_paths:
+        if os.path.exists(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            backend = cfg.get("local_ai", "gpu_backend", fallback="standard")
+            if backend in ("intel", "remote"):
+                try:
+                    return int(cfg.get("local_ai", "sycl_ctx_size", fallback="4096"))
+                except ValueError:
+                    return 4096
+            return None  # Standard backend — no ceiling
+    return None
+
+
+def get_num_ctx_options(model_name: str, server_ctx_ceiling: int | None = None) -> list[tuple[str, int]]:
     """Return filtered picklist of (label, value) for a model's context window.
 
     Entries beyond the model's max are excluded.
+    When server_ctx_ceiling is provided (Intel/remote), entries are also
+    capped to the server's configured --ctx-size.
     Returns empty list for cloud models (context not applicable).
     """
     _, max_ctx = get_model_context(model_name)
     if max_ctx == 0:
         return []  # Cloud models — not applicable
-    return [(label, value) for value, label in NUM_CTX_OPTIONS if value <= max_ctx]
+    # Apply server ceiling if provided (Intel/remote backend)
+    effective_max = min(max_ctx, server_ctx_ceiling) if server_ctx_ceiling else max_ctx
+    return [(label, value) for value, label in NUM_CTX_OPTIONS if value <= effective_max]
 
 
 def is_cloud_model(model_name: str) -> bool:

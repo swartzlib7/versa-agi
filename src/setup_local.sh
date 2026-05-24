@@ -69,9 +69,12 @@ INFERENCE_MASTER_KEY="${INFERENCE_MASTER_KEY:-}"
 SYCL_MODEL_DIR="/opt/versa-agi/sycl-models"
 SYCL_PORT="${SYCL_PORT:-8080}"
 SYCL_CONTAINER="versa-agi-sycl"
-SYCL_IMAGE="llama-sycl-server"
+SYCL_IMAGE="versa-agi-sycl"
 SYCL_LLAMA_CPP_TAG="${SYCL_LLAMA_CPP_TAG:-b9082}"
 HF_TOKEN="${HF_TOKEN:-}"
+SYCL_PARALLEL="${SYCL_PARALLEL:-1}"
+SYCL_CTX_SIZE="${SYCL_CTX_SIZE:-4096}"
+SYCL_VRAM_GB="${SYCL_VRAM_GB:-}"
 
 # ─── Legacy Cleanup Paths ──────────────────────────
 MINIFORGE_DIR="/opt/versa-agi/miniforge3"
@@ -79,19 +82,70 @@ IPEX_OLLAMA_DIR_LEGACY="/opt/versa-agi/ipex-ollama"
 IPEX_SERVICE_NAME="versa-agi-ollama-ipex"
 IPEX_SERVICE_FILE="/etc/systemd/system/${IPEX_SERVICE_NAME}.service"
 
-# ─── Intel SYCL Model Map ──────────────────────────
-declare -A SYCL_MODEL_REPO=(
-  ["gemma4:e4b"]="unsloth/gemma-4-12B-A2B-it-GGUF"
-  ["gemma4:26b"]="unsloth/gemma-4-26B-A4B-it-GGUF"
-  ["gemma4:31b"]="unsloth/gemma-4-31B-it-GGUF"
-  ["qwen3.6:35b"]="unsloth/Qwen3.6-35B-A3B-GGUF"
-)
-declare -A SYCL_MODEL_FILE=(
-  ["gemma4:e4b"]="gemma-4-12B-A2B-it-UD-Q4_K_M.gguf"
-  ["gemma4:26b"]="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
-  ["gemma4:31b"]="gemma-4-31B-it-UD-Q4_K_M.gguf"
-  ["qwen3.6:35b"]="Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
-)
+# ─── Intel SYCL Model Registry ──────────────────────
+# Loaded dynamically from models.ini via manage_registry.sh
+# Populates: _REG_NAMES[], _REG_REPOS[], _REG_FILES[], _REG_SIZES[], _REG_COUNT
+_MANAGE_REGISTRY_SCRIPT="${SCRIPT_DIR}/manage_registry.sh"
+
+# Load registry arrays (silently — no interactive menu here)
+_load_sycl_registry_arrays() {
+  if [ -f "${_MANAGE_REGISTRY_SCRIPT}" ]; then
+    source "${_MANAGE_REGISTRY_SCRIPT}" --list >/dev/null 2>&1
+    # After sourcing, _REG_* arrays are populated
+  else
+    warn "manage_registry.sh not found at ${_MANAGE_REGISTRY_SCRIPT}"
+    _REG_NAMES=()
+    _REG_REPOS=()
+    _REG_FILES=()
+    _REG_SIZES=()
+    _REG_COUNT=0
+  fi
+}
+
+# Helper: look up a registry value by model name (set -e safe)
+_reg_repo_for() { local n="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_NAMES[$i]}" = "$n" ]; then echo "${_REG_REPOS[$i]}"; return; fi; done; }
+_reg_file_for() { local n="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_NAMES[$i]}" = "$n" ]; then echo "${_REG_FILES[$i]}"; return; fi; done; }
+_reg_size_for() { local n="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_NAMES[$i]}" = "$n" ]; then echo "${_REG_SIZES[$i]}"; return; fi; done; echo "10"; }
+# Helper: reverse lookup — GGUF filename → friendly model key.
+# Used by client mode to translate /v1/models GGUF names back to
+# the canonical keys used by models.ini, agitop, and lifeline.
+_reg_name_for_file() { local f="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_FILES[$i]}" = "$f" ]; then echo "${_REG_NAMES[$i]}"; return; fi; done; }
+
+# ─── Concurrency Calculator ────────────────────────
+# Calculates recommended parallel slots based on available VRAM.
+# Sets: _CALC_RECOMMENDED, _CALC_MAX, _CALC_FREE_VRAM_GB
+_calculate_concurrency() {
+  local vram_gb="${1:-0}"
+  local model_size_gb="${2:-0}"
+  local ctx_size="${3:-4096}"
+
+  # KV cache per slot estimate: ~256MB at ctx_size 4096 for typical Q4_K_M models
+  # Scale linearly with context size
+  local kv_per_slot_mb=$(( 256 * ctx_size / 4096 ))
+  [ "${kv_per_slot_mb}" -lt 128 ] && kv_per_slot_mb=128
+
+  _CALC_FREE_VRAM_GB=$(( vram_gb - model_size_gb ))
+  [ "${_CALC_FREE_VRAM_GB}" -lt 0 ] && _CALC_FREE_VRAM_GB=0
+
+  local free_mb=$(( _CALC_FREE_VRAM_GB * 1024 ))
+  local headroom_mb=2048  # 2GB headroom for runtime overhead
+
+  if [ "${free_mb}" -le "${headroom_mb}" ]; then
+    _CALC_MAX=1
+    _CALC_RECOMMENDED=1
+    return
+  fi
+
+  _CALC_MAX=$(( (free_mb - headroom_mb) / kv_per_slot_mb ))
+  [ "${_CALC_MAX}" -lt 1 ] && _CALC_MAX=1
+  [ "${_CALC_MAX}" -gt 8 ] && _CALC_MAX=8
+
+  # Conservative recommendation: half of max, minimum 1, maximum 4
+  _CALC_RECOMMENDED=$(( _CALC_MAX / 2 ))
+  [ "${_CALC_RECOMMENDED}" -lt 1 ] && _CALC_RECOMMENDED=1
+  [ "${_CALC_RECOMMENDED}" -gt 4 ] && _CALC_RECOMMENDED=4
+  return 0
+}
 
 # ─── Parse Arguments ────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -138,6 +192,9 @@ if [ -n "${_LOCAL_INI}" ]; then
   fi
   [ -z "${REMOTE_INFERENCE_URL}" ] && REMOTE_INFERENCE_URL="$(_ini_val local_ai remote_inference_url)"
   [ -z "${INFERENCE_MASTER_KEY}" ] && INFERENCE_MASTER_KEY="$(_ini_val local_ai inference_master_key)"
+  [ "${SYCL_PARALLEL}" = "1" ] && { _v="$(_ini_val local_ai sycl_parallel)"; [ -n "$_v" ] && SYCL_PARALLEL="$_v"; }
+  [ "${SYCL_CTX_SIZE}" = "4096" ] && { _v="$(_ini_val local_ai sycl_ctx_size)"; [ -n "$_v" ] && SYCL_CTX_SIZE="$_v"; }
+  [ -z "${SYCL_VRAM_GB}" ] && SYCL_VRAM_GB="$(_ini_val local_ai sycl_vram_gb)"
 fi
 
 # ─── Banner ─────────────────────────────────────────
@@ -213,6 +270,12 @@ if [ "${TOPOLOGY}" = "server" ]; then
       exit 0
     fi
     echo ""
+    # Reset GPU config so detection prompts always run on reconfigure
+    INTEL_DEVICE_ID=""
+    INTEL_CARD_COUNT="1"
+    SYCL_PARALLEL=""
+    SYCL_CTX_SIZE=""
+    SYCL_VRAM_GB=""
   fi
 
   # Server mode: no agents, no paths.env, no agent DB updates.
@@ -330,11 +393,30 @@ if [ "${TOPOLOGY}" != "server" ]; then
       warn "Continuing anyway — check server is running and firewall allows connections."
     fi
 
-    # Query /v1/models
+    # Query /v1/models — the server returns GGUF filenames (e.g. Qwen3.6-35B-A3B-UD-Q4_K_M.gguf)
+    # but the rest of the system uses friendly keys (e.g. qwen3.6:35b).
+    # We translate via the [sycl_models] registry in models.ini.
     _remote_models=""
     _models_json=$(curl -sf "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null || echo "")
     if [ -n "${_models_json}" ]; then
-      _remote_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
+      _raw_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
+      if [ -n "${_raw_models}" ]; then
+        # Load SYCL registry for GGUF → friendly key translation
+        _load_sycl_registry_arrays
+        _translated_list=""
+        IFS=',' read -ra _raw_arr <<< "${_raw_models}"
+        for _gguf_name in "${_raw_arr[@]}"; do
+          _friendly=$(_reg_name_for_file "${_gguf_name}")
+          if [ -n "${_friendly}" ]; then
+            _translated_list="${_translated_list:+${_translated_list},}${_friendly}"
+          else
+            # No registry match — keep the raw name as fallback
+            warn "Model '${_gguf_name}' not found in sycl_models registry — using raw name"
+            _translated_list="${_translated_list:+${_translated_list},}${_gguf_name}"
+          fi
+        done
+        _remote_models="${_translated_list}"
+      fi
     fi
     if [ -n "${_remote_models}" ]; then
       ok "Available models: ${_remote_models}"
@@ -342,6 +424,8 @@ if [ "${TOPOLOGY}" != "server" ]; then
       warn "Could not query models from server. VERSA_LOCAL_MODELS will be empty."
       _remote_models=""
     fi
+
+    # server_config.json sync moved to after SSH tunnel setup (Step 5b)
 
 
     # Inference master key auth block removed
@@ -449,6 +533,38 @@ TUNNELEOF
       warn "Could not reach localhost:${_TUNNEL_PORT} through tunnel — server may not be running"
     fi
 
+    # Step 5b: Sync server_config.json via SSH
+    # The inference server doesn't serve this file — we read it directly
+    # from the server filesystem over the existing SSH connection.
+    info "Syncing server inference configuration..."
+    _SRV_CFG_REMOTE="/etc/versa-agi/server_config.json"
+    _srv_cfg=""
+    if _srv_cfg=$(sudo -u "${WATCHDOG_USER}" ssh -i "${_SSH_KEY}" \
+        -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=5 \
+        -o BatchMode=yes \
+        "${WATCHDOG_USER}@${_TUNNEL_HOST}" "cat ${_SRV_CFG_REMOTE}" 2>/dev/null); then
+      _srv_ctx=$(echo "${_srv_cfg}" | jq -r '.sycl_ctx_size // empty' 2>/dev/null)
+      _srv_par=$(echo "${_srv_cfg}" | jq -r '.sycl_parallel // empty' 2>/dev/null)
+      _srv_vram=$(echo "${_srv_cfg}" | jq -r '.sycl_vram_gb // empty' 2>/dev/null)
+
+      if [ -n "${_srv_ctx}" ]; then
+        ok "Server config synced: ctx=${_srv_ctx}, parallel=${_srv_par:-?}, vram=${_srv_vram:-?}GB"
+        # Write to local setup.ini
+        for _ini_file in "${SCRIPT_DIR}/setup.ini" "/etc/versa-agi/setup.ini"; do
+          if [ -f "${_ini_file}" ]; then
+            [ -n "${_srv_ctx}" ] && sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_ctx_size=.*/sycl_ctx_size='"${_srv_ctx}"'/}' "${_ini_file}"
+            [ -n "${_srv_par}" ] && sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_parallel=.*/sycl_parallel='"${_srv_par}"'/}' "${_ini_file}"
+            [ -n "${_srv_vram}" ] && sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_vram_gb=.*/sycl_vram_gb='"${_srv_vram}"'/}' "${_ini_file}"
+          fi
+        done
+      else
+        info "Server config found but missing inference parameters"
+      fi
+    else
+      info "Server config not available (optional — run 'sudo agictl model refresh' later)"
+    fi
+
     # Step 6: Update paths.env — use localhost (tunneled) URL, NOT the remote URL
     _TUNNEL_URL="http://localhost:${_TUNNEL_PORT}"
     if [ -f "${PATHS_ENV}" ] && [ "${PATHS_ENV}" != "/dev/null" ]; then
@@ -482,6 +598,7 @@ TUNNELEOF
 }
 CLIENTEOF
     chmod 640 "${CLIENT_STATE_FILE}"
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${CLIENT_STATE_FILE}" 2>/dev/null || true
 
     # Write to setup.ini (dual-write)
     for _ini_file in "${SCRIPT_DIR}/setup.ini" "/etc/versa-agi/setup.ini"; do
@@ -579,44 +696,52 @@ elif [ "${GPU_BACKEND}" = "intel" ] && systemctl is-active --quiet ollama 2>/dev
   echo ""
 fi
 
-# ─── Ollama Host Selection ──────────────────────────
-echo "  Where is Ollama running?"
-echo "    1) Install locally in this Linux machine (Default)"
-echo "    2) Host machine (OrbStack) - http://host.orb.internal:11434"
-echo "    3) Host machine (Lima)     - http://host.lima.internal:11434"
-echo "    4) Custom URL"
-echo ""
-read -p "  Selection [1]: " OLLAMA_CHOICE
-OLLAMA_CHOICE=${OLLAMA_CHOICE:-1}
+# ─── Ollama Host Selection (Standard backend only) ────
+if [ "${GPU_BACKEND}" = "intel" ]; then
+  # Intel SYCL uses Docker llama-server, not Ollama — skip Ollama configuration entirely
+  INSTALL_OLLAMA="false"
+  OLLAMA_HOST=""
+  info "Intel SYCL backend selected — Ollama not used (Docker SYCL replaces it)"
+  echo ""
+else
+  echo "  Where is Ollama running?"
+  echo "    1) Install locally in this Linux machine (Default)"
+  echo "    2) Host machine (OrbStack) - http://host.orb.internal:11434"
+  echo "    3) Host machine (Lima)     - http://host.lima.internal:11434"
+  echo "    4) Custom URL"
+  echo ""
+  read -p "  Selection [1]: " OLLAMA_CHOICE
+  OLLAMA_CHOICE=${OLLAMA_CHOICE:-1}
 
-INSTALL_OLLAMA="true"
+  INSTALL_OLLAMA="true"
 
-case "${OLLAMA_CHOICE}" in
-  2)
-    OLLAMA_HOST="http://host.orb.internal:11434"
-    INSTALL_OLLAMA="false"
-    ;;
-  3)
-    OLLAMA_HOST="http://host.lima.internal:11434"
-    INSTALL_OLLAMA="false"
-    ;;
-  4)
-    read -p "  Enter Custom Ollama URL (e.g. http://192.168.1.100:11434): " OLLAMA_HOST
-    INSTALL_OLLAMA="false"
-    ;;
-  *)
-    OLLAMA_HOST="http://localhost:11434"
-    ;;
-esac
+  case "${OLLAMA_CHOICE}" in
+    2)
+      OLLAMA_HOST="http://host.orb.internal:11434"
+      INSTALL_OLLAMA="false"
+      ;;
+    3)
+      OLLAMA_HOST="http://host.lima.internal:11434"
+      INSTALL_OLLAMA="false"
+      ;;
+    4)
+      read -p "  Enter Custom Ollama URL (e.g. http://192.168.1.100:11434): " OLLAMA_HOST
+      INSTALL_OLLAMA="false"
+      ;;
+    *)
+      OLLAMA_HOST="http://localhost:11434"
+      ;;
+  esac
 
-echo ""
-ok "Using Ollama Host: ${OLLAMA_HOST}"
-echo ""
+  echo ""
+  ok "Using Ollama Host: ${OLLAMA_HOST}"
+  echo ""
+fi
 
 # ═════════════════════════════════════════════════════
 # GPU BACKEND: INTEL (Docker SYCL)
 # ═════════════════════════════════════════════════════
-if [ "${GPU_BACKEND}" = "intel" ] && [ "${INSTALL_OLLAMA}" = "true" ]; then
+if [ "${GPU_BACKEND}" = "intel" ]; then
 
   # ── OS Check ──
   if command -v lsb_release &>/dev/null; then
@@ -636,33 +761,88 @@ if [ "${GPU_BACKEND}" = "intel" ] && [ "${INSTALL_OLLAMA}" = "true" ]; then
     ok "DRI render devices detected: $(ls /dev/dri/render* 2>/dev/null | wc -l)"
   fi
 
-  # ── Device ID ──
-  if [ -z "${INTEL_DEVICE_ID}" ]; then
+  # ── GPU Auto-Detection ──
+  echo ""
+  echo "  Intel ARC GPU Configuration"
+  echo "  ─────────────────────────────────────────"
+
+  # Auto-detect Intel GPUs via lspci
+  _GPU_LIST=()
+  _GPU_IDS=()
+  while IFS= read -r line; do
+    [ -z "${line}" ] && continue
+    # Extract device ID [8086:xxxx] and description
+    _dev_id=$(echo "${line}" | grep -oP '\[8086:[0-9a-f]+\]' | tr -d '[]')
+    _desc=$(echo "${line}" | sed 's/ \[.*$//' | sed 's/^[0-9:.]\+ //')
+    if [ -n "${_dev_id}" ] && [ -n "${_desc}" ]; then
+      _GPU_LIST+=("${_desc} [${_dev_id}]")
+      _GPU_IDS+=("${_dev_id}")
+    fi
+  done < <(lspci -nn -d 8086::0300 2>/dev/null; lspci -nn -d 8086::0380 2>/dev/null)
+
+  if [ "${#_GPU_LIST[@]}" -gt 0 ]; then
     echo ""
-    echo "  Intel ARC GPU Configuration"
-    echo "  ─────────────────────────────────────────"
+    echo "  Detected Intel GPUs:"
+    for i in "${!_GPU_LIST[@]}"; do
+      echo "    $((i + 1))) ${_GPU_LIST[$i]}"
+    done
+    echo "    $((${#_GPU_LIST[@]} + 1))) Enter manually"
+    echo ""
+
+    _DEFAULT_SEL=1
+    # If INTEL_DEVICE_ID is pre-set, try to find it in the list
+    if [ -n "${INTEL_DEVICE_ID}" ]; then
+      for i in "${!_GPU_IDS[@]}"; do
+        if [ "${_GPU_IDS[$i]}" = "${INTEL_DEVICE_ID}" ]; then
+          _DEFAULT_SEL=$((i + 1))
+          break
+        fi
+      done
+    fi
+
+    read -p "  Select GPU [${_DEFAULT_SEL}]: " _gpu_choice
+    _gpu_choice=${_gpu_choice:-${_DEFAULT_SEL}}
+
+    if [ "${_gpu_choice}" -le "${#_GPU_LIST[@]}" ] 2>/dev/null; then
+      INTEL_DEVICE_ID="${_GPU_IDS[$((_gpu_choice - 1))]}"
+    else
+      # Manual entry
+      read -p "  Enter PCI device ID (e.g. 8086:e223): " INTEL_DEVICE_ID
+    fi
+  else
+    echo ""
+    echo "  No Intel GPUs detected via lspci."
     echo "  To find your GPU PCI device ID, run:"
     echo "    lspci -nn | grep -i 'VGA\|Display'"
     echo ""
-    echo "  Example output:"
-    echo "    03:00.0 VGA compatible controller [0300]: Intel ... [8086:e212]"
-    echo "    The device ID is the last part: 8086:e212"
-    echo ""
-    read -p "  Enter PCI device ID (e.g. 8086:e212): " INTEL_DEVICE_ID
-    if [ -z "${INTEL_DEVICE_ID}" ]; then
-      error "Device ID is required for Intel ARC setup."
-    fi
+    _default_id="${INTEL_DEVICE_ID:-8086:e223}"
+    read -p "  Enter PCI device ID [${_default_id}]: " _manual_id
+    INTEL_DEVICE_ID="${_manual_id:-${_default_id}}"
+  fi
+
+  if [ -z "${INTEL_DEVICE_ID}" ]; then
+    error "Device ID is required for Intel ARC setup."
   fi
   ok "Device ID: ${INTEL_DEVICE_ID}"
 
   # ── Card Count ──
+  # Count how many cards match the selected device ID
+  _DETECTED_COUNT=$(lspci -nn -d "${INTEL_DEVICE_ID}" 2>/dev/null | wc -l)
+  [ "${_DETECTED_COUNT}" -lt 1 ] && _DETECTED_COUNT=1
+  INTEL_CARD_COUNT="${_DETECTED_COUNT}"
+
   echo ""
-  echo "  How many identical Intel ARC cards are installed?"
-  echo "  ⚠ Same card models are recommended. Mixed GPU configurations are untested."
-  echo ""
+  echo "  Identical cards detected: ${_DETECTED_COUNT}"
   read -p "  Card count [${INTEL_CARD_COUNT}]: " _card_input
   INTEL_CARD_COUNT=${_card_input:-${INTEL_CARD_COUNT}}
   ok "Card count: ${INTEL_CARD_COUNT}"
+
+  # ── VRAM ──
+  echo ""
+  _default_vram="${SYCL_VRAM_GB:-32}"
+  read -p "  Total GPU VRAM in GB [${_default_vram}]: " _vram_input
+  SYCL_VRAM_GB=${_vram_input:-${_default_vram}}
+  ok "VRAM: ${SYCL_VRAM_GB}GB"
 
   # ── Step 1: Install Docker ──
   echo ""
@@ -808,51 +988,90 @@ if [ "${GPU_BACKEND}" = "intel" ] && [ "${INSTALL_OLLAMA}" = "true" ]; then
     fi
   done
 
-  # ── Step 6: Model Selection ──
-  info "Step 6: Select Default Model"
+  # ── Step 6: Model Registry & Selection ──
+  info "Step 6: SYCL Model Registry & Selection"
+  _load_sycl_registry_arrays
+
+  # Show registry + allow management via manage_registry.sh
+  if [ -f "${_MANAGE_REGISTRY_SCRIPT}" ]; then
+    source "${_MANAGE_REGISTRY_SCRIPT}" --inline
+    # After interactive menu, arrays are up-to-date
+  fi
+
+  if [ "${_REG_COUNT}" -eq 0 ]; then
+    err "No SYCL models registered. Add models to models.ini [sycl_models] first."
+    exit 1
+  fi
+
   echo ""
   echo "  Select the model to run on your Intel ARC GPU:"
   echo ""
-  echo "    1) gemma4:e4b    — 8B params, ~5 GB   (small, fast)"
-  echo "    2) gemma4:26b    — 26B MoE, ~16 GB    (recommended)"
-  echo "    3) gemma4:31b    — 31B dense, ~18 GB   (powerful)"
-  echo "    4) qwen3.6:35b   — 35B MoE, ~21 GB    (multilingual)"
+  for i in $(seq 0 $((_REG_COUNT - 1))); do
+    printf "    %d) %-16s — ~%sGB\n" "$((i + 1))" "${_REG_NAMES[$i]}" "${_REG_SIZES[$i]}"
+  done
   echo ""
-  echo "  All models use Q4_K_M quantization optimized for 16GB VRAM."
   echo "  Only one model is loaded at a time. Switch with:"
   echo "    sudo agictl model activate <name>"
   echo ""
 
   # Determine default selection number
-  case "${DEFAULT_MODEL}" in
-    gemma4:e4b)   _MODEL_DEFAULT=1 ;;
-    gemma4:26b)   _MODEL_DEFAULT=2 ;;
-    gemma4:31b)   _MODEL_DEFAULT=3 ;;
-    qwen3.6:35b)  _MODEL_DEFAULT=4 ;;
-    *)            _MODEL_DEFAULT=2 ;;
-  esac
+  _MODEL_DEFAULT=1
+  for i in $(seq 0 $((_REG_COUNT - 1))); do
+    if [ "${_REG_NAMES[$i]}" = "${DEFAULT_MODEL}" ]; then
+      _MODEL_DEFAULT=$((i + 1))
+      break
+    fi
+  done
 
   read -p "  Selection [${_MODEL_DEFAULT}]: " _MODEL_CHOICE
   _MODEL_CHOICE=${_MODEL_CHOICE:-${_MODEL_DEFAULT}}
 
-  case "${_MODEL_CHOICE}" in
-    1) DEFAULT_MODEL="gemma4:e4b" ;;
-    2) DEFAULT_MODEL="gemma4:26b" ;;
-    3) DEFAULT_MODEL="gemma4:31b" ;;
-    4) DEFAULT_MODEL="qwen3.6:35b" ;;
-    *) DEFAULT_MODEL="gemma4:26b" ;;
-  esac
+  # Validate and resolve selection
+  _CHOICE_IDX=$((_MODEL_CHOICE - 1))
+  if [ "${_CHOICE_IDX}" -lt 0 ] || [ "${_CHOICE_IDX}" -ge "${_REG_COUNT}" ]; then
+    warn "Invalid selection. Defaulting to first model."
+    _CHOICE_IDX=0
+  fi
+  DEFAULT_MODEL="${_REG_NAMES[$_CHOICE_IDX]}"
   ok "Selected model: ${DEFAULT_MODEL}"
 
   SYCL_ACTIVE_MODEL="${DEFAULT_MODEL}"
-  SYCL_ACTIVE_GGUF="${SYCL_MODEL_FILE[${DEFAULT_MODEL}]}"
+  SYCL_ACTIVE_GGUF="$(_reg_file_for "${DEFAULT_MODEL}")"
+
+  # ── Step 6b: Concurrency Configuration ──
+  _MODEL_SIZE_GB="$(_reg_size_for "${DEFAULT_MODEL}")"
+  _calculate_concurrency "${SYCL_VRAM_GB:-32}" "${_MODEL_SIZE_GB}" "${SYCL_CTX_SIZE:-4096}"
+
+  echo ""
+  echo "  Concurrency Configuration"
+  echo "  ─────────────────────────────────────────"
+  echo ""
+  echo "  Model:       ${DEFAULT_MODEL} (~${_MODEL_SIZE_GB}GB)"
+  echo "  GPU VRAM:    ${SYCL_VRAM_GB:-32}GB"
+  echo "  Free VRAM:   ~${_CALC_FREE_VRAM_GB}GB (after model load)"
+  echo ""
+  echo "  Recommended: ${_CALC_RECOMMENDED} parallel slots"
+  echo "  Maximum:     ${_CALC_MAX} parallel slots"
+  echo ""
+  echo "  Each slot is an independent inference session."
+  echo "  llama-server divides --ctx-size across slots, so total = per_slot × parallel."
+  echo ""
+  echo "  ${_CALC_RECOMMENDED} slots × ${SYCL_CTX_SIZE:-4096} per slot = $(( _CALC_RECOMMENDED * ${SYCL_CTX_SIZE:-4096} )) total context."
+  echo ""
+
+  read -p "  Parallel slots [${_CALC_RECOMMENDED}]: " _par_input
+  SYCL_PARALLEL=${_par_input:-${_CALC_RECOMMENDED}}
+  read -p "  Context size per slot [${SYCL_CTX_SIZE:-4096}]: " _ctx_input
+  SYCL_CTX_SIZE=${_ctx_input:-${SYCL_CTX_SIZE:-4096}}
+  SYCL_CTX_TOTAL=$(( SYCL_CTX_SIZE * SYCL_PARALLEL ))
+  ok "Concurrency: ${SYCL_PARALLEL} slots × ${SYCL_CTX_SIZE}/slot = ${SYCL_CTX_TOTAL} total ctx"
 
   # ── Step 7: Download Model ──
   info "Step 7: Download Model"
   mkdir -p "${SYCL_MODEL_DIR}"
 
-  _HF_REPO="${SYCL_MODEL_REPO[${DEFAULT_MODEL}]}"
-  _HF_FILE="${SYCL_MODEL_FILE[${DEFAULT_MODEL}]}"
+  _HF_REPO="$(_reg_repo_for "${DEFAULT_MODEL}")"
+  _HF_FILE="$(_reg_file_for "${DEFAULT_MODEL}")"
 
   if [ -f "${SYCL_MODEL_DIR}/${_HF_FILE}" ]; then
     ok "Model already downloaded: ${_HF_FILE}"
@@ -882,6 +1101,10 @@ if [ "${GPU_BACKEND}" = "intel" ] && [ "${INSTALL_OLLAMA}" = "true" ]; then
     fi
   done
 
+  # llama-server --ctx-size is TOTAL context shared across all parallel slots.
+  # sycl_ctx_size is per-slot → multiply by parallel for the Docker launch.
+  _DOCKER_CTX_TOTAL=$(( ${SYCL_CTX_SIZE:-4096} * ${SYCL_PARALLEL:-1} ))
+
   docker run -d --name "${SYCL_CONTAINER}" \
     --restart unless-stopped \
     ${DOCKER_DEVICES} \
@@ -889,7 +1112,8 @@ if [ "${GPU_BACKEND}" = "intel" ] && [ "${INSTALL_OLLAMA}" = "true" ]; then
     -p "${SYCL_PORT}:8080" \
     "${SYCL_IMAGE}" \
     -m "/models/${SYCL_ACTIVE_GGUF}" \
-    -ngl 99 --host 0.0.0.0 --port 8080
+    -ngl 99 --host 0.0.0.0 --port 8080 \
+    --parallel "${SYCL_PARALLEL:-1}" --ctx-size "${_DOCKER_CTX_TOTAL}"
 
   sleep 5
 
@@ -995,10 +1219,14 @@ if [ "${TOPOLOGY}" = "server" ]; then
   "gpu_backend": "${GPU_BACKEND}",
   "active_model": "${_ACTIVE_MODEL}",
   "lan_ip": "${_LAN_IP}",
+  "sycl_ctx_size": ${SYCL_CTX_SIZE:-4096},
+  "sycl_parallel": ${SYCL_PARALLEL:-1},
+  "sycl_vram_gb": ${SYCL_VRAM_GB:-32},
   "configured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 SRVEOF
   chmod 640 "${SERVER_STATE_FILE}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${SERVER_STATE_FILE}" 2>/dev/null || true
   ok "Server state saved: ${SERVER_STATE_FILE}"
 
   # Write topology + master key to setup.ini (dual-write)
@@ -1015,6 +1243,9 @@ SRVEOF
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_active_model=.*/sycl_active_model='"${SYCL_ACTIVE_MODEL}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^hf_token=.*/hf_token='"${HF_TOKEN}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_llama_cpp_tag=.*/sycl_llama_cpp_tag='"${SYCL_LLAMA_CPP_TAG}"'/}' "${SETUP_INI}"
+        sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_vram_gb=.*/sycl_vram_gb='"${SYCL_VRAM_GB}"'/}' "${SETUP_INI}"
+        sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_parallel=.*/sycl_parallel='"${SYCL_PARALLEL}"'/}' "${SETUP_INI}"
+        sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_ctx_size=.*/sycl_ctx_size='"${SYCL_CTX_SIZE}"'/}' "${SETUP_INI}"
       fi
       # Server mode: disable cloud proxy — inference server only serves local models
       sed -i '/^\[cloud_models\]/,/^\[/{s/^enabled=.*/enabled=false/}' "${SETUP_INI}"
@@ -1096,6 +1327,9 @@ for SETUP_INI in "${_INI_FILES[@]}"; do
     sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_active_model=.*/sycl_active_model='"${SYCL_ACTIVE_MODEL}"'/}' "${SETUP_INI}"
     sed -i '/^\[local_ai\]/,/^\[/{s/^hf_token=.*/hf_token='"${HF_TOKEN}"'/}' "${SETUP_INI}"
     sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_llama_cpp_tag=.*/sycl_llama_cpp_tag='"${SYCL_LLAMA_CPP_TAG}"'/}' "${SETUP_INI}"
+    sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_vram_gb=.*/sycl_vram_gb='"${SYCL_VRAM_GB}"'/}' "${SETUP_INI}"
+    sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_parallel=.*/sycl_parallel='"${SYCL_PARALLEL}"'/}' "${SETUP_INI}"
+    sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_ctx_size=.*/sycl_ctx_size='"${SYCL_CTX_SIZE}"'/}' "${SETUP_INI}"
   fi
   ok "Updated: ${SETUP_INI}"
 done

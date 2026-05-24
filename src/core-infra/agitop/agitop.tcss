@@ -397,6 +397,55 @@ SystemSettingsModal {
     border: dashed $accent;
 }
 
+#md-attach-buttons {
+    height: auto;
+    margin-top: 1;
+}
+
+#md-attach-buttons Button {
+    margin-right: 1;
+}
+
+/* ─── Markdown Viewer Modal ──────────────────── */
+
+MarkdownViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#md-viewer-dialog {
+    width: 75%;
+    height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $warning;
+}
+
+#md-viewer-title {
+    margin-bottom: 1;
+    border-bottom: solid $warning;
+    padding-bottom: 1;
+}
+
+#md-viewer-scroll {
+    height: 1fr;
+    min-height: 5;
+    margin-bottom: 1;
+}
+
+#md-viewer-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#md-viewer-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 16;
+    height: 3;
+}
+
 /* ─── Compose Modal ──────────────────────────── */
 
 ComposeModal {

@@ -1086,6 +1086,19 @@ Wake reason: ${WAKE_REASON}."
       "from harness.model_context import get_model_context; print(get_model_context('${AGENT_MODEL}')[0])" 2>/dev/null || echo "4096")
   fi
 
+  # ── Server Ceiling Cap (Intel/Remote) ──
+  # For Intel SYCL / remote backends, the server pre-allocates KV cache per slot
+  # at --ctx-size. The per-agent num_ctx cannot exceed this hard ceiling.
+  # Standard Ollama manages context dynamically per-request — no cap needed.
+  if [ "${VERSA_GPU_BACKEND:-}" = "intel" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
+    SERVER_CTX_CEILING=$(PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -c \
+      "from harness.model_context import get_server_ctx_ceiling; c = get_server_ctx_ceiling(); print(c if c else 0)" 2>/dev/null || echo "0")
+    if [ "${SERVER_CTX_CEILING}" -gt 0 ] 2>/dev/null && [ "${AGENT_NUM_CTX}" -gt "${SERVER_CTX_CEILING}" ] 2>/dev/null; then
+      log "NUM_CTX CAP: ${AGENT_NAME} requested ${AGENT_NUM_CTX} but server ceiling is ${SERVER_CTX_CEILING} — capping"
+      AGENT_NUM_CTX="${SERVER_CTX_CEILING}"
+    fi
+  fi
+
   set +e
   sudo -u "${AGENT_USER}" \
     timeout "${TIMEOUT_DURATION}" \

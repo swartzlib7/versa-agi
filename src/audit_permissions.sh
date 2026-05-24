@@ -178,26 +178,28 @@ echo -e "${BOLD}── Sub-Agent Environments ──${NC}"
 # Find sub-agents from agents.db
 AGENTS_DB="/var/lib/versa-agi/agents.db"
 if [ -f "${AGENTS_DB}" ]; then
-  SUB_AGENTS=$(sqlite3 "${AGENTS_DB}" "SELECT name FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true)
-  for agent in ${SUB_AGENTS}; do
-    echo -e "  ${BOLD}[${agent}]${NC}"
+  SUB_AGENTS=$(sqlite3 "${AGENTS_DB}" "SELECT name || '|' || os_user FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true)
+  for agent_row in ${SUB_AGENTS}; do
+    agent="${agent_row%%|*}"
+    os_user="${agent_row##*|}"
+    echo -e "  ${BOLD}[${agent}]${NC}  (os_user: ${os_user})"
     AHOME="/home/agi-${agent}"
-    check "${AHOME}"                        "${agent}:agi_agents"   "770"  "Home dir"
-    check "${AHOME}/.agent"                 "${agent}:agi_agents"   "770"  ".agent dir"
-    check "${AHOME}/.agent/skills"          "${agent}:agi_agents"   "775"  "Skills dir"
-    check "${AHOME}/workspace"              "${agent}:agi_agents"   "770"  "Workspace dir"
-    check "/etc/versa-agi/${agent}_config.json" "watchdog:${agent}" "640" "Config JSON"
+    check "${AHOME}"                        "${os_user}:agi_agents"   "770"  "Home dir"
+    check "${AHOME}/.agent"                 "${os_user}:agi_agents"   "770"  ".agent dir"
+    check "${AHOME}/.agent/skills"          "${os_user}:agi_agents"   "775"  "Skills dir"
+    check "${AHOME}/workspace"              "${os_user}:agi_agents"   "770"  "Workspace dir"
+    check "/etc/versa-agi/${agent}_config.json" "watchdog:${os_user}" "640" "Config JSON"
     # §IX.2 /var/lib/versa-agi/{name}/ — agent data directory
-    check "/var/lib/versa-agi/${agent}"              "watchdog:${agent}"   "750" "Data dir"
-    check "/var/lib/versa-agi/${agent}/cycles"        "${agent}:${agent}"   "755" "Cycles dir"
-    check "/var/lib/versa-agi/${agent}/last_prompt.txt" "watchdog:${agent}" "640" "Last prompt"
-    check "/var/lib/versa-agi/${agent}/poise.md"      "watchdog:${agent}"   "640" "Poise template"
-    check "/var/lib/versa-agi/${agent}/duties.md"     "watchdog:${agent}"   "640" "Duties file"
+    check "/var/lib/versa-agi/${agent}"              "watchdog:${os_user}"   "750" "Data dir"
+    check "/var/lib/versa-agi/${agent}/cycles"        "${os_user}:${os_user}"   "755" "Cycles dir"
+    check "/var/lib/versa-agi/${agent}/last_prompt.txt" "watchdog:${os_user}" "640" "Last prompt"
+    check "/var/lib/versa-agi/${agent}/poise.md"      "watchdog:${os_user}"   "640" "Poise template"
+    check "/var/lib/versa-agi/${agent}/duties.md"     "watchdog:${os_user}"   "640" "Duties file"
     # §IX.4 Sub-agent files — git identity, SSH keypair
-    check "${AHOME}/README.md"              "${agent}:agi_agents"   "664"  "README"
-    check "${AHOME}/.gitconfig"             "${agent}:agi_agents"   "644"  "Git config"
-    check "${AHOME}/.git-credentials"       "${agent}:agi_agents"   "600"  "Git credentials"
-    check "${AHOME}/.ssh"                   "${agent}:agi_agents"   "700"  "SSH dir (keys enforced by restab: private=600, pub=644)"
+    check "${AHOME}/README.md"              "${os_user}:agi_agents"   "664"  "README"
+    check "${AHOME}/.gitconfig"             "${os_user}:agi_agents"   "644"  "Git config"
+    check "${AHOME}/.git-credentials"       "${os_user}:agi_agents"   "600"  "Git credentials"
+    check "${AHOME}/.ssh"                   "${os_user}:agi_agents"   "700"  "SSH dir (keys enforced by restab: private=600, pub=644)"
     echo ""
   done
 else
@@ -225,12 +227,13 @@ for expected in coa watchdog; do
     FAIL=$((FAIL + 1))
   fi
 done
-for agent in ${SUB_AGENTS:-}; do
-  if echo ",${AGI_MEMBERS}," | grep -q ",${agent},"; then
-    echo -e "  ${GREEN}PASS${NC}  ${agent} is in agi_agents"
+for agent_row in ${SUB_AGENTS:-}; do
+  _os_user="${agent_row##*|}"
+  if echo ",${AGI_MEMBERS}," | grep -q ",${_os_user},"; then
+    echo -e "  ${GREEN}PASS${NC}  ${_os_user} is in agi_agents"
     PASS=$((PASS + 1))
   else
-    echo -e "  ${RED}FAIL${NC}  ${agent} is NOT in agi_agents"
+    echo -e "  ${RED}FAIL${NC}  ${_os_user} is NOT in agi_agents"
     FAIL=$((FAIL + 1))
   fi
 done

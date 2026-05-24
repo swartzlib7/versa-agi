@@ -94,11 +94,13 @@ else
   info "No Docker SYCL container found"
 fi
 
-# Remove SYCL Docker image
-if docker images --format '{{.Repository}}' 2>/dev/null | grep -q "^llama-sycl-server$"; then
-  docker rmi llama-sycl-server 2>/dev/null || true
-  ok "Removed Docker image: llama-sycl-server"
-fi
+# Remove SYCL Docker image (current name + legacy name)
+for _img in versa-agi-sycl llama-sycl-server; do
+  if docker images --format '{{.Repository}}' 2>/dev/null | grep -q "^${_img}$"; then
+    docker rmi "${_img}" 2>/dev/null || true
+    ok "Removed Docker image: ${_img}"
+  fi
+done
 
 # ─── Step 1b: Stop Legacy IPEX Ollama Service (migration cleanup) ──
 if [ -f "${IPEX_SERVICE_FILE}" ]; then

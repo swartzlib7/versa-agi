@@ -9,7 +9,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Vertical, Horizontal, VerticalScroll
-from textual.widgets import DataTable, Static, Button, Checkbox, Select, TextArea
+from textual.widgets import DataTable, Static, Button, Checkbox, Select, TextArea, Markdown
 from textual.widget import Widget
 import subprocess
 
@@ -98,6 +98,40 @@ class ComposeModal(ModalScreen):
             self.app.pop_screen()
 
 
+class MarkdownViewModal(ModalScreen):
+    """Modal dialog to render markdown content with syntax highlighting."""
+
+    def __init__(self, title: str, content: str, **kwargs):
+        super().__init__(**kwargs)
+        self.md_title = title
+        self.md_content = content
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="md-viewer-dialog"):
+            yield Static(f"[bold cyan]📄 {self.md_title}[/]", id="md-viewer-title")
+            with VerticalScroll(id="md-viewer-scroll"):
+                yield Markdown(self.md_content, id="md-viewer-content")
+            with Horizontal(id="md-viewer-actions"):
+                yield Button("📋 Copy", variant="default", id="md-copy")
+                yield Button("Close", variant="primary", id="md-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "md-close":
+            self.app.pop_screen()
+        elif event.button.id == "md-copy":
+            try:
+                subprocess.run(["xclip", "-selection", "clipboard"], input=self.md_content.encode(), check=True)
+                self.app.notify("Markdown copied", title="Clipboard")
+            except FileNotFoundError:
+                try:
+                    subprocess.run(["xsel", "--clipboard", "--input"], input=self.md_content.encode(), check=True)
+                    self.app.notify("Markdown copied", title="Clipboard")
+                except Exception:
+                    self.app.notify("Install xclip or xsel for clipboard support", severity="warning")
+            except Exception:
+                self.app.notify("Clipboard copy failed", severity="warning")
+
+
 class MessageViewModal(ModalScreen):
     """Modal dialog to show full message content with edit/delete actions."""
 
@@ -136,8 +170,10 @@ class MessageViewModal(ModalScreen):
         created = _utc_to_local(msg.get("created_at", ""))
         msg_id = msg.get("message_id", "")
         cycle = msg.get("cycle_id") or "--"
-        has_attach = "Yes" if msg.get("has_attachments") else "No"
-        attach_path = msg.get("attachment_path") or "--"
+        # Only show attachments for outbound (sent) messages — inbound VV messages
+        # flag has_attachments for audio transcription URLs which aren't useful.
+        is_sent = direction == "sent"
+        has_attach = "Yes" if (is_sent and msg.get("has_attachments")) else "No"
 
         # Build header info block
         header = (
@@ -146,29 +182,47 @@ class MessageViewModal(ModalScreen):
             f"[cyan]To:[/] {to_name}\n"
             f"[cyan]Mode:[/] {mode}  [cyan]Status:[/] {status}\n"
             f"[cyan]Message ID:[/] {msg_id}\n"
-            f"[cyan]Cycle:[/] {cycle}\n"
-            f"[cyan]Attachments:[/] {has_attach}"
+            f"[cyan]Cycle:[/] {cycle}"
         )
-        if has_attach == "Yes" and attach_path != "--":
-            header += f"  [dim]({attach_path})[/]"
+        if is_sent:
+            header += f"\n[cyan]Attachments:[/] {has_attach}"
 
         # Prefer original_text (with emotion tags) for dashboard display
-        text = msg.get("original_text") or msg.get("text") or ""
-        if not text:
-            text = "[dim](empty message)[/]"
-        else:
-            text = text.replace("[", "\\[")
+        raw_text = msg.get("original_text") or msg.get("text") or ""
+        if not raw_text:
+            raw_text = "(empty message)"
+        # Store raw text for copy button
+        self._raw_text = raw_text
 
-        # Build attachment display (local file paths stored as JSON array)
-        attach_section = ""
-        attach_raw = msg.get("attachment_path") or ""
-        if attach_raw and attach_raw != "--":
-            try:
-                paths = json.loads(attach_raw)
-                if isinstance(paths, list) and paths:
-                    attach_section = "[cyan]Attachments:[/]\n" + "\n".join(f"  📎 {p}" for p in paths)
-            except (json.JSONDecodeError, TypeError):
-                attach_section = f"[cyan]Attachments:[/]\n  📎 {attach_raw}"
+        # Parse attachments from raw_payload (single source of truth).
+        # raw_payload stores the full attachments JSON array for sent messages.
+        # Messages sent before this field was populated will show no attachment details.
+        self._md_attachments = []
+        attach_labels = []
+
+        if is_sent and has_attach == "Yes":
+            raw_payload = msg.get("raw_payload") or ""
+            if raw_payload:
+                try:
+                    attachments = json.loads(raw_payload)
+                    if not isinstance(attachments, list):
+                        raise ValueError(f"Expected list, got {type(attachments).__name__}")
+                    for att in attachments:
+                        att_type = att.get("type", "unknown")
+                        meta = att.get("meta") or {}
+                        if att_type == "markdown" and att.get("value"):
+                            self._md_attachments.append({
+                                "title": meta.get("title", "Untitled"),
+                                "content": att["value"]
+                            })
+                        elif att_type == "media":
+                            attach_labels.append(f"📷 {meta.get('fileName', 'media')}")
+                        elif att_type == "url":
+                            attach_labels.append(f"🔗 {att.get('value', 'url')}")
+                        else:
+                            attach_labels.append(f"📎 {att_type}")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    attach_labels.append("[red]⚠ Failed to parse attachment data[/]")
 
         # Status selector options (must match messages.db CHECK constraint)
         status_options = [
@@ -185,9 +239,18 @@ class MessageViewModal(ModalScreen):
         with Vertical(id="msg-dialog"):
             with VerticalScroll(id="msg-dialog-scroll"):
                 yield Static(header, id="msg-dialog-header")
-                yield Static(text, id="msg-dialog-body")
-                if attach_section:
-                    yield Static(attach_section, id="msg-attachments")
+                yield TextArea(raw_text, id="msg-dialog-body", read_only=True)
+                # Attachment details (parsed from raw_payload)
+                if attach_labels or self._md_attachments:
+                    with Vertical(id="msg-attachments"):
+                        if attach_labels:
+                            yield Static("[cyan]Attachments:[/]\n" + "\n".join(attach_labels))
+                        for idx, md_att in enumerate(self._md_attachments):
+                            yield Button(
+                                f"📄 View: {md_att['title']}",
+                                variant="warning",
+                                id=f"md-view-{idx}",
+                            )
             yield Static("[cyan]Status[/] — change message processing status")
             yield Select(
                 status_options,
@@ -201,6 +264,7 @@ class MessageViewModal(ModalScreen):
                 if self.primary_uid and to_uid == self.primary_uid:
                     yield Button("💬 Reply", variant="warning", id="msg-reply")
                 yield Button("Save Status", variant="success", id="msg-save-status")
+                yield Button("📋 Copy Body", variant="default", id="msg-copy-body")
                 yield Button("Copy ID", variant="default", id="msg-dialog-copy-id")
                 yield Button("Delete", variant="error", id="msg-delete")
                 yield Button("Close", variant="primary", id="msg-dialog-close")
@@ -208,6 +272,19 @@ class MessageViewModal(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         from textual.widgets import Select
         msg_id = self.msg.get("message_id") or ""
+
+        # Handle markdown viewer buttons (md-view-0, md-view-1, etc.)
+        if event.button.id and event.button.id.startswith("md-view-"):
+            try:
+                idx = int(event.button.id.split("-")[-1])
+                md_att = self._md_attachments[idx]
+                self.app.push_screen(MarkdownViewModal(
+                    title=md_att["title"],
+                    content=md_att["content"]
+                ))
+            except (IndexError, ValueError):
+                self.app.notify("Attachment not found", severity="warning")
+            return
 
         if event.button.id == "msg-dialog-close":
             self.app.pop_screen()
@@ -228,6 +305,18 @@ class MessageViewModal(ModalScreen):
                 ))
             except Exception as e:
                 self.app.notify(f"Reply failed: {e}", severity="error")
+        elif event.button.id == "msg-copy-body":
+            try:
+                subprocess.run(["xclip", "-selection", "clipboard"], input=self._raw_text.encode(), check=True)
+                self.app.notify("Message body copied", title="Clipboard")
+            except FileNotFoundError:
+                try:
+                    subprocess.run(["xsel", "--clipboard", "--input"], input=self._raw_text.encode(), check=True)
+                    self.app.notify("Message body copied", title="Clipboard")
+                except Exception:
+                    self.app.notify("Install xclip or xsel for clipboard support", severity="warning")
+            except Exception:
+                self.app.notify("Clipboard copy failed", severity="warning")
         elif event.button.id == "msg-dialog-copy-id":
             if msg_id:
                 try:
@@ -461,7 +550,8 @@ class MessagesPanel(Widget):
             clean_text = msg.get("original_text") or msg.get("text") or ""
             mode = msg.get("mode", "typed")
             status = msg.get("status", "pending")
-            has_attach = "Yes" if msg.get("has_attachments") else "No"
+            # Only flag attachments for sent messages (inbound VV audio URLs aren't useful)
+            has_attach = "Yes" if (direction == "sent" and msg.get("has_attachments")) else "No"
             # Format: "YYYY-MM-DD HH:MM:SS" → "MM-DD HH:MM"
             raw_ts = _utc_to_local(msg.get("created_at", ""))
             if len(raw_ts) >= 16:

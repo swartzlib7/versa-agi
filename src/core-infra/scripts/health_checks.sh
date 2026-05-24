@@ -88,26 +88,26 @@ run_health_checks() {
   local AGENTS_DB="/var/lib/versa-agi/agents.db"
   if [ -f "${AGENTS_DB}" ]; then
     local sub_agents
-    sub_agents=$(sqlite3 "${AGENTS_DB}" "SELECT name || '|' || inactive FROM agents WHERE protected=0;" 2>/dev/null || true)
+    sub_agents=$(sqlite3 "${AGENTS_DB}" "SELECT name || '|' || os_user || '|' || inactive FROM agents WHERE protected=0;" 2>/dev/null || true)
     if [ -n "${sub_agents}" ]; then
       echo ""
       echo "  ── Sub-Agent Environments ──"
-      while IFS='|' read -r agent_name agent_inactive; do
+      while IFS='|' read -r agent_name agent_os_user agent_inactive; do
         [ -z "${agent_name}" ] && continue
         # Skip unapproved agents — no home dir expected until PU approves via dashboard
         if [ "${agent_inactive}" = "1" ]; then
           echo -e "  ⏳ SKIP  ${agent_name}: pending approval (not yet provisioned)"
           continue
         fi
-        local agent_home="/home/agi-${agent_name}"
+        local agent_home="/home/${agent_os_user}"
         health_check "${agent_name}: home exists" "[ -d '${agent_home}' ]"
         if [ -d "${agent_home}" ]; then
-          health_check "${agent_name}: OS user in agi_agents" "id -nG '${agent_name}' 2>/dev/null | grep -qw agi_agents"
-          ownership_check "${agent_home}/.agent" "${agent_name}:agi_agents" "${agent_name}: .agent/ owned by ${agent_name}:agi_agents"
-          # Credential isolation: config file must be root:{name} 640
+          health_check "${agent_name}: OS user in agi_agents" "id -nG '${agent_os_user}' 2>/dev/null | grep -qw agi_agents"
+          ownership_check "${agent_home}/.agent" "${agent_os_user}:agi_agents" "${agent_name}: .agent/ owned by ${agent_os_user}:agi_agents"
+          # Credential isolation: config file must be watchdog:{os_user} 640
           local agent_config="/etc/versa-agi/${agent_name}_config.json"
           if [ -f "${agent_config}" ]; then
-            ownership_check "${agent_config}" "watchdog:${agent_name}" "${agent_name}: config credential isolation"
+            ownership_check "${agent_config}" "watchdog:${agent_os_user}" "${agent_name}: config credential isolation"
             perms_check "${agent_config}" "640" "${agent_name}: config permissions"
           fi
         fi

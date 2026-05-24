@@ -389,10 +389,10 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 | `qwen3.6:35b` | ✓ | ✓ | Qwen 3.6 35B MoE — ~21GB VRAM, multilingual |
 
 > [!TIP]
-> **Intel ARC Users:** Only one model can be loaded at a time. Switch models via `sudo agictl model activate <name>`. All local sub-agents share the active model.
+> **Intel ARC Users:** Only one model can be loaded at a time. Switch models via `sudo agictl model activate <name>` — concurrency (parallel slots) is automatically recalculated based on your GPU VRAM and model size. Setup auto-detects Intel GPUs via `lspci` and prompts for confirmation. All local sub-agents share the active model. Model metadata is managed via the `models.ini` registry — add custom models with `sudo agictl model registry add <name> --repo <hf_repo> --file <gguf> --size <gb>`.
 
 > [!TIP]
-> **Distributed Setup (Server + Client):** Install as **Server** on your GPU machine to serve inference over LAN. Install as **Client** on your laptop — setup will create an SSH tunnel (`versa-agi-tunnel.service`) for encrypted communication and display a public key to authorize on the server. Local AI traffic routes securely through the tunnel directly to the inference endpoint. Use `sudo agictl model refresh` on the client to pick up model changes made on the server.
+> **Distributed Setup (Server + Client):** Install as **Server** on your GPU machine to serve inference over LAN. Install as **Client** on your laptop — setup will create an SSH tunnel (`versa-agi-tunnel.service`) for encrypted communication and display a public key to authorize on the server. Local AI traffic routes securely through the tunnel directly to the inference endpoint. Use `sudo agictl model refresh` on the client to pick up model changes and server configuration (context ceiling, concurrency) made on the server.
 
 > [!TIP]
 > **macOS Local AI (GPU Acceleration):** If you are running Versa AGi inside an OrbStack or Lima VM on a Mac, install Ollama natively on macOS to utilize your Apple Silicon GPU. During the local AI setup (`sudo ./setup_local.sh`), simply select the appropriate host route (e.g., `http://host.orb.internal:11434`) when prompted to seamlessly bridge the Linux VM to your Mac's Metal rendering engine.
@@ -400,6 +400,42 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 
 > [!NOTE]
 > The LangGraph harness tracks token usage natively per cycle and totals it monthly in the agitop dashboard.
+
+### Model Registry Management
+
+All SYCL model metadata (HuggingFace repo, GGUF filename, size) is centralized in `models.ini [sycl_models]`. This registry drives the setup menu, model downloads, concurrency calculations, and dashboard context picklists.
+
+**CLI Commands** (`agictl model registry`):
+
+```bash
+# List all registered SYCL models
+sudo agictl model registry list
+
+# Register a new model
+sudo agictl model registry add llama4:8b \
+  --repo unsloth/Llama-4-8B-GGUF \
+  --file Llama-4-8B-Q4_K_M.gguf \
+  --size 5 \
+  --ctx-recommended 32768 \
+  --ctx-max 131072 \
+  --label "Llama 4 8B — Dense, 128K context"
+
+# Update an existing model's properties
+sudo agictl model registry update gemma4:e4b --size 6
+
+# Remove a model from the SYCL registry
+sudo agictl model registry remove llama4:8b
+```
+
+**Interactive Manager** (standalone or during setup):
+
+```bash
+sudo ./manage_registry.sh          # Interactive add/edit/delete menu
+sudo ./manage_registry.sh --list   # Display registry only
+```
+
+> [!NOTE]
+> After registering a new model, use `sudo agictl model add <name>` to download the GGUF file, and `sudo agictl model activate <name>` to load it into the inference server.
 
 ---
 

@@ -314,7 +314,7 @@ INI_LOCAL_MODELS="$(ini_get local_ai local_models)"
 INI_OLLAMA_HOST="$(ini_get local_ai ollama_host http://localhost:11434)"
 INI_PROXY_PORT="$(ini_get local_ai proxy_port 4000)"
 INI_AUTO_PULL_MODEL="$(ini_get local_ai auto_pull_model true)"
-INI_INTEL_CARD_COUNT="$(ini_get local_ai intel_card_count 2)"
+INI_INTEL_CARD_COUNT="$(ini_get local_ai intel_card_count 1)"
 INI_INTEL_DEVICE_ID="$(ini_get local_ai intel_device_id '')"
 INI_HF_TOKEN="$(ini_get local_ai hf_token '')"
 INI_TOPOLOGY="$(ini_get local_ai topology local)"
@@ -585,9 +585,13 @@ if [ "${UPDATE_MODE}" = false ]; then
           chmod 755 "${DEPLOYED_CORE_INFRA}/bin/${f}"
         fi
       done
-      # Config (models.ini, setup.ini copy)
-      if [ -f "${SOURCE_CORE_INFRA}/config/models.ini" ]; then
-        cp "${SOURCE_CORE_INFRA}/config/models.ini" "${DEPLOYED_CORE_INFRA}/config/"
+      # Config (models.ini — canonical + local copy)
+      if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+        cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
+        chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/models.ini" 2>/dev/null || true
+        chmod 640 "/etc/versa-agi/models.ini"
+        # Also keep a local copy for agictl dev fallback
+        cp "${SCRIPT_DIR}/models.ini" "${DEPLOYED_CORE_INFRA}/config/"
       fi
       # Model context module (needed by agictl for num_ctx resolution)
       if [ -f "${SOURCE_CORE_INFRA}/harness/model_context.py" ]; then
@@ -627,9 +631,11 @@ if [ "${UPDATE_MODE}" = false ]; then
       fi
       ok "paths.env: VERSA_CORE_INFRA=${DEPLOYED_CORE_INFRA}"
 
-      # Ensure setup.ini is available in /etc/versa-agi/
-      if [ -f "${INI_FILE}" ] && [ ! -f "/etc/versa-agi/setup.ini" ]; then
+      # Ensure setup.ini is available in /etc/versa-agi/ (always sync from source)
+      if [ -f "${INI_FILE}" ]; then
         cp "${INI_FILE}" "/etc/versa-agi/setup.ini"
+        chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/setup.ini" 2>/dev/null || true
+        chmod 640 "/etc/versa-agi/setup.ini"
         ok "setup.ini deployed to /etc/versa-agi/"
       fi
 
@@ -685,13 +691,31 @@ if [ "${UPDATE_MODE}" = false ]; then
     fi
   fi
 
-  # ── Client (cloud only): mark for Step 9 skip ──
+  # ── Client overrides: sync INI values to match installation type selection ──
   if [ "${INSTALL_TYPE}" = "1" ]; then
+    # Cloud-only: no local AI, reset topology to default
+    INI_TOPOLOGY="local"
+    INI_EXECUTION_MODE="cloud"
+    INI_LOCAL_AI_ENABLED="false"
     info "Client (cloud only) — local AI will be skipped"
   else
-    info "Client (cloud + local AI) — local AI setup will follow"
+    # Client + Local AI: force topology=client and mode=hybrid
+    # This prevents a stale topology=server (from a shared INI) from
+    # steering setup_local.sh into installing GPU infrastructure locally.
+    INI_TOPOLOGY="client"
+    INI_EXECUTION_MODE="hybrid"
+    INI_LOCAL_AI_ENABLED="true"
+    info "Client (cloud + local AI) — topology set to client"
   fi
-  echo ""
+
+  # Write overrides back to setup.ini (both source and deployed)
+  for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+    if [ -f "${_ini_file}" ]; then
+      sed -i '/^\[local_ai\]/,/^\[/{s/^topology=.*/topology='"${INI_TOPOLOGY}"'/}' "${_ini_file}"
+      sed -i '/^\[local_ai\]/,/^\[/{s/^enabled=.*/enabled='"${INI_LOCAL_AI_ENABLED}"'/}' "${_ini_file}"
+      sed -i '/^\[gemini\]/,/^\[/{s/^mode=.*/mode='"${INI_EXECUTION_MODE}"'/}' "${_ini_file}"
+    fi
+  done
 fi
 
 # ═══════════════════════════════════════════════════════
@@ -860,6 +884,14 @@ deploy_repo() {
 
 deploy_repo "${SRC_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}" "${WATCHDOG_USER}" "Core Infrastructure"
 deploy_repo "${SRC_COA_ENV}" "${DEPLOYED_COA_ENV}" "${COA_USER}" "COA Environment"
+
+# Deploy models.ini to canonical location (alongside setup.ini)
+if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+  cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
+  chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/models.ini" 2>/dev/null || true
+  chmod 640 "/etc/versa-agi/models.ini"
+  ok "models.ini deployed to /etc/versa-agi/models.ini"
+fi
 
 # Agent registry workspace paths are set during registry seeding (Step 6b).
 
@@ -2319,6 +2351,7 @@ apply_system_permissions() {
   [ -d "/etc/versa-agi" ]                && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi && chmod 751 /etc/versa-agi
   [ -f "/etc/versa-agi/coa_config.json" ] && chown "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/coa_config.json && chmod 640 /etc/versa-agi/coa_config.json
   [ -f "/etc/versa-agi/setup.ini" ]       && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/setup.ini && chmod 640 /etc/versa-agi/setup.ini
+  [ -f "/etc/versa-agi/models.ini" ]      && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/models.ini && chmod 640 /etc/versa-agi/models.ini
   # paths.env: watchdog:coa 644 (readable by all — sourced by lifeline, agitop, sentinel)
   [ -f "/etc/versa-agi/paths.env" ]       && chown "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/paths.env && chmod 644 /etc/versa-agi/paths.env
   # Other .env files: watchdog:coa 640 (skip paths.env — already set above)
@@ -2327,14 +2360,17 @@ apply_system_permissions() {
     [ "$(basename "${env_file}")" = "paths.env" ] && continue
     chown "${WATCHDOG_USER}:${COA_USER}" "${env_file}" && chmod 640 "${env_file}"
   done
-  # Sub-agent configs: watchdog:{agent_name} 640
+  # Sub-agent configs: watchdog:{os_user} 640
   for sa_config in /etc/versa-agi/*_config.json; do
     [ -f "${sa_config}" ] || continue
     local sa_name
     sa_name=$(basename "${sa_config}" _config.json)
     [ "${sa_name}" = "coa" ] && continue  # COA handled above
-    if getent passwd "${sa_name}" &>/dev/null; then
-      chown "${WATCHDOG_USER}:${sa_name}" "${sa_config}" && chmod 640 "${sa_config}"
+    # Resolve os_user from agents.db
+    local sa_os_user
+    sa_os_user=$(sqlite3 "${AGENTS_DB}" "SELECT os_user FROM agents WHERE name='${sa_name}';" 2>/dev/null || true)
+    if [ -n "${sa_os_user}" ] && getent passwd "${sa_os_user}" &>/dev/null; then
+      chown "${WATCHDOG_USER}:${sa_os_user}" "${sa_config}" && chmod 640 "${sa_config}"
     fi
   done
   # Poise root: watchdog:watchdog 750 (coa.md, task_protocol.md)
@@ -2471,37 +2507,39 @@ apply_system_permissions() {
   local AGENTS_DB="/var/lib/versa-agi/agents.db"
   if [ -f "${AGENTS_DB}" ]; then
     local sub_agents
-    sub_agents=$(sqlite3 "${AGENTS_DB}" "SELECT name FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true)
-    for agent in ${sub_agents}; do
+    sub_agents=$(sqlite3 "${AGENTS_DB}" "SELECT name || '|' || os_user FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true)
+    for agent_row in ${sub_agents}; do
+      local agent="${agent_row%%|*}"
+      local os_user="${agent_row##*|}"
       local ahome="/home/agi-${agent}"
       [ -d "${ahome}" ] || continue
-      chown "${agent}:agi_agents" "${ahome}" && chmod 770 "${ahome}"
-      [ -d "${ahome}/.agent" ]        && chown "${agent}:agi_agents" "${ahome}/.agent" && chmod 770 "${ahome}/.agent"
-      [ -d "${ahome}/.agent/skills" ] && chown "${agent}:agi_agents" "${ahome}/.agent/skills" && chmod 775 "${ahome}/.agent/skills"
+      chown "${os_user}:agi_agents" "${ahome}" && chmod 770 "${ahome}"
+      [ -d "${ahome}/.agent" ]        && chown "${os_user}:agi_agents" "${ahome}/.agent" && chmod 770 "${ahome}/.agent"
+      [ -d "${ahome}/.agent/skills" ] && chown "${os_user}:agi_agents" "${ahome}/.agent/skills" && chmod 775 "${ahome}/.agent/skills"
       # .agent/skills/*.md (shipped) — watchdog:agi_agents 440 (agent CANNOT modify system skills)
       for _skill in "${ahome}/.agent/skills"/*.md; do
         [ -f "${_skill}" ] || continue
         chown "${WATCHDOG_USER}:agi_agents" "${_skill}"
         chmod 440 "${_skill}"
       done
-      [ -d "${ahome}/workspace" ]     && chown "${agent}:agi_agents" "${ahome}/workspace" && chmod 2770 "${ahome}/workspace"
+      [ -d "${ahome}/workspace" ]     && chown "${os_user}:agi_agents" "${ahome}/workspace" && chmod 2770 "${ahome}/workspace"
       # §IX.2 /var/lib/versa-agi/{name}/ — agent data directory
       # Parent dir: watchdog-traversable. cycles/: agent-writable (lifeline spawns as agent).
       # poise + duties: watchdog-readable (lifeline cat's poise for system.md)
       local vdata="/var/lib/versa-agi/${agent}"
       if [ -d "${vdata}" ]; then
-        chown "${WATCHDOG_USER}:${agent}" "${vdata}" && chmod 750 "${vdata}"
-        [ -d "${vdata}/cycles" ]        && chown -R "${agent}:${agent}" "${vdata}/cycles" && chmod 755 "${vdata}/cycles"
-        [ -f "${vdata}/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${agent}" "${vdata}/last_prompt.txt" && chmod 640 "${vdata}/last_prompt.txt"
+        chown "${WATCHDOG_USER}:${os_user}" "${vdata}" && chmod 750 "${vdata}"
+        [ -d "${vdata}/cycles" ]        && chown -R "${os_user}:${os_user}" "${vdata}/cycles" && chmod 755 "${vdata}/cycles"
+        [ -f "${vdata}/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/last_prompt.txt" && chmod 640 "${vdata}/last_prompt.txt"
       fi
-      [ -f "${vdata}/poise.md" ]  && chown "${WATCHDOG_USER}:${agent}" "${vdata}/poise.md"  && chmod 640 "${vdata}/poise.md"
-      [ -f "${vdata}/duties.md" ] && chown "${WATCHDOG_USER}:${agent}" "${vdata}/duties.md" && chmod 640 "${vdata}/duties.md"
+      [ -f "${vdata}/poise.md" ]  && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/poise.md"  && chmod 640 "${vdata}/poise.md"
+      [ -f "${vdata}/duties.md" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/duties.md" && chmod 640 "${vdata}/duties.md"
       # §IX.4 Sub-agent files — git identity, SSH keypair, credentials
-      [ -f "${ahome}/README.md" ]       && chown "${agent}:agi_agents" "${ahome}/README.md"       && chmod 664 "${ahome}/README.md"
-      [ -f "${ahome}/.gitconfig" ]      && chown "${agent}:agi_agents" "${ahome}/.gitconfig"      && chmod 644 "${ahome}/.gitconfig"
-      [ -f "${ahome}/.git-credentials" ] && chown "${agent}:agi_agents" "${ahome}/.git-credentials" && chmod 600 "${ahome}/.git-credentials"
+      [ -f "${ahome}/README.md" ]       && chown "${os_user}:agi_agents" "${ahome}/README.md"       && chmod 664 "${ahome}/README.md"
+      [ -f "${ahome}/.gitconfig" ]      && chown "${os_user}:agi_agents" "${ahome}/.gitconfig"      && chmod 644 "${ahome}/.gitconfig"
+      [ -f "${ahome}/.git-credentials" ] && chown "${os_user}:agi_agents" "${ahome}/.git-credentials" && chmod 600 "${ahome}/.git-credentials"
       if [ -d "${ahome}/.ssh" ]; then
-        chown -R "${agent}:agi_agents" "${ahome}/.ssh"
+        chown -R "${os_user}:agi_agents" "${ahome}/.ssh"
         chmod 700 "${ahome}/.ssh"
         # Private keys: 600, public keys: 644, config: 644
         find "${ahome}/.ssh" -maxdepth 1 -type f -name '*.pub' -exec chmod 644 {} + 2>/dev/null || true
@@ -2630,8 +2668,11 @@ MINSEED
   _ini_set "local_models" "${INI_LOCAL_MODELS:-gemma4:e4b,gemma4:26b,gemma4:31b}"
   _ini_set "auto_pull_model" "${INI_AUTO_PULL_MODEL:-true}"
   _ini_set_in "local_ai" "gpu_backend" "${INI_GPU_BACKEND:-standard}"
-  _ini_set "intel_card_count" "${INI_INTEL_CARD_COUNT:-2}"
+  _ini_set "intel_card_count" "${INI_INTEL_CARD_COUNT:-1}"
   _ini_set "intel_device_id" "${INI_INTEL_DEVICE_ID:-}"
+  _ini_set "sycl_vram_gb" "$(ini_get local_ai sycl_vram_gb 32)"
+  _ini_set "sycl_parallel" "$(ini_get local_ai sycl_parallel 1)"
+  _ini_set "sycl_ctx_size" "$(ini_get local_ai sycl_ctx_size 4096)"
   _ini_set "project"    "${gcp_project:-$INI_GCP_PROJECT}"
   _ini_set "location"   "${gcp_location:-$INI_GCP_LOCATION}"
   _ini_set "service_account_key" "${INI_SA_KEY_PATH:-}"

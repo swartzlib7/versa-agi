@@ -42,14 +42,15 @@ def provision_identity(agent_user, token, first_name, last_name, language, count
                       f"Use the agent's OS user (e.g. 'actingcoach'), not the display name.[/bold red]")
         return False
 
-    # ── DB-Level Guard ──────────────────────────────────
+    # ── DB-Level Guard ────────────────────────────────────
     # Only allow provisioning for agents registered in agents.db.
+    # agent_user may be either the social name or os_user — check both.
     if os.path.exists(agents_db):
         try:
             conn = sqlite3.connect(agents_db, timeout=5)
             conn.row_factory = sqlite3.Row
             agent_row = conn.execute(
-                "SELECT name FROM agents WHERE name = ?", (agent_user,)
+                "SELECT name, os_user FROM agents WHERE name = ? OR os_user = ?", (agent_user, agent_user)
             ).fetchone()
             conn.close()
 

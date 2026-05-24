@@ -605,26 +605,56 @@ SETUP_INI_CANONICAL = "/etc/versa-agi/setup.ini"
 SYCL_MODEL_DIR = "/opt/versa-agi/sycl-models"
 SYCL_CONTAINER = "versa-agi-sycl"
 
-# ─── Intel SYCL Model Map ──────────────────────────────
-# Maps Ollama-style model names → HuggingFace GGUF repos/files
-SYCL_MODEL_MAP = {
-    "gemma4:e4b": {
-        "repo": "unsloth/gemma-4-E4B-it-GGUF",
-        "file": "gemma-4-E4B-it-Q4_K_M.gguf",
-    },
-    "gemma4:26b": {
-        "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
-        "file": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
-    },
-    "gemma4:31b": {
-        "repo": "unsloth/gemma-4-31B-it-GGUF",
-        "file": "gemma-4-31B-it-Q4_K_M.gguf",
-    },
-    "qwen3.6:35b": {
-        "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
-        "file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
-    },
-}
+# ─── Intel SYCL Model Registry (dynamic) ──────────────────
+# Loaded from models.ini [sycl_models] section.
+# Format: model_key = hf_repo,gguf_filename,size_gb
+
+# Canonical models.ini path (deployed alongside setup.ini)
+# Dev fallback: src/models.ini (next to src/setup.ini)
+_MODELS_INI_PATHS = [
+    "/etc/versa-agi/models.ini",
+    os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "models.ini"),
+]
+
+
+def _load_sycl_registry():
+    """Load SYCL model registry from models.ini [sycl_models] section.
+
+    Returns dict: {name: {"repo": str, "file": str, "size_gb": int}}
+    Falls back to empty dict if models.ini is unavailable.
+    """
+    import configparser
+    ini = configparser.ConfigParser(delimiters=('=',))
+    for path in _MODELS_INI_PATHS:
+        if os.path.exists(path):
+            ini.read(path)
+            break
+
+    if not ini.has_section("sycl_models"):
+        return {}
+
+    registry = {}
+    for key, value in ini.items("sycl_models"):
+        try:
+            parts = value.strip().split(",")
+            if len(parts) == 3:
+                repo = parts[0].strip()
+                gguf_file = parts[1].strip()
+                size_gb = int(parts[2].strip())
+                registry[key.strip()] = {
+                    "repo": repo,
+                    "file": gguf_file,
+                    "size_gb": size_gb,
+                }
+        except (ValueError, IndexError):
+            continue
+
+    return registry
+
+
+# Module-level cache — loaded once on import, can be reloaded
+SYCL_MODEL_MAP = _load_sycl_registry()
 
 
 def _resolve_gpu_backend():
@@ -660,12 +690,45 @@ def _resolve_sycl_active_model():
     return ""
 
 
+def _resolve_sycl_concurrency():
+    """Read sycl_parallel, sycl_ctx_size, sycl_vram_gb from setup.ini.
+    Returns (parallel, ctx_size, vram_gb) as ints."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            parallel = int(cfg.get("local_ai", "sycl_parallel", fallback="1"))
+            ctx_size = int(cfg.get("local_ai", "sycl_ctx_size", fallback="4096"))
+            vram_gb = int(cfg.get("local_ai", "sycl_vram_gb", fallback="32"))
+            return parallel, ctx_size, vram_gb
+    return 1, 4096, 32
+
+
+def _calculate_concurrency(vram_gb, model_size_gb, ctx_size=4096):
+    """Calculate recommended parallel slots based on available VRAM.
+    Returns (recommended, max_slots, free_vram_gb)."""
+    kv_per_slot_mb = max(128, 256 * ctx_size // 4096)
+    free_vram_gb = max(0, vram_gb - model_size_gb)
+    free_mb = free_vram_gb * 1024
+    headroom_mb = 2048  # 2GB headroom
+
+    if free_mb <= headroom_mb:
+        return 1, 1, free_vram_gb
+
+    max_slots = min(8, max(1, (free_mb - headroom_mb) // kv_per_slot_mb))
+    recommended = min(4, max(1, max_slots // 2))
+    return recommended, max_slots, free_vram_gb
+
+
 def _query_sycl_models():
     """List GGUF files in the SYCL model directory with sizes. Returns [{name, file, size, active}]."""
     models = []
     active_model = _resolve_sycl_active_model()
     if not os.path.isdir(SYCL_MODEL_DIR):
         return models
+    # Reload registry to catch any recent additions
+    registry = _load_sycl_registry()
     for f in os.listdir(SYCL_MODEL_DIR):
         if f.endswith(".gguf"):
             fpath = os.path.join(SYCL_MODEL_DIR, f)
@@ -678,7 +741,7 @@ def _query_sycl_models():
                 size_str = f"{size_bytes} B"
             # Reverse-map GGUF filename to model name
             model_name = f
-            for mname, minfo in SYCL_MODEL_MAP.items():
+            for mname, minfo in registry.items():
                 if minfo["file"] == f:
                     model_name = mname
                     break
@@ -692,7 +755,7 @@ def _query_sycl_models():
     return models
 
 
-def _docker_restart_sycl(gguf_filename):
+def _docker_restart_sycl(gguf_filename, parallel=None, ctx_size=None):
     """Stop/rm/run the SYCL Docker container with a new model. Returns (ok, message)."""
     # Stop existing
     subprocess.run(["docker", "stop", SYCL_CONTAINER], capture_output=True)
@@ -705,7 +768,15 @@ def _docker_restart_sycl(gguf_filename):
         devices.extend(["--device", dev])
 
     sycl_port = _resolve_sycl_port()
-    sycl_image = "llama-sycl-server"
+    sycl_image = "versa-agi-sycl"
+
+    # Read concurrency settings from setup.ini (or use provided overrides)
+    ini_parallel, ini_ctx_size, _ = _resolve_sycl_concurrency()
+    _parallel = str(parallel or ini_parallel)
+    _per_slot_ctx = ctx_size or ini_ctx_size
+    # llama-server --ctx-size is TOTAL context shared across all parallel slots.
+    # sycl_ctx_size is per-slot → multiply by parallel for the launch.
+    _ctx_total = str(_per_slot_ctx * int(_parallel))
 
     cmd = [
         "docker", "run", "-d", "--name", SYCL_CONTAINER,
@@ -716,6 +787,7 @@ def _docker_restart_sycl(gguf_filename):
         sycl_image,
         "-m", f"/models/{gguf_filename}",
         "-ngl", "99", "--host", "0.0.0.0", "--port", "8080",
+        "--parallel", _parallel, "--ctx-size", _ctx_total,
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -1223,11 +1295,12 @@ def model_add(name, no_pull):
     if not no_pull:
         if gpu_backend == "intel":
             # Intel: download GGUF via HuggingFace CLI
-            if name not in SYCL_MODEL_MAP:
-                json_response(False, error=f"Model '{name}' not in SYCL model map. Known: {', '.join(SYCL_MODEL_MAP.keys())}")
+            registry = _load_sycl_registry()
+            if name not in registry:
+                json_response(False, error=f"Model '{name}' not in SYCL registry. Register with: agictl model registry add {name} --repo <hf_repo> --file <gguf> --size <gb>. Known: {', '.join(registry.keys())}")
                 sys.exit(1)
-            repo = SYCL_MODEL_MAP[name]["repo"]
-            gguf_file = SYCL_MODEL_MAP[name]["file"]
+            repo = registry[name]["repo"]
+            gguf_file = registry[name]["file"]
             gguf_path = os.path.join(SYCL_MODEL_DIR, gguf_file)
 
             if os.path.isfile(gguf_path):
@@ -1297,16 +1370,20 @@ def model_add(name, no_pull):
         sys.path.insert(0, '/usr/local/lib/versa-agi')
         from harness.model_context import get_model_context, _FALLBACK_CONTEXT_MAP
         recommended, max_ctx = get_model_context(name)
-        # Determine models.ini path (deployed → source)
+        # Determine models.ini path (canonical → dev fallback)
         models_ini_path = None
-        for p in ["/var/lib/versa-agi/config/models.ini",
-                  os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                               "core-infra", "config", "models.ini")]:
+        for p in _MODELS_INI_PATHS:
             if os.path.isfile(p):
                 models_ini_path = p
                 break
         if models_ini_path:
-            _update_models_ini_entry(models_ini_path, "local_models", name, name)
+            # Generate human-readable display label from model key
+            # e.g. "qwen3.6:35b" → "Qwen3.6 35B — User-added model"
+            family_size = name.split(":")
+            family = family_size[0].capitalize()
+            size_tag = family_size[1].upper() if len(family_size) > 1 else ""
+            display_label = f"{family} {size_tag} — User-added model".strip() if size_tag else f"{family} — User-added model"
+            _update_models_ini_entry(models_ini_path, "local_models", name, display_label)
             if recommended > 0 or max_ctx > 0:
                 _update_models_ini_entry(models_ini_path, "context_windows", name, f"{recommended},{max_ctx}")
             steps.append("models.ini updated")
@@ -1392,8 +1469,9 @@ def model_remove(name, delete):
     if delete:
         if gpu_backend == "intel":
             # Delete GGUF file
-            if name in SYCL_MODEL_MAP:
-                gguf_file = SYCL_MODEL_MAP[name]["file"]
+            registry = _load_sycl_registry()
+            if name in registry:
+                gguf_file = registry[name]["file"]
                 gguf_path = os.path.join(SYCL_MODEL_DIR, gguf_file)
                 if os.path.isfile(gguf_path):
                     os.remove(gguf_path)
@@ -1401,7 +1479,7 @@ def model_remove(name, delete):
                 else:
                     steps.append(f"GGUF not found: {gguf_file}")
             else:
-                errors.append(f"Model '{name}' not in SYCL model map")
+                errors.append(f"Model '{name}' not in SYCL registry. Register with: agictl model registry add {name} --repo <hf_repo> --file <gguf> --size <gb>")
         else:
             # Standard: ollama rm
             ollama_cmd = _resolve_ollama_cmd()
@@ -1554,16 +1632,27 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
 
 @model.command("activate")
 @click.argument("name")
-def model_activate(name):
+@click.option("--ctx", "ctx_override", type=int, default=None,
+              help="Override context window size per slot (e.g. 4096, 8192, 16384, 32768). Persisted to setup.ini.")
+@click.option("--parallel", "parallel_override", type=int, default=None,
+              help="Override parallel slot count (1-8). Persisted to setup.ini.")
+def model_activate(name, ctx_override, parallel_override):
     """Switch the active model on the Intel SYCL backend.
 
     Restarts the Docker container with the new model, updates setup.ini,
     regenerates inference_endpoint_config.yaml, and syncs all local sub-agents.
     Only available when gpu_backend=intel. Requires root (sudo).
 
+    Current ctx/parallel values are read from setup.ini. Use --ctx and
+    --parallel to override (new values are persisted for future activations).
+
     Examples:
+
       sudo agictl model activate gemma4:26b
-      sudo agictl model activate qwen3.6:35b
+
+      sudo agictl model activate gemma4:e4b --ctx 32768 --parallel 8
+
+      sudo agictl model activate qwen3.6:35b --ctx 8192
     """
     if os.geteuid() != 0:
         json_response(False, error="model activate requires root. Use: sudo agictl model activate ...")
@@ -1574,13 +1663,14 @@ def model_activate(name):
         json_response(False, error="model activate is only available for Intel SYCL backend (gpu_backend=intel)")
         sys.exit(1)
 
-    # Validate model name
-    if name not in SYCL_MODEL_MAP:
-        json_response(False, error=f"Unknown model '{name}'. Known: {', '.join(SYCL_MODEL_MAP.keys())}")
+    # Validate model name against dynamic registry
+    registry = _load_sycl_registry()
+    if name not in registry:
+        json_response(False, error=f"Unknown model '{name}'. Register with: agictl model registry add {name} --repo <hf_repo> --file <gguf> --size <gb>. Known: {', '.join(registry.keys())}")
         sys.exit(1)
 
     # Check model is downloaded
-    gguf_file = SYCL_MODEL_MAP[name]["file"]
+    gguf_file = registry[name]["file"]
     gguf_path = os.path.join(SYCL_MODEL_DIR, gguf_file)
     if not os.path.isfile(gguf_path):
         json_response(False, error=f"Model not downloaded. Run first: sudo agictl model add {name}")
@@ -1588,7 +1678,7 @@ def model_activate(name):
 
     # Already active?
     current_active = _resolve_sycl_active_model()
-    if name == current_active:
+    if name == current_active and ctx_override is None and parallel_override is None:
         json_response(True, model=name, action="already_active", message=f"'{name}' is already the active model")
         return
 
@@ -1607,28 +1697,49 @@ def model_activate(name):
     else:
         steps.append("no agents affected")
 
+    # ── 1b. Recalculate concurrency for new model ──
+    model_size_gb = registry[name].get("size_gb", 10)
+    ini_parallel, ini_ctx_size, ini_vram_gb = _resolve_sycl_concurrency()
+
+    # Apply overrides (if provided)
+    use_ctx = ctx_override if ctx_override is not None else ini_ctx_size
+    recommended, max_slots, free_vram = _calculate_concurrency(ini_vram_gb, model_size_gb, use_ctx)
+    use_parallel = parallel_override if parallel_override is not None else recommended
+
+    click.echo(f"  Concurrency for {name}:", err=True)
+    click.echo(f"    Model: ~{model_size_gb}GB, VRAM: {ini_vram_gb}GB, Free: ~{free_vram}GB", err=True)
+    click.echo(f"    Slots: {use_parallel} (recommended: {recommended}, max: {max_slots})", err=True)
+    click.echo(f"    Context: {use_ctx} per slot", err=True)
+    if ctx_override is not None or parallel_override is not None:
+        overrides = []
+        if ctx_override is not None:
+            overrides.append(f"ctx {ini_ctx_size}→{ctx_override}")
+        if parallel_override is not None:
+            overrides.append(f"parallel {ini_parallel}→{parallel_override}")
+        click.echo(f"    Override: {', '.join(overrides)}", err=True)
+    else:
+        click.echo(f"    Tip: override with --ctx <size> --parallel <slots>", err=True)
+
     # ── 2. Restart Docker container with new model ──
-    click.echo(f"  Restarting Docker container with {name}...", err=True)
-    ok, msg = _docker_restart_sycl(gguf_file)
+    click.echo(f"  Restarting Docker container with {name} (parallel={use_parallel}, ctx={use_ctx})...", err=True)
+    ok, msg = _docker_restart_sycl(gguf_file, parallel=use_parallel, ctx_size=use_ctx)
     if ok:
         steps.append(msg)
     else:
         errors.append(msg)
 
-    # ── 3. Update setup.ini ──
-    import configparser
+    # ── 3. Update setup.ini (comment-preserving, sed-style) ──
     ini_path = SETUP_INI_CANONICAL
     if not os.path.isfile(ini_path):
         ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
     if os.path.isfile(ini_path):
-        cfg = configparser.ConfigParser()
-        cfg.read(ini_path)
-        if cfg.has_section("local_ai"):
-            cfg.set("local_ai", "sycl_active_model", name)
-            cfg.set("local_ai", "default_model", name)
-            with open(ini_path, "w") as f:
-                cfg.write(f)
-            steps.append("setup.ini updated")
+        _update_ini_key(ini_path, "local_ai", "sycl_active_model", name)
+        _update_ini_key(ini_path, "local_ai", "default_model", name)
+        _update_ini_key(ini_path, "local_ai", "sycl_parallel", str(use_parallel))
+        if ctx_override is not None:
+            _update_ini_key(ini_path, "local_ai", "sycl_ctx_size", str(use_ctx))
+        _sync_ini_to_source(ini_path)
+        steps.append(f"setup.ini updated (parallel={use_parallel}, ctx={use_ctx})")
     else:
         errors.append("setup.ini not found")
 
@@ -1644,6 +1755,34 @@ def model_activate(name):
         steps.append(f"paths.env VERSA_LOCAL_MODELS → {name}")
     else:
         errors.append("paths.env update failed")
+
+    # ── 6. Write server_config.json for client topology sync ──
+    try:
+        import json as _json, datetime
+        server_config = {
+            "sycl_ctx_size": use_ctx,
+            "sycl_parallel": use_parallel,
+            "sycl_vram_gb": ini_vram_gb,
+            "active_model": name,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        server_config_path = "/etc/versa-agi/server_config.json"
+        with open(server_config_path, "w") as f:
+            _json.dump(server_config, f, indent=2)
+        # Make readable by watchdog user (SSH-based client sync reads as watchdog)
+        os.chmod(server_config_path, 0o640)
+        try:
+            import pwd, configparser as _cp
+            _ini = _cp.ConfigParser()
+            _ini.read(SETUP_INI_CANONICAL)
+            _wd_name = _ini.get("users", "watchdog", fallback="watchdog")
+            wdog = pwd.getpwnam(_wd_name)
+            os.chown(server_config_path, wdog.pw_uid, wdog.pw_gid)
+        except (KeyError, OSError):
+            pass  # watchdog user may not exist on dev machines
+        steps.append("server_config.json updated")
+    except Exception as e:
+        errors.append(f"server_config.json write failed: {e}")
 
     if errors:
         json_response(False, model=name, steps=steps, errors=errors)
@@ -1709,10 +1848,24 @@ def model_refresh():
         json_response(False, error=f"Failed to query {url}: {e}")
         sys.exit(1)
 
-    models = [m["id"] for m in data.get("data", [])]
-    if not models:
+    raw_models = [m["id"] for m in data.get("data", [])]
+    if not raw_models:
         json_response(False, error="Server returned no models", url=url)
         sys.exit(1)
+
+    # Translate GGUF filenames → friendly model keys via sycl_models registry.
+    # The server returns raw GGUF names (e.g. Qwen3.6-35B-A3B-UD-Q4_K_M.gguf)
+    # but the system uses friendly keys (e.g. qwen3.6:35b) everywhere.
+    registry = _load_sycl_registry()
+    gguf_to_friendly = {info["file"]: name for name, info in registry.items()}
+    models = []
+    for raw in raw_models:
+        friendly = gguf_to_friendly.get(raw)
+        if friendly:
+            models.append(friendly)
+        else:
+            # No registry match — keep raw name as fallback
+            models.append(raw)
 
     models_csv = ",".join(models)
 
@@ -1727,16 +1880,251 @@ def model_refresh():
             except Exception:
                 pass  # best-effort
 
-    json_response(True, models=models, source=url)
+    # ── Sync server_config.json via SSH (client topology only) ──
+    # The inference server doesn't serve this file — we read it from the
+    # server filesystem using the watchdog SSH key configured during setup.
+    server_config_synced = {}
+    if topology == "client":
+        try:
+            import subprocess
+            # Read SSH host from client_config.json
+            client_cfg_path = "/etc/versa-agi/client_config.json"
+            tunnel_host = None
+            if os.path.isfile(client_cfg_path):
+                with open(client_cfg_path) as f:
+                    client_cfg = _json.load(f)
+                tunnel_host = client_cfg.get("tunnel_host")
 
+            if tunnel_host:
+                # Resolve watchdog user name from setup.ini (may be custom)
+                wd_user = cfg.get("users", "watchdog", fallback="watchdog")
+                ssh_key = f"/home/{wd_user}/.ssh/versa_agi_ed25519"
+                remote_path = "/etc/versa-agi/server_config.json"
+                result = subprocess.run(
+                    ["sudo", "-u", wd_user, "ssh",
+                     "-i", ssh_key,
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     "-o", "ConnectTimeout=5",
+                     "-o", "BatchMode=yes",
+                     f"{wd_user}@{tunnel_host}",
+                     f"cat {remote_path}"],
+                    capture_output=True, text=True, timeout=15
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    server_config_synced = _json.loads(result.stdout)
+
+                    # Store key values in local setup.ini
+                    for ini in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+                        if os.path.isfile(ini):
+                            try:
+                                if "sycl_ctx_size" in server_config_synced:
+                                    _update_ini_key(ini, "local_ai", "sycl_ctx_size", str(server_config_synced["sycl_ctx_size"]))
+                                if "sycl_parallel" in server_config_synced:
+                                    _update_ini_key(ini, "local_ai", "sycl_parallel", str(server_config_synced["sycl_parallel"]))
+                                if "sycl_vram_gb" in server_config_synced:
+                                    _update_ini_key(ini, "local_ai", "sycl_vram_gb", str(server_config_synced["sycl_vram_gb"]))
+                            except Exception:
+                                pass  # best-effort
+        except Exception:
+            pass  # server_config.json may not exist yet — that's OK
+
+    json_response(True, models=models, source=url, server_config=server_config_synced if server_config_synced else None)
+
+
+# ─── Model Registry Subcommand Group ────────────────────
+# CRUD operations for the [sycl_models] section in models.ini
+
+@model.group()
+def registry():
+    """Manage the SYCL model registry (add, update, remove, list)."""
+    pass
+
+
+@registry.command("list")
+def registry_list():
+    """List all registered SYCL models from models.ini."""
+    reg = _load_sycl_registry()
+    if not reg:
+        click.echo("No SYCL models registered in models.ini [sycl_models].", err=True)
+        json_response(True, models=[])
+        return
+
+    # Also load context windows for display
+    import configparser
+    ini = configparser.ConfigParser(delimiters=('=',))
+    for path in _MODELS_INI_PATHS:
+        if os.path.exists(path):
+            ini.read(path)
+            break
+
+    results = []
+    for name, info in reg.items():
+        ctx_rec, ctx_max = 0, 0
+        if ini.has_section("context_windows"):
+            ctx_val = ini.get("context_windows", name, fallback="")
+            if "," in ctx_val:
+                try:
+                    ctx_rec, ctx_max = int(ctx_val.split(",")[0].strip()), int(ctx_val.split(",")[1].strip())
+                except ValueError:
+                    pass
+        results.append({
+            "name": name,
+            "repo": info["repo"],
+            "file": info["file"],
+            "size_gb": info["size_gb"],
+            "ctx_recommended": ctx_rec,
+            "ctx_max": ctx_max,
+        })
+
+    json_response(True, models=results)
+
+
+@registry.command("add")
+@click.argument("name")
+@click.option("--repo", required=True, help="HuggingFace repository (e.g. unsloth/Llama-4-8B-GGUF)")
+@click.option("--file", "gguf_file", required=True, help="GGUF filename (e.g. Llama-4-8B-Q4_K_M.gguf)")
+@click.option("--size", "size_gb", required=True, type=int, help="Approximate GGUF size in GB")
+@click.option("--ctx-recommended", type=int, default=0, help="Recommended context window (tokens)")
+@click.option("--ctx-max", type=int, default=0, help="Maximum context window (tokens)")
+@click.option("--label", default="", help="Display label for agitop (e.g. 'Llama 4 8B — Dense, 128K context')")
+def registry_add(name, repo, gguf_file, size_gb, ctx_recommended, ctx_max, label):
+    """Register a new SYCL model in models.ini."""
+    # Check for duplicate
+    reg = _load_sycl_registry()
+    if name in reg:
+        json_response(False, error=f"Model '{name}' already exists. Use 'agictl model registry update {name}' instead.")
+        sys.exit(1)
+
+    # Write to all models.ini copies
+    entry_value = f"{repo},{gguf_file},{size_gb}"
+    for ini_path in _MODELS_INI_PATHS:
+        if os.path.exists(ini_path):
+            _update_models_ini_entry(ini_path, "sycl_models", name, entry_value)
+            # Also register context window if provided
+            if ctx_recommended > 0 or ctx_max > 0:
+                ctx_val = f"{ctx_recommended},{ctx_max}"
+                _update_models_ini_entry(ini_path, "context_windows", name, ctx_val)
+            # Also register display label
+            display_label = label if label else name
+            _update_models_ini_entry(ini_path, "local_models", name, display_label)
+
+    json_response(True, model=name, repo=repo, file=gguf_file, size_gb=size_gb,
+                  ctx_recommended=ctx_recommended, ctx_max=ctx_max,
+                  message=f"Registered '{name}' in SYCL model registry")
+
+
+@registry.command("update")
+@click.argument("name")
+@click.option("--repo", default=None, help="Updated HuggingFace repository")
+@click.option("--file", "gguf_file", default=None, help="Updated GGUF filename")
+@click.option("--size", "size_gb", default=None, type=int, help="Updated GGUF size in GB")
+@click.option("--ctx-recommended", type=int, default=None, help="Updated recommended context")
+@click.option("--ctx-max", type=int, default=None, help="Updated maximum context")
+@click.option("--label", default=None, help="Updated display label")
+def registry_update(name, repo, gguf_file, size_gb, ctx_recommended, ctx_max, label):
+    """Update an existing SYCL model in the registry."""
+    reg = _load_sycl_registry()
+    if name not in reg:
+        json_response(False, error=f"Model '{name}' not found in registry. Use 'agictl model registry add' first.")
+        sys.exit(1)
+
+    current = reg[name]
+    new_repo = repo if repo else current["repo"]
+    new_file = gguf_file if gguf_file else current["file"]
+    new_size = size_gb if size_gb is not None else current["size_gb"]
+
+    entry_value = f"{new_repo},{new_file},{new_size}"
+
+    # Update in all models.ini copies using direct sed-like replacement
+    for ini_path in _MODELS_INI_PATHS:
+        if os.path.exists(ini_path):
+            # Read, find and replace the sycl_models entry
+            with open(ini_path, "r") as f:
+                content = f.read()
+            import re
+            # Match the key within [sycl_models] section
+            pattern = rf'(^{re.escape(name)}\s*=\s*).*'
+            new_content = re.sub(pattern, rf'\g<1>{entry_value}', content, count=1, flags=re.MULTILINE)
+            if new_content != content:
+                with open(ini_path, "w") as f:
+                    f.write(new_content)
+
+            # Update context windows if provided
+            if ctx_recommended is not None or ctx_max is not None:
+                import configparser
+                ini = configparser.ConfigParser(delimiters=('=',))
+                ini.read(ini_path)
+                old_rec, old_max = 4096, 131072
+                if ini.has_section("context_windows"):
+                    ctx_val = ini.get("context_windows", name, fallback="4096,131072")
+                    parts = ctx_val.split(",")
+                    if len(parts) == 2:
+                        try:
+                            old_rec, old_max = int(parts[0].strip()), int(parts[1].strip())
+                        except ValueError:
+                            pass
+                final_rec = ctx_recommended if ctx_recommended is not None else old_rec
+                final_max = ctx_max if ctx_max is not None else old_max
+                ctx_entry = f"{final_rec},{final_max}"
+                with open(ini_path, "r") as f:
+                    content = f.read()
+                pattern = rf'(^\[context_windows\].*?^{re.escape(name)}\s*=\s*).*'
+                new_content = re.sub(pattern, rf'\g<1>{ctx_entry}', content, count=1, flags=re.MULTILINE | re.DOTALL)
+                if new_content != content:
+                    with open(ini_path, "w") as f:
+                        f.write(new_content)
+
+            # Update label if provided
+            if label is not None:
+                with open(ini_path, "r") as f:
+                    content = f.read()
+                pattern = rf'(^\[local_models\].*?^{re.escape(name)}\s*=\s*).*'
+                new_content = re.sub(pattern, rf'\g<1>{label}', content, count=1, flags=re.MULTILINE | re.DOTALL)
+                if new_content != content:
+                    with open(ini_path, "w") as f:
+                        f.write(new_content)
+
+    json_response(True, model=name, repo=new_repo, file=new_file, size_gb=new_size,
+                  message=f"Updated '{name}' in SYCL model registry")
+
+
+@registry.command("remove")
+@click.argument("name")
+def registry_remove(name):
+    """Remove a SYCL model from the registry."""
+    reg = _load_sycl_registry()
+    if name not in reg:
+        json_response(False, error=f"Model '{name}' not found in SYCL registry.")
+        sys.exit(1)
+
+    for ini_path in _MODELS_INI_PATHS:
+        if os.path.exists(ini_path):
+            with open(ini_path, "r") as f:
+                lines = f.readlines()
+            # Remove from [sycl_models] section only
+            new_lines = []
+            in_sycl = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    in_sycl = (stripped == "[sycl_models]")
+                if in_sycl and stripped and not stripped.startswith("#") and not stripped.startswith("["):
+                    eq_pos = stripped.find("=")
+                    if eq_pos > 0 and stripped[:eq_pos].strip() == name:
+                        continue  # Skip this line
+                new_lines.append(line)
+            with open(ini_path, "w") as f:
+                f.writelines(new_lines)
+
+    json_response(True, model=name, message=f"Removed '{name}' from SYCL registry. Note: [context_windows] and [local_models] entries preserved.")
 
 def _update_ini_key(ini_path, section, key, value):
     """Update a single key in an INI file in-place."""
     import re
     with open(ini_path, "r") as f:
         content = f.read()
-    # Match the key within the section
-    pattern = rf'(\[{re.escape(section)}\][^\[]*?^{re.escape(key)})=.*'
+    # Match the key within the section (handles both key=value and key = value)
+    pattern = rf'(\[{re.escape(section)}\][^\[]*?^{re.escape(key)})\s*=\s*.*'
     replacement = rf'\g<1>={value}'
     new_content = re.sub(pattern, replacement, content, count=1, flags=re.MULTILINE)
     if new_content != content:
@@ -1802,8 +2190,8 @@ def agent_add(name, role):
     the OS user, home directory, and activate the agent for spawning.
     """
     name = name.lower()
-    os_user = name  # Agent name IS the OS username
-    agent_root = f"/home/agi-{name}"
+    os_user = f"agi-{name}"  # OS user gets agi- prefix; DB name is the social name
+    agent_root = f"/home/{os_user}"
     try:
         conn = sqlite3.connect(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -1886,7 +2274,7 @@ def agent_add(name, role):
         )
         conn.commit()
         conn.close()
-        result_data = dict(agent=name, os_user=name, role=role_label, workspace=agent_root,
+        result_data = dict(agent=name, os_user=os_user, role=role_label, workspace=agent_root,
                            status="pending_approval", inactive=True)
         if role_model:
             result_data["model"] = role_model
@@ -1950,7 +2338,8 @@ def agent_approve(name, force):
     """
     import shutil
     name = name.lower()
-    agent_root = f"/home/agi-{name}"
+    os_user = f"agi-{name}"  # OS user gets agi- prefix; DB name is the social name
+    agent_root = f"/home/{os_user}"
     try:
         conn = sqlite3.connect(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -1967,15 +2356,17 @@ def agent_approve(name, force):
         role_id = reverse_roles.get(role_label, "custom")
 
         # ── Create OS user with dedicated home ──
+        # --user-group: create a per-user group matching os_user (required for §IX credential isolation)
+        # --groups agi_agents: add to shared collaboration group as supplementary
         result = subprocess.run(
-            ["useradd", "--system", "--home-dir", agent_root, "--create-home",
-             "--shell", "/usr/sbin/nologin", "--groups", "agi_agents", name],
+            ["useradd", "--system", "--user-group", "--home-dir", agent_root, "--create-home",
+             "--shell", "/usr/sbin/nologin", "--groups", "agi_agents", os_user],
             capture_output=True, text=True
         )
         if result.returncode != 0:
             if "already exists" not in result.stderr:
                 conn.close()
-                json_response(False, error=f"Failed to create OS user '{name}': {result.stderr.strip()}")
+                json_response(False, error=f"Failed to create OS user '{os_user}': {result.stderr.strip()}")
                 sys.exit(1)
 
         # ── Scaffold directory structure ──
@@ -1987,7 +2378,7 @@ def agent_approve(name, force):
         # ── Copy poise template from deployed roles ──
         agent_data_dir = f"/var/lib/versa-agi/{name}"
         os.makedirs(agent_data_dir, exist_ok=True)
-        subprocess.run(["chown", f"watchdog:{name}", agent_data_dir], check=False)
+        subprocess.run(["chown", f"watchdog:{os_user}", agent_data_dir], check=False)
         subprocess.run(["chmod", "750", agent_data_dir], check=False)
 
         poise_dir = os.path.join(ROLES_DIR, role_id)
@@ -2031,28 +2422,28 @@ def agent_approve(name, force):
         readme_path = os.path.join(agent_root, "README.md")
         if not os.path.exists(readme_path):
             with open(readme_path, "w") as f:
-                f.write(f"# Agent: {name}\n\n**Role:** {role_label}  \n**OS User:** `{name}`  \n**Home:** `{agent_root}`\n\n")
+                f.write(f"# Agent: {name}\n\n**Role:** {role_label}  \n**OS User:** `{os_user}`  \n**Home:** `{agent_root}`\n\n")
                 f.write("Provisioned by `agictl agent approve`.\n\n")
                 f.write("## Rules\n\n- ALL project work MUST be inside `workspace/<project>/` directories\n")
                 f.write("- Use `agictl` for ALL infrastructure interaction\n- NEVER create project files outside `workspace/`\n\n")
                 f.write("## Directory Layout\n\n```\n")
-                f.write(f"agi-{name}/\n├── .agent/           # Agent metadata + system prompt\n│   ├── system.md     # Generated by Lifeline each spawn\n│   ├── skills/\n│   └── config/\n├── workspace/        # 770\n└── README.md\n```\n")
+                f.write(f"{os_user}/\n├── .agent/           # Agent metadata + system prompt\n│   ├── system.md     # Generated by Lifeline each spawn\n│   ├── skills/\n│   └── config/\n├── workspace/        # 770\n└── README.md\n```\n")
 
         # ── Set ownership & permissions ──
-        subprocess.run(["chown", "-R", f"{name}:agi_agents", agent_root], check=False)
+        subprocess.run(["chown", "-R", f"{os_user}:agi_agents", agent_root], check=False)
         subprocess.run(["chmod", "770", agent_root], check=False)
         subprocess.run(["chmod", "2770", os.path.join(agent_root, "workspace")], check=False)
         subprocess.run(["chmod", "770", os.path.join(agent_root, ".agent")], check=False)
-        subprocess.run(["chown", f"watchdog:{name}", duties_dest], check=False)
+        subprocess.run(["chown", f"watchdog:{os_user}", duties_dest], check=False)
         subprocess.run(["chmod", "660", duties_dest], check=False)
-        subprocess.run(["chown", f"watchdog:{name}", poise_dest], check=False)
+        subprocess.run(["chown", f"watchdog:{os_user}", poise_dest], check=False)
         subprocess.run(["chmod", "440", poise_dest], check=False)
         subprocess.run(["chmod", "664", readme_path], check=False)
         
         # ── Setup persistent data directories (CYCLES) ──
         agent_cycles_dir = os.path.join(agent_data_dir, "cycles")
         os.makedirs(agent_cycles_dir, exist_ok=True)
-        subprocess.run(["chown", "-R", f"{name}:{name}", agent_cycles_dir], check=False)
+        subprocess.run(["chown", "-R", f"{os_user}:{os_user}", agent_cycles_dir], check=False)
         subprocess.run(["chmod", "755", agent_cycles_dir], check=False)
         # system.md: Lifeline writes, everyone reads (444)
         system_md_file = os.path.join(agent_root, ".agent", "system.md")
@@ -2071,7 +2462,7 @@ def agent_approve(name, force):
                 agent_tools_link = os.path.join(agent_root, "workspace", "AGi-Tools")
                 if os.path.exists(tools_path) and not os.path.exists(agent_tools_link):
                     os.symlink(tools_path, agent_tools_link)
-                    subprocess.run(["chown", "-h", f"{name}:agi_agents", agent_tools_link], check=False)
+                    subprocess.run(["chown", "-h", f"{os_user}:agi_agents", agent_tools_link], check=False)
                 
                 # Auto-assign physical db record to grant query access
                 conn_tasks.execute(
@@ -2089,7 +2480,7 @@ def agent_approve(name, force):
         agent_env_path = f"/etc/versa-agi/{name}.env"
         if os.path.exists(coa_env_path):
             shutil.copy2(coa_env_path, agent_env_path)
-            subprocess.run(["chown", f"watchdog:{name}", agent_env_path], check=False)
+            subprocess.run(["chown", f"watchdog:{os_user}", agent_env_path], check=False)
             subprocess.run(["chmod", "640", agent_env_path], check=False)
 
         # ── Generate SSH keypair for Git operations ──
@@ -2101,12 +2492,12 @@ def agent_approve(name, force):
             os.makedirs(ssh_dir, exist_ok=True)
             os.chmod(ssh_dir, 0o700)
             subprocess.run(
-                ["ssh-keygen", "-t", "ed25519", "-f", key_path, "-N", "", "-C", f"{name}@versa-agi"],
+                ["ssh-keygen", "-t", "ed25519", "-f", key_path, "-N", "", "-C", f"{os_user}@versa-agi"],
                 capture_output=True, text=True, timeout=30
             )
             os.chmod(key_path, 0o600)
             os.chmod(pub_key_path, 0o644)
-            subprocess.run(["chown", "-R", f"{name}:agi_agents", ssh_dir], check=False)
+            subprocess.run(["chown", "-R", f"{os_user}:agi_agents", ssh_dir], check=False)
             # SSH config for GitHub/GitLab
             ssh_config = os.path.join(ssh_dir, "config")
             config_entries = (
@@ -2116,7 +2507,7 @@ def agent_approve(name, force):
             with open(ssh_config, "w") as f:
                 f.write(config_entries)
             os.chmod(ssh_config, 0o644)
-            subprocess.run(["chown", f"{name}:agi_agents", ssh_config], check=False)
+            subprocess.run(["chown", f"{os_user}:agi_agents", ssh_config], check=False)
         if os.path.exists(pub_key_path):
             with open(pub_key_path) as f:
                 ssh_public_key = f.read().strip()
@@ -2140,7 +2531,7 @@ def agent_approve(name, force):
         with open(git_config_path, "w") as f:
             f.write(git_config_content)
         os.chmod(git_config_path, 0o644)
-        subprocess.run(["chown", f"{name}:agi_agents", git_config_path], check=False)
+        subprocess.run(["chown", f"{os_user}:agi_agents", git_config_path], check=False)
 
         # ── Deploy system skills ──
         skills_source = "/home/watchdog/core-infra/skills"
@@ -2198,7 +2589,7 @@ def agent_approve(name, force):
                     }
                     with open(agent_config_path, "w") as f:
                         json.dump(minimal_config, f, indent=2)
-                    subprocess.run(["chown", f"watchdog:{name}", agent_config_path], check=False)
+                    subprocess.run(["chown", f"watchdog:{os_user}", agent_config_path], check=False)
                     subprocess.run(["chmod", "640", agent_config_path], check=False)
             except Exception:
                 # Non-fatal — agent can still run without VV comms
@@ -2210,13 +2601,13 @@ def agent_approve(name, force):
                     }
                     with open(agent_config_path, "w") as f:
                         json.dump(minimal_config, f, indent=2)
-                    subprocess.run(["chown", f"watchdog:{name}", agent_config_path], check=False)
+                    subprocess.run(["chown", f"watchdog:{os_user}", agent_config_path], check=False)
                     subprocess.run(["chmod", "640", agent_config_path], check=False)
 
         # ── Activate in DB ──
         conn.execute(
-            "UPDATE agents SET inactive=0, status='idle', updated_at=datetime('now') WHERE name=?",
-            (name,)
+            "UPDATE agents SET os_user=?, inactive=0, status='idle', updated_at=datetime('now') WHERE name=?",
+            (os_user, name)
         )
         conn.commit()
         conn.close()
@@ -2319,7 +2710,16 @@ def agent_deploy_skills(name):
     """
     import shutil, glob
     name = name.lower()
-    agent_root = f"/home/agi-{name}"
+    # Resolve os_user from agents.db
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT os_user FROM agents WHERE name=?", (name,)).fetchone()
+        conn.close()
+        os_user = row["os_user"] if row else f"agi-{name}"
+    except Exception:
+        os_user = f"agi-{name}"
+    agent_root = f"/home/{os_user}"
     skills_source = "/home/watchdog/core-infra/skills"
     skills_dest = os.path.join(agent_root, ".agent", "skills")
 
@@ -2332,8 +2732,8 @@ def agent_deploy_skills(name):
         sys.exit(1)
 
     os.makedirs(skills_dest, exist_ok=True)
-    # Set directory ownership per file manifest: {name}:agi_agents 775
-    subprocess.run(["chown", f"{name}:agi_agents", skills_dest], check=False)
+    # Set directory ownership per file manifest: {os_user}:agi_agents 775
+    subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
     subprocess.run(["chmod", "775", skills_dest], check=False)
     deployed = 0
     asset_dirs_deployed = 0
@@ -2358,7 +2758,7 @@ def agent_deploy_skills(name):
             if os.path.isdir(asset_dest):
                 shutil.rmtree(asset_dest)
             shutil.copytree(asset_src, asset_dest)
-            subprocess.run(["chown", "-R", f"{name}:agi_agents", asset_dest], check=False)
+            subprocess.run(["chown", "-R", f"{os_user}:agi_agents", asset_dest], check=False)
             subprocess.run(["chmod", "-R", "755", asset_dest], check=False)
             asset_dirs_deployed += 1
 
@@ -2410,10 +2810,11 @@ def agent_share_skill(skill_path, target_agent):
 
     for ag in agents:
         agent_name = ag["name"]
-        skills_dest = f"/home/agi-{agent_name}/.agent/skills"
+        ag_os_user = ag["os_user"] or f"agi-{agent_name}"
+        skills_dest = f"/home/{ag_os_user}/.agent/skills"
         if not os.path.isdir(skills_dest):
             os.makedirs(skills_dest, exist_ok=True)
-            subprocess.run(["chown", f"{agent_name}:agi_agents", skills_dest], check=False)
+            subprocess.run(["chown", f"{ag_os_user}:agi_agents", skills_dest], check=False)
             subprocess.run(["chmod", "775", skills_dest], check=False)
         dest_file = os.path.join(skills_dest, basename)
         # Remove existing read-only file before overwriting (440 blocks shutil.copy2)
@@ -2429,7 +2830,7 @@ def agent_share_skill(skill_path, target_agent):
             if os.path.isdir(asset_dest):
                 shutil.rmtree(asset_dest)
             shutil.copytree(asset_src, asset_dest)
-            subprocess.run(["chown", "-R", f"{agent_name}:agi_agents", asset_dest], check=False)
+            subprocess.run(["chown", "-R", f"{ag_os_user}:agi_agents", asset_dest], check=False)
             subprocess.run(["chmod", "-R", "755", asset_dest], check=False)
 
         results.append(agent_name)
@@ -2451,7 +2852,7 @@ def agent_set_duties(name, duties_file):
     try:
         conn = sqlite3.connect(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT name, protected FROM agents WHERE name=?", (name,)).fetchone()
+        row = conn.execute("SELECT name, os_user, protected FROM agents WHERE name=?", (name,)).fetchone()
         conn.close()
         if not row:
             json_response(False, error=f"Agent '{name}' not found")
@@ -2459,14 +2860,15 @@ def agent_set_duties(name, duties_file):
         if row["protected"] == 1:
             json_response(False, error=f"Cannot set duties for protected agent '{name}'")
             sys.exit(1)
+        os_user = row["os_user"] or f"agi-{name}"
         agent_data_dir = f"/var/lib/versa-agi/{name}"
         duties_dest = os.path.join(agent_data_dir, "duties.md")
         if not os.path.isdir(agent_data_dir):
             os.makedirs(agent_data_dir, exist_ok=True)
-            subprocess.run(["chown", f"watchdog:{name}", agent_data_dir], check=False)
+            subprocess.run(["chown", f"watchdog:{os_user}", agent_data_dir], check=False)
             subprocess.run(["chmod", "750", agent_data_dir], check=False)
         shutil.copy2(duties_file, duties_dest)
-        subprocess.run(["chown", f"watchdog:{name}", duties_dest], check=False)
+        subprocess.run(["chown", f"watchdog:{os_user}", duties_dest], check=False)
         subprocess.run(["chmod", "660", duties_dest], check=False)
         json_response(True, agent=name, duties_path=duties_dest,
                       note=f"Duties copied from {duties_file}")

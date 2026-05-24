@@ -368,8 +368,8 @@ capture "${COA_HOME}/" "COA home (${COA_HOME}/)" "${GLOBAL_EXCLUDES}"
 # ── 3f: Sub-agent homes ──
 info "3f: Sub-agent homes..."
 for sa_user in "${SUB_AGENT_USERS[@]+${SUB_AGENT_USERS[@]}}"; do
-  SA_HOME="/home/agi-${sa_user}"
-  [ -d "${SA_HOME}" ] || SA_HOME="/home/${sa_user}"
+  SA_HOME="/home/${sa_user}"
+  [ -d "${SA_HOME}" ] || continue  # Skip if home doesn't exist
   size_gate "${SA_HOME}" "Sub-agent ${sa_user}" "${GLOBAL_EXCLUDES}"
   capture "${SA_HOME}/" "Sub-agent: ${sa_user} (${SA_HOME}/)" "${GLOBAL_EXCLUDES}"
 done
@@ -573,8 +573,7 @@ if [ "${DRY_RUN}" = true ]; then
     fi
   done
   for sa_user in "${SUB_AGENT_USERS[@]+${SUB_AGENT_USERS[@]}}"; do
-    SA_HOME="/home/agi-${sa_user}"
-    [ -d "${SA_HOME}" ] || SA_HOME="/home/${sa_user}"
+    SA_HOME="/home/${sa_user}"
     if [ -d "${SA_HOME}" ]; then
       _s=$(du -sb "${SA_HOME}" 2>/dev/null | cut -f1)
       TOTAL_SIZE=$((TOTAL_SIZE + ${_s:-0}))

@@ -4,6 +4,28 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
+## [0.11.5] — 2026-05-24
+
+### Dynamic SYCL Model Registry
+
+- **Centralized Registry**: All SYCL model metadata (HF repo, GGUF filename, size) consolidated into `models.ini [sycl_models]` — replacing hardcoded maps in `setup_local.sh` and `cli.py`.
+- **`manage_registry.sh`**: New interactive script for SYCL model CRUD. Can be run standalone or sourced by `setup_local.sh` via `--inline` mode for setup-time registry management.
+- **`agictl model registry`**: New CLI subcommand group (`list`, `add`, `update`, `remove`) for programmatic registry management. Writes to both deployed and source `models.ini`.
+- **Dynamic Setup Menu**: `setup_local.sh` Step 6 now generates model selection dynamically from the registry instead of hardcoded `case` statements.
+- **Context Window Ceiling**: Dashboard `num_ctx` picklist now capped to the server's `sycl_ctx_size` for Intel/remote backends, preventing invalid context allocations.
+- **Server-to-Client Sync**: `agictl model activate` writes `server_config.json` with inference parameters. `agictl model refresh` (client topology) fetches and stores these values locally.
+- **GGUF Filename Fix**: Corrected `gemma4:e4b` GGUF filename from `gemma-4-12B-A2B-it-UD-Q4_K_M.gguf` to `gemma-4-E4B-it-Q4_K_M.gguf` (HuggingFace-verified).
+
+## [0.11.4] — 2026-05-23
+
+### Intel GPU Auto-Detection & Concurrency
+
+- **GPU Auto-Detection**: `setup_local.sh` now uses `lspci` to auto-detect Intel GPUs and presents them as numbered options during Intel SYCL configuration. Manual entry remains available as a fallback. Card count is auto-detected by matching the selected device ID.
+- **Concurrency Configuration**: New `sycl_parallel`, `sycl_ctx_size`, and `sycl_vram_gb` fields in `setup.ini` enable multi-slot inference. The setup calculates recommended parallel slots based on available VRAM and model size, with full formula commentary in `setup.ini`.
+- **Model Activate Recalculation**: `agictl model activate` now automatically recalculates concurrency when switching models, adjusting `--parallel` and `--ctx-size` passed to the Docker SYCL container.
+- **Reconfigure Fix**: Server reconfiguration now always re-prompts for GPU device ID, card count, VRAM, and concurrency (previously skipped when values were pre-loaded from `setup.ini`).
+- **Hardware Update**: Updated defaults from Intel ARC Pro B50 (dual 16GB) to Intel ARC Pro B70 (single 32GB). Documentation updated across GEMINI.md, README.md, and System Design.
+
 ## [0.11.3] — 2026-05-21
 
 ### Backup v2.0 (Manifest-Governed)
