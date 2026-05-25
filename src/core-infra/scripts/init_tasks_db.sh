@@ -181,6 +181,10 @@ CREATE TABLE IF NOT EXISTS project_members (
 
 CREATE INDEX IF NOT EXISTS idx_pm_project ON project_members(project_id);
 CREATE INDEX IF NOT EXISTS idx_pm_member ON project_members(member_type, member_id);
+
+-- Clean up any pre-existing orphaned project memberships or memories
+DELETE FROM project_members WHERE project_id NOT IN (SELECT id FROM projects);
+DELETE FROM agent_memory_project WHERE project_id NOT IN (SELECT id FROM projects);
 SQL
 
 echo "Tasks database initialized: ${DB_PATH}"

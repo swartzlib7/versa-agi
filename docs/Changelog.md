@@ -4,6 +4,15 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
+## [0.11.6] — 2026-05-25
+
+### Cascading Project Deletions & Database Cleanup
+
+- **Cascading Project Deletions**: Hard-deleting an archived project via `TasksReader.delete_project` (triggered from the `agitop` dashboard) now cascades and permanently deletes all associated memories from `agent_memory_project` and member assignments from `project_members` (preventing orphaned records and auto-increment ID memory contamination).
+- **Database Cleanup Migration**: Appended automated cleanup queries to `init_tasks_db.sh` so that running a standard system update (`sudo ./setup.sh --update` or `sudo versa-agi-update`) automatically purges any legacy orphaned memories and memberships from the production database.
+- **Tasks Unlinking Safety**: Confirmed and preserved task-unlinking behavior — tasks referencing a deleted project are safely unlinked (their `project_id` is set to `NULL`) instead of being deleted.
+- **System Design Documentation**: Documented the cascading deletion lifecycle and constraints in the system architecture files.
+
 ## [0.11.5] — 2026-05-24
 
 ### Dynamic SYCL Model Registry

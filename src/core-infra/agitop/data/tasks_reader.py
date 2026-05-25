@@ -307,6 +307,7 @@ class TasksReader:
         """Hard-delete a project. Only allowed if status is 'archived'.
         
         Unlinks any tasks referencing this project (sets project_id=NULL).
+        Cleans up associated project memberships and agent memories.
         Returns (success, message).
         """
         try:
@@ -320,12 +321,22 @@ class TasksReader:
                 conn.close()
                 return False, f"Project '{row['name']}' must be archived before deletion (current: {row['status']})"
             name = row["name"]
-            # Unlink tasks referencing this project
+            
+            # 1. Unlink tasks referencing this project
             conn.execute("UPDATE tasks SET project_id = NULL WHERE project_id = ?", (project_id,))
+            
+            # 2. Clean up project memberships
+            conn.execute("DELETE FROM project_members WHERE project_id = ?", (project_id,))
+            
+            # 3. Clean up associated project memories
+            conn.execute("DELETE FROM agent_memory_project WHERE project_id = ?", (project_id,))
+            
+            # 4. Delete the project record itself
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            
             conn.commit()
             conn.close()
-            return True, f"Deleted archived project '{name}'"
+            return True, f"Deleted archived project '{name}' and associated memories/members"
         except Exception as e:
             return False, str(e)
 
