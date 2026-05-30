@@ -5,8 +5,8 @@
    viewBox="0 0 800 400"
    version="1.1"
    id="svg11"
-   sodipodi:docname="versa-agi-banner-v1.svg"
-   inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
+   sodipodi:docname="versa-agi-banner-v2.svg"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
    inkscape:export-filename="versa-agi-banner-v2.png"
    inkscape:export-xdpi="245.75999"
    inkscape:export-ydpi="245.75999"
@@ -25,15 +25,16 @@
      inkscape:pageopacity="0.0"
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
-     inkscape:zoom="0.78091105"
-     inkscape:cx="439.87084"
-     inkscape:cy="165.83195"
-     inkscape:window-width="1920"
-     inkscape:window-height="1043"
-     inkscape:window-x="1920"
+     inkscape:zoom="3.1236442"
+     inkscape:cx="415.86042"
+     inkscape:cy="235.14202"
+     inkscape:window-width="2560"
+     inkscape:window-height="1403"
+     inkscape:window-x="0"
      inkscape:window-y="0"
      inkscape:window-maximized="1"
-     inkscape:current-layer="svg11" />
+     inkscape:current-layer="svg11"
+     showgrid="false" />
   <!-- Cypher Space Background -->
   <rect
      width="100%"
@@ -115,8 +116,8 @@
       </g>
     </g>
     <text
-       x="319.91699"
-       y="149.09451"
+       x="1352.1801"
+       y="919.88513"
        font-family="'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
        font-size="16px"
        fill="#ffffff"
@@ -124,7 +125,7 @@
        letter-spacing="1"
        id="text11"
        inkscape:label="slogan"
-       transform="matrix(8.308161,0,0,8.308161,-1312.9104,-318.8161)">AGENTIC GENERAL INFRASTRUCTURE</text>
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:121.853px;font-family:'Segoe UI', Roboto, Helvetica, Arial, sans-serif;-inkscape-font-specification:'Segoe UI, Roboto, Helvetica, Arial, sans-serif, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:8.30816;opacity:0.8;fill:#ffffff;stroke-width:8.30816">AGENTIC GENERAL INFRASTRUCTURE</text>
     <text
        x="308"
        y="116.03418"
