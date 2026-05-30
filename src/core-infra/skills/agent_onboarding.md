@@ -28,7 +28,7 @@ Run `agictl agent list-roles` to see the deployed role registry. Each role inclu
 
 4. **Post-provisioning (your responsibility):**
    - **Define duties:** Author a duties markdown file, then run `sudo agictl agent set-duties <name> <file>` to provision it
-   - **Copy skills:** Add any relevant skills to `/home/agi-{name}/.agent/skills/`
+   - **Skills:** Skills are automatically deployed to sub-agents by Lifeline via the DB-driven sync pipeline (`rsync --delete`). Use `agictl skill new` to create custom skills and `agictl skill status` to distribute them. Use `sudo agictl agent deploy-skills <name>` to force an immediate sync.
    - **SSH key:** The agent's SSH keypair was auto-generated at provisioning. For the first git project, deliver the public key to the Primary User (see `git_operations.md`)
    - **Assign to project:** Use `agictl project assign-member` if applicable
    - **Send welcome message:** Brief the new agent with orientation context
@@ -40,7 +40,7 @@ Run `agictl agent list-roles` to see the deployed role registry. Each role inclu
 ## What You Can Manage
 
 - **`duties.md`** — mutable assignment brief. Defines what the agent works on.
-- **`.agent/skills/`** — you can copy or create skills in the sub-agent's skills directory.
+- **Skills** — Use `agictl skill new`, `agictl skill override`, and `agictl skill status` to manage skills. See the `skill_authoring` skill for full details.
 
 ## What You Cannot Do
 

@@ -848,6 +848,7 @@ check_command "sqlite3" "sudo apt install sqlite3"
 check_command "jq" "sudo apt install jq"
 check_command "inotifywait" "sudo apt install inotify-tools"
 check_command "curl" "sudo apt install curl"
+check_command "rsync" "sudo apt install rsync"
 
 
 

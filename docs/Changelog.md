@@ -4,6 +4,26 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
+## [0.11.7] — 2026-05-28
+
+### Skills Scope, Overrides & Local AI Concurrency Gate
+
+#### Added
+- **Skill Scope System** — `scope` column (`all` | `coa_only`) on the `skills` table. COA-only skills are excluded from sub-agent deployments at three levels: rsync deployment (`--exclude`), triage catalog filtering, and harness always-inject blocks. Schema migration applied inline with error suppression for existing instances.
+- **Skill Overrides** — `agictl skill override <name>` creates `{name}_override.md` pre-populated from the shipped version. The harness resolves overrides at injection time — if `{name}_override.md` exists in the agent's skills directory, it replaces the shipped `{name}.md`. Overrides propagate via rsync. Withdrawing an override (deleting the file) reverts agents to the shipped version on the next sync.
+- **Skill Authoring Skill** — New COA-exclusive always-inject skill (`skill_authoring.md`) documenting the full skill lifecycle: creation, scoping, overriding, distribution, and withdrawal.
+- **Local AI Concurrency Gate** — Lifeline now caps concurrent local-model agent spawns per tick to the `sycl_parallel` slot count from `setup.ini`. Hoisted `IS_LOCAL_MODEL` detection out of the spawn subshell so the gate can enforce slot limits before fork. Cloud and third-party agents are unaffected.
+- **`agictl skill new --scope`** — New `--scope` option (`all` | `coa_only`, default: `all`) for skill creation.
+- **`agictl skill override`** — New command for creating shipped skill overrides.
+- **`agictl skill list` scope column** — Skill list now displays the `scope` column with `coa_only` highlighted in magenta.
+- **`rsync` prerequisite** — Added as a mandatory system dependency in `setup.sh`.
+
+#### Changed
+- **Skill deployment pipeline** — Replaced `shutil.copy` loop with `rsync -a --delete`. Skills removed from the source are now automatically pruned from sub-agent directories. COA-only skills dynamically excluded via DB query.
+- **Triage scope filtering** — `load_skills_catalog()` now accepts `agent_name` and filters `coa_only` skills from sub-agent triage catalogs via read-only DB query.
+- **Harness always-inject block** — Extended to inject `skill_authoring.md` for COA. Added override resolution: before injecting any triage-selected skill, checks for `{name}_override.md` and injects it instead.
+- **Agent onboarding skill** — Updated to reference DB-driven skill management (`agictl skill new/status/override`) instead of manual file copy.
+
 ## [0.11.6] — 2026-05-25
 
 ### Cascading Project Deletions & Database Cleanup

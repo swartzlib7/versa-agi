@@ -504,6 +504,19 @@ def main():
             except Exception as e:
                 tlog(f"CLI REFERENCE: Failed to read — {e}")
 
+    # ── Always-Inject: Skill Authoring (COA-exclusive) ──
+    # skill_authoring.md is injected only for COA — sub-agents never see it.
+    if skills_dir and args.agent == "coa":
+        skill_auth_path = os.path.join(skills_dir, "skill_authoring.md")
+        if os.path.isfile(skill_auth_path):
+            try:
+                with open(skill_auth_path, "r") as f:
+                    skill_auth_content = f.read()
+                system_prompt += f"\n\n---\n## ── SKILL AUTHORING REFERENCE ──\n\n{skill_auth_content}"
+                tlog(f"SKILL AUTHORING: Injected ({len(skill_auth_content)} chars)")
+            except Exception as e:
+                tlog(f"SKILL AUTHORING: Failed to read — {e}")
+
     with open(args.wake_file, "r") as f:
         wake_prompt = f.read()
 
@@ -562,13 +575,28 @@ def main():
         tasks_context=tasks_context,
         conversation_context=convo_context,
         skills_dir=skills_dir,
+        agent_name=args.agent,
     )
 
     # Inject skills based on triage classification
-    # Filter out cli_reference.md — it's always-injected above, not triage-driven.
+    # Filter out always-injected skills — they're not triage-driven.
     skill_content = ""
+    always_injected = {"cli_reference.md", "skill_authoring.md"}
     if skills_dir and triage_result.skills_to_inject:
-        triage_result.skills_to_inject = [s for s in triage_result.skills_to_inject if s != "cli_reference.md"]
+        triage_result.skills_to_inject = [s for s in triage_result.skills_to_inject if s not in always_injected]
+        # ── Override Resolution ──
+        # Before injecting a skill, check if {name}_override.md exists.
+        # If an override exists, inject it instead of the shipped version.
+        resolved_skills = []
+        for skill_name in triage_result.skills_to_inject:
+            base = skill_name.replace(".md", "")
+            override_path = os.path.join(skills_dir, f"{base}_override.md")
+            if os.path.isfile(override_path):
+                resolved_skills.append(f"{base}_override.md")
+                tlog(f"SKILL OVERRIDE: {skill_name} → {base}_override.md")
+            else:
+                resolved_skills.append(skill_name)
+        triage_result.skills_to_inject = resolved_skills
         if triage_result.skills_to_inject:
             skill_content = inject_skills(triage_result, skills_dir)
 

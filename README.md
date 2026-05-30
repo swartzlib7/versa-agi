@@ -33,7 +33,7 @@
 > **Cost Optimization & Caching:** The Gemini API offers massive pricing benefits through implicit and explicit Context Caching — ideal for agents constantly re-reading large conversation histories. API Keys or Service Accounts are required to unlock these features. The LangGraph harness tracks token usage natively per cycle and reports monthly aggregates in the agitop dashboard.
 
 > [!NOTE]
-> **Recommended OS: Ubuntu 24.04 LTS.** Versa AGi relies on advanced Linux kernel file monitoring (`inotify`) and native Python virtual environments. The setup infrastructure will natively resolve required system dependencies. Intel ARC GPU support (Docker SYCL backend) is verified exclusively on Ubuntu 24.04. **Distributed topology (Server)** additionally requires `openssh-server` for client SSH tunneling — auto-installed during server setup if missing.
+> **Recommended OS: Ubuntu 24.04 LTS.** Versa AGi relies on advanced Linux kernel file monitoring (`inotify`), `rsync` for skill deployment, and native Python virtual environments. The setup infrastructure will natively resolve required system dependencies. Intel ARC GPU support (Docker SYCL backend) is verified exclusively on Ubuntu 24.04. **Distributed topology (Server)** additionally requires `openssh-server` for client SSH tunneling — auto-installed during server setup if missing.
 
 > [!TIP]
 > **macOS Compatibility:** To run Versa AGi on a Mac without losing native Linux sandboxing features (like OS-level isolation and `systemd` background services), we recommend using **[OrbStack](https://orbstack.dev/)**. It provides a lightning-fast, zero-configuration Ubuntu 24.04 environment that seamlessly maps your macOS filesystem directly into the agent's workspace. **[LIMA](https://lima-vm.io/)** can also be used.
@@ -492,6 +492,7 @@ If the agent genuinely needs a system package (e.g., `imagemagick`, `ffmpeg`), i
 | **VV API requests** | 60 req/min | Client-side rate limiter — auto-throttle with user notification |
 | **VV sub-accounts** | 20 per sponsor | Server-side hard block at registration |
 | **Concurrent spawns** | 3 per Lifeline tick | Configurable — excess agents queued for next tick |
+| **Local AI concurrency** | `sycl_parallel` slots | Prevents inference server OOM — queues overflow to next tick |
 | **Active agents** | Unlimited | Soft gate — warns but allows |
 | **Message text** | 2048 characters | Server-side hard block |
 | **Attachments** | 10 per message, 50MB per file | Client + server enforcement |
@@ -529,8 +530,9 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 
 #### ⚙️ Infrastructure
 - **Sub-Agent System** — `agictl agent add/remove` with OS user isolation, per-agent config, and role-based provisioning from a template registry.
-- **Skill Lifecycle Management** — DB-driven skill registry in `agents.db` (`agictl skill new/list/status`). COA creates and maintains skills; Lifeline auto-distributes to all sub-agents on each tick via status-based polling (`draft` → `ready` → `synced` → `updated`). Dynamic `skills_catalog.md` generated from the DB replaces hardcoded triage lists.
-- **Skill Asset Directories** — Co-located asset directories (templates, scripts, reference data) deployed alongside skill `.md` files via `deploy-skills` and `share-skill`. Includes the **Solution Architect** skill with a standardized install script template for guiding PU through native environment setup on Ubuntu 24.04.
+- **Skill Lifecycle Management** — DB-driven skill registry in `agents.db` (`agictl skill new/list/status/override`). Skills have a `scope` attribute (`all` | `coa_only`) controlling deployment audience. COA creates and maintains skills; Lifeline auto-distributes to all sub-agents on each tick via status-based polling (`draft` → `ready` → `synced` → `updated`). Dynamic `skills_catalog.md` generated from the DB replaces hardcoded triage lists. Sub-agent triage catalogs exclude `coa_only` skills.
+- **Skill Overrides** — `agictl skill override <name>` creates a `{name}_override.md` pre-populated from the shipped version. Overrides propagate to all agents via `rsync --delete` and take precedence during harness injection. Withdrawing an override reverts agents to the shipped version on the next sync.
+- **Skill Asset Directories** — Co-located asset directories (templates, scripts, reference data) deployed alongside skill `.md` files via `rsync --delete` mirrored deployment. Includes the **Solution Architect** skill with a standardized install script template for guiding PU through native environment setup on Ubuntu 24.04.
 - **Sentinel** — Reactive `inotifywait` daemon (parked). Designed for mid-minute event triggers — retained for future emergency escalation. Skill distribution handled by Lifeline via status-based polling.
 - **Spawn Prompt Task Injection** — Active tasks pre-loaded into each agent's spawn prompt (priority-ordered, per-agent scoped). COA receives a sub-agent task overview for orchestration.
 - **Poise Framework** — Deterministic behavioral templates deployed as flat copies to `/etc/versa-agi/poise/`. Per-agent anchor style (`compact`/`full`) controls philosophical preamble injection.
@@ -562,7 +564,8 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 #### 🔧 Operations
 - **System Backup & Restore** — `versa-agi-backup` creates a hardware-agnostic archive. Self-contained `restore.sh` embedded in every archive.
 - **Post-Install Credential Management** — `agictl system set-key` CLI and dashboard 🔑 API KEYS button for credential rotation.
-- **Skills Hardening** — 20+ system skills deployed read-only via infrastructure. Agents can create new skills but cannot modify shipped ones. COA manages skill lifecycle via `agictl skill new/status`.
+- **Skills Hardening** — 20+ system skills deployed read-only via `rsync --delete` mirrored deployment. Agents can create new skills but cannot modify shipped ones. COA manages skill lifecycle via `agictl skill new/status/override`. COA-only skills (`scope='coa_only'`) are excluded from sub-agent deployments at the rsync, triage catalog, and harness injection levels.
+- **Local AI Concurrency Gate** — Prevents inference server OOM by capping concurrent local-model agent spawns per Lifeline tick to the `sycl_parallel` slot count from `setup.ini`. Cloud and third-party agents are unaffected.
 - **Database Vacuum** — On-demand via `agictl system vacuum` or agitop dashboard. Includes LangGraph checkpoint pruning (retains latest version per thread, removes stale snapshots).
 
 ---

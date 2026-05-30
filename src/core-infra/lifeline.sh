@@ -173,10 +173,19 @@ AGENT_DATA=$(/usr/local/bin/agictl agent get-active)
 MAX_SPAWN_PER_TICK=3
 SPAWNED_COUNT=0
 
+# ─── Setup INI Path ───────────────────────────────────
+SETUP_INI="/etc/versa-agi/setup.ini"
+
+# ─── Local AI Concurrency Cap ─────────────────────────
+# Limits how many local-model agents can be spawned per tick.
+# Aligned with sycl_parallel (inference server slot count) to prevent OOM.
+# Cloud and third-party agents are unaffected — separate API endpoints.
+LOCAL_SPAWN_CAP=$(grep -Po '^\s*sycl_parallel\s*=\s*\K[0-9]+' "${SETUP_INI}" 2>/dev/null || echo "2")
+LOCAL_SPAWNED_COUNT=0
+
 # ─── Circuit Breaker Thresholds ───────────────────────
 # Read from setup.ini [agent] section, with safe defaults.
 # Configurable via agitop ⚙ System Settings modal.
-SETUP_INI="/etc/versa-agi/setup.ini"
 CB_CONSECUTIVE="${VERSA_CB_CONSECUTIVE:-5}"
 CB_HOURLY="${VERSA_CB_HOURLY:-20}"
 if [ -f "${SETUP_INI}" ]; then
@@ -596,9 +605,23 @@ $(cat "${DUTIES_FILE}")"
     fi
   fi
 
+  # ─── Early Model Classification (for concurrency gating) ──
+  # Hoisted from the spawn subshell so Lifeline can enforce local AI slot limits.
+  IS_LOCAL_MODEL=false
+  echo ",${VERSA_LOCAL_MODELS:-}," | grep -q ",${AGENT_MODEL}," && IS_LOCAL_MODEL=true
+
   # ─── Concurrency Cap Check ────────────────────────
   if [ "${SPAWNED_COUNT}" -ge "${MAX_SPAWN_PER_TICK}" ]; then
     log "QUEUED: ${AGENT_NAME} (${SPAWNED_COUNT}/${MAX_SPAWN_PER_TICK} agents already spawned this tick — will run next tick)"
+    continue
+  fi
+
+  # ─── Local AI Concurrency Cap Check ─────────────────
+  # Prevents OOM on the inference server when more local-model agents
+  # exist than available inference slots (sycl_parallel).
+  if [ "${IS_LOCAL_MODEL}" = true ] && [ "${LOCAL_SPAWNED_COUNT}" -ge "${LOCAL_SPAWN_CAP}" ]; then
+    log "QUEUED: ${AGENT_NAME} (${LOCAL_SPAWNED_COUNT}/${LOCAL_SPAWN_CAP} local AI agents already spawned — inference slot limit)"
+    flock -u 200
     continue
   fi
 
@@ -672,6 +695,10 @@ $(cat "${DUTIES_FILE}")"
 
   # Increment spawn counter in main thread before forking
   SPAWNED_COUNT=$((SPAWNED_COUNT + 1))
+  # Increment local AI counter if applicable
+  if [ "${IS_LOCAL_MODEL}" = true ]; then
+    LOCAL_SPAWNED_COUNT=$((LOCAL_SPAWNED_COUNT + 1))
+  fi
 
   # Set agent status to 'active' immediately so dashboard doesn't lag behind log execution
   sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='active', status_message='Initializing cycle...', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
@@ -1116,8 +1143,10 @@ Wake reason: ${WAKE_REASON}."
   # Keep a readable log copy alongside the result file
   cp "${RESULT_FILE}" "${RESULT_LOG}" 2>/dev/null || true
 
-  # Reset agent status to 'idle' now that spawn is complete
-  sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='idle', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
+  # Reset agent status to 'idle' — but ONLY if it was 'active' (normal spawn → idle transition).
+  # Protective statuses (circuit_breaker, halted) must NOT be auto-cleared.
+  # Those require explicit recovery via 'agictl agent activate'.
+  sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='idle', updated_at=datetime('now') WHERE name='${AGENT_NAME}' AND status='active';" 2>/dev/null || true
 
   # ─── Resolve Session File (needed for both runaway msg and token extraction) ──
   SESSION_FILE_PATH="/var/lib/versa-agi/coa/cycles/cycle_telemetry.json"
@@ -1246,6 +1275,52 @@ Wake reason: ${WAKE_REASON}."
   chmod 600 "${CYCLES_DIR}"/result_*.json 2>/dev/null || true
   # Rotate: keep only last 10 result files
   ls -t "${CYCLES_DIR}"/result_*.json 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null || true
+
+  # ─── Checkpoint DB Pruning ───────────────────────
+  # Prevent unbounded growth of the checkpoints database.
+  # Keep only the last CHECKPOINT_KEEP_STEPS rows per thread.
+  # Old rows are deleted from both checkpoints and writes tables.
+  # Runs as agent user since they own checkpoints.db.
+  CHECKPOINT_KEEP_STEPS=50
+  CHECKPOINT_DB="/var/lib/versa-agi/${AGENT_NAME}/cycles/checkpoints.db"
+  if [ -f "${CHECKPOINT_DB}" ]; then
+    # Count total rows across all threads
+    TOTAL_ROWS=$(sqlite3 "${CHECKPOINT_DB}" "SELECT COUNT(*) FROM checkpoints;" 2>/dev/null || echo "0")
+    if [ "${TOTAL_ROWS:-0}" -gt "${CHECKPOINT_KEEP_STEPS}" ]; then
+      # Get the list of thread IDs
+      THREAD_IDS=$(sqlite3 "${CHECKPOINT_DB}" "SELECT DISTINCT thread_id FROM checkpoints;" 2>/dev/null || true)
+      PRUNED=0
+      if [ -n "${THREAD_IDS}" ]; then
+        while IFS= read -r TID; do
+          [ -z "${TID}" ] && continue
+          THREAD_COUNT=$(sqlite3 "${CHECKPOINT_DB}" \
+            "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${TID}';" 2>/dev/null || echo "0")
+          if [ "${THREAD_COUNT:-0}" -gt "${CHECKPOINT_KEEP_STEPS}" ]; then
+            # Delete older checkpoint rows and their associated writes
+            sqlite3 "${CHECKPOINT_DB}" "
+              DELETE FROM writes WHERE thread_id='${TID}' AND checkpoint_id NOT IN (
+                SELECT checkpoint_id FROM checkpoints WHERE thread_id='${TID}'
+                ORDER BY rowid DESC LIMIT ${CHECKPOINT_KEEP_STEPS}
+              );
+              DELETE FROM checkpoints WHERE thread_id='${TID}' AND rowid NOT IN (
+                SELECT rowid FROM checkpoints WHERE thread_id='${TID}'
+                ORDER BY rowid DESC LIMIT ${CHECKPOINT_KEEP_STEPS}
+              );
+            " 2>/dev/null || true
+            NEW_COUNT=$(sqlite3 "${CHECKPOINT_DB}" \
+              "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${TID}';" 2>/dev/null || echo "?")
+            PRUNED=$((PRUNED + THREAD_COUNT - NEW_COUNT))
+          fi
+        done <<< "${THREAD_IDS}"
+      fi
+      if [ "${PRUNED}" -gt 0 ]; then
+        # Reclaim disk space
+        sqlite3 "${CHECKPOINT_DB}" "VACUUM;" 2>/dev/null || true
+        DB_SIZE_MB=$(du -m "${CHECKPOINT_DB}" 2>/dev/null | cut -f1)
+        log "CHECKPOINT PRUNE: ${AGENT_NAME} — removed ${PRUNED} old rows, kept last ${CHECKPOINT_KEEP_STEPS} per thread (DB: ${DB_SIZE_MB}MB)"
+      fi
+    fi
+  fi
 
   # Release lock (fd 200 closes when subshell exits)
   # Note: The lock is held by the subshell automatically because it inherited FD 200

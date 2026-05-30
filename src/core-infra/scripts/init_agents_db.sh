@@ -75,17 +75,27 @@ ORDER BY protected DESC, name ASC;
 CREATE TABLE IF NOT EXISTS skills (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,
-    type            TEXT NOT NULL DEFAULT 'system',    -- 'system' | 'agent_created'
+    type            TEXT NOT NULL DEFAULT 'system',    -- 'system' | 'agent_created' | 'override'
     origin          TEXT NOT NULL DEFAULT 'shipped',   -- 'shipped' | 'coa' | agent name
     has_assets      BOOLEAN DEFAULT 0,
     description     TEXT,
     status          TEXT NOT NULL DEFAULT 'synced',    -- 'draft' | 'ready' | 'synced' | 'updated'
+    scope           TEXT NOT NULL DEFAULT 'all',       -- 'all' | 'coa_only'
     created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
     updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
 SQL
+
+# ─── Schema Migration: scope column ───
+# Safely add scope column for older databases (ignore if already exists).
+# Must run BEFORE the scope index — on existing DBs without scope,
+# the CREATE TABLE is a no-op so the column doesn't exist yet.
+sqlite3 "${DB_PATH}" "ALTER TABLE skills ADD COLUMN scope TEXT NOT NULL DEFAULT 'all';" 2>/dev/null || true
+
+# Now safe to create the scope index (column guaranteed to exist)
+sqlite3 "${DB_PATH}" "CREATE INDEX IF NOT EXISTS idx_skills_scope ON skills(scope);" 2>/dev/null || true
 
 echo "Registry database initialized: ${DB_PATH}"
 echo "Tables: agents, skills"

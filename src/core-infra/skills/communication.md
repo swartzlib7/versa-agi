@@ -258,27 +258,49 @@ When you detect exaggeration or ambiguity in effort/scope:
 VersaVoice AI renders messages as **chat bubbles** — rich containers designed for voice transcriptions (up to 5 minutes of content per bubble). This means:
 
 - **Conversational tone** — write like a human assistant, not a report generator
-- **Structure adds clarity** — bullets, numbered lists, and clear organization are welcome in ALL modes
+- **Structure adds clarity** — bullets, numbered lists, and clear organization are welcome in ALL modes (including voice — the platform handles rendering)
 - **Be complete** — one topic per message is ideal but not mandatory. Say what needs to be said.
 - **No unnecessary padding** — skip pleasantries like "I hope you're doing well" in routine updates
 - Messages are NOT a continuous text stream — each message is a self-contained chat bubble
 
-### TTS-Safe Messaging (MANDATORY)
+### Message Body vs Attachments (ALL MODES — MANDATORY)
 
-> **NEVER include technical content or raw numeric notation in the message body.** Messages may be processed by text-to-speech (TTS), and technical notation or digit characters cause audio misbehavior (looping, mispronunciation, garbled output).
+> **The message body is for natural, conversational language ONLY. All technical content MUST be sent as attachments — never in the body.** This applies to EVERY mode (`typed`, `translate`, `speak`, `speak_translated`) without exception.
 
-**The following MUST NOT appear in the message text:**
-- File paths or filenames (e.g., `/home/coa/workspace/report.md`, `duties.md`)
-- Code snippets, CLI commands, or terminal output
-- UIDs, hashes, or tokens
-- URLs (use `--url` attachment instead)
-- JSON, YAML, or any structured data
-- **Digit characters or numeric symbols** — including `$`, `%`, `#`, `@`, `+`, `=`, `<`, `>`, `&`
-- Any character sequences that are not natural spoken language
+This is the single most important messaging rule. Violations cause TTS audio misbehavior in voice modes and degrade readability in text modes. The platform is designed for human conversation — not terminal output.
 
-#### Numeric & Monetary Expression Rule
+**The following MUST NEVER appear in the message body:**
 
-> **ALL numbers, currencies, percentages, fractions, measurements, and quantities MUST be written as spoken words.** The TTS engine reads digit characters literally and garbles currency symbols. Write exactly what a human would say out loud.
+| Prohibited Content | Why | Correct Approach |
+|---|---|---|
+| File paths or filenames (`/home/coa/report.md`, `duties.md`) | Not natural language — garbles TTS, confuses readers | Refer by description: "the duties file", "the deployment script" |
+| Code snippets, CLI commands, terminal output | Technical notation — unreadable when spoken | Write to a file, attach with `--markdown` |
+| URLs or links | TTS reads them character-by-character | Attach with `--url` |
+| UIDs, hashes, API keys, auth tokens | Security risk and unreadable | Attach with `--markdown` if explicitly requested |
+| JSON, YAML, or structured data | Not conversational — belongs in a file | Write to workspace, attach with `--markdown` |
+
+**Examples:**
+
+❌ **Wrong:** `"I've updated /home/coa-env/.agent/duties.md with the new objectives and ran agictl task add to create 3 tasks. Here's the API key: sk-abc123."`
+
+✅ **Correct:** `"I've updated the duties file with the new objectives and created three tasks. See the attached report for details."` + `--markdown /path/to/report.md`
+
+❌ **Wrong:** `"Check out https://docs.example.com/api/v2/auth for the integration guide."`
+
+✅ **Correct:** `"I've found the integration guide for you — see the attached link."` + `--url https://docs.example.com/api/v2/auth`
+
+**Rules:**
+1. Refer to files by **descriptive name** — never by path or filename
+2. When technical details are needed, write them to a **Markdown file** in your workspace and attach with `--markdown`
+3. Refer the recipient to the attachment: *"I've attached the full technical details for your review."*
+4. URLs go in `--url` attachments — never inline in the message body
+5. Credentials, tokens, and keys are NEVER sent in the message body under any circumstances
+
+### Voice Mode Formatting (`speak` / `speak_translated`)
+
+> **When using voice modes, all numbers, currencies, percentages, and quantities MUST be written as spoken words.** The TTS engine reads digit characters literally and garbles currency symbols.
+
+Voice messages should be written in proper paragraphs with natural flow. Bullets and numbered lists are encouraged — they help the recipient read the transcription. The only additional constraint compared to text modes is that **numeric values must be expressed as words**.
 
 | ❌ WRONG (raw notation) | ✅ CORRECT (spoken language) |
 |---|---|
@@ -295,24 +317,13 @@ VersaVoice AI renders messages as **chat bubbles** — rich containers designed 
 | `10am` | ten in the morning |
 | `2026-04-08` | April eighth, twenty twenty-six |
 
-**Instead, use natural language in the message body and attach technical details:**
+**Example — voice mode:**
 
-**Wrong:** `"I've updated /home/coa-env/.agent/duties.md with the new objectives and ran agictl task add to create 3 tasks."`
+❌ **Wrong:** `"The project is $400 over budget and we're at 85% completion."`
 
-**Correct:** `"I've updated the duties file with the new objectives and created three tasks. See the attached report for details."` + `--markdown /path/to/report.md`
+✅ **Correct:** `"The project is four hundred dollars over budget and we are at eighty-five percent completion."`
 
-**Wrong:** `"The project is $400 over budget and we're at 85% completion."`
-
-**Correct:** `"The project is four hundred dollars over budget and we are at eighty-five percent completion."`
-
-**Rules:**
-1. Refer to files by **descriptive name** ("the duties file", "the project configuration", "the deployment script") — never by path or filename
-2. When technical details are requested, write them to a **Markdown file** in your workspace and attach it with `--markdown`
-3. Refer the recipient to the attachment: *"I've attached the full technical details for your review."*
-4. **Write ALL numbers as words** — no digit characters (`0-9`) should appear in the message body
-5. **Write ALL currencies as words** — "four hundred dollars", never "$400"
-6. **Write ALL percentages as words** — "fifteen percent", never "15%"
-7. This applies to `speak` and `speak_translated` modes — these are processed by TTS and raw notation will cause audio garbling. `typed` and `translate` modes may use standard numeric notation.
+> **`typed` and `translate` modes are exempt** — standard numeric notation (digits, symbols, percentages) is fine in text-only modes since no TTS processing occurs.
 
 ---
 
@@ -412,7 +423,6 @@ Before every `agictl message send`:
 2. ✅ Verify recipient UID (not display name)
 3. ✅ Select correct mode based on PROFILE language match
 4. ✅ Check message length — keep it conversational
-5. ✅ Verify no system internals are exposed
-6. ✅ Verify **no technical content** in message body (file paths, code, UIDs → use `--markdown` attachment)
-7. ✅ Verify **no digit characters or numeric symbols** in message body — write all numbers, currencies, and percentages as spoken words
+5. ✅ **No technical content in body** — file paths, code, URLs, UIDs, keys, JSON → attach with `--markdown` or `--url`
+6. ✅ **Voice modes only:** all numbers, currencies, and percentages written as spoken words (typed/translate exempt)
 

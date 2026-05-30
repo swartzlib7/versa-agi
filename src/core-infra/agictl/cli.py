@@ -2702,26 +2702,34 @@ def agent_activate(name):
 @agent.command("deploy-skills", hidden=True)
 @click.argument("name")
 def agent_deploy_skills(name):
-    """Deploy system skills to a sub-agent's workspace.
+    """Deploy system skills to a sub-agent's workspace via rsync.
 
-    Copies read-only system skills from /home/watchdog/core-infra/skills/
-    to the agent's .agent/skills/ directory. Requires root privileges.
+    Mirrors read-only system skills from /home/watchdog/core-infra/skills/
+    to the agent's .agent/skills/ directory using rsync --delete.
+    Skills removed from the source are automatically cleaned from the target.
+    COA-only skills (scope='coa_only') are excluded from sub-agent deploys.
+    Requires root privileges.
     Called by COA via sudo agictl or by the agitop dashboard.
     """
-    import shutil, glob
     name = name.lower()
     # Resolve os_user from agents.db
     try:
         conn = sqlite3.connect(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT os_user FROM agents WHERE name=?", (name,)).fetchone()
+
+        # Build dynamic exclude list from coa_only skills
+        coa_only_rows = conn.execute(
+            "SELECT name FROM skills WHERE scope='coa_only'"
+        ).fetchall()
         conn.close()
         os_user = row["os_user"] if row else f"agi-{name}"
     except Exception:
         os_user = f"agi-{name}"
+        coa_only_rows = []
     agent_root = f"/home/{os_user}"
-    skills_source = "/home/watchdog/core-infra/skills"
-    skills_dest = os.path.join(agent_root, ".agent", "skills")
+    skills_source = "/home/watchdog/core-infra/skills/"
+    skills_dest = os.path.join(agent_root, ".agent", "skills") + "/"
 
     if not os.path.isdir(agent_root):
         json_response(False, error=f"Agent workspace not found: {agent_root}")
@@ -2735,31 +2743,40 @@ def agent_deploy_skills(name):
     # Set directory ownership per file manifest: {os_user}:agi_agents 775
     subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
     subprocess.run(["chmod", "775", skills_dest], check=False)
+
+    # Build rsync command with dynamic exclusions
+    rsync_cmd = [
+        "rsync", "-a", "--delete",
+        "--exclude", "README.md",          # Never deploy the skills index
+    ]
+    # Exclude COA-only skills from sub-agent deploys
+    for coa_row in coa_only_rows:
+        skill_name = coa_row["name"]
+        rsync_cmd.extend(["--exclude", f"{skill_name}.md"])
+        rsync_cmd.extend(["--exclude", f"{skill_name}/"])  # co-located assets
+
+    rsync_cmd.extend([skills_source, skills_dest])
+
+    result = subprocess.run(rsync_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        json_response(False, error=f"rsync failed: {result.stderr.strip()}")
+        sys.exit(1)
+
+    # Post-rsync permissions: shipped .md files -> watchdog:agi_agents 440
     deployed = 0
     asset_dirs_deployed = 0
-    for skill_file in glob.glob(os.path.join(skills_source, "*.md")):
-        basename = os.path.basename(skill_file)
-        if basename == "README.md":
-            continue
-        dest_file = os.path.join(skills_dest, basename)
-        # Remove existing read-only file before overwriting (440 blocks shutil.copy2)
-        if os.path.exists(dest_file):
-            os.remove(dest_file)
-        shutil.copy(skill_file, dest_file)
-        subprocess.run(["chown", f"watchdog:agi_agents", dest_file], check=False)
-        subprocess.run(["chmod", "440", dest_file], check=False)
+    import glob
+    for skill_file in glob.glob(os.path.join(skills_dest, "*.md")):
+        subprocess.run(["chown", f"watchdog:agi_agents", skill_file], check=False)
+        subprocess.run(["chmod", "440", skill_file], check=False)
         deployed += 1
 
-        # Deploy co-located asset directory if it exists
-        skill_name = basename.replace(".md", "")
-        asset_src = os.path.join(skills_source, skill_name)
-        if os.path.isdir(asset_src):
-            asset_dest = os.path.join(skills_dest, skill_name)
-            if os.path.isdir(asset_dest):
-                shutil.rmtree(asset_dest)
-            shutil.copytree(asset_src, asset_dest)
-            subprocess.run(["chown", "-R", f"{os_user}:agi_agents", asset_dest], check=False)
-            subprocess.run(["chmod", "-R", "755", asset_dest], check=False)
+    # Fix asset directory permissions
+    for item in os.listdir(skills_dest):
+        item_path = os.path.join(skills_dest, item)
+        if os.path.isdir(item_path):
+            subprocess.run(["chown", "-R", f"{os_user}:agi_agents", item_path], check=False)
+            subprocess.run(["chmod", "-R", "755", item_path], check=False)
             asset_dirs_deployed += 1
 
     json_response(True, agent=name, skills_deployed=deployed, asset_dirs_deployed=asset_dirs_deployed, skills_path=skills_dest)
@@ -5789,7 +5806,8 @@ def skill():
 @skill.command("new")
 @click.argument("name")
 @click.option("--description", "-d", default=None, help="Skill description")
-def skill_new(name, description):
+@click.option("--scope", "-s", type=click.Choice(["all", "coa_only"]), default="all", help="Skill scope: 'all' (default) or 'coa_only'")
+def skill_new(name, description, scope):
     """Create a new skill template and asset directory.
 
     Creates the .md template and co-located asset directory in COA's
@@ -5876,15 +5894,15 @@ Reference them using relative paths from the agent's workspace.
     conn = sqlite3.connect(agents_db, timeout=5)
     try:
         conn.execute(
-            "INSERT OR IGNORE INTO skills (name, type, origin, has_assets, description, status) "
-            "VALUES (?, 'agent_created', 'coa', 1, ?, 'draft')",
-            (name, description or "")
+            "INSERT OR IGNORE INTO skills (name, type, origin, has_assets, description, status, scope) "
+            "VALUES (?, 'agent_created', 'coa', 1, ?, 'draft', ?)",
+            (name, description or "", scope)
         )
         conn.commit()
     finally:
         conn.close()
 
-    json_response(True, skill=name, skill_file=skill_file, asset_dir=asset_dir, status="draft")
+    json_response(True, skill=name, skill_file=skill_file, asset_dir=asset_dir, status="draft", scope=scope)
 
 
 @skill.command("status")
@@ -5941,12 +5959,12 @@ def skill_list(status, json_output):
 
     if status:
         rows = conn.execute(
-            "SELECT name, type, origin, has_assets, status, description, created_at, updated_at "
+            "SELECT name, type, origin, has_assets, status, scope, description, created_at, updated_at "
             "FROM skills WHERE status=? ORDER BY name", (status,)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT name, type, origin, has_assets, status, description, created_at, updated_at "
+            "SELECT name, type, origin, has_assets, status, scope, description, created_at, updated_at "
             "FROM skills ORDER BY type DESC, name"
         ).fetchall()
     conn.close()
@@ -5967,6 +5985,7 @@ def skill_list(status, json_output):
     table.add_column("Origin", style="dim")
     table.add_column("Assets", justify="center")
     table.add_column("Status", style="bold")
+    table.add_column("Scope", style="dim")
     table.add_column("Description", max_width=50)
 
     status_styles = {
@@ -5976,11 +5995,17 @@ def skill_list(status, json_output):
         "updated": "[yellow]updated[/]",
     }
 
+    scope_styles = {
+        "all": "all",
+        "coa_only": "[magenta]coa_only[/]",
+    }
+
     for r in rows:
         s = status_styles.get(r["status"], r["status"])
+        sc = scope_styles.get(r["scope"], r["scope"])
         assets = "✓" if r["has_assets"] else "—"
         desc = (r["description"] or "")[:50]
-        table.add_row(r["name"], r["type"], r["origin"], assets, s, desc)
+        table.add_row(r["name"], r["type"], r["origin"], assets, s, sc, desc)
 
     console.print(table)
     click.echo(f"\n{len(rows)} skill(s) registered")
@@ -6050,6 +6075,96 @@ def skill_register():
     conn.close()
 
     json_response(True, registered=registered, skipped=skipped, skills_dir=skills_dir)
+
+
+@skill.command("override")
+@click.argument("name")
+def skill_override(name):
+    """Create an override for a shipped skill.
+
+    Creates {name}_override.md in COA's skills directory, pre-populated
+    with the shipped skill content as a starting template. Registers the
+    override in the skills DB with type='override' and status='draft'.
+    COA edits the override, then marks it 'ready' for distribution.
+
+    The harness resolves overrides at injection time: if {name}_override.md
+    exists in the agent's skills directory, it is injected instead of the
+    shipped {name}.md. Overrides propagate to all agents via rsync.
+
+    To withdraw an override, delete the _override.md file and remove the
+    DB row. Agents revert to the shipped version on the next rsync cycle.
+    """
+    name = name.lower().replace(" ", "_").replace("-", "_")
+    override_name = f"{name}_override"
+
+    # Resolve COA skills directory
+    conn = sqlite3.connect(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    coa = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+    if not coa:
+        conn.close()
+        json_response(False, error="COA agent not found in registry")
+        sys.exit(1)
+    skills_dir = os.path.join(coa["workspace"], ".agent", "skills")
+
+    # Check the override doesn't already exist
+    override_file = os.path.join(skills_dir, f"{override_name}.md")
+    if os.path.exists(override_file):
+        conn.close()
+        json_response(False, error=f"Override already exists: {override_file}")
+        sys.exit(1)
+
+    # Load shipped skill content as template
+    shipped_source = "/home/watchdog/core-infra/skills"
+    shipped_file = os.path.join(shipped_source, f"{name}.md")
+    template_content = ""
+    if os.path.isfile(shipped_file):
+        try:
+            with open(shipped_file, "r") as f:
+                template_content = f.read()
+        except Exception:
+            pass
+
+    # Build override file
+    override_content = f"""# {name.replace('_', ' ').title()} — Override
+
+> **Override of:** `{name}.md` (shipped).
+> **Status:** Draft — edit this file, then mark ready: `agictl skill status {override_name} ready`
+>
+> This file takes precedence over the shipped `{name}.md` during harness injection.
+> To withdraw this override, delete this file and run: `agictl skill remove {override_name}`
+
+---
+
+{template_content}"""
+
+    os.makedirs(skills_dir, exist_ok=True)
+    with open(override_file, "w") as f:
+        f.write(override_content)
+
+    # Set permissions (COA-owned, writable)
+    subprocess.run(["chown", "coa:coa", override_file], check=False)
+    subprocess.run(["chmod", "644", override_file], check=False)
+
+    # Register in DB
+    try:
+        # Read description from shipped skill
+        description = ""
+        if template_content:
+            for line in template_content.splitlines():
+                if line.startswith("# "):
+                    description = f"Override: {line[2:]}"
+                    break
+        conn.execute(
+            "INSERT OR IGNORE INTO skills (name, type, origin, has_assets, description, status, scope) "
+            "VALUES (?, 'override', 'coa', 0, ?, 'draft', 'all')",
+            (override_name, description)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    json_response(True, skill=override_name, override_of=name, file=override_file, status="draft")
 
 
 if __name__ == "__main__":
