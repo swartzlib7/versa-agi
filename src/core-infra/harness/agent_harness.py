@@ -23,6 +23,7 @@ def tlog(msg: str):
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 
 from pydantic import BaseModel, Field
@@ -280,6 +281,69 @@ def agictl_memory(command: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════
+# 9b. GAME — Strategic pursuit management
+# ═══════════════════════════════════════════════════════
+
+class GameInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl game subcommand. "
+        "Examples: 'game add \"VersaVoice Launch\" --postulate \"Build the voice platform\"', "
+        "'game update 1 --posture aggressive --barriers \"Competitor launched\"', "
+        "'game show 1', 'game list', 'game list --status active', "
+        "'game assign-project 1 3', "
+        "'game opponent add 3 \"CompetitorCo\" --type business --desc \"Main rival\"', "
+        "'game opponent list --project 3', 'game opponent update 1 --assessment \"Losing ground\"', "
+        "'game opponent delete 1'."
+    ))
+
+@tool("agictl_game", args_schema=GameInput)
+def agictl_game(command: str) -> str:
+    """Manage strategic pursuits — games, posture, and competitive intelligence.
+    Examples:
+      - 'game add "Career" --postulate "Launch acting career" --posture exploratory'
+      - 'game update 1 --posture aggressive --barriers "Audition rejection rate high"'
+      - 'game show 1' — full game state with projects + awareness
+      - 'game list' — all games
+      - 'game assign-project 1 3' — assign project #3 to game #1
+      - 'game opponent add 3 "RivalCo" --type business'
+      - 'game opponent list --project 3'
+      - 'game opponent update 1 --assessment "They raised Series B"'
+      - 'game opponent delete 1'
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 9c. AWARENESS — Agent cognitive state (Conclusions + Actions)
+# ═══════════════════════════════════════════════════════
+
+class AwarenessInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl awareness subcommand. "
+        "Examples: 'awareness add conclusion --subject project --subject-id 3 --content \"Blocked by design input\"', "
+        "'awareness add action --subject connection --subject-id abc123 --content \"Switch to voice\" --action-conclusion-id 7', "
+        "'awareness revise 7 --content \"Updated understanding\"', "
+        "'awareness complete 12', "
+        "'awareness list --type conclusion --status active', "
+        "'awareness get 7'."
+    ))
+
+@tool("agictl_awareness", args_schema=AwarenessInput)
+def agictl_awareness(command: str) -> str:
+    """Manage your cognitive awareness — conclusions about the world and actions derived from them.
+    This is the core of the Awareness-First discipline. You MUST write conclusions and actions every cycle.
+    Examples:
+      - 'awareness add conclusion --subject self --content "I over-explain in messages"'
+      - 'awareness add action --subject connection --subject-id abc --content "Use bullet points" --action-conclusion-id 7'
+      - 'awareness revise 7 --content "Updated: they now prefer detailed reports"'
+      - 'awareness complete 12' — mark an action as done
+      - 'awareness list --status active' — all active awareness
+      - 'awareness get 7' — single entry details
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
 # 10. IDENTITY — VersaVoice sub-account provisioning
 # ═══════════════════════════════════════════════════════
 
@@ -370,6 +434,8 @@ ALL_TOOLS = [
     agictl_project,
     agictl_connection,
     agictl_memory,
+    agictl_game,
+    agictl_awareness,
     agictl_identity,
     agictl_execute,
 ]
@@ -420,19 +486,48 @@ def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, comp
 def get_llm(model_name: str, num_ctx: int = 0):
     """Instantiate the correct LLM provider based on the model name.
     
+    Provider routing (by model prefix):
+      gemini-*  → ChatGoogleGenerativeAI (direct API)
+      gpt-*     → ChatOpenAI (direct API — api.openai.com)
+      claude-*  → ChatAnthropic (direct API — api.anthropic.com)
+      grok-*    → ChatOpenAI (direct API — api.x.ai/v1, OpenAI-compatible)
+      *         → Local AI (ChatOllama or ChatOpenAI with local endpoint)
+    
     Args:
-        model_name: The model identifier (e.g. 'gemini-2.5-flash', 'gemma4:26b')
+        model_name: The model identifier (e.g. 'gemini-2.5-flash', 'gpt-5.5-2026-04-23')
         num_ctx: Context window size in tokens for Ollama models. 0 = Ollama default.
     """
-    # TODO: Implement xAI Provider
-    # TODO: Implement Anthropic Provider
 
+    # ── Gemini (Google) — direct API ──
     if model_name.startswith("gemini"):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for Gemini models.")
         return ChatGoogleGenerativeAI(model=model_name, temperature=0.2, google_api_key=api_key)
 
+    # ── OpenAI (GPT) — direct API ──
+    if model_name.startswith("gpt"):
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required for OpenAI models. Set via: sudo agictl system set-key openai <key>")
+        return ChatOpenAI(model=model_name, temperature=0.2, api_key=api_key)
+
+    # ── Anthropic (Claude) — direct API ──
+    if model_name.startswith("claude"):
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY is required for Anthropic models. Set via: sudo agictl system set-key anthropic <key>")
+        # NOTE: temperature/top_p/top_k are deprecated for Claude Opus 4.7+ — omit to avoid 400 errors.
+        return ChatAnthropic(model=model_name, api_key=api_key)
+
+    # ── xAI (Grok) — direct API via OpenAI-compatible endpoint ──
+    if model_name.startswith("grok"):
+        api_key = os.getenv("XAI_API_KEY")
+        if not api_key:
+            raise ValueError("XAI_API_KEY is required for xAI models. Set via: sudo agictl system set-key xai <key>")
+        return ChatOpenAI(base_url="https://api.x.ai/v1", model=model_name, temperature=0.2, api_key=api_key)
+
+    # ── Local AI (Ollama / Intel SYCL) ──
     gpu_backend = "standard"
     inference_url = "http://127.0.0.1:11434"
 
@@ -517,6 +612,20 @@ def main():
             except Exception as e:
                 tlog(f"SKILL AUTHORING: Failed to read — {e}")
 
+    # ── Always-Inject: Memory Management (Awareness-First Procedure) ──
+    # memory_management.md is mandatory — agents MUST execute the 5-step
+    # awareness procedure every cycle. Never gated behind triage.
+    if skills_dir:
+        mem_skill_path = os.path.join(skills_dir, "memory_management.md")
+        if os.path.isfile(mem_skill_path):
+            try:
+                with open(mem_skill_path, "r") as f:
+                    mem_skill_content = f.read()
+                system_prompt += f"\n\n---\n## ── MANDATORY: MEMORY & AWARENESS PROCEDURE ──\n**This procedure MUST be executed before ending every cycle.**\n\n{mem_skill_content}"
+                tlog(f"MEMORY SKILL: Injected ({len(mem_skill_content)} chars)")
+            except Exception as e:
+                tlog(f"MEMORY SKILL: Failed to read — {e}")
+
     with open(args.wake_file, "r") as f:
         wake_prompt = f.read()
 
@@ -581,7 +690,7 @@ def main():
     # Inject skills based on triage classification
     # Filter out always-injected skills — they're not triage-driven.
     skill_content = ""
-    always_injected = {"cli_reference.md", "skill_authoring.md"}
+    always_injected = {"cli_reference.md", "skill_authoring.md", "memory_management.md"}
     if skills_dir and triage_result.skills_to_inject:
         triage_result.skills_to_inject = [s for s in triage_result.skills_to_inject if s not in always_injected]
         # ── Override Resolution ──

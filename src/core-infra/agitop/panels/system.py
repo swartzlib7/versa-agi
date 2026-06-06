@@ -1,4 +1,4 @@
-"""System panel — Lifeline, CRON, Sentinel, disk, memory, mode, uptime."""
+"""System panel — CRON, disk, memory, uptime, AI mode."""
 
 import time
 from typing import Optional
@@ -51,8 +51,6 @@ class SystemPanel(Static):
             with Vertical(classes="sys-col"):
                 yield Static(" [b]System[/b]", classes="col-header")
                 yield MetricLabel(id="m-cron")
-                yield MetricLabel(id="m-lifeline")
-                yield MetricLabel(id="m-sentinel")
                 yield MetricLabel(id="m-inference_endpoint")
                 yield MetricLabel(id="m-localai")
                 yield MetricLabel(id="m-cloudproxy")
@@ -62,23 +60,22 @@ class SystemPanel(Static):
                 yield MetricLabel(id="m-config-error")
             with Vertical(classes="sys-col"):
                 yield Static(" [b]Agents[/b]", classes="col-header")
-                yield MetricLabel(id="m-mode")
                 yield MetricLabel(id="m-active")
                 yield MetricLabel(id="m-count")
                 yield MetricLabel(id="m-timer")
             with Vertical(classes="sys-col controls-col"):
                 yield Static(" [b]Controls[/b]", classes="col-header")
                 with Horizontal(classes="btn-grid-row"):
-                    yield Button("CRON: ON / OFF", id="btn-cron-toggle", variant="primary", classes="panel-btn")
+                    yield Button("LIFELINE: ON / OFF", id="btn-cron-toggle", variant="primary", classes="panel-btn")
                     yield Button("KILL ALL AGENTS", id="btn-kill-agents", variant="error", classes="panel-btn")
                 with Horizontal(classes="btn-grid-row"):
-                    yield Button("SYSTEM MEMORIES", id="btn-sys-memories", variant="warning", classes="panel-btn")
+                    yield Button("🎯 GAME OF LIFE", id="btn-strategy", variant="warning", classes="panel-btn strategy-btn")
                     yield Button("LOG:  ON / OFF", id="btn-log-toggle", variant="default", classes="panel-btn")
                 with Horizontal(classes="btn-grid-row"):
-                    yield Button("🔑 API KEYS", id="btn-api-keys", variant="default", classes="panel-btn api-keys-btn")
                     yield Button("⚙ SETTINGS", id="btn-system-settings", variant="default", classes="panel-btn")
-                with Horizontal(classes="btn-grid-row"):
                     yield Button("🗜 VACUUM DBs", id="btn-vacuum", variant="default", classes="panel-btn")
+                with Horizontal(classes="btn-grid-row"):
+                    yield Button("🔑 API KEYS", id="btn-api-keys", variant="default", classes="panel-btn api-keys-btn")
                     yield Button("◀ REFRESH - 5m ▶", id="btn-refresh-cycle", variant="default", classes="panel-btn")
             with Vertical(classes="sys-col clock-col"):
                 yield Static("", id="m-clock")
@@ -135,9 +132,9 @@ class SystemPanel(Static):
                 os_users = list({a["os_user"] for a in self.agent_reader.get_all_agents() if a.get("os_user")})
             self.system_reader.kill_agents(os_users)
             self.app.action_refresh_all()
-        elif button_id == "btn-sys-memories":
-            from agitop.panels.system_memory_editor import SystemMemoryEditorModal
-            self.app.push_screen(SystemMemoryEditorModal())
+        elif button_id == "btn-strategy":
+            from agitop.panels.strategy_modal import StrategyModal
+            self.app.push_screen(StrategyModal(self.app.tasks_reader))
         elif button_id == "btn-api-keys":
             from agitop.panels.api_keys_modal import ApiKeysModal
             self.app.push_screen(ApiKeysModal())
@@ -186,9 +183,8 @@ class SystemPanel(Static):
         
         cron_on = self.system_reader.is_cron_enabled()
         agent_running = self.system_reader.is_agent_process_running()
-        sentinel_on = self.system_reader.is_sentinel_running()
 
-        mode = getattr(self.config_reader, 'get_mode', lambda: "?")() if self.config_reader else "?"
+
         
         active_agents = len(self.agent_reader.get_active_agents()) if self.agent_reader else 0
         total_agents = len(self.agent_reader.get_all_agents()) if self.agent_reader else 0
@@ -216,13 +212,7 @@ class SystemPanel(Static):
         self.query_one("#m-up").update(f" UP:   [dim]{uptime}[/]")
 
         self.query_one("#m-cron").update(
-            f" CRON:      {self._dot(cron_on)} {'active' if cron_on else 'idle'}"
-        )
-        self.query_one("#m-lifeline").update(
-            f" LIFELINE:  {self._dot(agent_running)} {'active' if agent_running else 'idle'}"
-        )
-        self.query_one("#m-sentinel").update(
-            f" SENTINEL:  {self._dot(sentinel_on)} {'active' if sentinel_on else 'off'}"
+            f" LIFELINE:  {self._dot(cron_on)} {'active' if cron_on else 'idle'}"
         )
 
         log_on = self.system_reader.is_logging_enabled()
@@ -308,7 +298,6 @@ class SystemPanel(Static):
         else:
             self.query_one("#m-config-error").update("")
 
-        self.query_one("#m-mode").update(f" MODE:   [cyan]{mode}[/]")
         self.query_one("#m-active").update(f" ACTIVE: [{active_color}]{active_str}[/{active_color}]")
         self.query_one("#m-count").update(f" COUNT:  [bold]{active_agents}[/bold]/{total_agents}")
         timer_color = "yellow" if agent_running else "dim"

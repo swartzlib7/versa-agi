@@ -282,9 +282,11 @@ class SessionLink(Static):
 class FooterStatsPanel(Static):
     """Displays aggregate stats footer."""
 
-    def __init__(self, agent_reader: Optional[AgentReader], **kwargs):
+    def __init__(self, agent_reader: Optional[AgentReader],
+                 tasks_reader=None, **kwargs):
         super().__init__(**kwargs)
         self.agent_reader = agent_reader
+        self.tasks_reader = tasks_reader
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="footer-row"):
@@ -312,12 +314,21 @@ class FooterStatsPanel(Static):
 
         exit_color = "green" if last_exit == 0 else "red" if isinstance(last_exit, int) else "dim"
 
+        # Games and awareness counts
+        games_count = 0
+        awareness_count = 0
+        if self.tasks_reader:
+            games_count = self.tasks_reader.count_active_games()
+            awareness_count = self.tasks_reader.count_active_awareness()
+
         self.query_one("#footer-label").update(
             f"CYCLES: [bold]{total_cycles}[/]    │    "
             f"LAST EXIT: [{exit_color}]{last_exit}[/{exit_color}]    │    "
             f"TOKEN  In: [cyan]{_fmt_tokens(month_input)}[/]  Out: [cyan]{_fmt_tokens(month_output)}[/]  "
             f"Think: [cyan]{_fmt_tokens(month_think)}[/]  Cached: [dim cyan]{_fmt_tokens(month_cached)}[/]  "
-            f"Total: [bold cyan]{_fmt_tokens(month_tokens)}[/bold cyan]"
+            f"Total: [bold cyan]{_fmt_tokens(month_tokens)}[/bold cyan]    │    "
+            f"GAMES: [bold]{games_count}[/]    │    "
+            f"AWARE: [bold]{awareness_count}[/]"
         )
 
         # Reset link text

@@ -48,8 +48,15 @@ class ProjectMembersModal(ModalScreen):
         platform_options = [("-- None --", ""), ("github", "github"), ("gitlab", "gitlab")]
 
         with VerticalScroll(id="project-dialog"):
+            # Resolve game name if linked
+            game_id = proj.get("game_id")
+            game_label = ""
+            if game_id and self._tasks_reader:
+                game_name = self._tasks_reader.get_game_name(game_id)
+                game_label = f"  │  🎯 {game_name}"
+
             yield Static(
-                f"[bold]#{pid}[/]  [{color}]{status}[/]",
+                f"[bold]#{pid}[/]  [{color}]{status}[/]{game_label}",
                 id="project-dialog-title"
             )
             # ── Full-width fields ──
@@ -258,7 +265,7 @@ class ProjectsPanel(DataTable):
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.border_title = "Projects  │  ENTER for details  │  DEL to delete archived"
-        self.add_columns("ID", "Name", "Type", "Platform", "Branch", "Status", "Members")
+        self.add_columns("ID", "Name", "Type", "Platform", "Branch", "Game", "Status", "Members")
         self.refresh_data()
 
     def refresh_data(self) -> None:
@@ -280,12 +287,19 @@ class ProjectsPanel(DataTable):
             if self.tasks_reader and pid:
                 members_summary = self.tasks_reader.get_project_member_summary(int(pid))
 
+            # Game name resolution
+            game_name = "--"
+            game_id = proj.get("game_id")
+            if game_id and self.tasks_reader:
+                game_name = self.tasks_reader.get_game_name(game_id)
+
             self.add_row(
                 pid,
                 str(proj.get("name") or "Unnamed"),
                 str(proj.get("type") or "local"),
                 str(proj.get("platform") or "--"),
                 str(proj.get("branch") or "--"),
+                game_name,
                 s_formatted,
                 members_summary,
                 key=pid

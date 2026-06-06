@@ -24,7 +24,10 @@ class SystemMemoryEditorModal(ModalScreen):
                 yield Button("Close", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
-        self.table.add_columns("Key", "Value", "Stored By", "Updated")
+        self.table.add_column("Updated", width=20)
+        self.table.add_column("Stored By", width=12)
+        self.table.add_column("Key", width=30)
+        self.table.add_column("Value")
         self.refresh_table()
 
     def refresh_table(self) -> None:
@@ -38,16 +41,16 @@ class SystemMemoryEditorModal(ModalScreen):
         try:
             conn = sqlite3.connect(tasks_db, timeout=5)
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM agent_memory_system ORDER BY key ASC").fetchall()
+            rows = conn.execute("SELECT * FROM agent_memory_system ORDER BY updated_at ASC").fetchall()
             for r in rows:
                 val = r["value"]
-                if val and len(val) > 60:
-                    val = val[:57] + "..."
+                if val and len(val) > 80:
+                    val = val[:77] + "..."
                 self.table.add_row(
+                    str(r["updated_at"] or "--"),
+                    str(r["agent_name"] or "?"),
                     r["key"], 
                     val, 
-                    str(r["agent_name"] or "?"), 
-                    str(r["updated_at"] or "--"),
                     key=r["key"]
                 )
             conn.close()
@@ -66,7 +69,7 @@ class SystemMemoryEditorModal(ModalScreen):
             self.app.pop_screen()
         elif event.button.id == "btn-delete-mem":
             if hasattr(self, 'selected_row_key') and self.selected_row_key:
-                self.delete_memory(self.selected_row_key)
+                self.app.push_screen(DeleteMemoryConfirmModal(self.selected_row_key, self))
         elif event.button.id == "btn-edit-mem":
             if hasattr(self, 'selected_row_key') and self.selected_row_key:
                 self.app.push_screen(EditMemoryRowModal(self.selected_row_key, self))
@@ -107,10 +110,10 @@ class EditMemoryRowModal(ModalScreen):
         self.query_one("#input-mem-val", Input).value = self.current_val
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="msg-dialog"):
-            yield Static(f"[bold]Edit Memory:[/] {self.key_value}", id="msg-dialog-header")
+        with Vertical(id="edit-memory-dialog"):
+            yield Static(f"[bold]Edit Memory:[/] {self.key_value}", id="edit-mem-title")
             yield Input(placeholder="Memory Value", id="input-mem-val")
-            with Horizontal(id="msg-dialog-actions"):
+            with Horizontal(id="edit-mem-actions"):
                 yield Button("Save Changes", variant="success", id="btn-save-mem")
                 yield Button("Cancel", variant="default", id="msg-dialog-close")
                 
@@ -134,3 +137,43 @@ class EditMemoryRowModal(ModalScreen):
                 self.app.pop_screen()
             except Exception as e:
                 self.app.notify(f"Error saving memory: {e}", severity="error")
+
+
+class DeleteMemoryConfirmModal(ModalScreen):
+    """Confirmation dialog before deleting a system memory entry."""
+
+    def __init__(self, key_value: str, parent_modal, **kwargs):
+        super().__init__(**kwargs)
+        self.key_value = key_value
+        self.parent_modal = parent_modal
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="edit-memory-dialog"):
+            yield Static(
+                f"[bold red]Delete Memory[/]",
+                id="edit-mem-title"
+            )
+            yield Static(
+                f"Are you sure you want to delete the memory entry:\n\n"
+                f"  [bold]{self.key_value}[/]\n\n"
+                f"[dim]This action cannot be undone.[/]"
+            )
+            with Horizontal(id="edit-mem-actions"):
+                yield Button("Delete", variant="error", id="btn-confirm-delete-mem")
+                yield Button("Cancel", variant="default", id="btn-cancel-delete-mem")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-confirm-delete-mem":
+            tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
+            try:
+                conn = sqlite3.connect(tasks_db, timeout=5)
+                conn.execute("DELETE FROM agent_memory_system WHERE key=?", (self.key_value,))
+                conn.commit()
+                conn.close()
+                self.app.notify(f"Deleted memory: {self.key_value}", severity="information")
+                self.parent_modal.refresh_table()
+            except Exception as e:
+                self.app.notify(f"Error deleting memory: {e}", severity="error")
+            self.app.pop_screen()
+        elif event.button.id == "btn-cancel-delete-mem":
+            self.app.pop_screen()

@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS cycles (
   tokens_cached INTEGER DEFAULT 0,
   tokens_total  INTEGER DEFAULT 0,
   json_output_path TEXT,
+  session_start_ts DATETIME,
+  last_awareness_ts DATETIME,
   errors        TEXT
 );
 
@@ -49,6 +51,10 @@ if ! sqlite3 "${DB_PATH}" "SELECT tokens_input FROM cycles LIMIT 0;" 2>/dev/null
   sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN tokens_total INTEGER DEFAULT 0;" 2>/dev/null
   echo "Migration: added token tracking columns to cycles"
 fi
+
+# Add awareness enforcement gate columns if upgrading from earlier schema
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN session_start_ts DATETIME;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN last_awareness_ts DATETIME;" 2>/dev/null || true
 
 echo "Cycles database initialized: ${DB_PATH}"
 echo "Tables: cycles, config"

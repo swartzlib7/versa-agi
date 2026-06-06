@@ -128,7 +128,7 @@ api_key=
 mode=cloud
 
 # Tracked cloud model registry. Used by Lifeline for backend resolution.
-cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite-preview,auto
+cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite-preview
 
 # Default Gemini CLI model (--model flag). Per-agent overrides possible in registry.
 # Available models (gemini --model <value>):
@@ -141,7 +141,6 @@ cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-fl
 #   gemini-3-flash-preview    — Next gen preview. Frontier-class at reduced cost.
 #   gemini-3.1-pro-preview    — Next gen preview. Enhanced reasoning, extended context.
 #   gemini-3.1-flash-lite-preview — Next gen lite. Ultra-fast, lowest cost. Monitoring/simple tasks.
-#   auto                      — Auto-selects best model for the task.
 model=gemini-3-flash-preview
 
 # COA-approved models — only these models appear in the Dashboard model picker
@@ -160,20 +159,44 @@ thinking_level=high
 [local_ai]
 # Local AI backend (Ollama + Inference Endpoint). Run setup_local.sh to install.
 enabled=false
-# GPU backend: standard (NVIDIA/AMD) or ipex (Intel ARC via IPEX-LLM)
+# GPU backend: standard (NVIDIA/AMD), intel (Intel ARC via IPEX-LLM SYCL), or remote (client topology)
 gpu_backend=standard
 ollama_host=http://localhost:11434
 proxy_port=4000
 default_model=gemma4:e4b
 local_models=gemma4:e4b,gemma4:26b,gemma4:31b
 auto_pull_model=true
-# Intel ARC IPEX config (only used when gpu_backend=ipex)
-ipex_card_count=1
-ipex_device_id=8086:e212
+# Intel ARC IPEX config (only used when gpu_backend=intel)
+intel_card_count=1
+intel_device_id=8086:e223
+# Docker llama-server port (Intel SYCL only)
+sycl_port=8080
+# Active model for single-mode policy (set by 'agictl model activate').
+# Used only when model_loading_strategy=single. All local agents are synced to this model.
+# In router mode, agents use per-agent model assignments and this key is ignored.
+sycl_active_model=
+# Maximum models resident in VRAM simultaneously (llama-server --models-max).
+# The server uses LRU eviction when loaded count exceeds this value.
+sycl_models_max=1
+# HuggingFace token for Intel SYCL model downloads (prompted during setup)
+hf_token=
+# llama.cpp version tag for Docker image builds (pinned for reproducibility)
+sycl_llama_cpp_tag=b9082
+# Total GPU VRAM in GB (auto-detected during setup, used for concurrency calculation)
+sycl_vram_gb=32
+# Concurrent inference slots (llama-server --parallel N)
+sycl_parallel=2
+# Context window size PER SLOT in tokens (total = sycl_ctx_size × sycl_parallel)
+sycl_ctx_size=65536
 # Deployment topology: local (default), server, or client
 topology=local
 remote_inference_url=
 inference_master_key=
+# Model loading strategy — client-side policy for agent model assignment:
+#   single   — All local agents share one model (sycl_active_model). 'model activate' syncs all.
+#   router   — Each agent can use a different local model. 'model activate' updates default_model only.
+# The Docker container always runs in directory-scanning mode regardless of this setting.
+model_loading_strategy=router
 
 [gcp]
 # Only needed for vertex auth. If service_account_key is set, it's used;
@@ -183,11 +206,10 @@ location=us-central1
 service_account_key=
 
 [agent]
-mode=development
 cron_interval=1
-# Sentinel: reactive file watcher (inotifywait). Set to false when using
+# File monitor: reactive file watcher (inotifywait). Set to false when using
 # the post-cycle linger check instead (simpler, avoids race conditions).
-sentinel_enabled=false
+file_mon_enabled=false
 
 # Maximum allowed runtime for an agent work cycle (in minutes)
 # Default is 60. Set lower (e.g. 30) for stricter runaway protection.
@@ -291,7 +313,7 @@ INI_API_KEY="$(ini_get gemini api_key)"
 INI_GCP_PROJECT="$(ini_get gcp project)"
 INI_GCP_LOCATION="$(ini_get gcp location us-central1)"
 INI_SA_KEY_PATH="$(ini_get gcp service_account_key)"
-INI_MODE="$(ini_get agent mode development)"
+
 INI_AGENT_FIRST_NAME="$(ini_get agent first_name COA)"
 INI_AGENT_LAST_NAME="$(ini_get agent last_name Agent)"
 INI_AGENT_LANGUAGE="$(ini_get agent language en)"
@@ -980,32 +1002,7 @@ SYSCONFIG_FOR_TOKEN="${DEPLOYED_CORE_INFRA}/config/system_config.json"
 # In install mode it's set by Step 4; ensure it's always available from INI.
 VV_TOKEN="${VV_TOKEN:-${INI_VV_TOKEN}}"
 
-# ─── Step 5: Mode Configuration ─────────────────────
-section "Step 5 — Operating Mode"
 
-echo ""
-echo "Modes:"
-echo "  development — Tool calling allowed, relaxed monitoring"
-echo "  production  — Strict process monitoring, approval workflows"
-echo ""
-
-if [ -n "${INI_MODE}" ]; then
-  SELECTED_MODE="${INI_MODE}"
-  ok "Mode loaded from setup.ini: ${SELECTED_MODE}"
-else
-  read -p "Select mode [development/production] (default: development): " SELECTED_MODE
-  SELECTED_MODE="${SELECTED_MODE:-development}"
-fi
-
-if [ -f "${SYSCONFIG}" ]; then
-  jq --arg mode "${SELECTED_MODE}" '.mode = $mode' \
-    "${SYSCONFIG}" > "${SYSCONFIG}.tmp" && \
-    mv "${SYSCONFIG}.tmp" "${SYSCONFIG}"
-  chown "${COA_USER}:${COA_USER}" "${SYSCONFIG}"
-  ok "Mode set to: ${SELECTED_MODE}"
-fi
-
-echo ""
 
 # ─── Step 5b: AI Model Selection ─────────────────────
 # Disabled: COA requires a capable model for reliable tool-calling and structured output.
@@ -1099,6 +1096,38 @@ else
   VERSA_INFERENCE_URL_VAL="http://localhost:${INI_PROXY_PORT}"
 fi
 
+# ── Pre-compute values before writing paths.env ──
+
+# Intel SYCL single-model constraint: only the active model is selectable
+_PATHS_LOCAL_MODELS="${INI_LOCAL_MODELS}"
+_PATHS_GPU_BACKEND="${INI_GPU_BACKEND}"
+if [ "${INI_TOPOLOGY}" = "client" ]; then
+  _PATHS_GPU_BACKEND="remote"
+fi
+if [ "${_PATHS_GPU_BACKEND}" = "intel" ] || [ "${_PATHS_GPU_BACKEND}" = "remote" ]; then
+  _SYCL_ACTIVE="$(ini_get local_ai sycl_active_model '')"
+  if [ -n "${_SYCL_ACTIVE}" ]; then
+    _PATHS_LOCAL_MODELS="${_SYCL_ACTIVE}"
+  fi
+fi
+
+# Aggregate third-party models from all enabled providers
+_PATHS_PROXY_ENABLED="$(ini_get third_party enabled false)"
+_PATHS_PROXY_MODELS=""
+_PATHS_PROVIDERS="$(ini_get third_party providers '')"
+if [ -n "${_PATHS_PROVIDERS}" ]; then
+  IFS=',' read -ra _PP_LIST <<< "${_PATHS_PROVIDERS}"
+  for _pp in "${_PP_LIST[@]}"; do
+    _pp=$(echo "${_pp}" | xargs)
+    _pp_enabled="$(ini_get third_party "${_pp}_enabled" false)"
+    _pp_models="$(ini_get third_party "${_pp}_models" '')"
+    if [ "${_pp_enabled}" = "true" ] && [ -n "${_pp_models}" ]; then
+      [ -n "${_PATHS_PROXY_MODELS}" ] && _PATHS_PROXY_MODELS="${_PATHS_PROXY_MODELS},"
+      _PATHS_PROXY_MODELS="${_PATHS_PROXY_MODELS}${_pp_models}"
+    fi
+  done
+fi
+
 cat > "${PATHS_ENV}" <<PATHSEOF
 # Versa AGi — INI-derived system paths
 # Generated by setup.sh — do not edit manually.
@@ -1115,11 +1144,11 @@ VERSA_EXECUTION_MODE="${INI_EXECUTION_MODE}"
 VERSA_CLOUD_MODELS="${INI_CLOUD_MODELS}"
 VERSA_COA_APPROVED_MODELS="${INI_COA_APPROVED_MODELS}"
 VERSA_LOCAL_AI_ENABLED="${INI_LOCAL_AI_ENABLED}"
-VERSA_GPU_BACKEND="${INI_GPU_BACKEND}"
-VERSA_LOCAL_MODELS="${INI_LOCAL_MODELS}"
+VERSA_GPU_BACKEND="${_PATHS_GPU_BACKEND}"
+VERSA_LOCAL_MODELS="${_PATHS_LOCAL_MODELS}"
 VERSA_INFERENCE_URL="${VERSA_INFERENCE_URL_VAL}"
-VERSA_THIRD_PARTY_ENABLED="$(ini_get third_party enabled false)"
-VERSA_THIRD_PARTY_MODELS=""
+VERSA_THIRD_PARTY_ENABLED="${_PATHS_PROXY_ENABLED}"
+VERSA_THIRD_PARTY_MODELS="${_PATHS_PROXY_MODELS}"
 PATHSEOF
 chown "${WATCHDOG_USER}:${COA_USER}" "${PATHS_ENV}"
 chmod 644 "${PATHS_ENV}"
@@ -1447,6 +1476,14 @@ echo "${WATCHDOG_USER} ALL=(%agi_agents) NOPASSWD: ALL" > "${SUDOERS_WATCHDOG}"
 chmod 440 "${SUDOERS_WATCHDOG}"
 ok "Sudoers: ${WATCHDOG_USER} can spawn as any agi_agents member (NOPASSWD)"
 
+# Sudoers: allow watchdog to run agictl as root (no password)
+# Required for 'agictl model activate' (Docker restart, setup.ini writes) when
+# invoked over SSH from a client topology. Also used by lifeline for root-level ops.
+SUDOERS_WATCHDOG_ROOT="/etc/sudoers.d/versa_agi_watchdog_root"
+echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl, ${LIB_DIR}/agictl" > "${SUDOERS_WATCHDOG_ROOT}"
+chmod 440 "${SUDOERS_WATCHDOG_ROOT}"
+ok "Sudoers: ${WATCHDOG_USER} can run agictl as root (NOPASSWD)"
+
 # COA Autonomous Mode — full sudo access for gifted/dedicated hardware
 COA_AUTONOMOUS=$(grep -Po '^\s*autonomous\s*=\s*\K\S+' "${INI_FILE}" 2>/dev/null | head -1)
 SUDOERS_COA_AUTONOMOUS="/etc/sudoers.d/versa_agi_coa_autonomous"
@@ -1485,8 +1522,7 @@ if [ -f "${SYSCONFIG_SOURCE}" ]; then
   
   chown "${WATCHDOG_USER}:${COA_USER}" "${SYSCONFIG_DEST}"
   chmod 640 "${SYSCONFIG_DEST}"
-  CURRENT_MODE=$(jq -r '.mode // "development"' "${SYSCONFIG_DEST}" 2>/dev/null)
-  ok "system_config deployed → ${SYSCONFIG_DEST} (mode=${CURRENT_MODE})"
+  ok "system_config deployed → ${SYSCONFIG_DEST}"
 fi
 
 # ─── Step 8b: VersaVoice Identity Resolution (Moved) ─
@@ -1990,17 +2026,71 @@ if [ -d "${PROVIDERS_DIR}" ]; then
   export VERSA_SETUP_PARENT=1
   _PROVIDER_COUNT=0
 
-  # xAI — gated by [third_party] enabled=true
-  if [ -f "${PROVIDERS_DIR}/xai.sh" ]; then
-    INI_PROXY_ENABLED="$(ini_get third_party enabled false)"
-    if [ "${INI_PROXY_ENABLED}" = "true" ] && [ "${_UPDATE_TOPOLOGY:-}" != "server" ]; then
-      chmod +x "${PROVIDERS_DIR}/xai.sh"
-      bash "${PROVIDERS_DIR}/xai.sh"
-      _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
-    else
-      info "xAI provider skipped ([third_party] enabled=false)"
+  # ── Helper: prompt to enable/disable a third-party provider ──
+  # Usage: _provider_prompt <slug> <display_name> <ini_enabled_key> <script>
+  _provider_prompt() {
+    local slug="$1" display="$2" ini_key="$3" script="$4"
+
+    [ ! -f "${script}" ] && return
+
+    local current
+    current="$(ini_get third_party "${ini_key}" false)"
+    local state_label="disabled"
+    [ "${current}" = "true" ] && state_label="enabled"
+
+    # Server topology never runs cloud providers
+    if [ "${_UPDATE_TOPOLOGY:-}" = "server" ]; then
+      info "${display} provider skipped (server topology)"
+      return
     fi
-  fi
+
+    echo ""
+    echo "  ── ${display} ──"
+    echo "  Current status: ${state_label}"
+
+    local answer
+    if [ "${current}" = "true" ]; then
+      read -p "  Keep ${display} enabled? [Y/n]: " -n 1 -r answer
+    else
+      read -p "  Enable ${display}? [y/N]: " -n 1 -r answer
+    fi
+    echo ""
+
+    if [ "${current}" = "true" ]; then
+      # Currently enabled — default is Y (keep)
+      if [[ "${answer}" =~ ^[Nn]$ ]]; then
+        info "Disabling ${display}..."
+        chmod +x "${script}"
+        bash "${script}" --uninstall
+        return
+      fi
+
+      # Provider stays enabled — ask about key update
+      local key_answer
+      read -p "  Update API key? [y/N]: " -n 1 -r key_answer
+      echo ""
+      if [[ ! "${key_answer}" =~ ^[Yy]$ ]]; then
+        ok "${display} — kept (no key change)"
+        _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+        return
+      fi
+    else
+      # Currently disabled — default is N (skip)
+      if [[ ! "${answer}" =~ ^[Yy]$ ]]; then
+        info "${display} provider skipped"
+        return
+      fi
+    fi
+
+    # Run the provider setup
+    chmod +x "${script}"
+    bash "${script}"
+    _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+  }
+
+  _provider_prompt "xai"       "xAI (Grok)"          "enabled"            "${PROVIDERS_DIR}/xai.sh"
+  _provider_prompt "openai"    "OpenAI (GPT)"         "openai_enabled"     "${PROVIDERS_DIR}/openai.sh"
+  _provider_prompt "anthropic" "Anthropic (Claude)"   "anthropic_enabled"  "${PROVIDERS_DIR}/anthropic.sh"
 
   # SearXNG — gated by [search] enabled=true
   if [ -f "${PROVIDERS_DIR}/searxng.sh" ]; then
@@ -2207,7 +2297,7 @@ FROM agents ORDER BY protected DESC, name ASC;
     section "Update — Model Registry Sync"
 
     # ── Cloud Models (Gemini) ──
-    CURRENT_CLOUD_MODELS="gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite-preview,auto"
+    CURRENT_CLOUD_MODELS="gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite-preview"
     INI_FILE_PATH="/etc/versa-agi/setup.ini"
     if [ -f "${INI_FILE_PATH}" ]; then
       sed -i "s/^cloud_models=.*/cloud_models=${CURRENT_CLOUD_MODELS}/" "${INI_FILE_PATH}" 2>/dev/null || true
@@ -2234,8 +2324,10 @@ FROM agents ORDER BY protected DESC, name ASC;
     if [ "${_UPDATE_TOPOLOGY}" = "client" ]; then
       GPU_BACKEND="remote"
     fi
-    # Intel SYCL: single-model constraint — only the active model is available
-    if [ "${GPU_BACKEND}" = "intel" ]; then
+    # Intel SYCL: single-model constraint — only the active model is available.
+    # In router mode, all models remain available (server loads on demand).
+    _MODEL_LOADING_STRATEGY="$(ini_get local_ai model_loading_strategy router)"
+    if [ "${GPU_BACKEND}" = "intel" ] && [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
       SYCL_ACTIVE="$(ini_get local_ai sycl_active_model '')"
       if [ -n "${SYCL_ACTIVE}" ]; then
         LOCAL_MODELS="${SYCL_ACTIVE}"
@@ -2270,6 +2362,20 @@ FROM agents ORDER BY protected DESC, name ASC;
     # ── COA Approved Models ──
     CURRENT_COA_APPROVED="$(ini_get gemini coa_approved_models '')"
 
+    # ── Active Local Model ──
+    # Only meaningful in single mode. Router mode has no single active model.
+    # On client topology: preserve the existing value (set by client topology repair below).
+    # On server/local: read from setup.ini (set by agictl model activate).
+    if [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
+      if [ "${_UPDATE_TOPOLOGY}" = "client" ]; then
+        _ACTIVE_LOCAL_MODEL=$(grep '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
+      else
+        _ACTIVE_LOCAL_MODEL="$(ini_get local_ai sycl_active_model '')"
+      fi
+    else
+      _ACTIVE_LOCAL_MODEL=""
+    fi
+
     # ── Sync to paths.env ──
     if [ -f "${PATHS_ENV}" ]; then
       # Determine the correct Inference URL based on topology
@@ -2294,7 +2400,9 @@ FROM agents ORDER BY protected DESC, name ASC;
         "VERSA_THIRD_PARTY_ENABLED=\"${PROXY_ENABLED}\"" \
         "VERSA_THIRD_PARTY_MODELS=\"${AGGREGATED_PROXY_MODELS}\"" \
         "VERSA_THIRD_PARTY_URL=\"http://localhost:${PROXY_PORT}\"" \
-        "VERSA_COA_APPROVED_MODELS=\"${CURRENT_COA_APPROVED}\""; do
+        "VERSA_COA_APPROVED_MODELS=\"${CURRENT_COA_APPROVED}\"" \
+        "VERSA_ACTIVE_LOCAL_MODEL=\"${_ACTIVE_LOCAL_MODEL}\"" \
+        "VERSA_MODEL_LOADING_STRATEGY=\"${_MODEL_LOADING_STRATEGY}\""; do
         KEY="${kv%%=*}"
         if grep -q "^${KEY}=" "${PATHS_ENV}"; then
           sed -i "s|^${KEY}=.*|${kv}|" "${PATHS_ENV}"
@@ -2306,6 +2414,156 @@ FROM agents ORDER BY protected DESC, name ASC;
     fi
 
     # Legacy Inference Endpoint configuration removed (deprecated)
+    echo ""
+  fi
+
+  # ─── Client Topology Repair ───────────────────────────
+  # Self-healing: reconstruct client_config.json and sync active model
+  # when topology=client but config is missing or stale.
+  if [ "${DRY_RUN}" = false ] && [ "${_UPDATE_TOPOLOGY}" = "client" ]; then
+    section "Update — Client Topology Repair"
+
+    CLIENT_STATE_FILE="/etc/versa-agi/client_config.json"
+    _REPAIR_REMOTE_URL="$(ini_get local_ai remote_inference_url '')"
+    _REPAIR_MASTER_KEY="$(ini_get local_ai inference_master_key '')"
+
+    # ── Step 1: Reconstruct client_config.json if missing ──
+    if [ ! -f "${CLIENT_STATE_FILE}" ]; then
+      info "client_config.json missing — reconstructing from tunnel service..."
+
+      # Extract tunnel_host and tunnel_port from the running systemd service
+      _REPAIR_TUNNEL_HOST=""
+      _REPAIR_TUNNEL_PORT=""
+      _TUNNEL_EXEC=$(systemctl show versa-agi-tunnel --property=ExecStart --no-pager 2>/dev/null || true)
+      if [ -n "${_TUNNEL_EXEC}" ]; then
+        # Parse: watchdog@<host> from the ExecStart line
+        _REPAIR_TUNNEL_HOST=$(echo "${_TUNNEL_EXEC}" | grep -oP 'watchdog@\K[^\s;]+' | head -1)
+        # Parse: -L <port>:localhost:<port>
+        _REPAIR_TUNNEL_PORT=$(echo "${_TUNNEL_EXEC}" | grep -oP -- '-L\s+\K[0-9]+' | head -1)
+      fi
+
+      # Fallback: extract from remote_inference_url in setup.ini
+      if [ -z "${_REPAIR_TUNNEL_HOST}" ] && [ -n "${_REPAIR_REMOTE_URL}" ]; then
+        _REPAIR_TUNNEL_HOST=$(echo "${_REPAIR_REMOTE_URL}" | sed -E 's|https?://||;s|:[0-9]+$||;s|/.*||')
+      fi
+      if [ -z "${_REPAIR_TUNNEL_PORT}" ] && [ -n "${_REPAIR_REMOTE_URL}" ]; then
+        _REPAIR_TUNNEL_PORT=$(echo "${_REPAIR_REMOTE_URL}" | grep -oP ':\K[0-9]+$' || echo "8080")
+      fi
+
+      if [ -n "${_REPAIR_TUNNEL_HOST}" ] && [ -n "${_REPAIR_TUNNEL_PORT}" ]; then
+        _REPAIR_TUNNEL_URL="http://localhost:${_REPAIR_TUNNEL_PORT}"
+
+        # Query live models from the tunnel endpoint
+        _repair_models=""
+        _models_json=$(curl -sf "${_REPAIR_TUNNEL_URL}/v1/models" 2>/dev/null || echo "")
+        if [ -n "${_models_json}" ] && command -v jq &>/dev/null; then
+          _raw_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
+          if [ -n "${_raw_models}" ]; then
+            # Translate GGUF filenames → friendly keys via manage_registry.sh
+            _MANAGE_REGISTRY_SCRIPT="${SCRIPT_DIR}/manage_registry.sh"
+            if [ -f "${_MANAGE_REGISTRY_SCRIPT}" ]; then
+              source "${_MANAGE_REGISTRY_SCRIPT}" --list >/dev/null 2>&1 || true
+              # Define reverse-lookup (GGUF filename → friendly key).
+              # manage_registry.sh loads _REG_* arrays but doesn't define this helper.
+              _reg_name_for_file() { local f="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_FILES[$i]}" = "$f" ]; then echo "${_REG_NAMES[$i]}"; return; fi; done; }
+              _translated_list=""
+              IFS=',' read -ra _raw_arr <<< "${_raw_models}"
+              for _gguf_name in "${_raw_arr[@]}"; do
+                _friendly=$(_reg_name_for_file "${_gguf_name}" 2>/dev/null || true)
+                if [ -n "${_friendly}" ]; then
+                  _translated_list="${_translated_list:+${_translated_list},}${_friendly}"
+                else
+                  _translated_list="${_translated_list:+${_translated_list},}${_gguf_name}"
+                fi
+              done
+              _repair_models="${_translated_list}"
+            else
+              _repair_models="${_raw_models}"
+            fi
+          fi
+        fi
+
+        # Write client_config.json
+        mkdir -p "$(dirname "${CLIENT_STATE_FILE}")"
+        cat > "${CLIENT_STATE_FILE}" <<REPAIRCFG
+{
+  "topology": "client",
+  "remote_url": "${_REPAIR_REMOTE_URL}",
+  "tunnel_url": "${_REPAIR_TUNNEL_URL}",
+  "tunnel_host": "${_REPAIR_TUNNEL_HOST}",
+  "tunnel_port": "${_REPAIR_TUNNEL_PORT}",
+  "models": $(echo "${_repair_models:-}" | jq -R 'split(",")' 2>/dev/null || echo '[]'),
+  "repaired_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+REPAIRCFG
+        chmod 640 "${CLIENT_STATE_FILE}"
+        chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${CLIENT_STATE_FILE}" 2>/dev/null || true
+        ok "client_config.json reconstructed (tunnel: ${_REPAIR_TUNNEL_HOST}:${_REPAIR_TUNNEL_PORT})"
+      else
+        warn "Could not determine tunnel host/port — client_config.json NOT created"
+        warn "Run: sudo ./setup_local.sh (option 2) to configure the client connection"
+      fi
+    else
+      ok "client_config.json exists"
+    fi
+
+    # ── Step 2: Sync VERSA_ACTIVE_LOCAL_MODEL from remote server ──
+    # Only meaningful in single mode. Router mode has no single active model.
+    if [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
+    _CURRENT_ACTIVE=$(grep '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
+    # Trigger sync if: (a) empty, or (b) contains a raw GGUF filename (stale from previous bug)
+    _NEEDS_ACTIVE_SYNC=false
+    if [ -z "${_CURRENT_ACTIVE}" ]; then
+      _NEEDS_ACTIVE_SYNC=true
+      info "VERSA_ACTIVE_LOCAL_MODEL not set — querying remote server..."
+    elif [[ "${_CURRENT_ACTIVE}" == *.gguf ]]; then
+      _NEEDS_ACTIVE_SYNC=true
+      info "VERSA_ACTIVE_LOCAL_MODEL contains raw GGUF name '${_CURRENT_ACTIVE}' — re-translating..."
+    fi
+    if [ "${_NEEDS_ACTIVE_SYNC}" = "true" ]; then
+
+      # Read tunnel URL from paths.env (set during initial setup or sync above)
+      _REPAIR_INFERENCE=$(grep '^VERSA_INFERENCE_URL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
+      if [ -n "${_REPAIR_INFERENCE}" ]; then
+        _active_json=$(curl -sf "${_REPAIR_INFERENCE}/v1/models" 2>/dev/null || echo "")
+        if [ -n "${_active_json}" ] && command -v jq &>/dev/null; then
+          _active_gguf=$(echo "${_active_json}" | jq -r '.data[0].id' 2>/dev/null)
+          if [ -n "${_active_gguf}" ] && [ "${_active_gguf}" != "null" ]; then
+            # Translate GGUF → friendly name
+            _active_friendly=""
+            if declare -f _reg_name_for_file &>/dev/null; then
+              _active_friendly=$(_reg_name_for_file "${_active_gguf}" 2>/dev/null || true)
+            elif [ -f "${SCRIPT_DIR}/manage_registry.sh" ]; then
+              source "${SCRIPT_DIR}/manage_registry.sh" --list >/dev/null 2>&1 || true
+              # Define reverse-lookup if not already available
+              _reg_name_for_file() { local f="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_FILES[$i]}" = "$f" ]; then echo "${_REG_NAMES[$i]}"; return; fi; done; }
+              _active_friendly=$(_reg_name_for_file "${_active_gguf}" 2>/dev/null || true)
+            fi
+            _active_friendly="${_active_friendly:-${_active_gguf}}"
+
+            # Write to paths.env
+            if grep -q '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null; then
+              sed -i "s|^VERSA_ACTIVE_LOCAL_MODEL=.*|VERSA_ACTIVE_LOCAL_MODEL=\"${_active_friendly}\"|" "${PATHS_ENV}"
+            else
+              echo "VERSA_ACTIVE_LOCAL_MODEL=\"${_active_friendly}\"" >> "${PATHS_ENV}"
+            fi
+            ok "Active model synced: ${_active_friendly}"
+          else
+            warn "Remote server returned no models — VERSA_ACTIVE_LOCAL_MODEL not set"
+          fi
+        else
+          warn "Could not query inference endpoint at ${_REPAIR_INFERENCE} — VERSA_ACTIVE_LOCAL_MODEL not set"
+        fi
+      else
+        warn "No VERSA_INFERENCE_URL in paths.env — cannot query active model"
+      fi
+    else
+      ok "Active model: ${_CURRENT_ACTIVE}"
+    fi
+    else
+      ok "Router mode — active model sync skipped (all models available)"
+    fi
+
     echo ""
   fi
 
@@ -2327,15 +2585,15 @@ if [ -f "${SENTINEL_UNIT_SRC}" ]; then
   systemctl daemon-reload
 
   # Check INI for sentinel mode
-  SENTINEL_ENABLED="$(ini_get agent sentinel_enabled true)"
-  if [ "${SENTINEL_ENABLED}" = "true" ]; then
+  FILE_MON_ENABLED="$(ini_get agent file_mon_enabled true)"
+  if [ "${FILE_MON_ENABLED}" = "true" ]; then
     systemctl enable versa-agi-sentinel --quiet 2>/dev/null || true
     systemctl start versa-agi-sentinel 2>/dev/null || true
     ok "Sentinel service installed and started"
   else
     systemctl stop versa-agi-sentinel 2>/dev/null || true
     systemctl disable versa-agi-sentinel --quiet 2>/dev/null || true
-    ok "Sentinel service installed but DISABLED (sentinel_enabled=false)"
+    ok "Sentinel service installed but DISABLED (file_mon_enabled=false)"
   fi
 else
   warn "Sentinel service unit not found at ${SENTINEL_UNIT_SRC} — skipping"
@@ -2645,7 +2903,6 @@ api_key=
 mode=cloud
 model=gemini-3-flash-preview
 [agent]
-mode=development
 cron_interval=1
 [users]
 watchdog=watchdog
@@ -2671,15 +2928,21 @@ MINSEED
   _ini_set_in "local_ai" "gpu_backend" "${INI_GPU_BACKEND:-standard}"
   _ini_set "intel_card_count" "${INI_INTEL_CARD_COUNT:-1}"
   _ini_set "intel_device_id" "${INI_INTEL_DEVICE_ID:-}"
-  _ini_set "sycl_vram_gb" "$(ini_get local_ai sycl_vram_gb 32)"
-  _ini_set "sycl_parallel" "$(ini_get local_ai sycl_parallel 1)"
+  _ini_set "sycl_vram_gb" "$(ini_get local_ai sycl_vram_gb 8)"
+  _ini_set "sycl_parallel" "$(ini_get local_ai sycl_parallel 2)"
   _ini_set "sycl_ctx_size" "$(ini_get local_ai sycl_ctx_size 4096)"
+  _ini_set "sycl_port" "$(ini_get local_ai sycl_port 8080)"
+  _ini_set "sycl_active_model" "$(ini_get local_ai sycl_active_model '')"
+  _ini_set "sycl_models_max" "$(ini_get local_ai sycl_models_max 1)"
+  _ini_set "hf_token" "$(ini_get local_ai hf_token '')"
+  _ini_set "sycl_llama_cpp_tag" "$(ini_get local_ai sycl_llama_cpp_tag b9082)"
+  _ini_set_in "local_ai" "topology" "${INI_TOPOLOGY:-local}"
+  _ini_set "model_loading_strategy" "$(ini_get local_ai model_loading_strategy router)"
   _ini_set "project"    "${gcp_project:-$INI_GCP_PROJECT}"
   _ini_set "location"   "${gcp_location:-$INI_GCP_LOCATION}"
   _ini_set "service_account_key" "${INI_SA_KEY_PATH:-}"
-  _ini_set_in "agent" "mode" "${SELECTED_MODE:-development}"
   _ini_set "cron_interval" "${CRON_INTERVAL:-1}"
-  _ini_set "sentinel_enabled" "$(ini_get agent sentinel_enabled false)"
+  _ini_set "file_mon_enabled" "$(ini_get agent file_mon_enabled false)"
   _ini_set "timeout_minutes" "${INI_AGENT_TIMEOUT:-60}"
   _ini_set "runaway_threshold" "${INI_RUNAWAY_THRESHOLD:-300}"
   _ini_set "circuit_breaker_consecutive" "$(ini_get agent circuit_breaker_consecutive 5)"
@@ -2756,10 +3019,9 @@ else
   summary_card "Setup Complete" \
     "Core Infra:${DEPLOYED_CORE_INFRA}" \
     "COA Env:${DEPLOYED_COA_ENV}" \
-    "Mode:${SELECTED_MODE}" \
     "AI Backend:${SELECTED_EXEC_MODE}" \
     "CRON:Every ${CRON_INTERVAL} minutes" \
-    "Sentinel:Reactive file watcher (systemd)" \
+    "File Monitor:Reactive file watcher (systemd)" \
     "Database:V3 Split Schema"
 
   echo ""

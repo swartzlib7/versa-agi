@@ -6,6 +6,33 @@ Screen {
     background: $surface;
 }
 
+/* ─── Global Widget Border Styling ────────── */
+
+Input {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Input:focus {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Select:focus {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Select {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+SelectCurrent {
+    background: $surface-lighten-2;
+    color: $text;
+}
+
 #dashboard {
     height: auto;
     min-height: 1fr;
@@ -346,6 +373,83 @@ SystemSettingsModal {
     background: $surface 80%;
 }
 
+#settings-dialog {
+    width: 85%;
+    height: 90%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+}
+
+#settings-dialog-header {
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+}
+
+#settings-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+}
+
+.settings-col {
+    height: auto;
+}
+
+#settings-dialog-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#settings-dialog-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ── Router Mode Confirm Modal ─────────────── */
+
+RouterModeConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#router-dialog {
+    width: 60%;
+    height: auto;
+    max-height: 70%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #d97706;
+}
+
+#router-title {
+    margin-bottom: 1;
+    border-bottom: solid #d97706;
+    padding-bottom: 1;
+}
+
+#router-status {
+    margin-top: 1;
+    padding: 1;
+    min-height: 3;
+}
+
+#router-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#router-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
 #msg-dialog {
     width: 70%;
     height: 85%;
@@ -676,5 +780,187 @@ SkillViewModal {
     width: 1fr;
     margin: 0 1;
     min-width: 16;
+    height: 3;
+}
+
+/* ═══════════════════════════════════════════════════════
+   Strategy Button + Modal
+   ═══════════════════════════════════════════════════════ */
+
+.strategy-btn {
+    background: #d97706;
+    color: #ffffff;
+}
+
+.strategy-btn:hover {
+    background: #b45309;
+}
+
+/* Strategy Modal */
+StrategyModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#strategy-dialog {
+    width: 85%;
+    height: 90%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #d97706;
+}
+
+#strategy-dialog-title {
+    margin-bottom: 1;
+    border-bottom: solid #d97706;
+    padding-bottom: 1;
+}
+
+.strat-section-header {
+    margin-top: 2;
+}
+
+#games-table {
+    height: auto;
+    max-height: 8;
+    border: solid $warning;
+}
+
+#awareness-table {
+    height: auto;
+    max-height: 18;
+    border: solid $accent;
+}
+
+.awareness-filter-row {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.awareness-filter-row Select {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#sys-memory-strat-table {
+    height: auto;
+    max-height: 18;
+    border: solid $primary;
+}
+
+/* Game Detail Sub-Modal */
+GameDetailModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#game-detail-dialog {
+    width: 75%;
+    height: 80%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $warning;
+}
+
+/* Awareness Detail Sub-Modal */
+AwarenessDetailModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#awareness-detail-dialog {
+    width: 65%;
+    height: auto;
+    max-height: 75%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+}
+
+/* ── Full-width sole Close button ─────────────── */
+
+.modal-close-btn {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+}
+
+/* ── SYCL Activation Modal ──────────────────── */
+
+SyclActivationModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#sycl-dialog {
+    width: 60%;
+    height: auto;
+    max-height: 70%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #d97706;
+}
+
+#sycl-title {
+    margin-bottom: 1;
+    border-bottom: solid #d97706;
+    padding-bottom: 1;
+}
+
+#sycl-status {
+    margin-top: 1;
+    padding: 1;
+    min-height: 3;
+}
+
+#sycl-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#sycl-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ── Edit / Delete Memory Sub-Modals ─────────── */
+
+EditMemoryRowModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DeleteMemoryConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#edit-memory-dialog {
+    width: 50%;
+    height: auto;
+    max-height: 30%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+}
+
+#edit-mem-title {
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#edit-mem-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#edit-mem-actions Button {
+    width: 1fr;
+    margin: 0 1;
     height: 3;
 }

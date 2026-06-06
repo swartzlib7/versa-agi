@@ -41,6 +41,25 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
 CREATE INDEX IF NOT EXISTS idx_tasks_tags ON tasks(tags);
 
+-- ── Games (Strategic Pursuit Container) ──
+
+CREATE TABLE IF NOT EXISTS games (
+  id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                    TEXT NOT NULL UNIQUE,
+  postulate               TEXT,
+  milestones              TEXT,
+  posture                 TEXT DEFAULT 'exploratory' CHECK(posture IN ('exploratory','steady','aggressive','defensive')),
+  autonomy                TEXT DEFAULT 'collaborative' CHECK(autonomy IN ('advisory','collaborative','autonomous')),
+  freedoms_summary        TEXT,
+  barriers_summary        TEXT,
+  environment_assessed_at DATETIME,
+  status                  TEXT DEFAULT 'active' CHECK(status IN ('active','paused','archived')),
+  created_at              DATETIME DEFAULT (datetime('now')),
+  updated_at              DATETIME DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_games_status ON games(status);
+
 CREATE TABLE IF NOT EXISTS projects (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   name            TEXT NOT NULL UNIQUE,
@@ -51,9 +70,11 @@ CREATE TABLE IF NOT EXISTS projects (
   access_token    TEXT,
   branch          TEXT DEFAULT 'main',
   workspace_path  TEXT NOT NULL,
+  game_id         INTEGER,
   status          TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'paused', 'archived')),
   created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
-  updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+  updated_at      DATETIME NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (game_id) REFERENCES games(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
@@ -69,6 +90,7 @@ CREATE TABLE IF NOT EXISTS connections (
   abilities         TEXT,
   relationship      TEXT,
   notes             TEXT,
+  comm_preferences  TEXT,
   first_seen        DATETIME NOT NULL DEFAULT (datetime('now')),
   last_contact      DATETIME,
   profile_synced_at DATETIME
@@ -89,6 +111,16 @@ for col_def in \
 ; do
   sqlite3 "${DB_PATH}" "ALTER TABLE tasks ADD COLUMN ${col_def};" 2>/dev/null || true
 done
+
+# ─── Projects: game_id FK migration (for existing databases) ───
+sqlite3 "${DB_PATH}" "ALTER TABLE projects ADD COLUMN game_id INTEGER;" 2>/dev/null || true
+
+# ─── Connections: comm_preferences migration ───
+sqlite3 "${DB_PATH}" "ALTER TABLE connections ADD COLUMN comm_preferences TEXT;" 2>/dev/null || true
+
+# ─── Project Members: participation + comm_channels migration ───
+sqlite3 "${DB_PATH}" "ALTER TABLE project_members ADD COLUMN participation TEXT DEFAULT 'team_player';" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE project_members ADD COLUMN comm_channels TEXT;" 2>/dev/null || true
 
 sqlite3 "${DB_PATH}" <<'SQL'
 CREATE VIEW IF NOT EXISTS v_active_tasks AS
@@ -174,6 +206,8 @@ CREATE TABLE IF NOT EXISTS project_members (
   workspace_path  TEXT,
   branch          TEXT,
   roles           TEXT DEFAULT 'contributor',
+  participation   TEXT DEFAULT 'team_player' CHECK(participation IN ('team_player','sponsor','observer')),
+  comm_channels   TEXT,
   assigned_at     DATETIME DEFAULT (datetime('now')),
   PRIMARY KEY (project_id, member_type, member_id),
   FOREIGN KEY (project_id) REFERENCES projects(id)
@@ -182,10 +216,56 @@ CREATE TABLE IF NOT EXISTS project_members (
 CREATE INDEX IF NOT EXISTS idx_pm_project ON project_members(project_id);
 CREATE INDEX IF NOT EXISTS idx_pm_member ON project_members(member_type, member_id);
 
+-- ── Agent Awareness (Conclusions + Actions) ──
+
+CREATE TABLE IF NOT EXISTS agent_awareness (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name            TEXT NOT NULL,
+  type                  TEXT NOT NULL CHECK(type IN ('conclusion','action')),
+  subject_type          TEXT NOT NULL CHECK(subject_type IN ('connection','project','game','system','self')),
+  subject_id            TEXT,
+  content               TEXT NOT NULL,
+  action_conclusion_id  INTEGER,
+  context               TEXT,
+  status                TEXT DEFAULT 'active' CHECK(status IN ('active','revised','superseded','completed')),
+  created_at            DATETIME DEFAULT (datetime('now')),
+  updated_at            DATETIME DEFAULT (datetime('now')),
+  FOREIGN KEY (action_conclusion_id) REFERENCES agent_awareness(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_awareness_agent ON agent_awareness(agent_name);
+CREATE INDEX IF NOT EXISTS idx_awareness_type ON agent_awareness(agent_name, type, status);
+CREATE INDEX IF NOT EXISTS idx_awareness_subject ON agent_awareness(subject_type, subject_id);
+
+-- ── Project Opponents (Competitive Intelligence) ──
+
+CREATE TABLE IF NOT EXISTS project_opponents (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id            INTEGER NOT NULL,
+  name                  TEXT NOT NULL,
+  type                  TEXT CHECK(type IN ('person','agent','business','association')),
+  description           TEXT,
+  intelligence_sources  TEXT,
+  last_assessment       TEXT,
+  last_assessed_at      DATETIME,
+  created_at            DATETIME DEFAULT (datetime('now')),
+  FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_opponents_project ON project_opponents(project_id);
+
+-- ── Default Game (First Installation Seed) ──
+
+INSERT OR IGNORE INTO games (name, postulate, posture, autonomy)
+VALUES ('Get to know and understand your PU',
+        'Establish a deep working relationship with the Primary User — understand their goals, preferences, communication style, and life context',
+        'exploratory',
+        'advisory');
+
 -- Clean up any pre-existing orphaned project memberships or memories
 DELETE FROM project_members WHERE project_id NOT IN (SELECT id FROM projects);
 DELETE FROM agent_memory_project WHERE project_id NOT IN (SELECT id FROM projects);
 SQL
 
 echo "Tasks database initialized: ${DB_PATH}"
-echo "Tables: tasks, projects, connections, project_members, agent_memory_connection, agent_memory_project, agent_memory_system"
+echo "Tables: tasks, games, projects, connections, project_members, agent_memory_connection, agent_memory_project, agent_memory_system, agent_awareness, project_opponents"

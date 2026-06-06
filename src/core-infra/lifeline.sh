@@ -869,6 +869,85 @@ ${MEM_ITEMS}
     fi
   fi
 
+  # ── Environmental Awareness Injection ──────────────────
+  # Query games + agent_awareness for the environmental awareness context block.
+  # COA: full game board + all active awareness entries.
+  # Sub-agents: only their assigned project's game context (read-only) + own awareness.
+  ENVIRONMENTAL_AWARENESS=""
+  if [ -f "${TASKS_DB}" ]; then
+    if [ "${AGENT_NAME}" = "coa" ]; then
+      # ── COA: Full Game Board ──
+      ACTIVE_GAMES=$(sqlite3 -separator '|' "${TASKS_DB}" \
+        "SELECT id, name, postulate, posture, autonomy, freedoms_summary, barriers_summary, environment_assessed_at FROM games WHERE status='active' ORDER BY name;" 2>/dev/null || true)
+
+      if [ -n "${ACTIVE_GAMES}" ]; then
+        GAMES_BLOCK=""
+        while IFS='|' read -r G_ID G_NAME G_POST G_POSTURE G_AUTO G_FREE G_BARR G_ASSESSED; do
+          [ -z "${G_ID}" ] && continue
+          GAMES_BLOCK="${GAMES_BLOCK}
+  Game #${G_ID}: ${G_NAME}
+    Postulate: ${G_POST:-Not yet defined}
+    Posture: ${G_POSTURE} | Autonomy: ${G_AUTO}
+    Freedoms: ${G_FREE:-Not yet assessed}
+    Barriers: ${G_BARR:-Not yet assessed}
+    Last assessed: ${G_ASSESSED:-Never}"
+        done <<< "${ACTIVE_GAMES}"
+
+        ENVIRONMENTAL_AWARENESS="
+── ENVIRONMENTAL AWARENESS ──
+These are the active games you are running. Assess freedom vs barriers each cycle.
+
+ACTIVE GAMES:${GAMES_BLOCK}
+"
+      fi
+
+      # ── COA: All Active Awareness (conclusions + actions) ──
+      ACTIVE_AWARENESS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness list --status active --agent "${AGENT_NAME}" 2>/dev/null || true)
+      if [ -n "${ACTIVE_AWARENESS}" ] && echo "${ACTIVE_AWARENESS}" | jq -e '.[0]' >/dev/null 2>&1; then
+        AWARENESS_ITEMS=$(echo "${ACTIVE_AWARENESS}" | jq -r '.[] | "  [\(.type | ascii_upcase)] #\(.id) [\(.subject_type)\(if .subject_id then "/\(.subject_id)" else "" end)]: \(.content)"' 2>/dev/null || true)
+        if [ -n "${AWARENESS_ITEMS}" ]; then
+          ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
+YOUR ACTIVE AWARENESS (review these — revise any that no longer hold):
+${AWARENESS_ITEMS}
+"
+        fi
+      fi
+    else
+      # ── Sub-Agent: Read-Only Game Context (via assigned projects) ──
+      ASSIGNED_GAMES=$(sqlite3 -separator '|' "${TASKS_DB}" \
+        "SELECT DISTINCT g.id, g.name, g.postulate, g.posture, g.autonomy FROM games g INNER JOIN projects p ON p.game_id = g.id INNER JOIN project_members pm ON pm.project_id = p.id WHERE pm.member_type='agent' AND pm.member_id='${AGENT_NAME}' AND g.status='active';" 2>/dev/null || true)
+
+      if [ -n "${ASSIGNED_GAMES}" ]; then
+        GAMES_BLOCK=""
+        while IFS='|' read -r G_ID G_NAME G_POST G_POSTURE G_AUTO; do
+          [ -z "${G_ID}" ] && continue
+          GAMES_BLOCK="${GAMES_BLOCK}
+  Game #${G_ID}: ${G_NAME}
+    Postulate: ${G_POST:-Not yet defined}
+    Posture: ${G_POSTURE} | Autonomy: ${G_AUTO}"
+        done <<< "${ASSIGNED_GAMES}"
+
+        ENVIRONMENTAL_AWARENESS="
+── ENVIRONMENTAL AWARENESS (Read-Only — set by COA) ──
+Your work serves these strategic games. The posture is set by COA — align your work accordingly.
+${GAMES_BLOCK}
+"
+      fi
+
+      # ── Sub-Agent: Own Active Awareness Only ──
+      ACTIVE_AWARENESS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness list --status active --agent "${AGENT_NAME}" 2>/dev/null || true)
+      if [ -n "${ACTIVE_AWARENESS}" ] && echo "${ACTIVE_AWARENESS}" | jq -e '.[0]' >/dev/null 2>&1; then
+        AWARENESS_ITEMS=$(echo "${ACTIVE_AWARENESS}" | jq -r '.[] | "  [\(.type | ascii_upcase)] #\(.id) [\(.subject_type)\(if .subject_id then "/\(.subject_id)" else "" end)]: \(.content)"' 2>/dev/null || true)
+        if [ -n "${AWARENESS_ITEMS}" ]; then
+          ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
+YOUR ACTIVE AWARENESS (review and revise as needed):
+${AWARENESS_ITEMS}
+"
+        fi
+      fi
+    fi
+  fi
+
   # ── Message Flood Guard ──────────────────────────────
   # Prevent agents from sending repetitive unanswered messages to the PU.
   # If 5+ of the last 10 messages to the PU are consecutive outbound, inject
@@ -917,7 +996,7 @@ ${AGENT_IDENTITY}
 
 ${PRIMARY_USER_CONTEXT}${UPGRADE_NOTICE}
 ${SECURITY_WARNING}${MSG_FLOOD_GUARD}
-${OVERDUE_CONTEXT}${OPERATIONAL_MEMORY}
+${ENVIRONMENTAL_AWARENESS}${OVERDUE_CONTEXT}${OPERATIONAL_MEMORY}
 ${CONTEXT_SUMMARY}
 ${CONVERSATION_CONTEXT}
 ${TASK_SUMMARY}"
@@ -927,7 +1006,7 @@ ${TASK_SUMMARY}"
 
 ${PRIMARY_USER_CONTEXT}${UPGRADE_NOTICE}
 ${SECURITY_WARNING}${MSG_FLOOD_GUARD}
-${OVERDUE_CONTEXT}${OPERATIONAL_MEMORY}
+${ENVIRONMENTAL_AWARENESS}${OVERDUE_CONTEXT}${OPERATIONAL_MEMORY}
 ${CONTEXT_SUMMARY}
 ${CONVERSATION_CONTEXT}
 ${TASK_SUMMARY}"
@@ -998,6 +1077,10 @@ Wake reason: ${WAKE_REASON}."
     [ -n "${CURRENT_CYCLE_ID}" ] && echo "export VERSA_CYCLE_ID='${CURRENT_CYCLE_ID}'"
 
     [ -f "${ENV_FILE}" ] && sed 's/^/export /' "${ENV_FILE}"
+
+    # Source third-party provider keys (OpenAI, Anthropic, xAI)
+    INFERENCE_ENV="/etc/versa-agi/inference_endpoint.env"
+    [ -f "${INFERENCE_ENV}" ] && sed 's/^/export /' "${INFERENCE_ENV}"
 
     # ─── Backend Resolution ─────────────────
     # Model-driven: check agent model against cloud/local/proxy registries

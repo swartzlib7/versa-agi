@@ -97,7 +97,7 @@ class AgentsPanel(DataTable):
         self.cursor_type = "row"
         self.border_title = "Agents (Global Registry & Telemetry)"
         self.add_columns(
-            "Agent", "Role", "Inactive", "Protected", "Comms", "Req. By",
+            "Agent", "Provider", "Model", "Role", "Inactive", "Protected", "Comms", "Req. By",
             f"Last Cycle ({_TZ})", "Sent", "Recv", "Tasks", "Tokens", "Budget", "Status"
         )
         self.refresh_data()
@@ -121,39 +121,47 @@ class AgentsPanel(DataTable):
             agent_status_raw = agent.get("status") or ""
             agent_model = agent.get("model") or ""
 
-            # Backend icon: ☁ cloud, 🖥 local, 🔀 proxy, ⚠ invalid
+            # Provider detection from model name prefix
             local_models = self.system_reader.get_local_models()
             cloud_models = self.system_reader.get_cloud_models()
             third_party_models = self.system_reader.get_third_party_models()
             if agent_status_raw == "invalid_config":
-                backend_icon = "⚠ "
+                provider_display = "[yellow]⚠ Unknown[/]"
             elif agent_model in local_models:
-                backend_icon = "🖥 "
-            elif agent_model in third_party_models:
-                backend_icon = "🔀 "
+                provider_display = "[magenta]🖥 Local[/]"
+            elif agent_model.startswith("gemini"):
+                provider_display = "☁ [#4285F4]G[/][#EA4335]o[/][#FBBC05]o[/][#4285F4]g[/][#34A853]l[/][#EA4335]e[/]"
+            elif agent_model.startswith("grok"):
+                provider_display = "[purple]☁ xAI[/]"
+            elif agent_model.startswith("gpt"):
+                provider_display = "[white]☁ OpenAI[/]"
+            elif agent_model.startswith("claude"):
+                provider_display = "[yellow]☁ Anthropic[/]"
             elif agent_model in cloud_models or not agent_model:
-                backend_icon = "☁ "
+                provider_display = "☁ [#4285F4]G[/][#EA4335]o[/][#FBBC05]o[/][#4285F4]g[/][#34A853]l[/][#EA4335]e[/]"
+            elif agent_model in third_party_models:
+                provider_display = "[cyan]☁ Cloud[/]"
             else:
-                backend_icon = "? "
+                provider_display = "[dim]? Unknown[/]"
 
             if agent_status_raw == "removal_requested":
                 inactive = "[red]⊘ removal pending[/]"
-                name_markup = f"[red dim]{backend_icon}{name}[/]"
+                name_markup = f"[red dim]{name}[/]"
             elif agent_status_raw == "circuit_breaker":
                 inactive = "[bold red]⚡ breaker tripped[/]"
-                name_markup = f"[bold red]{backend_icon}{name}[/]"
+                name_markup = f"[bold red]{name}[/]"
             elif agent_status_raw == "halted":
                 inactive = "[bold red]✋ halted[/]"
-                name_markup = f"[bold red]{backend_icon}{name}[/]"
+                name_markup = f"[bold red]{name}[/]"
             elif agent_status_raw == "invalid_config":
                 inactive = "[yellow]⚠ config error[/]"
-                name_markup = f"[bold yellow]{backend_icon}{name}[/]"
+                name_markup = f"[bold yellow]{name}[/]"
             elif is_inactive:
                 inactive = "[yellow]○ pending[/]"
-                name_markup = f"[dim]{backend_icon}{name}[/]"
+                name_markup = f"[dim]{name}[/]"
             else:
                 inactive = "[green]● active[/]"
-                name_markup = f"[bold white]{backend_icon}{name}[/]"
+                name_markup = f"[bold white]{name}[/]"
             protected = "[green]Yes[/]" if agent.get("protected") == 1 else "No"
             can_comms = agent.get("can_message_connections", 0)
             if agent.get("protected") == 1:
@@ -208,8 +216,13 @@ class AgentsPanel(DataTable):
             if name == "coa" and (agent_model in local_models or agent_model in third_party_models):
                 coa_warning = " [yellow]⚠[/]"
 
+            # Model display — short name only (provider shown in dedicated column)
+            model_display = f"[dim]{agent_model}[/]" if agent_model else "[dim]default[/]"
+
             self.add_row(
                 name_markup,
+                provider_display,
+                model_display,
                 role + coa_warning,
                 inactive,
                 protected,
@@ -594,13 +607,24 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
     if proxy_enabled and proxy_set:
         for label, key in proxy_entries:
             if key in proxy_set:
-                filtered.append((f"🔀 {label}", key))
+                filtered.append((f"☁ {label}", key))
 
     # Local models: only if local_ai enabled — use labels from models.ini
+    # VERSA_LOCAL_MODELS now contains ALL downloaded models on the server
+    # (synced by 'agictl model refresh' via SSH filesystem scan).
     if local_enabled and local_set:
+        active_model = system_reader.get_active_local_model()
+        gpu_backend = system_reader.get_gpu_backend()
+        strategy = system_reader.get_loading_strategy()
         for m in local_set:
-            label = local_label_map.get(m, m)  # Fall back to raw name if no label
-            filtered.append((f"🖥 {label}", m))
+            label = local_label_map.get(m, m)
+            # Star indicator: single mode marks the VRAM-resident model;
+            # router mode — all models available, no star needed.
+            if strategy == "single" and gpu_backend in ("intel", "remote"):
+                star = " ★" if m == active_model else ""
+            else:
+                star = ""
+            filtered.append((f"🖥 {label}{star}", m))
 
     return filtered if filtered else [("gemini-3-flash-preview", "gemini-3-flash-preview")]
 
@@ -629,10 +653,16 @@ class TechnicalSetupModal(ModalScreen):
         current_num_ctx = agent.get("num_ctx", 0)
         current_model = agent.get("model") or ""
 
-        # Load model options for triage model selector
-        model_options = _load_models_ini(agents_panel.system_reader)
+        # Load model options for triage model selector — cloud only.
+        # Local models are excluded to prevent SYCL VRAM conflicts; use "Use
+        # agent model" (blank) to inherit the agent's own model for triage.
+        all_model_options = _load_models_ini(agents_panel.system_reader)
+        triage_model_options = [
+            (label, key) for label, key in all_model_options
+            if not label.startswith("🖥")
+        ]
         triage_kwargs = {"id": "select-triage-model", "allow_blank": True, "prompt": "Use agent model"}
-        if current_triage_model and any(k == current_triage_model for _, k in model_options):
+        if current_triage_model and any(k == current_triage_model for _, k in triage_model_options):
             triage_kwargs["value"] = current_triage_model
 
         # Load num_ctx picklist options filtered by model's max context
@@ -656,7 +686,7 @@ class TechnicalSetupModal(ModalScreen):
                 yield Input(value=current_tool_budget, placeholder="e.g. 6000", id="input-tool-budget", type="integer")
                 yield Static("[cyan]Triage Model[/] — lightweight model for message classification (blank = use agent model)")
                 yield Select(
-                    model_options,
+                    triage_model_options,
                     **triage_kwargs,
                 )
                 if not is_cloud and ctx_options:
@@ -713,6 +743,7 @@ class TechnicalSetupModal(ModalScreen):
                     triage_select = self.query_one("#select-triage-model", Select)
                     triage_model = triage_select.value if isinstance(triage_select.value, str) and triage_select.value else None
 
+
                     ok = all([
                         reader.update_agent_field(self.agent_name, "max_session_turns", turns),
                         reader.update_agent_field(self.agent_name, "tool_output_token_budget", tool_budget),
@@ -750,12 +781,16 @@ class TechnicalSetupModal(ModalScreen):
 
 
 class SyclActivationModal(ModalScreen):
-    """Confirmation modal for Intel SYCL model activation.
+    """Automated Intel SYCL model activation modal.
 
-    Defers model+num_ctx DB write until the user confirms server-side activation.
-    On confirm, updates ALL agents using local models (SYCL = single active model).
+    Executes 'agictl model activate' on the inference server automatically:
+      - Local topology:  runs sudo agictl model activate locally
+      - Client topology: SSH to server as watchdog, runs agictl model activate,
+                         then runs local 'sudo agictl model refresh' to sync state.
+
+    On success, updates ALL agents using local models (SYCL = single active model).
     Disables CRON on mount to prevent agents spawning with a mismatched model.
-    Re-enables CRON on confirm or cancel.
+    Re-enables CRON on completion (success or failure) or cancel.
     """
 
     def __init__(self, model_name: str, topology: str, agent_name: str, pending_num_ctx: int, **kwargs):
@@ -765,32 +800,30 @@ class SyclActivationModal(ModalScreen):
         self.agent_name = agent_name
         self.pending_num_ctx = pending_num_ctx
         self._cron_was_enabled = False
+        self._activating = False
+        self._preflight_passed = False  # Set True after successful pre-flight
+        self._last_status_text = ""  # Plain-text copy of status for clipboard
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
-        yield Static("[bold yellow]⚠ SYCL Model Activation Required[/]\n", id="sycl-title")
-        yield Static(
-            f"The active model on the inference server must be changed to [bold cyan]{self.model_name}[/].\n\n"
-            f"[bold]All agents using local models will be updated.[/]\n\n"
-            f"CRON has been [bold red]paused[/] to prevent agents from spawning with a mismatched model.\n"
-        )
-        if self.topology == "client":
+        location = "remote server" if self.topology == "client" else "this machine"
+        with Vertical(id="sycl-dialog"):
+            yield Static("[bold yellow]⚠ SYCL Model Activation[/]\n", id="sycl-title")
             yield Static(
-                f"[bold]Run on the server:[/]\n\n"
-                f"  [green]sudo agictl model activate {self.model_name}[/]\n"
+                f"Switch the active inference model to [bold cyan]{self.model_name}[/].\n\n"
+                f"Target: [bold]{location}[/]\n"
+                f"[bold]All agents using local models will be updated.[/]\n\n"
+                f"CRON has been [bold red]paused[/] during activation.\n",
+                id="sycl-info",
             )
-        else:
-            yield Static(
-                f"[bold]Run:[/]\n\n"
-                f"  [green]sudo agictl model activate {self.model_name}[/]\n"
-            )
-        yield Static("\nPress [bold]Confirm[/] once the model has been activated.\n")
-        with Horizontal(id="msg-dialog-actions"):
-            yield Button("Confirm — Model Activated", variant="success", id="btn-sycl-confirm")
-            yield Button("Cancel", variant="default", id="btn-sycl-cancel")
+            yield Static("[dim]Checking model availability...[/]", id="sycl-status")
+            with Horizontal(id="sycl-actions"):
+                yield Button("Activate Model", variant="success", id="btn-sycl-confirm", disabled=True)
+                yield Button("Copy", variant="default", id="btn-sycl-copy")
+                yield Button("Cancel", variant="default", id="btn-sycl-cancel")
 
     def on_mount(self) -> None:
-        """Disable CRON when the modal opens."""
+        """Disable CRON when the modal opens, then run pre-flight check."""
         try:
             agents_panel = self.app.query_one(AgentsPanel)
             if agents_panel.system_reader:
@@ -800,6 +833,8 @@ class SyclActivationModal(ModalScreen):
                     self.app.notify("CRON paused during model activation", title="Lifeline")
         except Exception:
             pass
+        # Launch pre-flight check in background thread
+        self._run_preflight()
 
     def _resume_cron(self) -> None:
         """Re-enable CRON if it was enabled before the modal opened."""
@@ -816,36 +851,376 @@ class SyclActivationModal(ModalScreen):
         except Exception as e:
             self.app.notify(f"Failed to resume CRON: {e}", title="Error", severity="error")
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-sycl-confirm":
-            # Update ALL agents using local models (SYCL = single active model constraint)
-            updated_count = 0
+    def _set_status(self, text: str) -> None:
+        """Update the status label in the modal."""
+        import re
+        self._last_status_text = re.sub(r'\[/?[^\]]*\]', '', text)  # Strip Rich markup
+        try:
+            self.query_one("#sycl-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _set_buttons_disabled(self, disabled: bool) -> None:
+        """Enable/disable action buttons during activation."""
+        try:
+            self.query_one("#btn-sycl-confirm", Button).disabled = disabled
+            self.query_one("#btn-sycl-cancel", Button).disabled = disabled
+        except Exception:
+            pass
+
+    def _resolve_gguf_filename(self) -> str:
+        """Look up the GGUF filename for self.model_name from models.ini."""
+        import configparser, os
+        ini = configparser.ConfigParser(delimiters=('=',))
+        for path in ["/etc/versa-agi/models.ini",
+                     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                         os.path.abspath(__file__)))), "..", "models.ini")]:
+            if os.path.exists(path):
+                ini.read(path)
+                break
+        if not ini.has_section("sycl_models"):
+            return ""
+        raw = ini.get("sycl_models", self.model_name, fallback="")
+        if not raw:
+            return ""
+        parts = raw.strip().split(",")
+        return parts[1].strip() if len(parts) >= 2 else ""
+
+    def _run_preflight(self) -> None:
+        """Check if the model is downloaded on the target via agictl model list."""
+        import threading
+
+        def _check():
+            import subprocess, json as _json
+
+            if self.topology == "client":
+                # Query server's model inventory via SSH
+                try:
+                    agents_panel = self.app.query_one(AgentsPanel)
+                    sr = agents_panel.system_reader
+                    tunnel_host = sr.get_tunnel_host() if sr else ""
+                    ssh_key = sr.get_watchdog_ssh_key() if sr else ""
+                    wd_user = sr.watchdog_user if sr else "watchdog"
+
+                    if not tunnel_host:
+                        self.app.call_from_thread(
+                            self._on_preflight_failed,
+                            "No tunnel_host configured.\n\n"
+                            "Run: [bold]sudo ./setup_local.sh[/] (option 2) to configure client mode.",
+                        )
+                        return
+
+                    result = subprocess.run(
+                        ["sudo", "-u", wd_user,
+                         "ssh", "-i", ssh_key,
+                         "-o", "StrictHostKeyChecking=accept-new",
+                         "-o", "ConnectTimeout=10",
+                         "-o", "BatchMode=yes",
+                         f"{wd_user}@{tunnel_host}",
+                         "agictl model list"],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    if result.returncode != 0:
+                        self.app.call_from_thread(
+                            self._on_preflight_failed,
+                            f"[bold red]Failed to query server models.[/]\n\n"
+                            f"[dim]{result.stderr.strip()[:200]}[/]",
+                        )
+                        return
+
+                    models = _json.loads(result.stdout)
+                    target = next((m for m in models if m["name"] == self.model_name), None)
+
+                    if target and target.get("downloaded"):
+                        self.app.call_from_thread(self._on_preflight_ready)
+                    else:
+                        self.app.call_from_thread(
+                            self._on_preflight_failed,
+                            f"[bold red]Model not downloaded on server.[/]\n\n"
+                            f"[bold]{self.model_name}[/] was not found on [dim]{tunnel_host}[/]\n\n"
+                            f"[bold cyan]On the server, run:[/]\n"
+                            f"  [bold]sudo agictl model add {self.model_name}[/]\n\n"
+                            f"Then return here and retry.",
+                        )
+                except subprocess.TimeoutExpired:
+                    self.app.call_from_thread(
+                        self._on_preflight_failed,
+                        "SSH connection to server timed out.\n\n"
+                        "Check that the SSH tunnel is running and the server is reachable.",
+                    )
+                except Exception as e:
+                    self.app.call_from_thread(
+                        self._on_preflight_failed,
+                        f"[bold red]Pre-flight SSH error[/]\n\n"
+                        f"[dim]topology={self.topology}[/]\n"
+                        f"{e}\n\n"
+                        f"[dim]You may cancel and retry, or check SSH connectivity.[/]",
+                    )
+            else:
+                # Local/server topology — query agictl model list directly
+                try:
+                    result = subprocess.run(
+                        ["sudo", "agictl", "model", "list"],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        models = _json.loads(result.stdout)
+                        target = next((m for m in models if m["name"] == self.model_name), None)
+                        if target and target.get("downloaded"):
+                            self.app.call_from_thread(self._on_preflight_ready)
+                        else:
+                            self.app.call_from_thread(
+                                self._on_preflight_failed,
+                                f"[bold red]Model not downloaded.[/]\n\n"
+                                f"[bold]{self.model_name}[/] is not available locally.\n\n"
+                                f"[bold cyan]Run:[/]\n"
+                                f"  [bold]sudo agictl model add {self.model_name}[/]\n\n"
+                                f"Then return here and retry.",
+                            )
+                    else:
+                        # agictl failed — fall back to allowing the attempt
+                        self.app.call_from_thread(self._on_preflight_ready)
+                except Exception:
+                    # Can't verify — allow the attempt
+                    self.app.call_from_thread(self._on_preflight_ready)
+
+        thread = threading.Thread(target=_check, daemon=True)
+        thread.start()
+
+    def _on_preflight_ready(self) -> None:
+        """Pre-flight passed — enable the Activate button."""
+        self._preflight_passed = True
+        self._set_status("[bold green]\u2713 Model available[/] — ready to activate.")
+        try:
+            self.query_one("#btn-sycl-confirm", Button).disabled = False
+        except Exception:
+            pass
+
+    def _on_preflight_failed(self, message: str) -> None:
+        """Pre-flight failed — show instructions, keep Activate disabled."""
+        self._preflight_passed = False
+        self._set_status(message)
+        try:
+            self.query_one("#btn-sycl-confirm", Button).disabled = True
+            self.query_one("#btn-sycl-cancel", Button).disabled = False
+        except Exception:
+            pass
+
+    def _run_activation(self) -> None:
+        """Run model activation in a background thread."""
+        import subprocess
+        import threading
+
+        def _activate():
             try:
                 agents_panel = self.app.query_one(AgentsPanel)
-                if agents_panel.agent_reader:
+                system_reader = agents_panel.system_reader
+
+                if self.topology == "client":
+                    # ── Client topology: SSH to server, activate remotely ──
+                    tunnel_host = system_reader.get_tunnel_host() if system_reader else ""
+                    ssh_key = system_reader.get_watchdog_ssh_key() if system_reader else ""
+                    wd_user = system_reader.watchdog_user if system_reader else "watchdog"
+
+                    if not tunnel_host:
+                        self.app.call_from_thread(self._on_activation_failed,
+                            "No tunnel_host configured. Run setup_local.sh in client mode first.")
+                        return
+
+                    self.app.call_from_thread(self._set_status,
+                        "[bold yellow]◐ Activating model on remote server...[/]")
+
+                    # Step 1: SSH to server and run activation
+                    ssh_cmd = [
+                        "sudo", "-u", wd_user,
+                        "ssh", "-i", ssh_key,
+                        "-o", "StrictHostKeyChecking=accept-new",
+                        "-o", "ConnectTimeout=15",
+                        "-o", "BatchMode=yes",
+                        f"{wd_user}@{tunnel_host}",
+                        f"sudo agictl model activate {self.model_name}",
+                    ]
+                    result = subprocess.run(
+                        ssh_cmd, capture_output=True, text=True, timeout=120,
+                    )
+                    if result.returncode != 0:
+                        # Extract error from agictl JSON response (stdout), with stderr as fallback
+                        error_msg = ""
+                        try:
+                            import json as _json
+                            data = _json.loads(result.stdout)
+                            error_msg = data.get("error", "")
+                        except Exception:
+                            pass
+                        if not error_msg:
+                            error_msg = (result.stdout or result.stderr or "Unknown error").strip()
+                        self.app.call_from_thread(self._on_activation_failed,
+                            f"Server activation failed:\n{error_msg[:500]}")
+                        return
+
+                    # Step 2: Local model refresh to sync paths.env
+                    self.app.call_from_thread(self._set_status,
+                        "[bold yellow]◑ Syncing local model state...[/]")
+                    refresh_result = subprocess.run(
+                        ["sudo", "agictl", "model", "refresh"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if refresh_result.returncode != 0:
+                        # Non-fatal — activation succeeded, just warn about sync
+                        self.app.call_from_thread(
+                            lambda: self.app.notify(
+                                "Model activated on server but local refresh failed. Run: sudo agictl model refresh",
+                                title="Partial Success", severity="warning",
+                            )
+                        )
+
+                else:
+                    # ── Local topology: run activation directly ──
+                    self.app.call_from_thread(self._set_status,
+                        "[bold yellow]◐ Activating model...[/]")
+
+                    result = subprocess.run(
+                        ["sudo", "agictl", "model", "activate", self.model_name],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if result.returncode != 0:
+                        # Extract error from agictl JSON response (stdout), with stderr as fallback
+                        error_msg = ""
+                        try:
+                            import json as _json
+                            data = _json.loads(result.stdout)
+                            error_msg = data.get("error", "")
+                        except Exception:
+                            pass
+                        if not error_msg:
+                            error_msg = (result.stdout or result.stderr or "Unknown error").strip()
+                        self.app.call_from_thread(self._on_activation_failed,
+                            f"Activation failed:\n{error_msg[:500]}")
+                        return
+
+                # ── Success: update all agent DB records ──
+                self.app.call_from_thread(self._on_activation_success)
+
+            except subprocess.TimeoutExpired:
+                self.app.call_from_thread(self._on_activation_failed,
+                    "Activation timed out after 120 seconds.")
+            except Exception as e:
+                self.app.call_from_thread(self._on_activation_failed, str(e))
+
+        thread = threading.Thread(target=_activate, daemon=True)
+        thread.start()
+
+    def _on_activation_success(self) -> None:
+        """Called on the main thread after successful activation."""
+        updated_agents = set()
+        try:
+            agents_panel = self.app.query_one(AgentsPanel)
+            if agents_panel.agent_reader:
+                # Target agent — always update
+                agents_panel.agent_reader.update_agent_field(
+                    self.agent_name, "model", self.model_name
+                )
+                agents_panel.agent_reader.update_agent_field(
+                    self.agent_name, "num_ctx", self.pending_num_ctx
+                )
+                updated_agents.add(self.agent_name)
+
+                # Sweep other agents on local models — only in single mode.
+                # Router mode: agents keep individual model assignments.
+                strategy = "single"
+                if agents_panel.system_reader:
+                    strategy = agents_panel.system_reader.get_loading_strategy()
+                if strategy == "single":
                     from harness.model_context import is_cloud_model
                     all_agents = agents_panel.agent_reader.get_all_agents()
                     for agent in all_agents:
+                        name = agent.get("name", "")
+                        if name in updated_agents:
+                            continue
                         agent_model = agent.get("model") or ""
                         if agent_model and not is_cloud_model(agent_model):
                             agents_panel.agent_reader.update_agent_field(
-                                agent["name"], "model", self.model_name
+                                name, "model", self.model_name
                             )
                             agents_panel.agent_reader.update_agent_field(
-                                agent["name"], "num_ctx", self.pending_num_ctx
+                                name, "num_ctx", self.pending_num_ctx
                             )
-                            updated_count += 1
-                    agents_panel.refresh_data()
-                    self.app.notify(
-                        f"Model set to {self.model_name} for {updated_count} agent(s)",
-                        title="Agent Settings",
-                    )
-            except Exception as e:
-                self.app.notify(f"DB update error: {e}", title="Error", severity="error")
-            # Re-enable CRON
-            self._resume_cron()
-            self.app.pop_screen()
+                            updated_agents.add(name)
+                agents_panel.refresh_data()
+        except Exception as e:
+            self.app.notify(f"DB update error: {e}", title="Error", severity="error")
+
+        self._set_status(
+            f"[bold green]✓ Model activated: {self.model_name}[/]\n"
+            f"  Updated {len(updated_agents)} agent(s)"
+        )
+        self.app.notify(
+            f"Model set to {self.model_name} for {len(updated_agents)} agent(s)",
+            title="Agent Settings",
+        )
+        self._resume_cron()
+        self._activating = False
+        # Replace buttons with a single Close
+        self._set_buttons_disabled(False)
+        try:
+            self.query_one("#btn-sycl-confirm", Button).remove()
+            cancel_btn = self.query_one("#btn-sycl-cancel", Button)
+            cancel_btn.label = "Close"
+            cancel_btn.variant = "primary"
+        except Exception:
+            pass
+
+    def _on_activation_failed(self, error_msg: str) -> None:
+        """Called on the main thread after failed activation."""
+        # Write error to log file for easy copy/paste (TUI doesn't support text selection)
+        log_path = "/tmp/versa_agi_activation.log"
+        try:
+            import re
+            clean_msg = re.sub(r'\[/?[^\]]*\]', '', error_msg)  # Strip Rich markup
+            with open(log_path, "w") as f:
+                f.write(f"SYCL Activation Error — {self.model_name}\n")
+                f.write(f"Topology: {self.topology}\n")
+                f.write(f"{'=' * 50}\n")
+                f.write(clean_msg + "\n")
+        except Exception:
+            log_path = ""
+        log_hint = f"\n\n[dim]Full error: cat {log_path}[/]" if log_path else ""
+        self._set_status(
+            f"[bold red]✗ Activation Failed[/]\n\n{error_msg}\n\n"
+            f"[dim]You can retry or cancel to restore CRON.[/]{log_hint}"
+        )
+        self._activating = False
+        self._set_buttons_disabled(False)
+        try:
+            self.query_one("#btn-sycl-confirm", Button).label = "Retry"
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-sycl-confirm":
+            if self._activating:
+                return  # Ignore double-clicks
+            self._activating = True
+            self._set_buttons_disabled(True)
+            self._run_activation()
+        elif event.button.id == "btn-sycl-copy":
+            if self._last_status_text:
+                import subprocess as _sp
+                copied = False
+                for clip_cmd in [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]:
+                    try:
+                        _sp.run(clip_cmd, input=self._last_status_text, text=True, timeout=3)
+                        copied = True
+                        break
+                    except Exception:
+                        continue
+                if copied:
+                    self.app.notify("Copied to clipboard", title="Copy")
+                else:
+                    self.app.notify("Install xclip: sudo apt install xclip", title="Copy Failed", severity="warning")
         elif event.button.id == "btn-sycl-cancel":
+            if self._activating:
+                return  # Don't allow cancel during activation
             # No DB write happened — just re-enable CRON and refresh UI
             try:
                 agents_panel = self.app.query_one(AgentsPanel)
@@ -973,16 +1348,21 @@ class AgentEditModal(ModalScreen):
                                     if not is_cloud_model(model_val):
                                         system_reader = agents_panel.system_reader
                                         if system_reader and system_reader.get_gpu_backend() in ("intel", "remote"):
-                                            # Check if model is already active on the server
-                                            active_models = set(system_reader.get_local_models())
-                                            if model_val not in active_models:
-                                                # Model not running on server — requires SYCL activation
-                                                needs_sycl = True
-                                                sycl_activation_needed = True
-                                                new_model = model_val
-                                                topology = system_reader.get_topology()
-                                                recommended, _ = get_model_context(model_val)
-                                                pending_num_ctx = recommended
+                                            strategy = system_reader.get_loading_strategy()
+                                            if strategy == "router":
+                                                # Router: server loads on demand — no activation needed.
+                                                # Direct save below handles the DB write.
+                                                pass
+                                            else:
+                                                # Single: check against the VRAM-resident model
+                                                active_model = system_reader.get_active_local_model()
+                                                if model_val != active_model:
+                                                    needs_sycl = True
+                                                    sycl_activation_needed = True
+                                                    new_model = model_val
+                                                    topology = system_reader.get_topology()
+                                                    recommended, _ = get_model_context(model_val)
+                                                    pending_num_ctx = recommended
                                 except Exception:
                                     pass
 
@@ -1154,7 +1534,7 @@ class MemoryViewModal(ModalScreen):
 
             # System memories (global — shared across all agents)
             sys_rows = conn.execute(
-                "SELECT * FROM agent_memory_system ORDER BY key ASC"
+                "SELECT * FROM agent_memory_system ORDER BY updated_at ASC"
             ).fetchall()
             if sys_rows:
                 content += "[bold cyan]━━━ System Memory (Global) ━━━[/]\n\n"

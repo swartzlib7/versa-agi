@@ -158,6 +158,84 @@ agictl memory system list
 
 ---
 
+> **MANDATORY**: Use the **`memory_management.md`** skill (always-injected) at the end of every cycle to execute the 5-step Awareness-First procedure: Reflect → Conclude → Act → Profile → Verify.
+
+## 9. game
+
+```bash
+agictl game add "<name>" [--postulate TEXT] [--posture exploratory|steady|aggressive|defensive] [--autonomy advisory|collaborative|autonomous]
+agictl game update <id> [--name TEXT] [--postulate TEXT] [--posture ...] [--autonomy ...] [--freedoms TEXT] [--barriers TEXT] [--milestones JSON] [--status active|paused|archived]
+agictl game show <id>                                  # Full details + related projects + active awareness
+agictl game list [--status active|paused|archived]     # All games
+agictl game assign-project <game_id> <project_id>      # Link project to game
+```
+
+**Posture**: `exploratory`, `steady`, `aggressive`, `defensive`
+
+### Opponents
+
+```bash
+agictl game opponent add <project_id> "<name>" [--type person|agent|business|association] [--desc TEXT] [--sources JSON]
+agictl game opponent list [--project <id>]
+agictl game opponent update <id> [--name TEXT] [--desc TEXT] [--sources JSON] [--assessment TEXT]
+agictl game opponent delete <id>
+```
+
+## 10. awareness
+
+```bash
+agictl awareness add conclusion --subject <type> [--subject-id ID] --content "<text>" [--context "<why>"]
+agictl awareness add action --subject <type> [--subject-id ID] --content "<text>" --action-conclusion-id <id> [--context "<why>"]
+agictl awareness revise <entry_id> --content "<updated text>"
+agictl awareness complete <entry_id>
+agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
+agictl awareness get <entry_id>
+```
+
+**Subject types**: `connection`, `project`, `game`, `system`, `self`
+
+> **Enforcement**: `cycle end` warns if no awareness was logged this session.
+
+---
+
+## 11. search — Web Search
+
+```bash
+agictl search web "<query>"                           # Search the web via local SearXNG
+agictl search web "<query>" --count 10                # Return up to 10 results (default: 5)
+agictl search web "<query>" --categories science      # Filter by search category (default: general)
+```
+
+> **Availability**: Search requires SearXNG to be installed and `setup.ini [search] enabled=true`. If search is disabled, the harness tool `agictl_search` will not be available.
+
+**Returns JSON**: `{success: true, query: "...", results: [{title, url, snippet, engine}], count: N}`
+
+Use for: technical research, version compatibility checks, documentation lookups, competitive intelligence.
+
+## 12. execute — Code Execution
+
+```bash
+agictl execute bash "<script>"                        # Run a bash script
+agictl execute python "<script>"                      # Run a Python script
+```
+
+Scripts execute as **your agent user** (not root/watchdog) with a 120-second timeout.
+
+> **BLOCKED**: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod` — these are infrastructure-level blocked. If you need elevated access, set the task to `blocked` and report to COA.
+
+**Returns JSON**: `{success: true/false, output: "...", exit_code: N}`
+
+## 13. model — LLM Model Management
+
+```bash
+agictl model list                                     # List registered models with status
+agictl model list --table                             # Display as formatted table
+```
+
+> **Access**: `model list` is available to COA and system scripts only. Sub-agents see their assigned model via `system whoami`.
+
+---
+
 ## Platform Limits
 
 | Resource | Limit | Behavior |
@@ -174,3 +252,4 @@ agictl memory system list
 - **NEVER** guess command syntax — consult this reference
 - All effectful commands return JSON: `{"success": true/false, ...}`
 - Commands marked **(STUB)** return confirmation but are not fully wired yet
+

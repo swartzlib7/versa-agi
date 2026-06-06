@@ -4,7 +4,72 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
-## [0.11.7] — 2026-05-28
+## [0.12.2] — 2026-06-05
+
+### Configuration Cleanup
+
+#### Removed
+- **`[agent] mode` flag** — Non-functional `development`/`production` toggle purged from `setup.ini`, `setup.sh` (INI load, Step 5 prompt, system_config.json write, INI persist, summary card), `config_reader.py` (`get_mode()`), and agitop system panel (`#m-mode` widget). The mode concept was never implemented — monitoring and approval workflows are managed via `agictl` status and agent database states.
+
+#### Changed
+- **`sentinel_enabled` → `file_mon_enabled`** — Renamed across `setup.ini`, `setup.sh` (service installer, INI persist), and all documentation (System Design config table, Sentinel Observation Guide, Debug Mode Controls). Formalizes "Sentinel" as reserved for the planned remote monitoring service, distinguishing it from the parked CRON-based file watcher.
+
+## [0.12.1] — 2026-06-05
+
+### SYCL Model Controls Hardening
+
+#### Added
+- **Automated SYCL Model Activation** — `SyclActivationModal` now executes `agictl model activate` automatically via background thread instead of displaying manual CLI instructions. Client topology triggers SSH execution on the remote server (as watchdog), followed by local `model refresh`. Local/server topology runs activation directly. Modal shows live status feedback (◐/◑ spinner), retry on failure, and CRON pause/resume lifecycle.
+- **Topology-Aware SSH Accessors** — `SystemReader.get_tunnel_host()` reads from `/etc/versa-agi/client_config.json`, `SystemReader.get_watchdog_ssh_key()` returns the watchdog SSH key path. Used by the activation modal for remote command execution.
+- **Sudoers Provisioning for Remote Activation** — `setup_local.sh` (server mode) now writes `/etc/sudoers.d/versa-agi-model-activate` granting the watchdog user passwordless `sudo agictl model activate *`. Includes `visudo` syntax validation with auto-rollback on failure.
+- **Model Loading Strategy Config** — `setup.ini [local_ai] model_loading_strategy=single` key added. Written to `paths.env` as `VERSA_MODEL_LOADING_STRATEGY`. Prepares for future Router Mode (`--models-dir`) without changing current behavior.
+
+#### Changed
+- **Triage Model Dropdown — Cloud/Third-Party Only** — `TechnicalSetupModal` triage model `Select` now filters out all local models (🖥 prefix). Only cloud (☁) and third-party (🔀) models are selectable for triage. Use "Use agent model" (blank) to inherit the agent's own model.
+- **SYCL Triage Guard Removed** — The runtime guard that blocked saving when a local triage model didn't match the active VRAM-resident model is removed. The dropdown-level restriction makes it architecturally unnecessary.
+
+## [0.12.0] — 2026-06-05
+
+### Environmental Awareness Framework (Awareness-First Cognitive Model)
+
+#### Added
+- **Games Table** — `games` table in `tasks.db` with `postulate`, `posture` (exploratory/steady/aggressive/defensive), `autonomy` (advisory/collaborative/autonomous), `freedoms_summary`, `barriers_summary`, `milestones`, and `environment_assessed_at`. Default "Life" game seeded on new installations.
+- **Agent Awareness Table** — `agent_awareness` table in `tasks.db` with typed entries (`conclusion`/`action`), subject scoping (`connection`/`project`/`game`/`system`/`self`), `action_conclusion_id` FK for tracing actions to parent conclusions, and lifecycle statuses (`active`/`revised`/`superseded`/`completed`). Indexed for agent, type+status, and subject queries.
+- **Project Opponents Table** — `project_opponents` table for competitive intelligence tracking per project. Supports opponent types (`person`/`agent`/`business`/`association`), sourced intelligence, and assessment notes.
+- **`agictl game` command group** — `add`, `update`, `show`, `list`, `assign-project` for managing the Game of Life strategic containers.
+- **`agictl game opponent` subgroup** — `add`, `list`, `update`, `delete` for managing competitive intelligence per project.
+- **`agictl awareness` command group** — `add`, `revise`, `complete`, `list`, `get` for managing cognitive state. `add action` enforces FK linkage to parent conclusions. `revise` creates a new entry and marks the old one `superseded`.
+- **`agictl_game` LangGraph tool** — Harness wrapper enabling agents to invoke game management via the LangGraph tool interface.
+- **`agictl_awareness` LangGraph tool** — Harness wrapper enabling agents to invoke awareness management via the LangGraph tool interface.
+- **Awareness Enforcement Gate** — `session_start_ts` and `last_awareness_ts` columns added to `cycles.db`. `cycle_start` sets `session_start_ts`. `cycle_end` checks if `last_awareness_ts` is newer than `session_start_ts` and emits an advisory warning if no awareness was logged.
+- **Environmental Awareness injection in Lifeline** — Active games and active awareness entries are queried from `tasks.db` and injected into the system prompt. COA receives the full game board + all active awareness. Sub-agents receive read-only game context (via project membership) + their own awareness entries.
+- **COA Poise: SYSTEM PURPOSE** — New section defining Postulates (visionary faculty) and Creation (executive faculty) as the twin foundations of Versa AGi.
+- **COA Poise: ENVIRONMENTAL AWARENESS — GAME OF LIFE** — New section with the 4-element awareness model (Freedom, Barriers, Purposes, Choice), posture definitions, and the Awareness Discipline mandate.
+- **COA Poise: ASSESS ENVIRONMENT step (2.5)** — New work cycle step requiring COA to review game posture and revise stale conclusions before processing messages.
+- **COA Poise: PURPOSE ALIGNMENT** — Added to DECIDE step: "Does this work advance a postulate?"
+- **Sub-Agent Poise: AWARENESS section** — Added to all 10 role templates with compact awareness mandate.
+- **Task Protocol: Purpose Alignment** — New core directive: consider which Game a task advances.
+- **Task Protocol: Awareness at Exit** — New core directive: persist at least one conclusion before ending a cycle.
+
+#### Changed
+- **Memory Management Skill** — Rewritten as the 5-step Awareness-First procedure (Reflect → Conclude → Act → Profile → Verify) with dimensional guidance (System, User, Intention, Reason).
+- **Memory Management: Always-Injected** — `memory_management.md` hardcoded into the `always_injected` set and the prompt injection block in `agent_harness.py`. Now injected for all agents (not just COA), bypassing triage-based gating.
+- **CLI Reference** — Both `cli_reference.md` (COA) and `cli_reference_agent.md` (sub-agents) updated with `game`, `opponent`, and `awareness` command documentation. Command groups count updated from 8 to 11.
+- **Sub-Agent Work Cycle** — Step 5 "End cycle" replaced with a 2-step "Persist + End cycle" sequence including awareness add and memory update commands.
+- **ALL_TOOLS Registry** — `agictl_game` and `agictl_awareness` registered in the harness tool list between `agictl_memory` and `agictl_identity`.
+- **Team Players Schema** — `participation` and `comm_channels` columns added to `project_members`. `comm_preferences` added to `connections`. Safe ALTER TABLE migration for existing databases.
+
+### Multi-Provider Aggregation & Model Registry
+
+#### Fixed
+- **Dashboard model picklist missing third-party models** — `setup.sh` fresh-install `paths.env` generation wrote an empty `VERSA_THIRD_PARTY_MODELS` instead of aggregating all enabled providers (xAI, OpenAI, Anthropic). Only the `--update` path had correct aggregation logic. Both paths now use the same provider iteration loop.
+- **Dashboard showing inactive local models** — Intel SYCL backend can only load one model at a time (`sycl_active_model`), but `paths.env` exported the full `local_models` list. `VERSA_LOCAL_MODELS` is now restricted to the active SYCL model when `gpu_backend=intel` or `remote`.
+- **`xai.sh` clobbering other providers' models** — Provider aggregation loop only iterated its own `xai` slug, overwriting models from OpenAI/Anthropic. Now iterates all configured provider slugs from `setup.ini [cloud_models] providers=`.
+- **Orphaned `qwen3:32b` registry entry** — Removed from `models.ini [local_models]` and `[context_windows]`. Had no SYCL registry entry and was not in `setup.ini local_models`.
+
+#### Added
+- **API key update prompt** — `setup.sh --update` now asks "Update API key?" for each enabled provider, preventing unnecessary re-entry of valid credentials during routine updates.
+
 
 ### Skills Scope, Overrides & Local AI Concurrency Gate
 

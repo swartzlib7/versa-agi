@@ -15,3 +15,5 @@ Use `agictl task` to manage your workload according to these parameters:
 1. **NEVER leave a task `in_progress` at cycle end** unless you intend immediate re-spawn. Always defer to `waiting` or `blocked` with a future `due_date`, or mark `done`.
 2. **Task Creation:** `--due-date` is **mandatory**. A `planned` task only triggers spawn when its `due_date` arrives.
 3. **Data Context:** Use `agictl task get <id>` to read the full JSON payload. Use `--desc`, `--priority`, `--assignee` when designing the work queue.
+4. **Purpose Alignment:** When creating or reviewing tasks, consider which **Game** (postulate) the task advances. If a task doesn't serve any active postulate, question whether it should exist.
+5. **Awareness at Exit:** Before ending a cycle, formulate at least one conclusion about your work and persist it via `agictl awareness add`. The `cycle end` command will warn if no awareness was logged.

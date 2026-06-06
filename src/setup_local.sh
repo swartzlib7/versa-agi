@@ -75,6 +75,8 @@ HF_TOKEN="${HF_TOKEN:-}"
 SYCL_PARALLEL="${SYCL_PARALLEL:-1}"
 SYCL_CTX_SIZE="${SYCL_CTX_SIZE:-4096}"
 SYCL_VRAM_GB="${SYCL_VRAM_GB:-}"
+SYCL_MODELS_MAX="${SYCL_MODELS_MAX:-1}"
+MODEL_LOADING_STRATEGY="${MODEL_LOADING_STRATEGY:-router}"
 
 # ─── Legacy Cleanup Paths ──────────────────────────
 MINIFORGE_DIR="/opt/versa-agi/miniforge3"
@@ -195,6 +197,8 @@ if [ -n "${_LOCAL_INI}" ]; then
   [ "${SYCL_PARALLEL}" = "1" ] && { _v="$(_ini_val local_ai sycl_parallel)"; [ -n "$_v" ] && SYCL_PARALLEL="$_v"; }
   [ "${SYCL_CTX_SIZE}" = "4096" ] && { _v="$(_ini_val local_ai sycl_ctx_size)"; [ -n "$_v" ] && SYCL_CTX_SIZE="$_v"; }
   [ -z "${SYCL_VRAM_GB}" ] && SYCL_VRAM_GB="$(_ini_val local_ai sycl_vram_gb)"
+  [ "${SYCL_MODELS_MAX}" = "1" ] && { _v="$(_ini_val local_ai sycl_models_max)"; [ -n "$_v" ] && SYCL_MODELS_MAX="$_v"; }
+  { _v="$(_ini_val local_ai model_loading_strategy)"; [ -n "$_v" ] && MODEL_LOADING_STRATEGY="$_v"; }
 fi
 
 # ─── Banner ─────────────────────────────────────────
@@ -1105,13 +1109,18 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
   # sycl_ctx_size is per-slot → multiply by parallel for the Docker launch.
   _DOCKER_CTX_TOTAL=$(( ${SYCL_CTX_SIZE:-4096} * ${SYCL_PARALLEL:-1} ))
 
+  # Always launch in Router Mode (--models-dir) — the server auto-discovers
+  # all GGUFs in the directory and loads them on demand with LRU eviction.
+  # Client-side model_loading_strategy (single/router) controls agent behavior,
+  # not how the Docker container runs.
   docker run -d --name "${SYCL_CONTAINER}" \
     --restart unless-stopped \
     ${DOCKER_DEVICES} \
     -v "${SYCL_MODEL_DIR}:/models" \
     -p "${SYCL_PORT}:8080" \
     "${SYCL_IMAGE}" \
-    -m "/models/${SYCL_ACTIVE_GGUF}" \
+    --models-dir /models \
+    --models-max "${SYCL_MODELS_MAX:-1}" \
     -ngl 99 --host 0.0.0.0 --port 8080 \
     --parallel "${SYCL_PARALLEL:-1}" --ctx-size "${_DOCKER_CTX_TOTAL}"
 
@@ -1218,9 +1227,12 @@ if [ "${TOPOLOGY}" = "server" ]; then
   "topology": "server",
   "gpu_backend": "${GPU_BACKEND}",
   "active_model": "${_ACTIVE_MODEL}",
+  "default_model": "${DEFAULT_MODEL}",
+  "model_loading_strategy": "${MODEL_LOADING_STRATEGY}",
   "lan_ip": "${_LAN_IP}",
   "sycl_ctx_size": ${SYCL_CTX_SIZE:-4096},
   "sycl_parallel": ${SYCL_PARALLEL:-1},
+  "sycl_models_max": ${SYCL_MODELS_MAX:-1},
   "sycl_vram_gb": ${SYCL_VRAM_GB:-32},
   "configured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
@@ -1228,6 +1240,24 @@ SRVEOF
   chmod 640 "${SERVER_STATE_FILE}"
   chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${SERVER_STATE_FILE}" 2>/dev/null || true
   ok "Server state saved: ${SERVER_STATE_FILE}"
+
+  # ── Sudoers: allow watchdog passwordless 'agictl model activate' ──
+  # This enables remote model activation from client dashboards via SSH.
+  _SUDOERS_FILE="/etc/sudoers.d/versa-agi-model-activate"
+  _AGICTL_PATH=$(command -v agictl 2>/dev/null || echo "/usr/bin/agictl")
+  _SUDOERS_LINE="${WATCHDOG_USER} ALL=(root) NOPASSWD: ${_AGICTL_PATH} model activate *"
+  if [ ! -f "${_SUDOERS_FILE}" ] || ! grep -qF "model activate" "${_SUDOERS_FILE}" 2>/dev/null; then
+    echo "${_SUDOERS_LINE}" > "${_SUDOERS_FILE}"
+    chmod 0440 "${_SUDOERS_FILE}"
+    if visudo -cf "${_SUDOERS_FILE}" >/dev/null 2>&1; then
+      ok "Sudoers: ${WATCHDOG_USER} can run 'sudo agictl model activate' without password"
+    else
+      rm -f "${_SUDOERS_FILE}"
+      warn "Sudoers syntax check failed — removed. Add manually if needed."
+    fi
+  else
+    ok "Sudoers: model activate entry already configured"
+  fi
 
   # Write topology + master key to setup.ini (dual-write)
   for SETUP_INI in "${SCRIPT_DIR}/setup.ini" "/etc/versa-agi/setup.ini"; do
@@ -1281,17 +1311,15 @@ fi
 
 # ─── Step: Update paths.env ────────────────────────
 if [ -f "${PATHS_ENV}" ]; then
-  # For Intel SYCL: only the active model is available at runtime (single-model constraint)
-  if [ "${GPU_BACKEND}" = "intel" ]; then
-    RUNTIME_MODELS="${SYCL_ACTIVE_MODEL}"
-  else
-    RUNTIME_MODELS="${LOCAL_MODELS}"
-  fi
+  # All downloaded models are always available — Docker runs in Router Mode
+  # (--models-dir) so the server auto-discovers GGUFs on demand.
+  RUNTIME_MODELS="${LOCAL_MODELS}"
   for kv in \
     "VERSA_LOCAL_AI_ENABLED=\"true\"" \
     "VERSA_EXECUTION_MODE=\"hybrid\"" \
     "VERSA_GPU_BACKEND=\"${GPU_BACKEND}\"" \
-    "VERSA_LOCAL_MODELS=\"${RUNTIME_MODELS}\""; do
+    "VERSA_LOCAL_MODELS=\"${RUNTIME_MODELS}\"" \
+    "VERSA_MODEL_LOADING_STRATEGY=\"${MODEL_LOADING_STRATEGY}\""; do
     KEY="${kv%%=*}"
     if grep -q "^${KEY}=" "${PATHS_ENV}"; then
       sed -i "s|^${KEY}=.*|${kv}|" "${PATHS_ENV}"

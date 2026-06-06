@@ -2,6 +2,7 @@
 System reader — CRON state, disk, memory, processes.
 """
 
+import os
 import shutil
 import subprocess
 from typing import Optional
@@ -388,6 +389,29 @@ class SystemReader:
         """Check VERSA_THIRD_PARTY_ENABLED in paths.env."""
         return self._read_paths_env("VERSA_THIRD_PARTY_ENABLED", "false").lower() == "true"
 
+    def get_loading_strategy(self) -> str:
+        """Get model loading strategy from paths.env: 'single' or 'router'.
+
+        'router' — all downloaded models are available; the server loads on demand.
+        'single' — one model loaded at a time (legacy SYCL behaviour).
+        """
+        return self._read_paths_env("VERSA_MODEL_LOADING_STRATEGY", "single")
+
+    def get_active_local_model(self) -> str:
+        """Get the single active (VRAM-resident) local model from paths.env.
+
+        Only meaningful when model_loading_strategy=single. In router mode
+        all models are available and this returns empty string.
+
+        Written by ``agictl model activate`` and synced by
+        ``agictl model refresh`` on client topologies.
+
+        Returns empty string if not set or in router mode.
+        """
+        if self.get_loading_strategy() == "router":
+            return ""  # No single active model in router mode
+        return self._read_paths_env("VERSA_ACTIVE_LOCAL_MODEL", "")
+
     def get_coa_approved_models(self) -> list[str]:
         """Get COA-approved model allowlist from paths.env.
 
@@ -398,6 +422,29 @@ class SystemReader:
         if raw:
             return [m.strip() for m in raw.split(",") if m.strip()]
         return self.get_cloud_models()
+
+    def get_tunnel_host(self) -> str:
+        """Get the remote inference server hostname from client_config.json.
+
+        Only meaningful when topology=client. Returns empty string if
+        not configured or file missing.
+        """
+        import json
+        cfg_path = "/etc/versa-agi/client_config.json"
+        try:
+            with open(cfg_path, "r") as f:
+                cfg = json.load(f)
+            return cfg.get("tunnel_host", "")
+        except Exception:
+            return ""
+
+    def get_watchdog_ssh_key(self) -> str:
+        """Get the SSH key path for the watchdog user.
+
+        This key is used by the SSH tunnel and for remote command
+        execution on inference servers (client topology).
+        """
+        return f"/home/{self.watchdog_user}/.ssh/versa_agi_ed25519"
 
     def _read_paths_env(self, key: str, default: str = "") -> str:
         """Read a single key from /etc/versa-agi/paths.env."""

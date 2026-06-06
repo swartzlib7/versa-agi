@@ -23,6 +23,8 @@ _FALLBACK_CONTEXT_MAP: dict[str, tuple[int, int]] = {
     # Cloud models (context managed server-side)
     "gemini":       (0, 0),
     "grok":         (0, 0),
+    "gpt":          (0, 0),
+    "claude":       (0, 0),
     # Qwen 3
     "qwen3:32b":    (32768, 131072),
     "qwen3.6:35b":  (32768, 131072),

@@ -27,7 +27,7 @@
 > | **Edition 1** | Was built exclusively around `@google/gemini-cli`. Intelligence frameworks, context injection, and file behaviors are hardcoded to native Gemini CLI constraints. See the [Gemini CLI Repository](https://github.com/google-gemini/gemini-cli). |
 > | **2026.04** | **Local AI & Third-Party Cloud Providers.** Introduced hybrid execution — agents can run on local hardware via Ollama (NVIDIA/AMD) with native LangChain integrations for unified model routing. |
 > | **2026.05** | **Intel ARC & Distributed Topology.** Native Docker SYCL backend for Intel ARC GPUs (Battlemage, Alchemist). New **Server** installation mode enables developers to host inference on a dedicated GPU machine while running the agent system on their laptop. |
-> | **Edition 2** | **LangGraph Agent Harness.** Replaced `gemini-cli` with a custom Python-native LangGraph orchestration engine. Decommissioned Inference Server in favor of direct LangChain native model integrations (Google Gemini, Ollama, SYCL, and third-party Cloud models like xAI Grok). |
+> | **Edition 2** | **LangGraph Agent Harness.** Replaced `gemini-cli` with a custom Python-native LangGraph orchestration engine. Decommissioned Inference Server in favor of direct LangChain native model integrations (Google Gemini, Ollama, SYCL, and third-party Cloud models — xAI Grok, OpenAI GPT, Anthropic Claude). |
 
 > [!CAUTION]
 > **Cost Optimization & Caching:** The Gemini API offers massive pricing benefits through implicit and explicit Context Caching — ideal for agents constantly re-reading large conversation histories. API Keys or Service Accounts are required to unlock these features. The LangGraph harness tracks token usage natively per cycle and reports monthly aggregates in the agitop dashboard.
@@ -296,6 +296,8 @@ Credentials can be updated after installation without re-running the full setup:
 sudo agictl system set-key gemini <new-api-key>       # Propagates to all .env and .bashrc files
 sudo agictl system set-key versavoice <new-token>     # Propagates to all config JSON files
 sudo agictl system set-key xai <new-api-key>           # Updates xAI provider config
+sudo agictl system set-key openai <new-api-key>        # Updates OpenAI provider config
+sudo agictl system set-key anthropic <new-api-key>     # Updates Anthropic provider config
 ```
 
 Alternatively, the **agitop** dashboard provides a **🔑 API KEYS** button (purple, in the System Controls panel) for GUI-based credential management with masked key display and save feedback.
@@ -374,7 +376,6 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 | `gemini-2.5-flash-lite` | Flash | Ultra-fast, lightweight. High-volume, low-cost. |
 | `gemini-2.0-flash` | Flash | Previous gen. General-purpose multimodal. |
 | `gemini-2.0-flash-lite` | Flash | Previous gen. Simple, high-frequency tasks. |
-| `auto` | Auto | Auto-selects best model for the task. |
 
 > [!IMPORTANT]
 > **COA Model Restriction:** The Chief Orchestrator Agent (COA) requires reliable tool-calling and structured output. Only approved models can be assigned to the COA via the Dashboard. Configured in `setup.ini` → `[gemini].coa_approved_models`. Sub-agents are not restricted.
@@ -389,7 +390,11 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 | `qwen3.6:35b` | ✓ | ✓ | Qwen 3.6 35B MoE — ~21GB VRAM, multilingual |
 
 > [!TIP]
-> **Intel ARC Users:** Only one model can be loaded at a time. Switch models via `sudo agictl model activate <name>` — concurrency (parallel slots) is automatically recalculated based on your GPU VRAM and model size. Setup auto-detects Intel GPUs via `lspci` and prompts for confirmation. All local sub-agents share the active model. Model metadata is managed via the `models.ini` registry — add custom models with `sudo agictl model registry add <name> --repo <hf_repo> --file <gguf> --size <gb>`.
+> **Intel ARC Users:** Two model loading strategies are available, configurable via the agitop ⚙ Settings modal:
+> - **Router Mode** (default) — Multiple models loaded on demand from the GGUF directory. Each agent can use a different local model. The server evicts least-recently-used models when `sycl_models_max` is exceeded.
+> - **Single Mode** — All local agents share one active model. Switch models via `sudo agictl model activate <name>` — concurrency (parallel slots) is automatically recalculated based on your GPU VRAM and model size. Switching to Single Mode automatically sweeps all local agents to the active model.
+>
+> Setup auto-detects Intel GPUs via `lspci` and prompts for confirmation. Model metadata is managed via the `models.ini` registry — add custom models with `sudo agictl model registry add <name> --repo <hf_repo> --file <gguf> --size <gb>`.
 
 > [!TIP]
 > **Distributed Setup (Server + Client):** Install as **Server** on your GPU machine to serve inference over LAN. Install as **Client** on your laptop — setup will create an SSH tunnel (`versa-agi-tunnel.service`) for encrypted communication and display a public key to authorize on the server. Local AI traffic routes securely through the tunnel directly to the inference endpoint. Use `sudo agictl model refresh` on the client to pick up model changes and server configuration (context ceiling, concurrency) made on the server.
@@ -525,7 +530,7 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 - **Context Window Management** — `pre_model_hook` with `trim_messages` enforces a rolling context window (~32k tokens). Full history preserved in checkpoint; only the LLM input is trimmed. Conversation injection depth configurable per-agent (`conversation_depth`, default: 10 messages per contact).
 - **Budget Warnings** — Step budget warnings injected as genuine `HumanMessage` objects at 80%/95% thresholds, with hard termination at 100%.
 - **Local AI Backend** — Native LangChain integration. Three modes (`cloud`, `local`, `hybrid`). Standard backend uses Ollama (NVIDIA/AMD). Intel backend uses Docker SYCL with containerized llama.cpp for Intel ARC GPUs. Per-agent model assignment with ☁/🖥 dashboard indicators.
-- **Third-Party Cloud Models** — Native LangChain integrations for external LLM providers (e.g., xAI Grok, Anthropic). Extensible provider pattern. Dashboard shows 🔀 icons.
+- **Third-Party Cloud Models** — Native LangChain integrations for external LLM providers (xAI Grok, OpenAI GPT, Anthropic Claude). Extensible provider pattern — add new providers via the 3-key `setup.ini` convention (`{slug}_enabled`, `{slug}_api_key`, `{slug}_models`). Dashboard shows 🔀 icons.
 - **Web Search** — Local SearXNG integration for agent research (`agictl search web`). Runs as a Docker container (`searxng` + `searxng-redis`), bound to `127.0.0.1:8888`. LangGraph Tool #12, conditionally registered when enabled. Graceful degradation when disabled.
 
 #### ⚙️ Infrastructure

@@ -59,7 +59,7 @@ class AgitopApp(App):
             with Horizontal(id="agents-projects-row"):
                 yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
                 yield ProjectsPanel(self.tasks_reader, id="projects-panel")
-            yield FooterStatsPanel(self.agent_reader, id="footer-stats-panel")
+            yield FooterStatsPanel(self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel")
             with Collapsible(title="Tasks", id="tasks-collapsible", collapsed=True):
                 yield TasksPanel(self.tasks_reader, message_reader=self.message_reader, id="tasks-panel")
             with Collapsible(title="Messages", id="messages-collapsible", collapsed=True):

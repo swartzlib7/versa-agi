@@ -21,10 +21,6 @@ class ConfigReader:
             pass
         return {}
 
-    def get_mode(self) -> str:
-        """Get the agent mode (development/production)."""
-        return self.get_config().get("mode", "unknown")
-
     def get_spawn_state(self) -> str:
         """Get the spawn state (active/paused)."""
         return self.get_config().get("spawn_state", "unknown")

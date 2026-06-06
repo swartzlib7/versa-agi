@@ -89,8 +89,10 @@ echo "  Models: grok-4-1-fast-reasoning, grok-4.20-reasoning"
 # Update paths.env
 if [ -f "${PATHS_ENV}" ]; then
   # Aggregate all enabled third-party models
+  PROVIDERS="$(provider_ini_get third_party providers 'xai,openai,anthropic')"
   AGGREGATED=""
-  for provider_slug in xai; do
+  IFS=',' read -ra PROVIDER_LIST <<< "${PROVIDERS}"
+  for provider_slug in "${PROVIDER_LIST[@]}"; do
     p_enabled="$(provider_ini_get third_party "${provider_slug}_enabled" false)"
     p_models="$(provider_ini_get third_party "${provider_slug}_models" '')"
     if [ "${p_enabled}" = "true" ] && [ -n "${p_models}" ]; then

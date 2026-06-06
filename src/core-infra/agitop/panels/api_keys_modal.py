@@ -40,17 +40,32 @@ def _read_vv_token() -> str:
         return ""
 
 
-def _read_xai_key() -> str:
-    """Read current xAI API key from inference_endpoint.env."""
+def _read_env_key(env_var: str) -> str:
+    """Read an API key from inference_endpoint.env by variable name."""
     env_path = "/etc/versa-agi/inference_endpoint.env"
     try:
         with open(env_path, "r") as f:
             for line in f:
-                if line.startswith("XAI_API_KEY="):
+                if line.startswith(f"{env_var}="):
                     return line.split("=", 1)[1].strip()
     except Exception:
         pass
     return ""
+
+
+def _read_xai_key() -> str:
+    """Read current xAI API key from inference_endpoint.env."""
+    return _read_env_key("XAI_API_KEY")
+
+
+def _read_openai_key() -> str:
+    """Read current OpenAI API key from inference_endpoint.env."""
+    return _read_env_key("OPENAI_API_KEY")
+
+
+def _read_anthropic_key() -> str:
+    """Read current Anthropic API key from inference_endpoint.env."""
+    return _read_env_key("ANTHROPIC_API_KEY")
 
 
 def _is_proxy_enabled() -> bool:
@@ -85,9 +100,19 @@ class ApiKeysModal(ModalScreen):
             yield Static("", id="status-vv")
 
             # xAI API Key
-            yield Static("[b]xAI API Key[/]  [dim](Grok Third-Party Cloud Providers)[/]")
+            yield Static("[b]xAI API Key[/]  [dim](Grok)[/]")
             yield Input(placeholder="Enter xAI API Key...", password=True, id="input-xai-key")
             yield Static("", id="status-xai")
+
+            # OpenAI API Key
+            yield Static("[b]OpenAI API Key[/]  [dim](GPT Models)[/]")
+            yield Input(placeholder="Enter OpenAI API Key...", password=True, id="input-openai-key")
+            yield Static("", id="status-openai")
+
+            # Anthropic API Key
+            yield Static("[b]Anthropic API Key[/]  [dim](Claude Models)[/]")
+            yield Input(placeholder="Enter Anthropic API Key...", password=True, id="input-anthropic-key")
+            yield Static("", id="status-anthropic")
 
             # Result feedback
             yield Static("", id="api-keys-feedback")
@@ -101,20 +126,25 @@ class ApiKeysModal(ModalScreen):
         gemini_key = _read_gemini_key()
         vv_token = _read_vv_token()
         xai_key = _read_xai_key()
+        openai_key = _read_openai_key()
+        anthropic_key = _read_anthropic_key()
         proxy_enabled = _is_proxy_enabled()
 
         # Status line
         g_status = f"[green]✅ Set[/] — {_mask_key(gemini_key)}" if gemini_key else "[red]❌ Not configured[/]"
         v_status = f"[green]✅ Set[/] — {_mask_key(vv_token)}" if vv_token else "[red]❌ Not configured[/]"
         x_status_prefix = f"[cyan]Enabled[/]" if proxy_enabled else "[dim]Disabled[/]"
-        if xai_key:
-            x_status = f"[green]✅ Set[/] — {_mask_key(xai_key)}  ({x_status_prefix})"
-        else:
-            x_status = f"[red]❌ Not configured[/]  ({x_status_prefix})"
+
+        def _provider_status(key: str) -> str:
+            if key:
+                return f"[green]✅ Set[/] — {_mask_key(key)}  ({x_status_prefix})"
+            return f"[red]❌ Not configured[/]  ({x_status_prefix})"
 
         self.query_one("#status-gemini", Static).update(f"   {g_status}")
         self.query_one("#status-vv", Static).update(f"   {v_status}")
-        self.query_one("#status-xai", Static).update(f"   {x_status}")
+        self.query_one("#status-xai", Static).update(f"   {_provider_status(xai_key)}")
+        self.query_one("#status-openai", Static).update(f"   {_provider_status(openai_key)}")
+        self.query_one("#status-anthropic", Static).update(f"   {_provider_status(anthropic_key)}")
         self.query_one("#api-keys-status", Static).update(
             "[dim]Enter a new value to update. Leave blank to keep current.[/]"
         )
@@ -124,6 +154,8 @@ class ApiKeysModal(ModalScreen):
             "gemini": gemini_key,
             "versavoice": vv_token,
             "xai": xai_key,
+            "openai": openai_key,
+            "anthropic": anthropic_key,
         }
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -137,6 +169,8 @@ class ApiKeysModal(ModalScreen):
         new_gemini = self.query_one("#input-gemini-key", Input).value.strip()
         new_vv = self.query_one("#input-vv-token", Input).value.strip()
         new_xai = self.query_one("#input-xai-key", Input).value.strip()
+        new_openai = self.query_one("#input-openai-key", Input).value.strip()
+        new_anthropic = self.query_one("#input-anthropic-key", Input).value.strip()
 
         changes = []
         if new_gemini and new_gemini != self._original.get("gemini", ""):
@@ -145,6 +179,10 @@ class ApiKeysModal(ModalScreen):
             changes.append(("versavoice", new_vv))
         if new_xai and new_xai != self._original.get("xai", ""):
             changes.append(("xai", new_xai))
+        if new_openai and new_openai != self._original.get("openai", ""):
+            changes.append(("openai", new_openai))
+        if new_anthropic and new_anthropic != self._original.get("anthropic", ""):
+            changes.append(("anthropic", new_anthropic))
 
         if not changes:
             self.query_one("#api-keys-feedback", Static).update(

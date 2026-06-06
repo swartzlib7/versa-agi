@@ -158,7 +158,7 @@ def system_config_set(key, value):
         sys.exit(1)
 
 @system.command("set-key", hidden=True)
-@click.argument("key_type", type=click.Choice(["gemini", "versavoice", "xai"]))
+@click.argument("key_type", type=click.Choice(["gemini", "versavoice", "xai", "openai", "anthropic"]))
 @click.argument("value")
 def system_set_key(key_type, value):
     """Update an API key/token and propagate to all locations. Requires root.
@@ -166,7 +166,9 @@ def system_set_key(key_type, value):
     Key types:
       gemini     - Gemini API Key → coa.env, *.env, .bashrc, setup.ini
       versavoice - VersaVoice API Token → coa_config.json, *_config.json, setup.ini
-      xai        - xAI API Key → inference_endpoint.env, setup.ini → restarts Inference Server
+      xai        - xAI API Key → inference_endpoint.env, setup.ini
+      openai     - OpenAI API Key → inference_endpoint.env, setup.ini
+      anthropic  - Anthropic API Key → inference_endpoint.env, setup.ini
     """
     import glob
     import re
@@ -308,12 +310,66 @@ def system_set_key(key_type, value):
         # setup.ini
         _ini_set("third_party", "xai_api_key", value)
 
-        # Restart Inference Server if running
-        import subprocess as _sp
-        result = _sp.run(["systemctl", "is-active", "inference_endpoint"], capture_output=True, text=True)
-        if result.stdout.strip() == "active":
-            _sp.run(["systemctl", "restart", "inference_endpoint"], check=False)
-            updated_files.append("inference_endpoint.service (restarted)")
+    # ════════════════════════════════════════════════
+    # OPENAI API KEY
+    # ════════════════════════════════════════════════
+    elif key_type == "openai":
+        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
+        env_var = "OPENAI_API_KEY"
+        if os.path.isfile(inference_endpoint_env):
+            if _sed_replace(inference_endpoint_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(inference_endpoint_env)
+            else:
+                # Key line doesn't exist yet — append it
+                try:
+                    with open(inference_endpoint_env, "a") as f:
+                        f.write(f"\n{env_var}={value}\n")
+                    updated_files.append(inference_endpoint_env)
+                except Exception as e:
+                    errors.append(f"{inference_endpoint_env}: {e}")
+        else:
+            try:
+                with open(inference_endpoint_env, "w") as f:
+                    f.write(f"{env_var}={value}\n")
+                os.chmod(inference_endpoint_env, 0o600)
+                import subprocess as _sp
+                _sp.run(["chown", "root:root", inference_endpoint_env], check=False)
+                updated_files.append(inference_endpoint_env)
+            except Exception as e:
+                errors.append(f"{inference_endpoint_env}: {e}")
+
+        # setup.ini
+        _ini_set("third_party", "openai_api_key", value)
+
+    # ════════════════════════════════════════════════
+    # ANTHROPIC API KEY
+    # ════════════════════════════════════════════════
+    elif key_type == "anthropic":
+        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
+        env_var = "ANTHROPIC_API_KEY"
+        if os.path.isfile(inference_endpoint_env):
+            if _sed_replace(inference_endpoint_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(inference_endpoint_env)
+            else:
+                try:
+                    with open(inference_endpoint_env, "a") as f:
+                        f.write(f"\n{env_var}={value}\n")
+                    updated_files.append(inference_endpoint_env)
+                except Exception as e:
+                    errors.append(f"{inference_endpoint_env}: {e}")
+        else:
+            try:
+                with open(inference_endpoint_env, "w") as f:
+                    f.write(f"{env_var}={value}\n")
+                os.chmod(inference_endpoint_env, 0o600)
+                import subprocess as _sp
+                _sp.run(["chown", "root:root", inference_endpoint_env], check=False)
+                updated_files.append(inference_endpoint_env)
+            except Exception as e:
+                errors.append(f"{inference_endpoint_env}: {e}")
+
+        # setup.ini
+        _ini_set("third_party", "anthropic_api_key", value)
 
     # ── Report result ──
     if errors:
@@ -690,6 +746,37 @@ def _resolve_sycl_active_model():
     return ""
 
 
+def _resolve_loading_strategy():
+    """Read model_loading_strategy from setup.ini. Returns 'single' or 'router'."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return cfg.get("local_ai", "model_loading_strategy", fallback="single")
+    return "single"
+
+
+def _resolve_gguf_for_model(model_name):
+    """Look up GGUF filename from models.ini [sycl_models] section.
+    Returns the GGUF filename string, or the model_name itself as fallback."""
+    registry = _load_sycl_registry()
+    if model_name in registry:
+        return registry[model_name]["file"]
+    return model_name
+
+
+def _resolve_sycl_models_max():
+    """Read sycl_models_max from setup.ini (fallback: 1)."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return int(cfg.get("local_ai", "sycl_models_max", fallback="1"))
+    return 1
+
+
 def _resolve_sycl_concurrency():
     """Read sycl_parallel, sycl_ctx_size, sycl_vram_gb from setup.ini.
     Returns (parallel, ctx_size, vram_gb) as ints."""
@@ -755,8 +842,13 @@ def _query_sycl_models():
     return models
 
 
-def _docker_restart_sycl(gguf_filename, parallel=None, ctx_size=None):
-    """Stop/rm/run the SYCL Docker container with a new model. Returns (ok, message)."""
+def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
+    """Stop/rm/run the SYCL Docker container in Router Mode (--models-dir).
+
+    Only called when infrastructure parameters change (parallel, ctx, models-max).
+    Model switching does NOT require a Docker restart — the server loads on demand.
+    Returns (ok, message).
+    """
     # Stop existing
     subprocess.run(["docker", "stop", SYCL_CONTAINER], capture_output=True)
     subprocess.run(["docker", "rm", SYCL_CONTAINER], capture_output=True)
@@ -777,6 +869,7 @@ def _docker_restart_sycl(gguf_filename, parallel=None, ctx_size=None):
     # llama-server --ctx-size is TOTAL context shared across all parallel slots.
     # sycl_ctx_size is per-slot → multiply by parallel for the launch.
     _ctx_total = str(_per_slot_ctx * int(_parallel))
+    _models_max = str(models_max or _resolve_sycl_models_max())
 
     cmd = [
         "docker", "run", "-d", "--name", SYCL_CONTAINER,
@@ -785,7 +878,8 @@ def _docker_restart_sycl(gguf_filename, parallel=None, ctx_size=None):
         "-v", f"{SYCL_MODEL_DIR}:/models",
         "-p", f"{sycl_port}:8080",
         sycl_image,
-        "-m", f"/models/{gguf_filename}",
+        "--models-dir", "/models",
+        "--models-max", _models_max,
         "-ngl", "99", "--host", "0.0.0.0", "--port", "8080",
         "--parallel", _parallel, "--ctx-size", _ctx_total,
     ]
@@ -1101,15 +1195,28 @@ def _regenerate_inference_endpoint_config():
     if local_enabled == "true" and local_models_raw:
         gpu_backend = cfg.get("local_ai", "gpu_backend", fallback="standard")
         if gpu_backend == "intel":
-            # Intel: single active model via Docker llama-server (OpenAI-compatible)
+            # Intel SYCL: Docker llama-server (OpenAI-compatible)
             sycl_port = cfg.get("local_ai", "sycl_port", fallback="8080")
-            active_model = cfg.get("local_ai", "sycl_active_model", fallback="")
-            if active_model:
-                lines.append(f"  - model_name: {active_model}\n")
-                lines.append("    inference_endpoint_params:\n")
-                lines.append(f"      model: openai/{active_model}\n")
-                lines.append(f"      api_base: http://localhost:{sycl_port}/v1\n")
-                lines.append("      api_key: none\n")
+            strategy = cfg.get("local_ai", "model_loading_strategy", fallback="single")
+            if strategy == "router":
+                # Router: register ALL downloaded local models — server loads on demand
+                for model in [m.strip() for m in local_models_raw.split(",") if m.strip()]:
+                    gguf = _resolve_gguf_for_model(model)
+                    lines.append(f"  - model_name: {model}\n")
+                    lines.append("    inference_endpoint_params:\n")
+                    lines.append(f"      model: openai/{gguf}\n")
+                    lines.append(f"      api_base: http://localhost:{sycl_port}/v1\n")
+                    lines.append("      api_key: none\n")
+            else:
+                # Single: only the active model (existing behavior)
+                active_model = cfg.get("local_ai", "sycl_active_model", fallback="")
+                if active_model:
+                    gguf = _resolve_gguf_for_model(active_model)
+                    lines.append(f"  - model_name: {active_model}\n")
+                    lines.append("    inference_endpoint_params:\n")
+                    lines.append(f"      model: openai/{gguf}\n")
+                    lines.append(f"      api_base: http://localhost:{sycl_port}/v1\n")
+                    lines.append("      api_key: none\n")
         else:
             # Standard: all models via Ollama
             for model in [m.strip() for m in local_models_raw.split(",") if m.strip()]:
@@ -1174,7 +1281,72 @@ def model_list(as_table):
     gpu_backend = _resolve_gpu_backend()
 
     if gpu_backend == "intel":
-        # Intel: list GGUF files in model dir
+        # Check topology — client delegates to the server via SSH
+        import configparser as _cp
+        _ini = _cp.ConfigParser()
+        for p in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+            if os.path.isfile(p):
+                _ini.read(p)
+                break
+        _topology = _ini.get("local_ai", "topology", fallback="local")
+
+        if _topology == "client":
+            # Delegate to server — SSH and run agictl model list there
+            import subprocess, json as _json
+            client_cfg_path = "/etc/versa-agi/client_config.json"
+            tunnel_host = None
+            if os.path.isfile(client_cfg_path):
+                with open(client_cfg_path) as f:
+                    tunnel_host = _json.load(f).get("tunnel_host")
+            if not tunnel_host:
+                json_response(False, error="No tunnel_host configured — run setup_local.sh")
+                sys.exit(1)
+
+            wd_user = _ini.get("users", "watchdog", fallback="watchdog")
+            ssh_key = f"/home/{wd_user}/.ssh/versa_agi_ed25519"
+            try:
+                result = subprocess.run(
+                    ["sudo", "-u", wd_user, "ssh", "-i", ssh_key,
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                     f"{wd_user}@{tunnel_host}",
+                     "agictl model list"],
+                    capture_output=True, text=True, timeout=20
+                )
+                if result.returncode != 0:
+                    json_response(False, error=f"Server returned error: {result.stderr.strip()}")
+                    sys.exit(1)
+                models = _json.loads(result.stdout)
+            except subprocess.TimeoutExpired:
+                json_response(False, error="SSH connection to server timed out")
+                sys.exit(1)
+            except Exception as e:
+                json_response(False, error=f"Failed to query server: {e}")
+                sys.exit(1)
+
+            if as_table:
+                table = Table(title=f"Local Models — Intel SYCL (via {tunnel_host})")
+                table.add_column("Model", style="cyan")
+                table.add_column("Active", style="green")
+                table.add_column("Registered", style="green")
+                table.add_column("Downloaded", style="green")
+                table.add_column("Size", style="yellow")
+                for m in models:
+                    table.add_row(
+                        f"{'★ ' if m.get('active') else '  '}{m['name']}",
+                        "✓" if m.get("active") else "—",
+                        "✓" if m.get("registered") else "✗",
+                        "✓" if m.get("downloaded") else "✗",
+                        m.get("size") or "—",
+                    )
+                console.print(table)
+            else:
+                for m in models:
+                    m.pop("size_bytes", None)
+                print(json.dumps(models, indent=2))
+            return
+
+        # Local/server topology: check filesystem directly
         registered, _ = _read_ini_csv("local_ai", "local_models")
         sycl_models = _query_sycl_models()
         downloaded_names = {m["name"] for m in sycl_models}
@@ -1637,14 +1809,13 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
 @click.option("--parallel", "parallel_override", type=int, default=None,
               help="Override parallel slot count (1-8). Persisted to setup.ini.")
 def model_activate(name, ctx_override, parallel_override):
-    """Switch the active model on the Intel SYCL backend.
+    """Switch the active/default model on the Intel SYCL backend.
 
-    Restarts the Docker container with the new model, updates setup.ini,
-    regenerates inference_endpoint_config.yaml, and syncs all local sub-agents.
+    Updates setup.ini, regenerates inference_endpoint_config.yaml, and
+    (in single mode) syncs all local sub-agents. Docker is only restarted
+    when infrastructure parameters (--ctx, --parallel) change.
+
     Only available when gpu_backend=intel. Requires root (sudo).
-
-    Current ctx/parallel values are read from setup.ini. Use --ctx and
-    --parallel to override (new values are persisted for future activations).
 
     Examples:
 
@@ -1673,103 +1844,135 @@ def model_activate(name, ctx_override, parallel_override):
     gguf_file = registry[name]["file"]
     gguf_path = os.path.join(SYCL_MODEL_DIR, gguf_file)
     if not os.path.isfile(gguf_path):
-        json_response(False, error=f"Model not downloaded. Run first: sudo agictl model add {name}")
-        sys.exit(1)
+        # Fallback: scan directory for the file (handles symlinks, case drift)
+        found_path = None
+        if os.path.isdir(SYCL_MODEL_DIR):
+            for f in os.listdir(SYCL_MODEL_DIR):
+                if f == gguf_file or f.lower() == gguf_file.lower():
+                    candidate = os.path.join(SYCL_MODEL_DIR, f)
+                    if os.path.isfile(candidate) or os.path.islink(candidate):
+                        found_path = candidate
+                        break
+        if found_path:
+            gguf_path = found_path
+            gguf_file = os.path.basename(found_path)
+        else:
+            dir_listing = []
+            if os.path.isdir(SYCL_MODEL_DIR):
+                dir_listing = [f for f in os.listdir(SYCL_MODEL_DIR) if f.endswith(".gguf")]
+            json_response(False, error=(
+                f"Model not downloaded. Expected: {gguf_path}\n"
+                f"Directory {SYCL_MODEL_DIR} contains: {dir_listing or '(empty or missing)'}\n"
+                f"Run first: sudo agictl model add {name}"
+            ))
+            sys.exit(1)
 
-    # Already active?
+    strategy = _resolve_loading_strategy()
     current_active = _resolve_sycl_active_model()
-    if name == current_active and ctx_override is None and parallel_override is None:
+
+    # Already active? (only relevant in single mode where sycl_active_model matters)
+    if strategy == "single" and name == current_active and ctx_override is None and parallel_override is None:
         json_response(True, model=name, action="already_active", message=f"'{name}' is already the active model")
         return
 
     errors = []
     steps = []
+    affected = []
 
-    # ── 1. Show affected agents ──
-    affected = _update_all_local_agent_models(name)
-    if affected:
-        agent_list = [{"agent": a, "previous_model": m} for a, m in affected]
-        steps.append(f"updated {len(affected)} agent(s)")
-        click.echo(f"\n  Affected agents ({len(affected)}):", err=True)
-        for a, m in affected:
-            click.echo(f"    • {a}: {m} → {name}", err=True)
-        click.echo("", err=True)
+    # ── 1. Agent sync (strategy-dependent) ──
+    if strategy == "single":
+        affected = _update_all_local_agent_models(name)
+        if affected:
+            steps.append(f"updated {len(affected)} agent(s)")
+            click.echo(f"\n  Affected agents ({len(affected)}):", err=True)
+            for a, m in affected:
+                click.echo(f"    • {a}: {m} → {name}", err=True)
+            click.echo("", err=True)
+        else:
+            steps.append("no agents affected")
     else:
-        steps.append("no agents affected")
+        # Router: agents keep individual assignments — no sweep
+        steps.append("router mode — agents keep individual model assignments")
 
-    # ── 1b. Recalculate concurrency for new model ──
+    # ── 2. Concurrency info ──
     model_size_gb = registry[name].get("size_gb", 10)
     ini_parallel, ini_ctx_size, ini_vram_gb = _resolve_sycl_concurrency()
-
-    # Apply overrides (if provided)
     use_ctx = ctx_override if ctx_override is not None else ini_ctx_size
     recommended, max_slots, free_vram = _calculate_concurrency(ini_vram_gb, model_size_gb, use_ctx)
-    use_parallel = parallel_override if parallel_override is not None else recommended
+    use_parallel = parallel_override if parallel_override is not None else ini_parallel
 
     click.echo(f"  Concurrency for {name}:", err=True)
     click.echo(f"    Model: ~{model_size_gb}GB, VRAM: {ini_vram_gb}GB, Free: ~{free_vram}GB", err=True)
     click.echo(f"    Slots: {use_parallel} (recommended: {recommended}, max: {max_slots})", err=True)
     click.echo(f"    Context: {use_ctx} per slot", err=True)
-    if ctx_override is not None or parallel_override is not None:
-        overrides = []
-        if ctx_override is not None:
-            overrides.append(f"ctx {ini_ctx_size}→{ctx_override}")
-        if parallel_override is not None:
-            overrides.append(f"parallel {ini_parallel}→{parallel_override}")
-        click.echo(f"    Override: {', '.join(overrides)}", err=True)
-    else:
-        click.echo(f"    Tip: override with --ctx <size> --parallel <slots>", err=True)
 
-    # ── 2. Restart Docker container with new model ──
-    click.echo(f"  Restarting Docker container with {name} (parallel={use_parallel}, ctx={use_ctx})...", err=True)
-    ok, msg = _docker_restart_sycl(gguf_file, parallel=use_parallel, ctx_size=use_ctx)
-    if ok:
-        steps.append(msg)
+    # ── 3. Docker restart ONLY if infrastructure params changed ──
+    infra_changed = (ctx_override is not None or parallel_override is not None)
+    if infra_changed:
+        click.echo(f"  Restarting Docker (infrastructure params changed)...", err=True)
+        ok, msg = _docker_restart_sycl(parallel=use_parallel, ctx_size=use_ctx)
+        if ok:
+            steps.append(msg)
+        else:
+            errors.append(msg)
     else:
-        errors.append(msg)
+        steps.append("Docker restart not needed (config-only change)")
 
-    # ── 3. Update setup.ini (comment-preserving, sed-style) ──
+    # ── 4. Update setup.ini (comment-preserving, sed-style) ──
     ini_path = SETUP_INI_CANONICAL
     if not os.path.isfile(ini_path):
         ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
     if os.path.isfile(ini_path):
-        _update_ini_key(ini_path, "local_ai", "sycl_active_model", name)
-        _update_ini_key(ini_path, "local_ai", "default_model", name)
-        _update_ini_key(ini_path, "local_ai", "sycl_parallel", str(use_parallel))
+        if strategy == "single":
+            _update_ini_key(ini_path, "local_ai", "sycl_active_model", name)
+            _update_ini_key(ini_path, "local_ai", "default_model", name)
+        else:
+            # Router: update default_model only — agents keep individual assignments
+            _update_ini_key(ini_path, "local_ai", "default_model", name)
         if ctx_override is not None:
             _update_ini_key(ini_path, "local_ai", "sycl_ctx_size", str(use_ctx))
+        if parallel_override is not None:
+            _update_ini_key(ini_path, "local_ai", "sycl_parallel", str(use_parallel))
         _sync_ini_to_source(ini_path)
-        steps.append(f"setup.ini updated (parallel={use_parallel}, ctx={use_ctx})")
+        steps.append(f"setup.ini updated (strategy={strategy})")
     else:
         errors.append("setup.ini not found")
 
-    # ── 4. Regenerate inference_endpoint_config.yaml + restart ──
+    # ── 5. Regenerate inference_endpoint_config.yaml + restart ──
     ok, msg = _regenerate_inference_endpoint_config()
     if ok:
         steps.append(msg)
     else:
         errors.append(msg)
 
-    # ── 5. Update paths.env — single active model constraint ──
-    if _update_paths_env_key("VERSA_LOCAL_MODELS", name):
-        steps.append(f"paths.env VERSA_LOCAL_MODELS → {name}")
+    # ── 6. Update paths.env — all models always available (router architecture) ──
+    all_local, _ = _read_ini_csv("local_ai", "local_models")
+    all_local_str = ",".join(all_local) if all_local else name
+    if _update_paths_env_key("VERSA_LOCAL_MODELS", all_local_str):
+        steps.append(f"paths.env VERSA_LOCAL_MODELS → {all_local_str}")
     else:
-        errors.append("paths.env update failed")
+        errors.append("paths.env VERSA_LOCAL_MODELS update failed")
 
-    # ── 6. Write server_config.json for client topology sync ──
+    if strategy == "single":
+        if _update_paths_env_key("VERSA_ACTIVE_LOCAL_MODEL", name):
+            steps.append(f"paths.env VERSA_ACTIVE_LOCAL_MODEL → {name}")
+
+    # ── 7. Write server_config.json for client topology sync ──
     try:
         import json as _json, datetime
         server_config = {
             "sycl_ctx_size": use_ctx,
             "sycl_parallel": use_parallel,
+            "sycl_models_max": _resolve_sycl_models_max(),
             "sycl_vram_gb": ini_vram_gb,
-            "active_model": name,
+            "active_model": name if strategy == "single" else current_active,
+            "default_model": name,
+            "model_loading_strategy": strategy,
             "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         server_config_path = "/etc/versa-agi/server_config.json"
         with open(server_config_path, "w") as f:
             _json.dump(server_config, f, indent=2)
-        # Make readable by watchdog user (SSH-based client sync reads as watchdog)
         os.chmod(server_config_path, 0o640)
         try:
             import pwd, configparser as _cp
@@ -1779,7 +1982,7 @@ def model_activate(name, ctx_override, parallel_override):
             wdog = pwd.getpwnam(_wd_name)
             os.chown(server_config_path, wdog.pw_uid, wdog.pw_gid)
         except (KeyError, OSError):
-            pass  # watchdog user may not exist on dev machines
+            pass
         steps.append("server_config.json updated")
     except Exception as e:
         errors.append(f"server_config.json write failed: {e}")
@@ -1791,6 +1994,7 @@ def model_activate(name, ctx_override, parallel_override):
         result_data = {
             "model": name,
             "action": "activated",
+            "strategy": strategy,
             "steps": steps,
             "previous_model": current_active,
         }
@@ -1801,12 +2005,14 @@ def model_activate(name, ctx_override, parallel_override):
 
 @model.command("refresh")
 def model_refresh():
-    """Query remote inference server and update local model registry.
+    """Query remote inference server and sync model inventory.
 
-    For client topology only — syncs VERSA_LOCAL_MODELS from
-    the server's /v1/models endpoint.
+    Discovers ALL downloaded models on the server via 'agictl model list'
+    (SSH for client topology, direct call for local topology). Updates
+    VERSA_LOCAL_MODELS with the full list and VERSA_ACTIVE_LOCAL_MODEL
+    with the running model.
     """
-    import configparser, urllib.request, json as _json
+    import configparser, json as _json
 
     # Read topology from setup.ini
     ini_path = SETUP_INI_CANONICAL
@@ -1824,52 +2030,100 @@ def model_refresh():
         json_response(False, error="model refresh is for client/local topologies — this is a server")
         sys.exit(1)
 
-    # For local topology, just read /v1/models from localhost
-    if topology == "local":
-        inference_url = _read_paths_env_key("VERSA_INFERENCE_URL") or "http://localhost:4000"
-        master_key = ""
-    else:  # client
-        inference_url = cfg.get("local_ai", "remote_inference_url", fallback="")
-        master_key = cfg.get("local_ai", "inference_master_key", fallback="")
 
-    if not inference_url:
-        json_response(False, error="No Inference URL configured (set remote_inference_url in setup.ini)")
+    # ── Phase 1: Discover ALL models and active model ──
+    # For SYCL, only one model is loaded in VRAM at a time, but the server
+    # may have many GGUFs downloaded. We query 'agictl model list' which
+    # returns structured JSON with name, downloaded, and active fields.
+    all_downloaded = []
+    active_model = ""
+    server_config_synced = {}
+
+    if topology == "client":
+        import subprocess
+        # Read SSH credentials from client_config.json
+        client_cfg_path = "/etc/versa-agi/client_config.json"
+        tunnel_host = None
+        if os.path.isfile(client_cfg_path):
+            with open(client_cfg_path) as f:
+                client_cfg = _json.load(f)
+            tunnel_host = client_cfg.get("tunnel_host")
+
+        if not tunnel_host:
+            json_response(False, error="No tunnel_host in client_config.json — run setup_local.sh to configure client mode")
+            sys.exit(1)
+
+        wd_user = cfg.get("users", "watchdog", fallback="watchdog")
+        ssh_key = f"/home/{wd_user}/.ssh/versa_agi_ed25519"
+        ssh_base = ["sudo", "-u", wd_user, "ssh", "-i", ssh_key,
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", "ConnectTimeout=5",
+                    "-o", "BatchMode=yes",
+                    f"{wd_user}@{tunnel_host}"]
+
+        # Query the server's model inventory via agictl
+        try:
+            result = subprocess.run(
+                ssh_base + ["agictl model list"],
+                capture_output=True, text=True, timeout=20
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                server_models = _json.loads(result.stdout)
+                for m in server_models:
+                    if m.get("downloaded"):
+                        all_downloaded.append(m["name"])
+                    if m.get("active"):
+                        active_model = m["name"]
+        except Exception:
+            pass  # SSH may fail — fall back gracefully
+
+        # Sync server_config.json (VRAM, ctx_size, parallel slots, etc.)
+        try:
+            remote_path = "/etc/versa-agi/server_config.json"
+            result = subprocess.run(
+                ssh_base + [f"cat {remote_path}"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                server_config_synced = _json.loads(result.stdout)
+
+                # Store key values in local setup.ini
+                for ini in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+                    if os.path.isfile(ini):
+                        try:
+                            if "sycl_ctx_size" in server_config_synced:
+                                _update_ini_key(ini, "local_ai", "sycl_ctx_size", str(server_config_synced["sycl_ctx_size"]))
+                            if "sycl_parallel" in server_config_synced:
+                                _update_ini_key(ini, "local_ai", "sycl_parallel", str(server_config_synced["sycl_parallel"]))
+                            if "sycl_vram_gb" in server_config_synced:
+                                _update_ini_key(ini, "local_ai", "sycl_vram_gb", str(server_config_synced["sycl_vram_gb"]))
+                        except Exception:
+                            pass  # best-effort
+        except Exception:
+            pass  # server_config.json may not exist yet — that's OK
+
+    else:
+        # Local topology — query models directly
+        sycl_models = _query_sycl_models()
+        for m in sycl_models:
+            if m.get("downloaded"):
+                all_downloaded.append(m["name"])
+            if m.get("active"):
+                active_model = m["name"]
+
+    # ── Phase 3: Resolve final model list ──
+    # Prefer filesystem scan; fall back to /v1/models if scan returned nothing
+    if all_downloaded:
+        models = all_downloaded
+    elif active_model:
+        models = [active_model]
+    else:
+        json_response(False, error="No models discovered — server may be unreachable")
         sys.exit(1)
-
-    # Query /v1/models
-    url = f"{inference_url.rstrip('/')}/v1/models"
-    req = urllib.request.Request(url)
-    if master_key:
-        req.add_header("Authorization", f"Bearer {master_key}")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read().decode())
-    except Exception as e:
-        json_response(False, error=f"Failed to query {url}: {e}")
-        sys.exit(1)
-
-    raw_models = [m["id"] for m in data.get("data", [])]
-    if not raw_models:
-        json_response(False, error="Server returned no models", url=url)
-        sys.exit(1)
-
-    # Translate GGUF filenames → friendly model keys via sycl_models registry.
-    # The server returns raw GGUF names (e.g. Qwen3.6-35B-A3B-UD-Q4_K_M.gguf)
-    # but the system uses friendly keys (e.g. qwen3.6:35b) everywhere.
-    registry = _load_sycl_registry()
-    gguf_to_friendly = {info["file"]: name for name, info in registry.items()}
-    models = []
-    for raw in raw_models:
-        friendly = gguf_to_friendly.get(raw)
-        if friendly:
-            models.append(friendly)
-        else:
-            # No registry match — keep raw name as fallback
-            models.append(raw)
 
     models_csv = ",".join(models)
 
-    # Update paths.env
+    # Update paths.env with full downloaded list
     _update_paths_env_key("VERSA_LOCAL_MODELS", models_csv)
 
     # Update setup.ini (both copies)
@@ -1880,55 +2134,20 @@ def model_refresh():
             except Exception:
                 pass  # best-effort
 
-    # ── Sync server_config.json via SSH (client topology only) ──
-    # The inference server doesn't serve this file — we read it from the
-    # server filesystem using the watchdog SSH key configured during setup.
-    server_config_synced = {}
-    if topology == "client":
-        try:
-            import subprocess
-            # Read SSH host from client_config.json
-            client_cfg_path = "/etc/versa-agi/client_config.json"
-            tunnel_host = None
-            if os.path.isfile(client_cfg_path):
-                with open(client_cfg_path) as f:
-                    client_cfg = _json.load(f)
-                tunnel_host = client_cfg.get("tunnel_host")
+    # ── Phase 4: Sync active model ──
+    # Priority: server_config.json > /v1/models > first in list
+    if server_config_synced and server_config_synced.get("active_model"):
+        active_model = server_config_synced["active_model"]
+    elif not active_model and models:
+        active_model = models[0]
+    if active_model:
+        _update_paths_env_key("VERSA_ACTIVE_LOCAL_MODEL", active_model)
 
-            if tunnel_host:
-                # Resolve watchdog user name from setup.ini (may be custom)
-                wd_user = cfg.get("users", "watchdog", fallback="watchdog")
-                ssh_key = f"/home/{wd_user}/.ssh/versa_agi_ed25519"
-                remote_path = "/etc/versa-agi/server_config.json"
-                result = subprocess.run(
-                    ["sudo", "-u", wd_user, "ssh",
-                     "-i", ssh_key,
-                     "-o", "StrictHostKeyChecking=accept-new",
-                     "-o", "ConnectTimeout=5",
-                     "-o", "BatchMode=yes",
-                     f"{wd_user}@{tunnel_host}",
-                     f"cat {remote_path}"],
-                    capture_output=True, text=True, timeout=15
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    server_config_synced = _json.loads(result.stdout)
-
-                    # Store key values in local setup.ini
-                    for ini in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
-                        if os.path.isfile(ini):
-                            try:
-                                if "sycl_ctx_size" in server_config_synced:
-                                    _update_ini_key(ini, "local_ai", "sycl_ctx_size", str(server_config_synced["sycl_ctx_size"]))
-                                if "sycl_parallel" in server_config_synced:
-                                    _update_ini_key(ini, "local_ai", "sycl_parallel", str(server_config_synced["sycl_parallel"]))
-                                if "sycl_vram_gb" in server_config_synced:
-                                    _update_ini_key(ini, "local_ai", "sycl_vram_gb", str(server_config_synced["sycl_vram_gb"]))
-                            except Exception:
-                                pass  # best-effort
-        except Exception:
-            pass  # server_config.json may not exist yet — that's OK
-
-    json_response(True, models=models, source=url, server_config=server_config_synced if server_config_synced else None)
+    json_response(True,
+                  models=models,
+                  active_model=active_model,
+                  source="ssh+agictl" if topology == "client" else "local",
+                  server_config=server_config_synced if server_config_synced else None)
 
 
 # ─── Model Registry Subcommand Group ────────────────────
@@ -4352,7 +4571,7 @@ def cycle_start(agent_name):
     cycle_id = f"{agent_name}-{int(time.time())}"
     try:
         conn = sqlite3.connect(cycles_db, timeout=5)
-        conn.execute("INSERT INTO cycles (id, started_at) VALUES (?, datetime('now'))", (cycle_id,))
+        conn.execute("INSERT INTO cycles (id, started_at, session_start_ts) VALUES (?, datetime('now'), datetime('now'))", (cycle_id,))
         conn.commit()
         conn.close()
         json_response(True, cycle_id=cycle_id, agent=agent_name)
@@ -4368,6 +4587,23 @@ def cycle_end(summary, agent_name):
     sum_text = " ".join(summary)
     if not agent_name:
         agent_name = get_agent_name()
+
+    # ── Awareness Enforcement Gate ──
+    # Check if agent logged any awareness this cycle (advisory, not hard-blocking)
+    awareness_warning = False
+    try:
+        conn = sqlite3.connect(cycles_db, timeout=5)
+        row = conn.execute(
+            "SELECT session_start_ts, last_awareness_ts FROM cycles WHERE id LIKE ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+            (f"{agent_name}-%",)
+        ).fetchone()
+        if row and row[0]:  # session_start_ts exists
+            if not row[1] or row[1] <= row[0]:  # no awareness_ts or older than session start
+                awareness_warning = True
+        conn.close()
+    except Exception:
+        pass
+
     try:
         conn = sqlite3.connect(cycles_db, timeout=5)
         conn.execute(
@@ -4392,6 +4628,10 @@ def cycle_end(summary, agent_name):
             aconn.close()
     except Exception:
         pass
+
+    if awareness_warning:
+        console.print("[yellow]⚠ AWARENESS NOT RECORDED — no conclusions or actions logged this cycle. "
+                      "Review your work and persist awareness before ending.[/yellow]", stderr=True)
 
     console.print(f"🛑 Cycle ended: {sum_text}")
     # Exit the tool subprocess cleanly. The parent harness detects this output
@@ -5177,6 +5417,426 @@ def project_git_setup():
         json_response(False, error=str(e))
         sys.exit(1)
 
+# ═══════════════════════════════════════════════════════
+# 6b. GAME — Strategic pursuit management
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def game():
+    """Strategic pursuit management."""
+    pass
+
+@game.command("add")
+@click.argument("name")
+@click.option("--postulate", default=None, help="The intended reality (vision statement)")
+@click.option("--posture", type=click.Choice(['exploratory','steady','aggressive','defensive']), default='exploratory')
+@click.option("--autonomy", type=click.Choice(['advisory','collaborative','autonomous']), default='collaborative')
+def game_add(name, postulate, posture, autonomy):
+    """Register a new strategic game."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        existing = conn.execute("SELECT id FROM games WHERE name=?", (name,)).fetchone()
+        if existing:
+            conn.close()
+            json_response(False, error=f"Game '{name}' already exists (id={existing[0]})")
+            sys.exit(1)
+        conn.execute(
+            "INSERT INTO games (name, postulate, posture, autonomy) VALUES (?, ?, ?, ?)",
+            (name, postulate, posture, autonomy)
+        )
+        conn.commit()
+        game_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        json_response(True, action="game_add", game_id=game_id, name=name, posture=posture, autonomy=autonomy)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game.command("update")
+@click.argument("game_id", type=int)
+@click.option("--name", default=None, help="Rename the game")
+@click.option("--postulate", default=None, help="Update the postulate")
+@click.option("--posture", type=click.Choice(['exploratory','steady','aggressive','defensive']), default=None)
+@click.option("--autonomy", type=click.Choice(['advisory','collaborative','autonomous']), default=None)
+@click.option("--freedoms", default=None, help="Freedoms summary text")
+@click.option("--barriers", default=None, help="Barriers summary text")
+@click.option("--milestones", default=None, help="JSON milestones")
+@click.option("--status", type=click.Choice(['active','paused','archived']), default=None)
+def game_update(game_id, name, postulate, posture, autonomy, freedoms, barriers, milestones, status):
+    """Update a game's strategic state."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        existing = conn.execute("SELECT id FROM games WHERE id=?", (game_id,)).fetchone()
+        if not existing:
+            conn.close()
+            json_response(False, error=f"Game id={game_id} not found")
+            sys.exit(1)
+        updates = []
+        params = []
+        field_map = {
+            "name": name, "postulate": postulate, "posture": posture,
+            "autonomy": autonomy, "freedoms_summary": freedoms,
+            "barriers_summary": barriers, "milestones": milestones, "status": status
+        }
+        for col, val in field_map.items():
+            if val is not None:
+                updates.append(f"{col}=?")
+                params.append(val)
+        if not updates:
+            conn.close()
+            json_response(False, error="No fields to update")
+            sys.exit(1)
+        # If posture or freedoms/barriers changed, update environment_assessed_at
+        if posture or freedoms or barriers:
+            updates.append("environment_assessed_at=datetime('now')")
+        updates.append("updated_at=datetime('now')")
+        params.append(game_id)
+        conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id=?", params)
+        conn.commit()
+        conn.close()
+        json_response(True, action="game_update", game_id=game_id, updated_fields=list(field_map.keys()))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game.command("show")
+@click.argument("game_id", type=int)
+def game_show(game_id):
+    """Show full details of a game including related projects and awareness."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Game id={game_id} not found")
+            sys.exit(1)
+        result = dict(row)
+        # Related projects
+        projects = conn.execute("SELECT id, name, status FROM projects WHERE game_id=?", (game_id,)).fetchall()
+        result["projects"] = [dict(p) for p in projects]
+        # Active awareness entries for this game
+        awareness = conn.execute(
+            "SELECT id, agent_name, type, content, status FROM agent_awareness WHERE subject_type='game' AND subject_id=? AND status='active'",
+            (str(game_id),)
+        ).fetchall()
+        result["active_awareness"] = [dict(a) for a in awareness]
+        conn.close()
+        print(json.dumps(result, indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@game.command("list")
+@click.option("--status", "game_status", default=None, help="Filter by status (default: all)")
+def game_list(game_status):
+    """List all games."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        if game_status:
+            rows = conn.execute("SELECT * FROM games WHERE status=? ORDER BY name", (game_status,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM games ORDER BY name").fetchall()
+        conn.close()
+        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@game.command("assign-project")
+@click.argument("game_id", type=int)
+@click.argument("project_id", type=int)
+def game_assign_project(game_id, project_id):
+    """Assign a project to a game (sets projects.game_id)."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        g = conn.execute("SELECT id FROM games WHERE id=?", (game_id,)).fetchone()
+        if not g:
+            conn.close()
+            json_response(False, error=f"Game id={game_id} not found")
+            sys.exit(1)
+        p = conn.execute("SELECT id, name FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not p:
+            conn.close()
+            json_response(False, error=f"Project id={project_id} not found")
+            sys.exit(1)
+        conn.execute("UPDATE projects SET game_id=?, updated_at=datetime('now') WHERE id=?", (game_id, project_id))
+        conn.commit()
+        conn.close()
+        json_response(True, action="game_assign_project", game_id=game_id, project_id=project_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+# ── Game Opponents (Competitive Intelligence) ──
+
+@game.group("opponent")
+def game_opponent():
+    """Manage competitive intelligence for projects."""
+    pass
+
+@game_opponent.command("add")
+@click.argument("project_id", type=int)
+@click.argument("name")
+@click.option("--type", "opp_type", type=click.Choice(['person','agent','business','association']), default='business')
+@click.option("--desc", default=None, help="Description of the opponent")
+@click.option("--sources", default=None, help="JSON: URLs, social handles, API endpoints")
+def opponent_add(project_id, name, opp_type, desc, sources):
+    """Add a competitor/opponent to a project."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.execute(
+            "INSERT INTO project_opponents (project_id, name, type, description, intelligence_sources) VALUES (?, ?, ?, ?, ?)",
+            (project_id, name, opp_type, desc, sources)
+        )
+        conn.commit()
+        opp_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        json_response(True, action="opponent_add", id=opp_id, project_id=project_id, name=name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game_opponent.command("list")
+@click.option("--project", "project_id", type=int, default=None, help="Filter by project")
+def opponent_list(project_id):
+    """List opponents (optionally filtered by project)."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        if project_id:
+            rows = conn.execute("SELECT * FROM project_opponents WHERE project_id=? ORDER BY name", (project_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM project_opponents ORDER BY project_id, name").fetchall()
+        conn.close()
+        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@game_opponent.command("update")
+@click.argument("opponent_id", type=int)
+@click.option("--name", default=None)
+@click.option("--desc", default=None)
+@click.option("--sources", default=None, help="JSON intelligence sources")
+@click.option("--assessment", default=None, help="Latest competitive analysis")
+def opponent_update(opponent_id, name, desc, sources, assessment):
+    """Update an opponent record."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        updates = []
+        params = []
+        for col, val in [("name", name), ("description", desc), ("intelligence_sources", sources), ("last_assessment", assessment)]:
+            if val is not None:
+                updates.append(f"{col}=?")
+                params.append(val)
+        if assessment:
+            updates.append("last_assessed_at=datetime('now')")
+        if not updates:
+            conn.close()
+            json_response(False, error="No fields to update")
+            sys.exit(1)
+        params.append(opponent_id)
+        conn.execute(f"UPDATE project_opponents SET {', '.join(updates)} WHERE id=?", params)
+        conn.commit()
+        conn.close()
+        json_response(True, action="opponent_update", id=opponent_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game_opponent.command("delete")
+@click.argument("opponent_id", type=int)
+def opponent_delete(opponent_id):
+    """Remove an opponent record."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        existing = conn.execute("SELECT id, name FROM project_opponents WHERE id=?", (opponent_id,)).fetchone()
+        if not existing:
+            conn.close()
+            json_response(False, error=f"Opponent id={opponent_id} not found")
+            sys.exit(1)
+        conn.execute("DELETE FROM project_opponents WHERE id=?", (opponent_id,))
+        conn.commit()
+        conn.close()
+        json_response(True, action="opponent_delete", id=opponent_id, name=existing[1])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+# ═══════════════════════════════════════════════════════
+# 6c. AWARENESS — Agent cognitive state (Conclusions + Actions)
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def awareness():
+    """Agent awareness management (conclusions + actions)."""
+    pass
+
+@awareness.command("add")
+@click.argument("entry_type", type=click.Choice(['conclusion', 'action']))
+@click.option("--subject", "subject_type", required=True, type=click.Choice(['connection','project','game','system','self']))
+@click.option("--subject-id", default=None, help="FK reference (uid, id, or omit for system/self)")
+@click.option("--content", required=True, help="The conclusion or action statement")
+@click.option("--action-conclusion-id", type=int, default=None, help="FK to parent conclusion (actions only)")
+@click.option("--context", default=None, help="What prompted this awareness entry")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_add(entry_type, subject_type, subject_id, content, action_conclusion_id, context, agent_name):
+    """Add a conclusion or action to the awareness store."""
+    if not agent_name:
+        agent_name = get_agent_name()
+    # Validate: actions should have a conclusion_id
+    if entry_type == 'action' and action_conclusion_id is None:
+        console.print("[yellow]⚠ Warning: Action added without --action-conclusion-id. Consider linking to a parent conclusion.[/yellow]", stderr=True)
+    # Validate: conclusions should NOT have a conclusion_id
+    if entry_type == 'conclusion' and action_conclusion_id is not None:
+        json_response(False, error="--action-conclusion-id is only valid for actions, not conclusions")
+        sys.exit(1)
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        # If action, validate conclusion exists
+        if action_conclusion_id is not None:
+            parent = conn.execute("SELECT id, type FROM agent_awareness WHERE id=?", (action_conclusion_id,)).fetchone()
+            if not parent:
+                conn.close()
+                json_response(False, error=f"Parent conclusion id={action_conclusion_id} not found")
+                sys.exit(1)
+            if parent[1] != 'conclusion':
+                conn.close()
+                json_response(False, error=f"id={action_conclusion_id} is not a conclusion (type={parent[1]})")
+                sys.exit(1)
+        conn.execute(
+            "INSERT INTO agent_awareness (agent_name, type, subject_type, subject_id, content, action_conclusion_id, context) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (agent_name, entry_type, subject_type, subject_id, content, action_conclusion_id, context)
+        )
+        conn.commit()
+        entry_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        # Update awareness timestamp for enforcement gate
+        _update_awareness_timestamp(agent_name)
+        json_response(True, action="awareness_add", id=entry_id, type=entry_type, subject_type=subject_type, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@awareness.command("revise")
+@click.argument("entry_id", type=int)
+@click.option("--content", required=True, help="Updated conclusion/action content")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_revise(entry_id, content, agent_name):
+    """Revise an awareness entry. Old entry → superseded, new entry created."""
+    if not agent_name:
+        agent_name = get_agent_name()
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        old = conn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        if not old:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        old = dict(old)
+        # Mark old as superseded
+        conn.execute("UPDATE agent_awareness SET status='superseded', updated_at=datetime('now') WHERE id=?", (entry_id,))
+        # Create new entry with same metadata
+        conn.execute(
+            "INSERT INTO agent_awareness (agent_name, type, subject_type, subject_id, content, action_conclusion_id, context, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+            (old['agent_name'], old['type'], old['subject_type'], old['subject_id'], content, old['action_conclusion_id'],
+             f"Revised from id={entry_id}")
+        )
+        conn.commit()
+        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        _update_awareness_timestamp(agent_name)
+        json_response(True, action="awareness_revise", old_id=entry_id, new_id=new_id, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@awareness.command("complete")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_complete(entry_id, agent_name):
+    """Mark an action as completed."""
+    if not agent_name:
+        agent_name = get_agent_name()
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        row = conn.execute("SELECT type FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        conn.execute("UPDATE agent_awareness SET status='completed', updated_at=datetime('now') WHERE id=?", (entry_id,))
+        conn.commit()
+        conn.close()
+        json_response(True, action="awareness_complete", id=entry_id, type=row[0])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@awareness.command("list")
+@click.option("--type", "entry_type", type=click.Choice(['conclusion', 'action']), default=None, help="Filter by type")
+@click.option("--subject", "subject_type", type=click.Choice(['connection','project','game','system','self']), default=None)
+@click.option("--subject-id", default=None)
+@click.option("--status", "entry_status", default=None, help="Filter by status (default: all)")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_name):
+    """List awareness entries. No --status = all statuses."""
+    if not agent_name:
+        agent_name = get_agent_name()
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM agent_awareness WHERE agent_name=?"
+        params = [agent_name]
+        if entry_type:
+            query += " AND type=?"
+            params.append(entry_type)
+        if subject_type:
+            query += " AND subject_type=?"
+            params.append(subject_type)
+        if subject_id:
+            query += " AND subject_id=?"
+            params.append(subject_id)
+        if entry_status:
+            query += " AND status=?"
+            params.append(entry_status)
+        query += " ORDER BY created_at DESC"
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@awareness.command("get")
+@click.argument("entry_id", type=int)
+def awareness_get(entry_id):
+    """Get a single awareness entry by ID."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        conn.close()
+        if not row:
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        print(json.dumps(dict(row), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+
+def _update_awareness_timestamp(agent_name):
+    """Update last_awareness_ts on the agent's current cycle for enforcement gate."""
+    try:
+        cdb = sqlite3.connect(cycles_db, timeout=5)
+        cdb.execute(
+            "UPDATE cycles SET last_awareness_ts=datetime('now') WHERE id LIKE ? AND ended_at IS NULL",
+            (f"{agent_name}-%",)
+        )
+        cdb.commit()
+        cdb.close()
+    except Exception:
+        pass  # Non-fatal — enforcement gate is advisory
+
 
 # ═══════════════════════════════════════════════════════
 # 7. CONNECTION — Social graph management
@@ -5641,6 +6301,59 @@ def memory_system_list():
         print(json.dumps([dict(r) for r in rows], indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
+
+@memory_system.command("delete")
+@click.argument("key")
+def memory_system_delete(key):
+    """Delete a system memory entry by key."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        cursor = conn.execute(
+            "DELETE FROM agent_memory_system WHERE key=?", (key,)
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if deleted:
+            json_response(True, key=key, action="deleted")
+        else:
+            json_response(False, error=f"Key '{key}' not found")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_system.command("rename")
+@click.argument("old_key")
+@click.argument("new_key")
+def memory_system_rename(old_key, new_key):
+    """Rename a system memory key (preserves value and metadata)."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        # Check old key exists
+        existing = conn.execute(
+            "SELECT id FROM agent_memory_system WHERE key=?", (old_key,)
+        ).fetchone()
+        if not existing:
+            conn.close()
+            json_response(False, error=f"Key '{old_key}' not found")
+            return
+        # Check new key doesn't conflict
+        conflict = conn.execute(
+            "SELECT id FROM agent_memory_system WHERE key=?", (new_key,)
+        ).fetchone()
+        if conflict:
+            conn.close()
+            json_response(False, error=f"Key '{new_key}' already exists")
+            return
+        conn.execute(
+            "UPDATE agent_memory_system SET key=?, updated_at=datetime('now') WHERE key=?",
+            (new_key, old_key)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, old_key=old_key, new_key=new_key, action="renamed")
+    except Exception as e:
+        json_response(False, error=str(e))
+
 
 # ═══════════════════════════════════════════════════════
 # 9. EXECUTE — Code execution

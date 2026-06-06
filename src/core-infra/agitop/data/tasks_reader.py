@@ -362,3 +362,97 @@ class TasksReader:
             return True, f"Deleted task #{task_id}: '{title}'"
         except Exception as e:
             return False, str(e)
+
+    # ═══════════════════════════════════════════════════════
+    # Games — Strategic Pursuit Management
+    # ═══════════════════════════════════════════════════════
+
+    def get_all_games(self) -> list[dict]:
+        """All games ordered by status then name."""
+        return self._query("SELECT * FROM games ORDER BY status ASC, name ASC")
+
+    def get_game(self, game_id: int) -> Optional[dict]:
+        """Full game details by ID."""
+        rows = self._query("SELECT * FROM games WHERE id = ?", (game_id,))
+        return rows[0] if rows else None
+
+    def get_game_project_count(self, game_id: int) -> int:
+        """Count projects linked to a game."""
+        rows = self._query("SELECT COUNT(*) as c FROM projects WHERE game_id = ?", (game_id,))
+        return rows[0]["c"] if rows else 0
+
+    def get_game_name(self, game_id: int) -> str:
+        """Resolve game_id to game name."""
+        if not game_id:
+            return "--"
+        rows = self._query("SELECT name FROM games WHERE id = ?", (game_id,))
+        return rows[0]["name"] if rows else f"#{game_id}"
+
+    def get_game_projects(self, game_id: int) -> list[dict]:
+        """Projects linked to a game."""
+        return self._query(
+            "SELECT id, name, status FROM projects WHERE game_id = ? ORDER BY name",
+            (game_id,)
+        )
+
+    def get_game_opponents(self, game_id: int) -> list[dict]:
+        """Opponents across all projects linked to a game."""
+        return self._query(
+            "SELECT po.*, p.name as project_name FROM project_opponents po "
+            "JOIN projects p ON po.project_id = p.id "
+            "WHERE p.game_id = ? ORDER BY po.last_assessed_at DESC",
+            (game_id,)
+        )
+
+    # ═══════════════════════════════════════════════════════
+    # Awareness — Agent Cognitive State
+    # ═══════════════════════════════════════════════════════
+
+    def get_awareness_entries(self, agent_name: str = None, status: str = None,
+                              entry_type: str = None,
+                              limit: int = 50, offset: int = 0) -> list[dict]:
+        """Awareness entries with optional filters and pagination."""
+        clauses, params = [], []
+        if agent_name:
+            clauses.append("agent_name = ?")
+            params.append(agent_name)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if entry_type:
+            clauses.append("type = ?")
+            params.append(entry_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.extend([limit, offset])
+        return self._query(
+            f"SELECT * FROM agent_awareness {where} ORDER BY id ASC LIMIT ? OFFSET ?",
+            tuple(params)
+        )
+
+    def get_awareness_entry(self, entry_id: int) -> Optional[dict]:
+        """Full awareness entry by ID."""
+        rows = self._query("SELECT * FROM agent_awareness WHERE id = ?", (entry_id,))
+        return rows[0] if rows else None
+
+    def count_active_awareness(self) -> int:
+        """Count active awareness entries."""
+        rows = self._query("SELECT COUNT(*) as c FROM agent_awareness WHERE status = 'active'")
+        return rows[0]["c"] if rows else 0
+
+    def count_all_awareness(self, status: str = None, entry_type: str = None) -> int:
+        """Count awareness entries with optional filters for pagination."""
+        clauses, params = [], []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if entry_type:
+            clauses.append("type = ?")
+            params.append(entry_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._query(f"SELECT COUNT(*) as c FROM agent_awareness {where}", tuple(params))
+        return rows[0]["c"] if rows else 0
+
+    def count_active_games(self) -> int:
+        """Count active games."""
+        rows = self._query("SELECT COUNT(*) as c FROM games WHERE status = 'active'")
+        return rows[0]["c"] if rows else 0

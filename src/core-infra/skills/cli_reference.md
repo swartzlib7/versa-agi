@@ -8,11 +8,12 @@ You do NOT have direct access to your SQLite database or system configuration fi
 
 ## Command Groups
 
-agictl is organized into 8 data-model-driven command groups plus an identity provisioning group:
+agictl is organized into 15 data-model-driven command groups:
 
 | Group | Purpose |
 |---|---|
 | `system` | System config, identity, workspace, security |
+| `model` | LLM model management (list, add, remove, activate) |
 | `agent` | Agent registry, status, lifecycle |
 | `task` | Cognitive task queue |
 | `message` | VersaVoice communication |
@@ -20,7 +21,12 @@ agictl is organized into 8 data-model-driven command groups plus an identity pro
 | `project` | Workspace project management |
 | `connection` | VersaVoice social graph |
 | `memory` | Agent memory (connection, project, system) |
+| `game` | Strategic pursuit management |
+| `awareness` | Agent cognitive state (conclusions + actions) |
 | `identity` | Sub-account provisioning (setup only) |
+| `execute` | Code execution (bash/python) |
+| `search` | Web search via SearXNG |
+| `skill` | Skill management (create, distribute, override) |
 
 ---
 
@@ -240,7 +246,118 @@ agictl memory system set <key> <value>                # Write/update (UPSERT)
 agictl memory system list                             # All system memory entries
 ```
 
-> **MANDATORY**: Use the **`memory_management.md`** skill at the end of every cycle to write back memory for all contacts, projects, and system discoveries from this cycle.
+> **MANDATORY**: Use the **`memory_management.md`** skill (always-injected) at the end of every cycle to execute the 5-step Awareness-First procedure: Reflect → Conclude → Act → Profile → Verify.
+
+## 9. game — Strategic Pursuit Management
+
+```bash
+agictl game add "<name>" [--postulate TEXT] [--posture exploratory|steady|aggressive|defensive] [--autonomy advisory|collaborative|autonomous]
+agictl game update <id> [--name TEXT] [--postulate TEXT] [--posture ...] [--autonomy ...] [--freedoms TEXT] [--barriers TEXT] [--milestones JSON] [--status active|paused|archived]
+agictl game show <id>                                  # Full details + related projects + active awareness
+agictl game list [--status active|paused|archived]     # All games (default: all statuses)
+agictl game assign-project <game_id> <project_id>      # Link project to game
+```
+
+**Posture values**: `exploratory` (high freedom, low barriers), `steady` (balanced), `aggressive` (proactive, rising barriers), `defensive` (barriers dominating)
+
+**Autonomy values**: `advisory` (suggest only), `collaborative` (work with PU), `autonomous` (act independently)
+
+### Opponent Management (Competitive Intelligence)
+
+```bash
+agictl game opponent add <project_id> "<name>" [--type person|agent|business|association] [--desc TEXT] [--sources JSON]
+agictl game opponent list [--project <id>]              # List all or per-project
+agictl game opponent update <id> [--name TEXT] [--desc TEXT] [--sources JSON] [--assessment TEXT]
+agictl game opponent delete <id>                       # Remove an opponent
+```
+
+## 10. awareness — Agent Cognitive State
+
+```bash
+agictl awareness add conclusion --subject <type> [--subject-id ID] --content "<text>" [--context "<why>"]
+agictl awareness add action --subject <type> [--subject-id ID] --content "<text>" --action-conclusion-id <id> [--context "<why>"]
+agictl awareness revise <entry_id> --content "<updated text>"    # Supersedes old, creates new
+agictl awareness complete <entry_id>                             # Mark action as done
+agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
+agictl awareness get <entry_id>                                  # Single entry details
+```
+
+**Subject types**: `connection`, `project`, `game`, `system`, `self`
+
+**Status lifecycle**: `active` → `revised`/`superseded` (via revise) or `completed` (via complete)
+
+> **Enforcement**: `cycle end` checks for awareness entries this session. A warning is emitted if no conclusions or actions were logged.
+
+> **Revise, don't duplicate**: If a previous conclusion is outdated, use `awareness revise <id>` — the old entry is marked `superseded` and a new one is created with an audit trail.
+
+---
+
+## 11. search — Web Search
+
+```bash
+agictl search web "<query>"                           # Search the web via local SearXNG
+agictl search web "<query>" --count 10                # Return up to 10 results (default: 5)
+agictl search web "<query>" --categories science      # Filter by search category (default: general)
+```
+
+> **Availability**: Requires SearXNG installed and `setup.ini [search] enabled=true`. Install via `providers/searxng.sh`.
+
+**Returns JSON**: `{success: true, query: "...", results: [{title, url, snippet, engine}], count: N}`
+
+**Harness Integration**: The harness conditionally registers the `agictl_search` tool at startup based on `_is_search_enabled()`. When `enabled=false`, agents cannot use search.
+
+## 12. execute — Code Execution
+
+```bash
+agictl execute bash "<script>"                        # Run a bash script as the agent user
+agictl execute python "<script>"                      # Run a Python script as the agent user
+```
+
+Scripts execute as the **calling agent's OS user** (dropped from watchdog via `sudo -u`). 120-second timeout.
+
+> **Privilege Escalation Guard**: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod` are **infrastructure-level blocked** — both at the harness tool layer and the CLI layer. These commands will NEVER succeed.
+
+**Returns JSON**: `{success: true/false, output: "...", exit_code: N}`
+
+## 13. skill — Skill Management (COA Only)
+
+```bash
+agictl skill new <name> [--description TEXT] [--scope all|coa_only]  # Create skill template + asset dir
+agictl skill status <name> ready                      # Mark draft → ready for distribution
+agictl skill status <name> updated                    # Mark synced → updated for re-sync
+agictl skill list [--status STATUS] [--json-output]   # List all registered skills
+agictl skill register                                 # Bootstrap skills DB from filesystem
+agictl skill override <name>                          # Create override for a shipped skill
+```
+
+**Skill lifecycle**: `draft` → `ready` → `synced` (by Lifeline) → `updated` → `synced`
+
+**Override workflow**: `agictl skill override <name>` creates `{name}_override.md` pre-populated with the shipped content. The harness resolves overrides at injection time.
+
+> Agent skill distribution is handled by Lifeline via `rsync` — skills marked `ready` or `updated` are deployed to all active sub-agents on the next tick.
+
+## 14. model — LLM Model Management
+
+```bash
+agictl model list [--table]                           # List registered models with pull status
+agictl model add <name> [--provider gemini|ollama]    # Register a new model
+agictl model remove <name>                            # Remove a model from registry
+agictl model run <name>                               # Pull/download a model
+agictl model activate <name>                          # Set as active model for this agent
+agictl model refresh                                  # Refresh model registry from providers
+```
+
+> **GPU Backend**: Model management adapts to the configured backend (`standard` = Ollama, `intel` = SYCL/GGUF, `remote` = inference server).
+
+## 15. identity — VersaVoice Sub-Account Provisioning
+
+```bash
+agictl identity provision <agent_user> --token TOKEN --first-name NAME --last-name NAME [--language en] [--country ""] [--voice female|male|reflective]
+```
+
+> **Guard**: Only protected agents (COA, watchdog) can provision VV identities. Sub-agents communicate via `agictl message internal` — no VV account needed.
+
+> **Voice options**: `female` (default), `male`, `reflective` (clones Primary User's voice).
 
 ---
 
