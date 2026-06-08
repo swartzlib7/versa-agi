@@ -383,14 +383,23 @@ if [ "${TOPOLOGY}" != "server" ]; then
       error "Remote URL is required for client topology."
     fi
 
-    # Prompt for master key
-    read -p "  Enter Inference Master Key: " _master_key
-    INFERENCE_MASTER_KEY="${_master_key:-${INFERENCE_MASTER_KEY}}"
+    # Prompt for master key (auto-inject 'versa-sk' for Intel SYCL on port 8080)
+    if [[ "${REMOTE_INFERENCE_URL}" == *":8080"* ]]; then
+      if [ -z "${INFERENCE_MASTER_KEY}" ]; then
+        INFERENCE_MASTER_KEY="versa-sk"
+        info "Intel SYCL detected (port 8080) — auto-injecting default master key: ${INFERENCE_MASTER_KEY}"
+      else
+        info "Intel SYCL detected (port 8080) — keeping existing master key: ${INFERENCE_MASTER_KEY}"
+      fi
+    else
+      read -p "  Enter Inference Master Key: " _master_key
+      INFERENCE_MASTER_KEY="${_master_key:-${INFERENCE_MASTER_KEY}}"
+    fi
 
     # Health check
     echo ""
     info "Testing connection to ${REMOTE_INFERENCE_URL}..."
-    if curl -sf -o /dev/null "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null; then
+    if curl -sf -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null; then
       ok "Remote server reachable (health: ok)"
     else
       warn "Remote server may not be reachable at ${REMOTE_INFERENCE_URL}"
@@ -401,7 +410,7 @@ if [ "${TOPOLOGY}" != "server" ]; then
     # but the rest of the system uses friendly keys (e.g. qwen3.6:35b).
     # We translate via the [sycl_models] registry in models.ini.
     _remote_models=""
-    _models_json=$(curl -sf "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null || echo "")
+    _models_json=$(curl -sf -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null || echo "")
     if [ -n "${_models_json}" ]; then
       _raw_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
       if [ -n "${_raw_models}" ]; then
@@ -531,7 +540,7 @@ TUNNELEOF
     fi
 
     # Step 5: Verify tunnel connectivity (pass master key — Inference Server requires auth)
-    if curl -sf -o /dev/null "http://localhost:${_TUNNEL_PORT}/v1/models" 2>/dev/null; then
+    if curl -sf -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "http://localhost:${_TUNNEL_PORT}/v1/models" 2>/dev/null; then
       ok "Tunnel verified: localhost:${_TUNNEL_PORT} reachable"
     else
       warn "Could not reach localhost:${_TUNNEL_PORT} through tunnel — server may not be running"

@@ -196,8 +196,8 @@ if [ -f "${SETUP_INI}" ]; then
 fi
 
 # ─── Process Each Agent ──────────────────────────────
-# Normalized format: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages
-while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS; do
+# Normalized format: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode
+while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE; do
   [ -z "${AGENT_NAME}" ] && continue
   [ "${AGENT_NAME}" = "watchdog" ] && continue
   # Use default model if no per-agent override
@@ -208,10 +208,12 @@ while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT
   [ -z "${AGENT_NUM_CTX}" ] && AGENT_NUM_CTX="0"
   # Default conversation depth to 10
   [ -z "${AGENT_CONVO_DEPTH}" ] && AGENT_CONVO_DEPTH="10"
-  # Default resume enabled to 1
-  [ -z "${AGENT_RESUME_ENABLED}" ] && AGENT_RESUME_ENABLED="1"
+  # Default resume enabled to 0 (fresh start each cycle — prevents identity drift from checkpoint baggage)
+  [ -z "${AGENT_RESUME_ENABLED}" ] && AGENT_RESUME_ENABLED="0"
   # Default resume max messages to 0 (unlimited)
   [ -z "${AGENT_RESUME_MAX_MSGS}" ] && AGENT_RESUME_MAX_MSGS="0"
+  # Default skill injection mode to hybrid
+  [ -z "${AGENT_SKILL_MODE}" ] && AGENT_SKILL_MODE="hybrid"
 
   # Check agent workspace exists
   if [ ! -d "${AGENT_PATH}" ]; then
@@ -293,15 +295,15 @@ agictl agent list for full details — you and your agentic team:
 ${AGENT_REGISTRY_FOR_SYSTEM}"
     fi
 
+    # Duties extracted to separate variable for WHY section placement (not part of WHAT/rules)
+    DUTIES_CONTEXT=""
     DUTIES_FILE="/var/lib/versa-agi/${AGENT_NAME}/duties.md"
     if [ -f "${DUTIES_FILE}" ]; then
-      MERGED_CONTENT="${MERGED_CONTENT}
-
----
-
+      DUTIES_CONTEXT="
 ## ── DUTIES & ASSIGNMENT ──
 
-$(cat "${DUTIES_FILE}")"
+$(cat "${DUTIES_FILE}")
+"
     fi
 
     # ── VV Communication Override for sub-agents with external comms ──
@@ -984,32 +986,80 @@ The only exception is a genuine emergency (system failure, security incident, or
     fi
   fi
 
+  # ── Package Approval Notification (one-shot) ──
+  # Notify agent of approved packages they requested (once only).
+  # notified_at is set immediately — agent sees this exactly once.
+  PKG_NOTICE=""
+  if [ -f "${AGENTS_DB}" ]; then
+    APPROVED_PKGS=$(sqlite3 -separator '|' "${AGENTS_DB}" \
+      "SELECT name, resolved_at FROM system_packages WHERE status='approved' AND requested_by='${AGENT_NAME}' AND notified_at IS NULL;" \
+      2>/dev/null || true)
+    if [ -n "${APPROVED_PKGS}" ]; then
+      PKG_LIST=""
+      while IFS='|' read -r PKG_NAME PKG_DATE; do
+        [ -z "${PKG_NAME}" ] && continue
+        PKG_LIST="${PKG_LIST}
+  - ${PKG_NAME} (approved at ${PKG_DATE})"
+      done <<< "${APPROVED_PKGS}"
+
+      PKG_NOTICE="
+SYSTEM NOTICE — APPROVED PACKAGES:
+The following system packages you requested have been approved. You may now install them via 'agictl pkg install <name>':${PKG_LIST}
+"
+      # Mark as notified (one-shot)
+      sqlite3 "${AGENTS_DB}" \
+        "UPDATE system_packages SET notified_at=datetime('now') WHERE status='approved' AND requested_by='${AGENT_NAME}' AND notified_at IS NULL;" \
+        2>/dev/null || true
+      log "PKG_NOTICE: ${AGENT_NAME} — notified of approved packages"
+    fi
+  fi
+
   # ─── System Prompt Assembly ──
-  # The poise (MERGED_CONTENT) is the agent's core instruction set — rules, work cycle, skills.
-  # It MUST be the first thing in the system prompt. Identity and context follow.
+  # Priority hierarchy: WHO → WHY → WHAT → OPERATIONAL → MEMORY → HISTORY
+  # WHO (identity) is first for primacy — the agent grounds in who it is.
+  # WHY (purpose/awareness) gives strategic context before behavioral rules.
+  # WHAT (poise) is the behavioral ruleset — interpreted through identity + purpose.
+  # OPERATIONAL plumbing (security, flood guard, etc.) follows.
+  # MEMORY and HISTORY come last for recency — the freshest context.
   if [ -n "${MERGED_CONTENT}" ]; then
-    SYSTEM_PROMPT="${MERGED_CONTENT}
+    SYSTEM_PROMPT="${AGENT_IDENTITY}
+
+${PRIMARY_USER_CONTEXT}
 
 ---
 
-${AGENT_IDENTITY}
+${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 
-${PRIMARY_USER_CONTEXT}${UPGRADE_NOTICE}
-${SECURITY_WARNING}${MSG_FLOOD_GUARD}
-${ENVIRONMENTAL_AWARENESS}${OVERDUE_CONTEXT}${OPERATIONAL_MEMORY}
+---
+
+${MERGED_CONTENT}
+
+---
+
+${SECURITY_WARNING}${MSG_FLOOD_GUARD}${PKG_NOTICE}${UPGRADE_NOTICE}
+
+${OPERATIONAL_MEMORY}
+
 ${CONTEXT_SUMMARY}
-${CONVERSATION_CONTEXT}
-${TASK_SUMMARY}"
+${CONVERSATION_CONTEXT}"
   else
     log "WARN: ${AGENT_NAME} — no poise content, system prompt will lack rules"
     SYSTEM_PROMPT="${AGENT_IDENTITY}
 
-${PRIMARY_USER_CONTEXT}${UPGRADE_NOTICE}
-${SECURITY_WARNING}${MSG_FLOOD_GUARD}
-${ENVIRONMENTAL_AWARENESS}${OVERDUE_CONTEXT}${OPERATIONAL_MEMORY}
+${PRIMARY_USER_CONTEXT}
+
+---
+
+${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
+
+---
+
+${SECURITY_WARNING}${MSG_FLOOD_GUARD}${PKG_NOTICE}${UPGRADE_NOTICE}
+
+${OPERATIONAL_MEMORY}
+
 ${CONTEXT_SUMMARY}
-${CONVERSATION_CONTEXT}
-${TASK_SUMMARY}"
+${CONVERSATION_CONTEXT}"
   fi
 
   # Inject local-model specific anti-runaway safeguards
@@ -1212,7 +1262,7 @@ Wake reason: ${WAKE_REASON}."
   set +e
   sudo -u "${AGENT_USER}" \
     timeout "${TIMEOUT_DURATION}" \
-      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' ${RESUME_FLAG} ${TRIAGE_ARGS} > '${RESULT_FILE}' 2>&1"
+      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} > '${RESULT_FILE}' 2>&1"
   EXIT_CODE=$?
   # NOTE: Do NOT re-enable set -e here. The subshell runs with set +e
   # (line 631) intentionally — post-spawn commands like kill/wait may fail

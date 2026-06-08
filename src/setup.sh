@@ -78,6 +78,33 @@ done
 
 dry() { echo -e "${BOLD:-\033[1m}[DRY-RUN]${NC:-\033[0m} $*"; }
 
+# ─── Early CRON Pause (--update only) ───────────────
+# Immediately disable the lifeline CRON before any config
+# loading to prevent agent spawns during the update window.
+# Uses 'watchdog' directly — WATCHDOG_USER is not yet resolved.
+if [ "${UPDATE_MODE}" = true ]; then
+  _EARLY_CRON=$(crontab -u watchdog -l 2>/dev/null || true)
+  CRON_WAS_ACTIVE="${CRON_WAS_ACTIVE:-false}"
+
+  if echo "${_EARLY_CRON}" | grep -qi "^[^#].*lifeline"; then
+    CRON_WAS_ACTIVE=true
+    if [ "${DRY_RUN}" = true ]; then
+      dry "Would comment out lifeline CRON entries"
+    else
+      echo "${_EARLY_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
+        crontab -u watchdog -
+      ok "CRON paused (commented out)"
+    fi
+  else
+    if echo "${_EARLY_CRON}" | grep -qi "^#.*lifeline"; then
+      if [ "${CRON_WAS_ACTIVE}" != true ]; then
+        CRON_WAS_ACTIVE=true
+      fi
+    fi
+  fi
+  export CRON_WAS_ACTIVE
+fi
+
 # ─── Platform Check ─────────────────────────────────
 detect_os 2>/dev/null || true
 require_linux 2>/dev/null || true
@@ -259,6 +286,23 @@ platforms=none
 # Primary User's workspace access path (symlink to .agent/workspace/)
 # This is always created — the Primary User needs filesystem visibility.
 workspace_link=
+
+[search]
+# Web search provider for agent research capabilities.
+# Powered by SearXNG (native install via providers/searxng.sh).
+# Agents access via: agictl search web "<query>"
+enabled=true
+engine=searxng
+searxng_url=http://localhost:8888
+
+[browser]
+# Headless browser automation for agents (Playwright + Chromium).
+# Enables: agictl browser goto/click/fill/screenshot/extract
+# Install via: setup.sh prompt, agitop System Settings, or manually: sudo ./providers/playwright.sh
+# Per-agent control: agitop dashboard → Agent Settings → Browser Usage
+enabled=false
+# Page load timeout in seconds (default: 30). Editable via agitop System Settings.
+timeout=30
 TEMPLATE
   chmod 600 "${INI_FILE}"
   echo ""
@@ -370,9 +414,19 @@ echo ""
 
 # ═══════════════════════════════════════════════════════
 # UPDATE MODE PREAMBLE (--update only)
-# Steps U1-U4: Git pull, CRON pause, drain agents, backup
+# CRON is already paused (early block near line 81).
+# Steps: Git pull, drain agents, backup, deploy.
 # ═══════════════════════════════════════════════════════
 if [ "${UPDATE_MODE}" = true ]; then
+
+  # ─── U2: CRON Status ─────────────────────────────────
+  section "Update — CRON Status"
+  if [ "${CRON_WAS_ACTIVE}" = true ]; then
+    ok "CRON was paused at script start"
+  else
+    warn "No active lifeline CRON was found at script start"
+  fi
+  echo ""
 
   # ─── U1: Git Auto-Update ─────────────────────────────
   # Only pull if running from the persisted system repo.
@@ -419,32 +473,11 @@ if [ "${UPDATE_MODE}" = true ]; then
     ok "Repository updated"
     # Re-exec with updated script
     export SKIP_PULL=true
+    export CRON_WAS_ACTIVE
     exec "$0" --update ${DRY_RUN:+--dry-run} ${SKIP_VERIFY:+--skip-verify} ${REPO_BRANCH:+--branch "${REPO_BRANCH}"} ${GRACE_PERIOD:+--grace "${GRACE_PERIOD}"}
   fi
 
-  # ─── U2: Pause CRON ──────────────────────────────────
-  section "Update — Pause CRON"
-  EXISTING_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
-  CRON_WAS_ACTIVE=false
 
-  if echo "${EXISTING_CRON}" | grep -q "^[^#].*lifeline.sh"; then
-    CRON_WAS_ACTIVE=true
-    if [ "${DRY_RUN}" = true ]; then
-      dry "Would comment out lifeline CRON entry"
-    else
-      echo "${EXISTING_CRON}" | sed 's|^\(.*/lifeline\.sh.*\)$|#\1|' | \
-        crontab -u "${WATCHDOG_USER}" -
-      ok "CRON paused (commented out)"
-    fi
-  else
-    if echo "${EXISTING_CRON}" | grep -q "^#.*lifeline.sh"; then
-      warn "CRON already paused"
-      CRON_WAS_ACTIVE=true
-    else
-      warn "No lifeline CRON entry found"
-    fi
-  fi
-  echo ""
 
   # ─── U3: Drain Running Agents ────────────────────────
   section "Update — Drain Agents"
@@ -1210,6 +1243,9 @@ chown -R root:root "${VENV_DIR}"
 find "${VENV_DIR}" -type d -exec chmod 755 {} +
 find "${VENV_DIR}" -type f -exec chmod 644 {} +
 find "${VENV_DIR}/bin" -type f -exec chmod 755 {} +
+# Fix Playwright driver binary — pip bundles a node executable that needs +x
+chmod +x "${VENV_DIR}"/lib/python3.*/site-packages/playwright/driver/node 2>/dev/null || true
+chmod +x "${VENV_DIR}"/lib/python3.*/site-packages/playwright/driver/package/bin/* 2>/dev/null || true
 
 info "Deploying harness code to global library..."
 rm -rf "${LIB_DIR}/harness"
@@ -1483,6 +1519,13 @@ SUDOERS_WATCHDOG_ROOT="/etc/sudoers.d/versa_agi_watchdog_root"
 echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl, ${LIB_DIR}/agictl" > "${SUDOERS_WATCHDOG_ROOT}"
 chmod 440 "${SUDOERS_WATCHDOG_ROOT}"
 ok "Sudoers: ${WATCHDOG_USER} can run agictl as root (NOPASSWD)"
+
+# Sudoers: allow watchdog to run apt-get as root (for approved package installations)
+# The allowlist gate is enforced in Python (agictl pkg install) before apt-get is ever called.
+SUDOERS_PKG_INSTALLER="/etc/sudoers.d/versa_agi_pkg_installer"
+echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/bin/apt-get install -y *" > "${SUDOERS_PKG_INSTALLER}"
+chmod 440 "${SUDOERS_PKG_INSTALLER}"
+ok "Sudoers: ${WATCHDOG_USER} can run apt-get install as root (NOPASSWD)"
 
 # COA Autonomous Mode — full sudo access for gifted/dedicated hardware
 COA_AUTONOMOUS=$(grep -Po '^\s*autonomous\s*=\s*\K\S+' "${INI_FILE}" 2>/dev/null | head -1)
@@ -2104,6 +2147,35 @@ if [ -d "${PROVIDERS_DIR}" ]; then
     fi
   fi
 
+  # Playwright (Headless Browser) — gated by [browser] enabled=true
+  if [ -f "${PROVIDERS_DIR}/playwright.sh" ]; then
+    INI_BROWSER_ENABLED="$(ini_get browser enabled false)"
+    INI_BROWSER_TIMEOUT="$(ini_get browser timeout 30)"
+    if [ "${INI_BROWSER_ENABLED}" = "true" ]; then
+      chmod +x "${PROVIDERS_DIR}/playwright.sh"
+      bash "${PROVIDERS_DIR}/playwright.sh" --timeout "${INI_BROWSER_TIMEOUT}"
+      _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+    else
+      # Prompt for it if it's NOT enabled but we are in interactive mode (not UPDATE_MODE or UPDATE_MODE is false)
+      if [ "${UPDATE_MODE:-false}" = "false" ]; then
+        echo ""
+        echo "  ── Playwright (Headless Browser) ──"
+        echo "  Playwright enables agents to view, navigate, and extract content from websites."
+        read -p "  Enable Playwright browser automation? [y/N]: " -n 1 -r ans
+        echo ""
+        if [[ "${ans}" =~ ^[Yy]$ ]]; then
+          chmod +x "${PROVIDERS_DIR}/playwright.sh"
+          bash "${PROVIDERS_DIR}/playwright.sh"
+          _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+        else
+          info "Playwright provider skipped ([browser] enabled=false)"
+        fi
+      else
+        info "Playwright provider skipped ([browser] enabled=false)"
+      fi
+    fi
+  fi
+
   unset VERSA_SETUP_PARENT
 
   if [ ${_PROVIDER_COUNT} -eq 0 ]; then
@@ -2201,17 +2273,22 @@ if [ "${UPDATE_MODE}" = true ]; then
     sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN resume_max_messages INTEGER DEFAULT 0;" 2>/dev/null && \
       ok "Added resume_max_messages column to agents table" || \
       info "resume_max_messages column already exists"
+    # v0.14.0: browser_enabled column for headless browser automation (Playwright)
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN browser_enabled BOOLEAN DEFAULT 0;" 2>/dev/null && \
+      ok "Added browser_enabled column to agents table" || \
+      info "browser_enabled column already exists"
     # Recreate views to include new columns
     sqlite3 "${AGENTS_DB}" "DROP VIEW IF EXISTS v_active_agents; DROP VIEW IF EXISTS v_agent_registry;" 2>/dev/null || true
     sqlite3 "${AGENTS_DB}" "
 CREATE VIEW IF NOT EXISTS v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages, browser_enabled
 FROM agents WHERE inactive = 0 ORDER BY name ASC;
 CREATE VIEW IF NOT EXISTS v_agent_registry AS
 SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_size_threshold, inactive, protected, can_message_connections, model, triage_model, role,
        context_injection_mode, token_budget, max_session_turns, tool_output_token_budget,
        session_retention_enabled, session_retention_max_age, session_retention_max_count,
        anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages,
+       browser_enabled,
        status, status_message, requested_by, requested_by_name, created_at
 FROM agents ORDER BY protected DESC, name ASC;
 " 2>/dev/null && ok "Views recreated with new columns" || warn "View recreation failed"
@@ -2455,7 +2532,7 @@ FROM agents ORDER BY protected DESC, name ASC;
 
         # Query live models from the tunnel endpoint
         _repair_models=""
-        _models_json=$(curl -sf "${_REPAIR_TUNNEL_URL}/v1/models" 2>/dev/null || echo "")
+        _models_json=$(curl -sf -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_TUNNEL_URL}/v1/models" 2>/dev/null || echo "")
         if [ -n "${_models_json}" ] && command -v jq &>/dev/null; then
           _raw_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
           if [ -n "${_raw_models}" ]; then
@@ -2525,7 +2602,7 @@ REPAIRCFG
       # Read tunnel URL from paths.env (set during initial setup or sync above)
       _REPAIR_INFERENCE=$(grep '^VERSA_INFERENCE_URL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
       if [ -n "${_REPAIR_INFERENCE}" ]; then
-        _active_json=$(curl -sf "${_REPAIR_INFERENCE}/v1/models" 2>/dev/null || echo "")
+        _active_json=$(curl -sf -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_INFERENCE}/v1/models" 2>/dev/null || echo "")
         if [ -n "${_active_json}" ] && command -v jq &>/dev/null; then
           _active_gguf=$(echo "${_active_json}" | jq -r '.data[0].id' 2>/dev/null)
           if [ -n "${_active_gguf}" ] && [ "${_active_gguf}" != "null" ]; then
@@ -2828,6 +2905,24 @@ apply_system_permissions() {
 apply_system_permissions
 
 # ═══════════════════════════════════════════════════════
+# U4b: Sync Templates (--update only, with prompt)
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = true ]; then
+  section "Update — Sync Templates"
+  if [ "${DRY_RUN}" = true ]; then
+    dry "Would prompt to sync system templates to active agents"
+  else
+    echo ""
+    read -p "  Do you want to sync updated system templates (poise & skills) to active agents? [y/N]: " -n 1 -r sync_ans
+    echo ""
+    if [[ $sync_ans =~ ^[Yy]$ ]]; then
+      step_arrow "Running: python3 ${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py"
+      python3 "${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py" || warn "sync_templates encountered an issue."
+    fi
+  fi
+fi
+
+# ═══════════════════════════════════════════════════════
 # U5: Resume CRON (--update only, with prompt)
 # ═══════════════════════════════════════════════════════
 if [ "${UPDATE_MODE}" = true ]; then
@@ -2837,7 +2932,7 @@ if [ "${UPDATE_MODE}" = true ]; then
   elif [ "${CRON_WAS_ACTIVE:-false}" = true ]; then
     if confirm "Resume CRON (lifeline scheduler)?"; then
       CURRENT_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
-      echo "${CURRENT_CRON}" | sed 's|^#\(.*lifeline\.sh.*\)$|\1|' | \
+      echo "${CURRENT_CRON}" | sed '/[Ll]ifeline/s|^#||' | \
         crontab -u "${WATCHDOG_USER}" -
       ok "CRON resumed"
     else

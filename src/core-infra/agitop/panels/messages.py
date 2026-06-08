@@ -631,18 +631,17 @@ class MessagesPanel(Widget):
     def _set_vv_enabled(self, enabled: bool) -> None:
         """Write VV enabled state to setup.ini (scoped to [versavoice] section)."""
         val = "true" if enabled else "false"
-        for ini_path in ["/etc/versa-agi/setup.ini"]:
-            try:
-                # IMPORTANT: scope sed to [versavoice] section — enabled= exists in multiple sections
-                subprocess.run(
-                    ["sudo", "sed", "-i",
-                     f"/^\\[versavoice\\]/,/^\\[/{{s/^enabled=.*/enabled={val}/}}",
-                     ini_path],
-                    capture_output=True, timeout=5
-                )
-            except Exception:
-                pass
-        self.app.notify(f"VersaVoice {'enabled' if enabled else 'disabled'}", title="Settings")
+        try:
+            result = subprocess.run(
+                ["agictl", "system", "config", "set-ini", "versavoice", "enabled", val],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                self.app.notify(f"VersaVoice {'enabled' if enabled else 'disabled'}", title="Settings")
+                return
+        except Exception:
+            pass
+        self.app.notify("Failed to toggle VersaVoice — check permissions", severity="error")
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "chk-vv-enabled":

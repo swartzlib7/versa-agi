@@ -9,7 +9,7 @@ import threading
 from textual.screen import ModalScreen
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll, Container
-from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown
+from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, Collapsible
 
 
 _SETUP_INI_PATHS = [
@@ -52,36 +52,22 @@ def _read_ini_value(section: str, key: str, default: str = "") -> str:
 
 
 def _write_ini_value(section: str, key: str, value: str) -> bool:
-    """Write a value to setup.ini using sed — preserves all comments and formatting."""
-    path = _find_setup_ini()
-    if not os.path.exists(path):
-        return False
-    # Use sed to replace the key=value line in-place (handles key = value and key=value)
-    # Pattern: within [section], replace key line
-    sed_expr = f'/^\\[{re.escape(section)}\\]/,/^\\[/ s/^\\s*{re.escape(key)}\\s*=.*/{key}={value}/'
+    """Write a value to setup.ini using agictl system config set-ini."""
     try:
         result = subprocess.run(
-            ["sed", "-i", sed_expr, path],
-            capture_output=True, text=True, timeout=5
+            ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "system", "config", "set-ini", section, key, str(value)],
+            capture_output=True, text=True, timeout=10
         )
-        ok = result.returncode == 0
-    except PermissionError:
-        # Try with sudo
-        try:
-            result = subprocess.run(
-                ["sudo", "sed", "-i", sed_expr, path],
-                capture_output=True, text=True, timeout=5
-            )
-            ok = result.returncode == 0
-        except Exception:
-            ok = False
+        if result.returncode == 0:
+            import json as _json
+            data = _json.loads(result.stdout.strip())
+            if data.get("success", False):
+                _sync_ini_copies(_find_setup_ini())
+                return True
     except Exception:
-        ok = False
+        pass
+    return False
 
-    # Sync written INI to the alternate copy (source ↔ deployed)
-    if ok:
-        _sync_ini_copies(path)
-    return ok
 
 
 def _sync_ini_copies(written_path: str) -> None:
@@ -94,6 +80,19 @@ def _sync_ini_copies(written_path: str) -> None:
                 shutil.copy2(written_path, target)
             except Exception:
                 pass  # Non-fatal
+
+
+class PaginatedDataTable(DataTable):
+    """DataTable subclass that intercepts PageUp/PageDown key events to trigger custom pagination callbacks."""
+    def __init__(self, key_callback, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.key_callback = key_callback
+
+    def on_key(self, event) -> None:
+        if event.key in ("pageup", "pagedown"):
+            event.prevent_default()
+            event.stop()
+            self.key_callback(event.key)
 
 
 def _update_paths_env_key(key: str, value: str) -> bool:
@@ -197,6 +196,23 @@ def _get_skills_rows() -> list[dict]:
     except Exception:
         return []
 
+
+def _get_packages_rows() -> list[dict]:
+    """Read all system packages from agents.db for table display."""
+    db_path = "/var/lib/versa-agi/agents.db"
+    if not os.path.exists(db_path):
+        return []
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, status, reason, requested_by, requested_at, resolved_at "
+            "FROM system_packages ORDER BY requested_at DESC"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
 
 def _read_skill_file(skill_name: str) -> str:
     """Read the full content of a skill .md file from the canonical source."""
@@ -520,6 +536,14 @@ class RouterModeConfirmModal(ModalScreen):
 class SystemSettingsModal(ModalScreen):
     """Modal for configuring system-level settings."""
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._skills_rows = _get_skills_rows()
+        self._pkg_rows = _get_packages_rows()
+        self._skills_page = 0
+        self._pkg_page = 0
+        self._page_size = 13
+
     def compose(self) -> ComposeResult:
         # Circuit Breaker
         cb_consecutive = _read_ini_value("agent", "circuit_breaker_consecutive", "5")
@@ -535,14 +559,15 @@ class SystemSettingsModal(ModalScreen):
         # COA Autonomous Mode
         coa_autonomous = _read_ini_value("coa", "autonomous", "false").lower() == "true"
 
+        # Browser Automation
+        browser_enabled = _read_ini_value("browser", "enabled", "false").lower() == "true"
+        browser_timeout = _read_ini_value("browser", "timeout", "30")
+
         # Model Loading Strategy
         loading_strategy = _read_ini_value("local_ai", "model_loading_strategy", "single")
         gpu_backend = _read_ini_value("local_ai", "gpu_backend", "standard")
         local_ai_enabled = _read_ini_value("local_ai", "enabled", "false").lower() == "true"
         self._show_strategy = local_ai_enabled and gpu_backend in ("intel", "remote")
-
-        # Skills data
-        self._skills_rows = _get_skills_rows()
 
         with Vertical(id="settings-dialog"):
             with VerticalScroll(id="settings-scroll"):
@@ -562,15 +587,35 @@ class SystemSettingsModal(ModalScreen):
                         yield Static("")
                         yield Static("[bold cyan]Circuit Breaker[/]")
                         yield Static("[dim]Prevents runaway API cost from repeated spawn failures[/]")
+                        yield Static("[dim]Only exit codes 1 (error), 42 (input error), 99 (runaway) trigger the breaker.[/]")
                         yield Static("")
                         yield Static("[cyan]Consecutive Failure Threshold[/]")
                         yield Input(value=cb_consecutive, placeholder="e.g. 5", id="input-cb-consecutive", type="integer")
                         yield Static("[cyan]Hourly Failure Threshold[/]")
                         yield Input(value=cb_hourly, placeholder="e.g. 20", id="input-cb-hourly", type="integer")
-                        yield Static("[dim]Only exit codes 1 (error), 42 (input error), 99 (runaway) trigger the breaker.[/]")
+
+                        # Browser Automation
+                        yield Static("")
+                        yield Static("[bold cyan]Browser Automation[/]")
+                        yield Static("[dim]Headless Chromium for page navigation and extraction[/]")
+                        _browser_label = "Disable" if browser_enabled else "Enable"
+                        _browser_variant = "error" if browser_enabled else "success"
+                        _browser_status = "[green]● Enabled[/]" if browser_enabled else "[red]● Disabled[/]"
+                        yield Static(f"Status: {_browser_status}", id="browser-status-label")
+                        yield Button(f"{_browser_label} Browser Automation", variant=_browser_variant, id="btn-browser-toggle")
+                        yield Static("")
+                        yield Static("[cyan]Page Load Timeout (seconds)[/]")
+                        yield Input(value=browser_timeout, placeholder="e.g. 30", id="input-browser-timeout", type="integer")
 
                     # ── Right Column ──
                     with Vertical(classes="settings-col"):
+                        # COA Autonomous Mode
+                        yield Static("")
+                        yield Static("[bold cyan]COA Autonomous Mode[/]")
+                        yield Checkbox("Autonomous (NOPASSWD: ALL)", id="chk-coa-autonomous", value=coa_autonomous)
+                        yield Static("[bold yellow]⚠ Only enable on dedicated hardware[/]")
+                        yield Static("")
+
                         # Model Loading Strategy (Intel SYCL only)
                         if self._show_strategy:
                             _strat_label = "Router" if loading_strategy == "router" else "Single"
@@ -584,50 +629,52 @@ class SystemSettingsModal(ModalScreen):
                                 f"Switch to {'Single' if loading_strategy == 'router' else 'Router'} Mode",
                                 variant="warning", id="btn-toggle-strategy",
                             )
-                            yield Static("")
 
                         # Web Search
+                        yield Static("")
                         yield Static("[bold cyan]Web Search[/]")
                         yield Static("[dim]Local SearXNG integration for agent research[/]")
                         yield Checkbox("Enabled", id="chk-search-enabled", value=search_enabled)
+                        yield Static("")
                         yield Static("[cyan]SearXNG URL[/]")
                         yield Input(value=searxng_url, placeholder="http://localhost:8888", id="input-searxng-url")
 
-                        # COA Autonomous Mode
-                        yield Static("")
-                        yield Static("[bold cyan]COA Autonomous Mode[/]")
-                        yield Checkbox("Autonomous (NOPASSWD: ALL)", id="chk-coa-autonomous", value=coa_autonomous)
-                        yield Static("[bold yellow]⚠ Only enable on dedicated hardware[/]")
-
-                # ── Skills Registry (full width below grid) ──
+                # ── Skills Registry (full width below grid, always visible) ──
                 yield Static("")
-                yield Static(f"[bold cyan]Skills Registry[/] — {len(self._skills_rows)} skill(s) registered")
-                skills_table = DataTable(id="skills-registry-table")
+                skills_table = PaginatedDataTable(self._handle_skills_key, id="skills-registry-table")
                 yield skills_table
                 yield Static("[dim]Double-click or press Enter to view a skill · Manage via: agictl skill list[/]")
+
+                # ── System Packages (full width below skills, always visible) ──
+                yield Static("")
+                pkg_table = PaginatedDataTable(self._handle_packages_key, id="packages-table")
+                yield pkg_table
+                with Horizontal(id="packages-actions"):
+                    yield Button("Approve", variant="success", id="btn-pkg-approve")
+                    yield Button("Deny", variant="error", id="btn-pkg-deny")
+                    yield Button("Install", variant="warning", id="btn-pkg-install")
+                    yield Button("Add/Request", variant="primary", id="btn-pkg-add")
+                    yield Button("Remove", variant="default", id="btn-pkg-remove")
 
             with Horizontal(id="settings-dialog-actions"):
                 yield Button("Save", variant="success", id="btn-save-settings")
                 yield Button("Cancel", variant="default", id="btn-settings-close")
 
     def on_mount(self) -> None:
-        """Populate the skills DataTable after mount."""
+        """Populate the skills and packages DataTables after mount."""
         try:
             table = self.query_one("#skills-registry-table", DataTable)
             table.cursor_type = "row"
             table.add_columns("Name", "Type", "Origin", "Assets", "Status", "Description")
-            for idx, r in enumerate(self._skills_rows):
-                assets = "✓" if r.get("has_assets") else "—"
-                desc = r.get("description") or ""
-                table.add_row(
-                    r.get("name", ""),
-                    r.get("type", ""),
-                    r.get("origin", ""),
-                    assets,
-                    r.get("status", ""),
-                    desc,
-                    key=str(idx),
-                )
+            self._update_skills_table()
+        except Exception:
+            pass
+
+        try:
+            pkg_table = self.query_one("#packages-table", DataTable)
+            pkg_table.cursor_type = "row"
+            pkg_table.add_columns("Package", "Status", "Reason", "Requested By", "Requested At")
+            self._update_packages_table()
         except Exception:
             pass
 
@@ -689,10 +736,18 @@ class SystemSettingsModal(ModalScreen):
                 except Exception:
                     pass  # Non-fatal — sudoers change is best-effort from dashboard
 
-                if all([ok1, ok2, ok3, ok4, ok5]):
+                # ── Browser Timeout (browser toggle handled by modal, not Save) ──
+                browser_timeout = int(self.query_one("#input-browser-timeout", Input).value)
+                if browser_timeout < 5:
+                    self.app.notify("Browser timeout must be ≥ 5 seconds", severity="error")
+                    return
+                ok6 = _write_ini_value("browser", "timeout", str(browser_timeout))
+
+                if all([ok1, ok2, ok3, ok4, ok5, ok6]):
                     summary_parts = [
                         f"Circuit breaker: {cb_consecutive}/{cb_hourly}",
                         f"Search: {'on' if search_enabled else 'off'}",
+                        f"Browser timeout: {browser_timeout}s",
                         f"Autonomous: {'on' if coa_autonomous else 'off'}",
                     ]
                     self.app.notify(
@@ -706,3 +761,679 @@ class SystemSettingsModal(ModalScreen):
             self.app.pop_screen()
         elif event.button.id == "btn-settings-close":
             self.app.pop_screen()
+        elif event.button.id == "btn-browser-toggle":
+            browser_enabled = _read_ini_value("browser", "enabled", "false").lower() == "true"
+            new_val = 0 if browser_enabled else 1
+            ok = _write_ini_value("browser", "enabled", "false" if browser_enabled else "true")
+            if ok:
+                # Resolve COA os_user from agents DB (authoritative after setup)
+                try:
+                    _db = sqlite3.connect("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
+                    _row = _db.execute("SELECT os_user FROM agents WHERE name='coa'").fetchone()
+                    _db.close()
+                    coa_user = _row[0] if _row else "coa"
+                except Exception:
+                    coa_user = "coa"
+                from agitop.panels.agents import AgentBrowserToggleModal
+                self.app.push_screen(
+                    AgentBrowserToggleModal(agent_name="coa", new_val=new_val, os_user=coa_user),
+                    callback=lambda _: self._refresh_browser_status()
+                )
+            else:
+                self.app.notify("Failed to write setup.ini — check permissions", severity="error")
+        elif event.button.id in ("btn-pkg-approve", "btn-pkg-deny", "btn-pkg-install", "btn-pkg-remove"):
+            self._handle_pkg_action(event.button.id)
+        elif event.button.id == "btn-pkg-add":
+            self._handle_pkg_add()
+    def _handle_skills_key(self, key: str) -> None:
+        if key == "pageup":
+            if self._skills_page > 0:
+                self._skills_page -= 1
+                self._update_skills_table()
+        elif key == "pagedown":
+            max_page = max(0, (len(self._skills_rows) - 1) // self._page_size)
+            if self._skills_page < max_page:
+                self._skills_page += 1
+                self._update_skills_table()
+
+    def _handle_packages_key(self, key: str) -> None:
+        if key == "pageup":
+            if self._pkg_page > 0:
+                self._pkg_page -= 1
+                self._update_packages_table()
+        elif key == "pagedown":
+            max_page = max(0, (len(self._pkg_rows) - 1) // self._page_size)
+            if self._pkg_page < max_page:
+                self._pkg_page += 1
+                self._update_packages_table()
+
+    def _on_browser_modal_close(self, success: bool) -> None:
+        if success:
+            self._refresh_browser_status()
+
+    def _refresh_browser_status(self) -> None:
+        try:
+            browser_enabled = _read_ini_value("browser", "enabled", "false").lower() == "true"
+            status_lbl = self.query_one("#browser-status-label", Static)
+            _browser_status = "[green]● Enabled[/]" if browser_enabled else "[red]● Disabled[/]"
+            status_lbl.update(f"Status: {_browser_status}")
+
+            btn = self.query_one("#btn-browser-toggle", Button)
+            btn.label = "Disable Browser Automation" if browser_enabled else "Enable Browser Automation"
+            btn.variant = "error" if browser_enabled else "success"
+        except Exception:
+            pass
+
+    def _install_playwright_background(self) -> None:
+        """Background thread: fix driver permissions, install deps + chromium, notify."""
+        import glob as _glob
+        try:
+            # Fix driver permissions (pip may not preserve +x on node binary)
+            for driver_dir in _glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages/playwright/driver"):
+                node_bin = os.path.join(driver_dir, "node")
+                if os.path.isfile(node_bin):
+                    os.chmod(node_bin, 0o755)
+                pkg_bin = os.path.join(driver_dir, "package", "bin")
+                if os.path.isdir(pkg_bin):
+                    for f in os.listdir(pkg_bin):
+                        fp = os.path.join(pkg_bin, f)
+                        if os.path.isfile(fp):
+                            os.chmod(fp, 0o755)
+
+            pw_bin = "/usr/local/lib/versa-agi/venv/bin/playwright"
+            if not os.path.isfile(pw_bin):
+                self.app.call_from_thread(
+                    self.app.notify, "Playwright binary not found — run setup.sh", title="Error", severity="error"
+                )
+                return
+
+            # Install system dependencies (as root — agitop runs as root)
+            r1 = subprocess.run(
+                [pw_bin, "install-deps", "chromium"],
+                capture_output=True, text=True, timeout=120
+            )
+            if r1.returncode != 0:
+                self.app.call_from_thread(
+                    self.app.notify, "Failed to install system dependencies", title="Error", severity="error"
+                )
+                return
+
+            # Install Chromium for COA user
+            coa_user = _read_ini_value("users", "coa", "coa")
+            r2 = subprocess.run(
+                ["sudo", "-u", coa_user, "-H", pw_bin, "install", "chromium"],
+                capture_output=True, text=True, timeout=120
+            )
+            if r2.returncode != 0:
+                self.app.call_from_thread(
+                    self.app.notify, f"Failed to install Chromium for {coa_user}", title="Error", severity="error"
+                )
+                return
+
+            self.app.call_from_thread(
+                self.app.notify, "Playwright Chromium installed successfully", title="Browser Automation"
+            )
+        except Exception as e:
+            self.app.call_from_thread(
+                self.app.notify, f"Installation error: {e}", title="Error", severity="error"
+            )
+
+    def _update_skills_table(self) -> None:
+        try:
+            table = self.query_one("#skills-registry-table", DataTable)
+            table.clear()
+
+            start = self._skills_page * self._page_size
+            end = start + self._page_size
+            page_rows = self._skills_rows[start:end]
+
+            for idx, r in enumerate(page_rows):
+                assets = "✓" if r.get("has_assets") else "—"
+                desc = r.get("description") or ""
+                abs_idx = start + idx
+                table.add_row(
+                    r.get("name", ""),
+                    r.get("type", ""),
+                    r.get("origin", ""),
+                    assets,
+                    r.get("status", ""),
+                    desc,
+                    key=str(abs_idx),
+                )
+
+            total_pages = max(1, (len(self._skills_rows) + self._page_size - 1) // self._page_size)
+            current_page = self._skills_page + 1
+            table.border_title = f"Skills Registry ({len(self._skills_rows)})  │  Page {current_page}/{total_pages}  │  PgUp/PgDn to navigate"
+        except Exception:
+            pass
+
+    def _update_packages_table(self) -> None:
+        try:
+            pkg_table = self.query_one("#packages-table", DataTable)
+            pkg_table.clear()
+
+            start = self._pkg_page * self._page_size
+            end = start + self._page_size
+            page_rows = self._pkg_rows[start:end]
+
+            for idx, r in enumerate(page_rows):
+                status_styles = {"approved": "green", "requested": "yellow", "denied": "red"}
+                s = r.get("status", "")
+                style = status_styles.get(s, "")
+                display_status = f"[{style}]{s}[/{style}]" if style else s
+                abs_idx = start + idx
+                pkg_table.add_row(
+                    r.get("name", ""),
+                    display_status,
+                    r.get("reason", "") or "—",
+                    r.get("requested_by", "") or "—",
+                    r.get("requested_at", "") or "—",
+                    key=str(abs_idx),
+                )
+
+            total_pages = max(1, (len(self._pkg_rows) + self._page_size - 1) // self._page_size)
+            current_page = self._pkg_page + 1
+            pkg_table.border_title = f"Packages & Requests ({len(self._pkg_rows)})  │  Page {current_page}/{total_pages}  │  PgUp/PgDn to navigate"
+        except Exception:
+            pass
+
+    def _handle_pkg_action(self, button_id: str) -> None:
+        """Handle package approve/deny/install/remove for selected row."""
+        try:
+            pkg_table = self.query_one("#packages-table", DataTable)
+            cursor_row = pkg_table.cursor_row
+            if cursor_row is None or cursor_row < 0:
+                self.app.notify("Select a package first", severity="warning")
+                return
+            row_key, _ = pkg_table.coordinate_to_cell_key((cursor_row, 0))
+            if not row_key or not row_key.value:
+                self.app.notify("Select a package first", severity="warning")
+                return
+            idx = int(row_key.value)
+            if idx < 0 or idx >= len(self._pkg_rows):
+                self.app.notify("Select a package first", severity="warning")
+                return
+            pkg_name = self._pkg_rows[idx].get("name", "")
+        except Exception:
+            self.app.notify("Select a package first", severity="warning")
+            return
+
+        action_map = {
+            "btn-pkg-approve": "approve",
+            "btn-pkg-deny": "deny",
+            "btn-pkg-install": "install",
+            "btn-pkg-remove": "remove",
+        }
+        action = action_map.get(button_id)
+        if not action:
+            return
+
+        if action == "install":
+            self.app.push_screen(PackageInstallModal(pkg_name=pkg_name), callback=self._on_install_modal_close)
+            return
+
+        def _run():
+            try:
+                cmd = ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "pkg", action, pkg_name]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                import json
+                try:
+                    resp = json.loads(result.stdout)
+                    if resp.get("success"):
+                        self.app.call_from_thread(
+                            self.app.notify, f"Package '{pkg_name}': {action} succeeded", title="Packages"
+                        )
+                    else:
+                        self.app.call_from_thread(
+                            self.app.notify, resp.get("error", "Unknown error"), title="Error", severity="error"
+                        )
+                except json.JSONDecodeError:
+                    self.app.call_from_thread(
+                        self.app.notify, result.stdout or result.stderr, title="Result"
+                    )
+            except Exception as e:
+                self.app.call_from_thread(
+                    self.app.notify, str(e), title="Error", severity="error"
+                )
+            finally:
+                self.app.call_from_thread(self._refresh_packages)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _refresh_packages(self) -> None:
+        """Reload package data, clear and repopulate the DataTable."""
+        try:
+            self._pkg_rows = _get_packages_rows()
+            self._update_packages_table()
+        except Exception:
+            pass
+
+    def _on_install_modal_close(self, success: bool) -> None:
+        self._refresh_packages()
+
+    def _handle_pkg_add(self) -> None:
+        """Prompt for package name and add it via agictl request modal."""
+        self.app.push_screen(PackageRequestModal(), callback=self._on_pkg_request_modal_close)
+
+    def _on_pkg_request_modal_close(self, success: bool) -> None:
+        if success:
+            self._refresh_packages()
+
+
+class PackageRequestModal(ModalScreen):
+    """Modal dialog for a PU or agent to request a system package."""
+
+    CSS = """
+    PackageRequestModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #request-pkg-dialog {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $surface;
+    }
+    #request-pkg-actions {
+        margin-top: 1;
+        height: auto;
+    }
+    #request-pkg-actions Button {
+        margin-right: 1;
+    }
+    #lbl-request-pkg-error {
+        margin-top: 1;
+        height: auto;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="request-pkg-dialog"):
+            yield Static("[bold yellow]Add/Request System Package[/]\n")
+            yield Static("Enter the apt package name to request or add:")
+            yield Input(placeholder="e.g. valgrind", id="input-request-pkg-name")
+            yield Static("\nProvide a brief reason/justification:")
+            yield Input(placeholder="e.g. Debug memory leaks", id="input-request-pkg-reason")
+            yield Static("", id="lbl-request-pkg-error")
+            with Horizontal(id="request-pkg-actions"):
+                yield Button("Submit Request", variant="success", id="btn-request-confirm")
+                yield Button("Cancel", variant="default", id="btn-request-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-request-cancel":
+            self.dismiss(False)
+        elif event.button.id == "btn-request-confirm":
+            pkg_name = self.query_one("#input-request-pkg-name", Input).value.strip()
+            reason = self.query_one("#input-request-pkg-reason", Input).value.strip()
+            error_lbl = self.query_one("#lbl-request-pkg-error", Static)
+
+            if not pkg_name:
+                error_lbl.update("[red]Package name is required[/]")
+                return
+            if not re.match(r"^[a-z0-9][a-z0-9.+\-]+$", pkg_name):
+                error_lbl.update("[red]Invalid package name format[/]")
+                return
+            if not reason:
+                error_lbl.update("[red]Reason is required[/]")
+                return
+
+            # Submit via agictl pkg request
+            def _run():
+                try:
+                    cmd = ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "pkg", "request", pkg_name, "--reason", reason]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    import json
+                    try:
+                        resp = json.loads(result.stdout)
+                        if resp.get("success"):
+                            self.app.call_from_thread(self.app.notify, f"Package '{pkg_name}' requested", title="Success")
+                            self.app.call_from_thread(self.dismiss, True)
+                        else:
+                            error_msg = resp.get('error', 'Request failed')
+                            self.app.call_from_thread(error_lbl.update, f"[red]{error_msg}[/]")
+                    except json.JSONDecodeError:
+                        self.app.call_from_thread(self.app.notify, result.stdout or result.stderr, title="Result")
+                        self.app.call_from_thread(self.dismiss, False)
+                except Exception as e:
+                    self.app.call_from_thread(error_lbl.update, f"[red]Error: {e}[/]")
+
+            threading.Thread(target=_run, daemon=True).start()
+
+
+class BrowserAutomationModal(ModalScreen):
+    """Modal for enabling/disabling Browser Automation with real-time feedback.
+
+    Follows the SyclActivationModal pattern: shows status, runs background
+    provisioning (playwright install/cleanup), and closes with notification.
+    """
+
+    CSS = """
+    BrowserAutomationModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #browser-dialog {
+        width: 75;
+        height: 20;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $surface;
+    }
+    #browser-terminal {
+        height: 1fr;
+        background: $boost;
+        border: solid $surface-lighten-1;
+        padding: 0 1;
+        scrollbar-gutter: stable;
+        color: $text-muted;
+    }
+    #browser-actions {
+        margin-top: 1;
+        height: auto;
+        align: right middle;
+    }
+    #browser-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, current_enabled: bool, **kwargs):
+        super().__init__(**kwargs)
+        self.current_enabled = current_enabled
+        self.target_enabled = not current_enabled
+        self._running = False
+        self._terminal_text = ""
+
+    def compose(self) -> ComposeResult:
+        action = "Disable" if self.current_enabled else "Enable"
+        with Vertical(id="browser-dialog"):
+            yield Static(f"[bold yellow]🌐 Browser Automation — {action}[/]\n", id="browser-title")
+            yield Static("...", id="browser-info")
+            yield VerticalScroll(Static(id="browser-terminal-text"), id="browser-terminal")
+            with Horizontal(id="browser-actions"):
+                confirm_variant = "success" if self.target_enabled else "error"
+                yield Button(f"Confirm {action}", variant=confirm_variant, id="btn-browser-confirm")
+                yield Button("Cancel", variant="default", id="btn-browser-close")
+
+    def on_mount(self) -> None:
+        self.query_one("#browser-terminal").display = False
+        if self.target_enabled:
+            info = (
+                f"This will [bold]enable[/] headless Chromium browser automation system-wide.\n\n"
+                f"Playwright Chromium binaries will be installed for the watchdog user.\n"
+                f"Agents with browser_enabled=1 will gain access on their next spawn.\n"
+            )
+        else:
+            info = (
+                f"This will [bold]disable[/] headless Chromium browser automation system-wide.\n\n"
+                f"Agents with browser_enabled=1 will lose access until re-enabled.\n"
+                f"Chromium binaries will remain installed.\n"
+            )
+        self.query_one("#browser-info", Static).update(info)
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        import re as _re
+        return _re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+
+    def _append_text(self, text: str) -> None:
+        self._terminal_text += text
+        try:
+            term = self.query_one("#browser-terminal-text", Static)
+            term.update(self._terminal_text)
+            self.query_one("#browser-terminal", VerticalScroll).scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _enable_close(self) -> None:
+        btn = self.query_one("#btn-browser-close", Button)
+        btn.disabled = False
+        btn.loading = False
+        btn.label = "Close"
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "btn-browser-close":
+            self.dismiss(len(self._terminal_text) > 0)
+        elif event.button.id == "btn-browser-confirm" and not self._running:
+            self._running = True
+            
+            # Switch to terminal view
+            self.query_one("#browser-info").display = False
+            self.query_one("#btn-browser-confirm").display = False
+            self.query_one("#browser-terminal").display = True
+            
+            # Disable close button, show loading state, and change label
+            close_btn = self.query_one("#btn-browser-close", Button)
+            close_btn.disabled = True
+            close_btn.loading = True
+            close_btn.label = "Working..."
+            
+            self._terminal_text = ""
+            threading.Thread(target=self._run_toggle, daemon=True).start()
+
+    def _run_toggle(self) -> None:
+        """Background thread: toggle browser, optionally install Playwright system-wide."""
+        try:
+            if self.target_enabled:
+                # Fix Playwright driver permissions (pip install may not preserve +x on node binary)
+                import glob as _glob
+                for driver_dir in _glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages/playwright/driver"):
+                    node_bin = os.path.join(driver_dir, "node")
+                    if os.path.isfile(node_bin):
+                        os.chmod(node_bin, 0o755)
+                    pkg_bin = os.path.join(driver_dir, "package", "bin")
+                    if os.path.isdir(pkg_bin):
+                        for f in os.listdir(pkg_bin):
+                            fp = os.path.join(pkg_bin, f)
+                            if os.path.isfile(fp):
+                                os.chmod(fp, 0o755)
+                self.app.call_from_thread(self._append_text, "✓ Playwright driver permissions verified\n\n")
+
+                self.app.call_from_thread(self._append_text, "Installing Playwright system dependencies (this may take a moment)...\n")
+                self.app.call_from_thread(self._append_text, "$ /usr/local/lib/versa-agi/venv/bin/playwright install-deps chromium\n")
+                
+                cmd_deps = ["/usr/local/lib/versa-agi/venv/bin/playwright", "install-deps", "chromium"]
+                process_deps = subprocess.Popen(
+                    cmd_deps,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                while True:
+                    line = process_deps.stdout.readline()
+                    if not line:
+                        break
+                    self.app.call_from_thread(self._append_text, self._strip_ansi(line))
+                process_deps.wait()
+                
+                if process_deps.returncode != 0:
+                    self.app.call_from_thread(
+                        self._append_text,
+                        f"\n[red]✗ System dependencies installation failed with exit code {process_deps.returncode}[/]\n"
+                    )
+                    self.app.call_from_thread(
+                        self.app.notify, "Failed to install Playwright system dependencies", title="Error", severity="error"
+                    )
+                    return
+                
+                self.app.call_from_thread(self._append_text, "\n[green]✓ System dependencies installed successfully.[/]\n\n")
+                
+                coa_user = _read_ini_value("users", "coa", "coa")
+                self.app.call_from_thread(self._append_text, f"Installing Chromium browser for user '{coa_user}'...\n")
+                self.app.call_from_thread(self._append_text, f"$ sudo -u {coa_user} -H /usr/local/lib/versa-agi/venv/bin/playwright install chromium\n")
+                
+                cmd_browser = ["sudo", "-u", coa_user, "-H", "/usr/local/lib/versa-agi/venv/bin/playwright", "install", "chromium"]
+                process_browser = subprocess.Popen(
+                    cmd_browser,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                while True:
+                    line = process_browser.stdout.readline()
+                    if not line:
+                        break
+                    self.app.call_from_thread(self._append_text, self._strip_ansi(line))
+                process_browser.wait()
+                
+                if process_browser.returncode != 0:
+                    self.app.call_from_thread(
+                        self._append_text,
+                        f"\n[red]✗ Playwright browser installation failed with exit code {process_browser.returncode}[/]\n"
+                    )
+                    self.app.call_from_thread(
+                        self.app.notify, "Failed to install Playwright Chromium", title="Error", severity="error"
+                    )
+                    return
+                
+                self.app.call_from_thread(self._append_text, "\n[green]✓ Playwright Chromium browser installed successfully.[/]\n\n")
+                
+                self.app.call_from_thread(self._append_text, "Writing setup.ini: browser.enabled = true...\n")
+                ok = _write_ini_value("browser", "enabled", "true")
+                if not ok:
+                    self.app.call_from_thread(self._append_text, "[red]Failed to write setup.ini — check permissions[/]\n")
+                    return
+                
+                self.app.call_from_thread(self._append_text, "[green]✓ setup.ini updated successfully.[/]\n")
+                self.app.call_from_thread(
+                    self.app.notify, "Browser automation enabled system-wide", title="Browser Automation"
+                )
+            else:
+                self.app.call_from_thread(self._append_text, "Writing setup.ini: browser.enabled = false...\n")
+                ok = _write_ini_value("browser", "enabled", "false")
+                if not ok:
+                    self.app.call_from_thread(self._append_text, "[red]Failed to write setup.ini — check permissions[/]\n")
+                    return
+                self.app.call_from_thread(self._append_text, "[green]✓ setup.ini updated successfully.[/]\n\n")
+                
+                coa_user = _read_ini_value("users", "coa", "coa")
+                self.app.call_from_thread(self._append_text, f"Removing Chromium binaries for user '{coa_user}'...\n")
+                cache_dir = f"/home/{coa_user}/.cache/ms-playwright/"
+                if os.path.isdir(cache_dir):
+                    cmd = ["sudo", "-u", coa_user, "rm", "-rf", cache_dir]
+                    self.app.call_from_thread(self._append_text, f"$ sudo -u {coa_user} rm -rf {cache_dir}\n")
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    if res.returncode == 0:
+                        self.app.call_from_thread(self._append_text, f"[green]✓ Cleaned up cache directory successfully.[/]\n")
+                    else:
+                        self.app.call_from_thread(self._append_text, f"[red]✗ Cleanup failed: {res.stderr}[/]\n")
+                else:
+                    self.app.call_from_thread(self._append_text, "Cache directory does not exist or is already removed.\n")
+                
+                self.app.call_from_thread(self._append_text, "[green]✓ Browser automation disabled system-wide[/]\n")
+                self.app.call_from_thread(
+                    self.app.notify, "Browser automation disabled", title="Browser Automation"
+                )
+        except Exception as e:
+            self.app.call_from_thread(self._append_text, f"\n[red]Error: {e}[/]\n")
+        finally:
+            self._running = False
+            self.app.call_from_thread(self._enable_close)
+
+
+class PackageInstallModal(ModalScreen):
+    """Modal that runs 'sudo agictl pkg install <package>' and streams real-time stdout/stderr feedback."""
+
+    CSS = """
+    PackageInstallModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #install-dialog {
+        width: 75;
+        height: 20;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $surface;
+    }
+    #install-terminal {
+        height: 1fr;
+        background: $boost;
+        border: solid $surface-lighten-1;
+        padding: 0 1;
+        scrollbar-gutter: stable;
+        color: $text-muted;
+    }
+    #install-actions {
+        margin-top: 1;
+        height: auto;
+        align: right middle;
+    }
+    """
+
+    def __init__(self, pkg_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self.pkg_name = pkg_name
+        self._terminal_text = ""
+        self._running = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="install-dialog"):
+            yield Static(f"[bold yellow]📦 Installing Package: {self.pkg_name}[/]\n", id="install-title")
+            yield VerticalScroll(Static(id="install-terminal-text"), id="install-terminal")
+            with Horizontal(id="install-actions"):
+                yield Button("Cancel/Close", variant="default", id="btn-install-close")
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-install-close", Button).disabled = True
+        self._running = True
+        threading.Thread(target=self._run_install, daemon=True).start()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-install-close":
+            self.dismiss(True)
+
+    def _append_text(self, text: str) -> None:
+        self._terminal_text += text
+        try:
+            term = self.query_one("#install-terminal-text", Static)
+            term.update(self._terminal_text)
+            self.query_one("#install-terminal", VerticalScroll).scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _enable_close(self) -> None:
+        btn = self.query_one("#btn-install-close", Button)
+        btn.disabled = False
+        btn.loading = False
+
+    def _run_install(self) -> None:
+        try:
+            self.app.call_from_thread(self._append_text, f"$ sudo -u watchdog /usr/local/lib/versa-agi/agictl pkg install {self.pkg_name}\n")
+            cmd = ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "pkg", "install", self.pkg_name]
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            # Stream output line by line
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                self.app.call_from_thread(self._append_text, line)
+
+            process.wait()
+
+            if process.returncode == 0:
+                self.app.call_from_thread(self._append_text, "\n[green]✓ Installation completed successfully[/]\n")
+                self.app.call_from_thread(
+                    self.app.notify, f"Package '{self.pkg_name}' installed", title="Packages"
+                )
+            else:
+                self.app.call_from_thread(self._append_text, f"\n[red]✗ Installation failed with exit code {process.returncode}[/]\n")
+                self.app.call_from_thread(
+                    self.app.notify, f"Failed to install package '{self.pkg_name}'", title="Error", severity="error"
+                )
+        except Exception as e:
+            self.app.call_from_thread(self._append_text, f"\n[red]Error executing install: {e}[/]\n")
+        finally:
+            self._running = False
+            self.app.call_from_thread(self._enable_close)

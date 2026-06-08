@@ -120,7 +120,7 @@ class AgentReader:
                    "session_retention_enabled", "session_retention_max_age",
                    "session_retention_max_count", "anchor_style", "triage_model",
                    "num_ctx", "conversation_depth", "resume_enabled",
-                   "resume_max_messages"}
+                   "resume_max_messages", "skill_injection_mode"}
         if field not in allowed:
             return False
         try:

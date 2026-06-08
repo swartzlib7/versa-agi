@@ -964,3 +964,13 @@ DeleteMemoryConfirmModal {
     margin: 0 1;
     height: 3;
 }
+
+#skills-registry-table {
+    height: 16;
+    border: solid $primary;
+}
+
+#packages-table {
+    height: 8;
+    border: solid $primary;
+}

@@ -21,7 +21,7 @@ from agitop.panels.tasks import TasksPanel
 from agitop.panels.messages import MessagesPanel
 from agitop.panels.projects import ProjectsPanel
 from agitop.panels.footer_stats import FooterStatsPanel
-VERSION = "3.0.0"
+VERSION = "3.2.0"
 
 class AgitopApp(App):
     """Versa AGi Mission Control Dashboard."""

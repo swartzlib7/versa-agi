@@ -39,8 +39,11 @@ CREATE TABLE IF NOT EXISTS agents (
   session_retention_max_count INTEGER DEFAULT 45,
   num_ctx           INTEGER DEFAULT 0,
   conversation_depth INTEGER DEFAULT 10,
-  resume_enabled    BOOLEAN DEFAULT 1,
+  resume_enabled    BOOLEAN DEFAULT 0,
   resume_max_messages INTEGER DEFAULT 0,
+  skill_injection_mode TEXT DEFAULT 'hybrid',
+  anchor_style      TEXT DEFAULT 'compact',
+  browser_enabled   BOOLEAN DEFAULT 0,
   requested_by      TEXT,
   requested_by_name TEXT,
   created_at        DATETIME NOT NULL DEFAULT (datetime('now')),
@@ -52,7 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
 
 -- Active agents (used by Lifeline for spawning)
 CREATE VIEW IF NOT EXISTS v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
 FROM agents
 WHERE inactive = 0
 ORDER BY name ASC;
@@ -63,6 +66,7 @@ SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_siz
        context_injection_mode, token_budget, max_session_turns, tool_output_token_budget,
        session_retention_enabled, session_retention_max_age, session_retention_max_count,
        anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages,
+       skill_injection_mode, browser_enabled,
        status, status_message,
        requested_by, requested_by_name, created_at
 FROM agents
@@ -86,7 +90,36 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status);
+
+-- ─── System Packages Registry ────────────────────────
+-- Tracks system-level packages (apt) requested by agents or the PU.
+-- Agents request → PU approves/denies → Lifeline notifies agent (one-shot).
+CREATE TABLE IF NOT EXISTS system_packages (
+    name          TEXT PRIMARY KEY,
+    status        TEXT NOT NULL,           -- 'approved', 'requested', 'denied'
+    reason        TEXT,                    -- Why the package is needed
+    requested_by  TEXT,                    -- Agent name or 'pu'
+    requested_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    resolved_at   DATETIME,
+    notified_at   DATETIME                -- One-shot: set after Lifeline injects notice
+);
 SQL
+
+# ─── Schema Migration: system_packages table ───
+sqlite3 "${DB_PATH}" <<'SQL'
+CREATE TABLE IF NOT EXISTS system_packages (
+    name          TEXT PRIMARY KEY,
+    status        TEXT NOT NULL,
+    reason        TEXT,
+    requested_by  TEXT,
+    requested_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    resolved_at   DATETIME,
+    notified_at   DATETIME
+);
+SQL
+
+# ─── Schema Migration: system_packages notified_at column ───
+sqlite3 "${DB_PATH}" "ALTER TABLE system_packages ADD COLUMN notified_at DATETIME;" 2>/dev/null || true
 
 # ─── Schema Migration: scope column ───
 # Safely add scope column for older databases (ignore if already exists).
@@ -97,5 +130,42 @@ sqlite3 "${DB_PATH}" "ALTER TABLE skills ADD COLUMN scope TEXT NOT NULL DEFAULT 
 # Now safe to create the scope index (column guaranteed to exist)
 sqlite3 "${DB_PATH}" "CREATE INDEX IF NOT EXISTS idx_skills_scope ON skills(scope);" 2>/dev/null || true
 
+# ─── Schema Migration: anchor_style column ───
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN anchor_style TEXT DEFAULT 'compact';" 2>/dev/null || true
+
+# ─── Schema Migration: browser_enabled column ───
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN browser_enabled BOOLEAN DEFAULT 0;" 2>/dev/null || true
+
+# ─── Schema Migration: skill_injection_mode column ───
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN skill_injection_mode TEXT DEFAULT 'hybrid';" 2>/dev/null || true
+
+# ─── Schema Migration: resume_enabled default change (1 → 0) ───
+# New agents get 0 via schema default. Existing agents with legacy default of 1
+# are migrated to 0 for consistency (fresh start prevents identity drift).
+sqlite3 "${DB_PATH}" "UPDATE agents SET resume_enabled = 0 WHERE resume_enabled = 1;" 2>/dev/null || true
+
+# ─── View Migration: drop and recreate views to include new columns ───
+# Views are cheap to recreate and must reflect the current column set.
+sqlite3 "${DB_PATH}" <<'VIEWS'
+DROP VIEW IF EXISTS v_active_agents;
+CREATE VIEW v_active_agents AS
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
+FROM agents
+WHERE inactive = 0
+ORDER BY name ASC;
+
+DROP VIEW IF EXISTS v_agent_registry;
+CREATE VIEW v_agent_registry AS
+SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_size_threshold, inactive, protected, can_message_connections, model, triage_model, role,
+       context_injection_mode, token_budget, max_session_turns, tool_output_token_budget,
+       session_retention_enabled, session_retention_max_age, session_retention_max_count,
+       anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages,
+       skill_injection_mode, browser_enabled,
+       status, status_message,
+       requested_by, requested_by_name, created_at
+FROM agents
+ORDER BY protected DESC, name ASC;
+VIEWS
+
 echo "Registry database initialized: ${DB_PATH}"
-echo "Tables: agents, skills"
+echo "Tables: agents, skills, system_packages"

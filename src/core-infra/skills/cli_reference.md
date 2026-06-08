@@ -8,7 +8,7 @@ You do NOT have direct access to your SQLite database or system configuration fi
 
 ## Command Groups
 
-agictl is organized into 15 data-model-driven command groups:
+agictl is organized into 17 data-model-driven command groups:
 
 | Group | Purpose |
 |---|---|
@@ -27,6 +27,8 @@ agictl is organized into 15 data-model-driven command groups:
 | `execute` | Code execution (bash/python) |
 | `search` | Web search via SearXNG |
 | `skill` | Skill management (create, distribute, override) |
+| `browser` | Headless browser automation (Playwright) |
+| `pkg` | System package registry (request, approve, install) |
 
 ---
 
@@ -358,6 +360,62 @@ agictl identity provision <agent_user> --token TOKEN --first-name NAME --last-na
 > **Guard**: Only protected agents (COA, watchdog) can provision VV identities. Sub-agents communicate via `agictl message internal` — no VV account needed.
 
 > **Voice options**: `female` (default), `male`, `reflective` (clones Primary User's voice).
+
+## 16. browser — Headless Browser Automation
+
+```bash
+agictl browser goto "<url>"                           # Load page, return text content
+agictl browser goto "<url>" --screenshot              # Load page + save screenshot
+agictl browser click "<url>" "<selector>"             # Navigate then click an element
+agictl browser fill "<url>" "<selector>" "<value>"    # Navigate then fill a form field
+agictl browser screenshot "<url>"                     # Capture visible viewport
+agictl browser screenshot "<url>" --full-page         # Capture full scrollable page
+agictl browser extract "<url>"                        # Extract all text content
+agictl browser extract "<url>" --selector "<css>"     # Extract text from specific elements
+agictl browser extract "<url>" --selector "<css>" --attribute "<attr>"  # Extract attribute values
+```
+
+> **Availability**: Requires `setup.ini [browser] enabled=true` AND per-agent `browser_enabled=1`. Install via `providers/playwright.sh`.
+
+**Security**: Only `http://` and `https://` URLs allowed. All operations run as the agent's OS user. Page timeout governed by `[browser] timeout` (default 30s).
+
+**Screenshots**: Saved to `workspace/screenshots/browser_<timestamp>.png`.
+
+**Returns JSON**: `{success: true, url: "...", title: "...", content: "...", screenshot: "/path/..."}`
+
+### COA Delegation (Root Only)
+
+```bash
+sudo agictl browser enable <agent_name>               # Set browser_enabled=1 + install Chromium
+sudo agictl browser disable <agent_name>              # Set browser_enabled=0 + cleanup cache
+```
+
+**Harness Integration**: The harness conditionally registers the `agictl_browser` tool at startup based on `_is_browser_enabled()`. When `enabled=false`, agents cannot use browser.
+
+## 17. pkg — System Package Registry
+
+```bash
+agictl pkg list                                       # List all packages and their statuses (JSON)
+agictl pkg request <name> --reason "..."              # Request a package for installation
+agictl pkg install <name>                             # Install an approved package (apt-get)
+```
+
+### PU-Only Commands (Root)
+
+```bash
+sudo agictl pkg add <name> --reason "..."             # Pre-register a package as approved
+sudo agictl pkg approve <name>                        # Approve a pending request
+sudo agictl pkg deny <name>                           # Deny a pending request
+sudo agictl pkg remove <name>                         # Remove a package from the registry
+```
+
+**Workflow**: Agent requests → PU approves (agitop or CLI) → Lifeline injects `PKG_NOTICE` into agent prompt on next spawn → Agent installs.
+
+> **Security**: Package names are validated against strict regex (`^[a-z0-9][a-z0-9.+\-]+$`). Installation runs as `watchdog → sudo apt-get install -y <name>` (root escalation via sudoers rule). Only packages with `status='approved'` can be installed.
+
+> **Notification**: Approved packages trigger a one-shot system prompt injection on the requesting agent's next spawn. The agent sees the notice exactly once.
+
+**Returns JSON**: `{success: true, package: "jq", status: "approved"}`
 
 ---
 

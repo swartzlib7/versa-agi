@@ -450,6 +450,48 @@ def _is_search_enabled():
 if _is_search_enabled():
     ALL_TOOLS.append(agictl_search)
 
+# ═══════════════════════════════════════════════════════
+# BROWSER — Headless browser automation (Playwright)
+# ═══════════════════════════════════════════════════════
+
+class BrowserInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl browser subcommand to run. "
+        "Examples: 'browser goto \"https://example.com\"', "
+        "'browser goto \"https://example.com\" --screenshot', "
+        "'browser click \"https://example.com\" \"button.submit\"', "
+        "'browser fill \"https://example.com\" \"#email\" \"user@test.com\"', "
+        "'browser screenshot \"https://example.com\" --full-page', "
+        "'browser extract \"https://example.com\" --selector \"h1\"', "
+        "'browser extract \"https://example.com\" --selector \"a\" --attribute \"href\"'."
+    ))
+
+@tool("agictl_browser", args_schema=BrowserInput)
+def agictl_browser(command: str) -> str:
+    """Browse web pages using a headless Chromium browser.
+    Use for: navigating pages, clicking elements, filling forms, taking screenshots, extracting content.
+    IMPORTANT: Only http:// and https:// URLs are allowed. file:// is blocked.
+    Examples:
+      - 'browser goto "https://example.com"' — load page and get text content
+      - 'browser goto "https://example.com" --screenshot' — load + screenshot
+      - 'browser click "https://example.com" "button.submit"' — click an element
+      - 'browser fill "https://example.com" "#email" "user@test.com"' — fill a form field
+      - 'browser screenshot "https://example.com" --full-page' — full-page screenshot
+      - 'browser extract "https://example.com" --selector "h1"' — extract text from selector
+      - 'browser extract "https://example.com" --selector "a" --attribute "href"' — extract attribute
+    """
+    return _run_agictl(command)
+
+# Conditionally register browser tool based on setup.ini config
+def _is_browser_enabled():
+    import configparser
+    config = configparser.ConfigParser()
+    config.read("/etc/versa-agi/setup.ini")
+    return config.get("browser", "enabled", fallback="false").lower() == "true"
+
+if _is_browser_enabled():
+    ALL_TOOLS.append(agictl_browser)
+
 
 # ═══════════════════════════════════════════════════════
 # Telemetry
@@ -573,6 +615,7 @@ def main():
     parser.add_argument("--tasks-file", default=None, help="Path to pre-computed active tasks context for triage")
     parser.add_argument("--convo-file", default=None, help="Path to pre-computed conversation history for triage")
     parser.add_argument("--resume-max-messages", type=int, default=0, help="Trim checkpoint to last N messages on resume (0 = unlimited)")
+    parser.add_argument("--skill-mode", default="hybrid", choices=["full", "lazy", "hybrid"], help="Skill injection mode: full (inject all), lazy (manifest only), hybrid (core injected + lazy manifest)")
     args = parser.parse_args()
 
     TOOL_OUTPUT_LIMIT = args.tool_budget
@@ -625,6 +668,20 @@ def main():
                 tlog(f"MEMORY SKILL: Injected ({len(mem_skill_content)} chars)")
             except Exception as e:
                 tlog(f"MEMORY SKILL: Failed to read — {e}")
+
+    # ── Always-Inject: Communication Basic (essential messaging rules) ──
+    # communication_basic.md is a ~2 KB condensed version of the full communication skill.
+    # Always present — agents must know how to send/receive messages correctly.
+    if skills_dir:
+        comm_basic_path = os.path.join(skills_dir, "communication_basic.md")
+        if os.path.isfile(comm_basic_path):
+            try:
+                with open(comm_basic_path, "r") as f:
+                    comm_basic_content = f.read()
+                system_prompt += f"\n\n---\n## ── COMMUNICATION RULES ──\n\n{comm_basic_content}"
+                tlog(f"COMMUNICATION BASIC: Injected ({len(comm_basic_content)} chars)")
+            except Exception as e:
+                tlog(f"COMMUNICATION BASIC: Failed to read — {e}")
 
     with open(args.wake_file, "r") as f:
         wake_prompt = f.read()
@@ -690,7 +747,9 @@ def main():
     # Inject skills based on triage classification
     # Filter out always-injected skills — they're not triage-driven.
     skill_content = ""
-    always_injected = {"cli_reference.md", "skill_authoring.md", "memory_management.md"}
+    always_injected = {"cli_reference.md", "skill_authoring.md", "memory_management.md", "communication_basic.md", "communication.md"}
+    skill_mode = getattr(args, 'skill_mode', 'hybrid')
+    tlog(f"SKILL MODE: {skill_mode}")
     if skills_dir and triage_result.skills_to_inject:
         triage_result.skills_to_inject = [s for s in triage_result.skills_to_inject if s not in always_injected]
         # ── Override Resolution ──
@@ -707,7 +766,39 @@ def main():
                 resolved_skills.append(skill_name)
         triage_result.skills_to_inject = resolved_skills
         if triage_result.skills_to_inject:
-            skill_content = inject_skills(triage_result, skills_dir)
+            if skill_mode == "full":
+                # Full mode: inject entire skill content (legacy behavior)
+                skill_content = inject_skills(triage_result, skills_dir)
+            elif skill_mode in ("hybrid", "lazy"):
+                # Hybrid/Lazy mode: generate a compact manifest instead of full content.
+                # Agents load full skill files on-demand via agictl execute bash "cat <path>".
+                manifest_lines = []
+                for skill_name in triage_result.skills_to_inject:
+                    skill_path = os.path.join(skills_dir, skill_name)
+                    # Extract first non-empty, non-heading line as description
+                    desc = skill_name
+                    if os.path.isfile(skill_path):
+                        try:
+                            with open(skill_path, "r") as sf:
+                                for line in sf:
+                                    line = line.strip()
+                                    if line and not line.startswith("#") and not line.startswith(">"):
+                                        desc = line[:120]
+                                        break
+                        except Exception:
+                            pass
+                    manifest_lines.append(f"- **{skill_name}** → `~/.agent/skills/{skill_name}` — {desc}")
+                    tlog(f"SKILL MANIFEST: {skill_name} (lazy)")
+
+                if manifest_lines:
+                    skill_content = (
+                        "\n\n---\n## ── SKILLS AVAILABLE ──\n\n"
+                        "**Load these skills BEFORE performing related work.** "
+                        "Command: `agictl execute bash \"cat <path>\"`\n\n"
+                        + "\n".join(manifest_lines)
+                    )
+            else:
+                skill_content = inject_skills(triage_result, skills_dir)
 
     # Build enhanced system prompt with injected skills
     enhanced_prompt = system_prompt

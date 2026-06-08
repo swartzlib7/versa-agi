@@ -212,7 +212,31 @@ agictl search web "<query>" --categories science      # Filter by search categor
 
 Use for: technical research, version compatibility checks, documentation lookups, competitive intelligence.
 
-## 12. execute — Code Execution
+## 12. browser — Headless Browser
+
+```bash
+agictl browser goto "<url>"                           # Load page, return text content
+agictl browser goto "<url>" --screenshot              # Load page + save screenshot
+agictl browser click "<url>" "<selector>"             # Navigate then click an element
+agictl browser fill "<url>" "<selector>" "<value>"    # Navigate then fill a form field
+agictl browser screenshot "<url>"                     # Capture visible viewport
+agictl browser screenshot "<url>" --full-page         # Capture full scrollable page
+agictl browser extract "<url>"                        # Extract all text content
+agictl browser extract "<url>" --selector "<css>"     # Extract text from specific elements
+agictl browser extract "<url>" --selector "<css>" --attribute "<attr>"  # Extract attribute values
+```
+
+> **Availability**: Browser requires Playwright to be installed and both `setup.ini [browser] enabled=true` AND your agent's `browser_enabled=1`. If browser is disabled, the harness tool `agictl_browser` will not be available.
+
+**Security**: Only `http://` and `https://` URLs allowed. `file://`, `javascript:`, and `data:` URLs are blocked. All operations run as your OS user.
+
+**Screenshots**: Saved to `workspace/screenshots/browser_<timestamp>.png`.
+
+**Returns JSON**: `{success: true, url: "...", title: "...", content: "...", screenshot: "/path/..."}`
+
+Use for: web page verification, content extraction, form testing, dashboard screenshots, API documentation scraping.
+
+## 13. execute — Code Execution
 
 ```bash
 agictl execute bash "<script>"                        # Run a bash script
@@ -225,7 +249,7 @@ Scripts execute as **your agent user** (not root/watchdog) with a 120-second tim
 
 **Returns JSON**: `{success: true/false, output: "...", exit_code: N}`
 
-## 13. model — LLM Model Management
+## 14. model — LLM Model Management
 
 ```bash
 agictl model list                                     # List registered models with status
@@ -233,6 +257,22 @@ agictl model list --table                             # Display as formatted tab
 ```
 
 > **Access**: `model list` is available to COA and system scripts only. Sub-agents see their assigned model via `system whoami`.
+
+## 15. pkg — System Package Registry
+
+```bash
+agictl pkg list                                       # View all registered packages and statuses
+agictl pkg request <name> --reason "..."              # Request a system package for installation
+agictl pkg install <name>                             # Install an approved package
+```
+
+> **Approval workflow**: You request → PU approves → Lifeline notifies you (one-shot prompt injection) → you install. You **cannot** approve, deny, or remove packages — those are PU-only.
+
+> **Security**: Package names must be valid apt names (lowercase, digits, dots, hyphens, plus). Installation uses watchdog→root escalation via sudoers. Only packages with `status='approved'` can be installed.
+
+**Returns JSON**: `{success: true, package: "jq", status: "requested"}`
+
+Use for: requesting build tools, libraries, or runtime dependencies that your work requires.
 
 ---
 

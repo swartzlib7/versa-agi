@@ -461,6 +461,7 @@ The security model enforces a strict separation between the **agent** (Versa), t
 | **Run scripts** | ✅ Full — execute anything in their workspace |
 | **Network access** | ✅ Full — curl, wget, API calls — no firewall restrictions |
 | **Web search** | ✅ When enabled — local SearXNG instance via `agictl search web` |
+| **Browser automation** | ✅ When enabled — headless Chromium via `agictl browser` commands |
 | **REST API comms** | ✅ Full — VersaVoice communication via `agictl` |
 | **Read system skills** | ✅ Read-only — can read shipped skills but not modify |
 
@@ -471,8 +472,8 @@ The security model enforces a strict separation between the **agent** (Versa), t
 | **`sudo` anything** | Can only sudo `agictl` — nothing else |
 | **Install system packages** | No sudo access for system package managers |
 | **Modify the monitoring layer** | POSIX ownership prevents write access |
-| **Modify its own behavioral framework** | Read-only, synced by the Lifeline scheduler |
-| **Read its own past thought logs** | Cycle archives are owned by the monitoring layer |
+| **Modify its own behavioral template (Poise)** | Read-only `/etc/versa-agi/poise/` files. While the templates are locked, agent behavior is dynamic by a deterministic design, composed at spawn time via active database status, assigned role parameters, and system variables. |
+| **Read its own past thought logs (internal trace/stdout)** | Cycle archives (raw execution stdout/stderr) are stored in the monitoring layer and owned by `watchdog`. This is distinct from structured strategic memory and environmental awareness (`agent_memory`, `agent_awareness` tables in SQLite), which the agent can read and write freely via `agictl` memory/awareness commands. |
 | **Modify system skills** | Deployed read-only by the infrastructure |
 | **Tamper with the Data Gateway** | Root-owned, outside agent's permission scope |
 
@@ -487,7 +488,7 @@ If the agent genuinely needs a system package (e.g., `imagemagick`, `ffmpeg`), i
 >
 > **Docker is root-equivalent.** Adding an agent's OS user to the `docker` group gives that agent the ability to mount the entire host filesystem into a container (`docker run -v /:/host`) and obtain full root access to the host — including other agents' workspaces, the monitoring layer, and system credentials. Docker's own documentation [explicitly warns](https://docs.docker.com/engine/security/#docker-daemon-attack-surface) that the `docker` group grants privileges equivalent to `root`.
 >
-> **Recommended: Use Multipass for agent workloads.** If an agent needs a containerized environment (e.g., running a web server, testing deployments), [Multipass](https://multipass.run/) provides genuine VM-level isolation via the hypervisor. Root inside a Multipass VM stays inside the VM — it cannot access the host filesystem or escalate to the host OS. This makes it the safe default for granting agents sandboxed execution environments.
+> **Recommended: Use Vagrant and Ansible (VirtualBox) for agent workloads.** If an agent needs a containerized or isolated environment (e.g., running a web server, testing deployments), Vagrant combined with Ansible provisioning running on VirtualBox provides genuine VM-level isolation. Root inside the VM stays inside the VM — it cannot access the host filesystem or escalate to the host OS. This makes it the safe default for granting agents sandboxed execution environments.
 
 ---
 
@@ -513,9 +514,6 @@ The infrastructure is deployed across three layers: a **monitoring layer** (Watc
 
 ## Roadmap
 
-### Watchdog Installer Automation
-An automated package installation workflow: agents request system packages → Watchdog queues the request → Primary User approves → Watchdog installs and notifies the agent.
-
 ### GitHub Integration
 Connect the Primary User's GitHub account for agent-driven push/pull:
 - Setup script handles creating new repos or linking existing ones
@@ -525,14 +523,16 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 
 #### 🧠 Agent Engine
 - **LangGraph Agent Harness** — Custom Python-native LangGraph orchestration engine. 12 typed Pydantic tool schemas, `stream()` execution model, and structured telemetry output.
-- **Cross-Cycle Checkpointing** — SQLite-backed `SqliteSaver` enables automatic state persistence across cycles. Thread-scoped identification (`{agent_id}-{project_id}`) with checkpoint repair for hard-terminated cycles. Per-agent resume control (`resume_enabled`, `resume_max_messages`) enables fresh-start mode or rolling memory trimming.
+- **System Prompt Hierarchy** — Priority-ordered prompt assembly (WHO→WHY→WHAT→OPERATIONAL→MEMORY→HISTORY). Identity and purpose are placed first for primacy, conversation history last for recency. Prevents identity drift by grounding agents in who they are before behavioral rules.
+- **Cross-Cycle Checkpointing** — SQLite-backed `SqliteSaver` enables automatic state persistence across cycles. Thread-scoped identification (`{agent_id}-{project_id}`) with checkpoint repair for hard-terminated cycles. Per-agent resume control (`resume_enabled`, `resume_max_messages`) — defaults to fresh-start mode (`resume_enabled=0`) to prevent identity erosion from checkpoint baggage.
 - **Task Triage Node** — Lightweight pre-agent classification with a 10-signal decision matrix. Routes work to the correct project thread, selects relevant skills from the dynamic DB-driven catalog, and emits intent-based **behavioral directives** (execution order per classification + signal-specific guidance) that guide agent behavior without prescribing specific CLI commands.
-- **Dynamic Skill Injection** — 20+ skills injected on-demand from a DB-driven skills catalog (`skills_catalog.md`). Each skill includes a **purpose annotation** explaining why it was injected and what behavior is expected. Agents only load skills relevant to their current work — reducing prompt size by ~10KB/cycle.
+- **Hybrid Skill Injection** — Three configurable modes (`hybrid`/`full`/`lazy`) per-agent via `skill_injection_mode` in `agents.db`. **Hybrid** (default): core skills always injected (CLI reference, memory management, communication basic ~2 KB), triage-driven skills listed as a compact manifest for on-demand loading via `agictl execute bash "cat <path>"`. **Full**: all triage-selected skills injected inline (legacy). **Lazy**: manifest only. Reduces startup tokens by ~10KB/cycle while ensuring agents have essential rules.
 - **Context Window Management** — `pre_model_hook` with `trim_messages` enforces a rolling context window (~32k tokens). Full history preserved in checkpoint; only the LLM input is trimmed. Conversation injection depth configurable per-agent (`conversation_depth`, default: 10 messages per contact).
 - **Budget Warnings** — Step budget warnings injected as genuine `HumanMessage` objects at 80%/95% thresholds, with hard termination at 100%.
 - **Local AI Backend** — Native LangChain integration. Three modes (`cloud`, `local`, `hybrid`). Standard backend uses Ollama (NVIDIA/AMD). Intel backend uses Docker SYCL with containerized llama.cpp for Intel ARC GPUs. Per-agent model assignment with ☁/🖥 dashboard indicators.
 - **Third-Party Cloud Models** — Native LangChain integrations for external LLM providers (xAI Grok, OpenAI GPT, Anthropic Claude). Extensible provider pattern — add new providers via the 3-key `setup.ini` convention (`{slug}_enabled`, `{slug}_api_key`, `{slug}_models`). Dashboard shows 🔀 icons.
 - **Web Search** — Local SearXNG integration for agent research (`agictl search web`). Runs as a Docker container (`searxng` + `searxng-redis`), bound to `127.0.0.1:8888`. LangGraph Tool #12, conditionally registered when enabled. Graceful degradation when disabled.
+- **Headless Browser Automation** — Native integration of Playwright for headless Chromium automation (`agictl browser`). Agents can programmatically navigate pages (`goto`), interact with forms (`click`, `fill`), capture screenshots (`screenshot`), and extract structured page content (`extract`). Controlled via two-layer security validation (system-wide and per-agent toggle) with automated sandbox isolation.
 
 #### ⚙️ Infrastructure
 - **Sub-Agent System** — `agictl agent add/remove` with OS user isolation, per-agent config, and role-based provisioning from a template registry.
@@ -573,6 +573,8 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 - **Skills Hardening** — 20+ system skills deployed read-only via `rsync --delete` mirrored deployment. Agents can create new skills but cannot modify shipped ones. COA manages skill lifecycle via `agictl skill new/status/override`. COA-only skills (`scope='coa_only'`) are excluded from sub-agent deployments at the rsync, triage catalog, and harness injection levels.
 - **Local AI Concurrency Gate** — Prevents inference server OOM by capping concurrent local-model agent spawns per Lifeline tick to the `sycl_parallel` slot count from `setup.ini`. Cloud and third-party agents are unaffected.
 - **Database Vacuum** — On-demand via `agictl system vacuum` or agitop dashboard. Includes LangGraph checkpoint pruning (retains latest version per thread, removes stale snapshots).
+- **System Package Registry** — Database-driven package management (`system_packages` table). Agents request packages via `agictl pkg request`, PU approves/denies via `agictl pkg approve/deny` or agitop dashboard, and approved packages are installed via `agictl pkg install` with watchdog→root sudoers escalation. Lifeline injects one-shot notifications to agents when their requested packages are approved.
+- **Browser Automation** — Playwright-based headless Chromium browser integration. System-wide enable/disable via agitop Settings modal with real-time provisioning feedback. Per-agent control via Agent Settings with immediate DB toggle and background binary install/cleanup.
 
 ---
 
@@ -590,6 +592,27 @@ sudo agictl identity provision <agent_name> \
 ```
 
 The provisioner auto-detects the stale ID, clears it, and registers a new sub-account. Accept the new connection request in the VersaVoice app afterward.
+
+### System Package Requests
+
+Agents can request system packages via `agictl pkg request <name> --reason "..."`.
+
+```bash
+# As PU — list pending requests
+agictl pkg list
+
+# Approve a package
+sudo agictl pkg approve <name>
+
+# Install (any user, approved-gate enforced)
+agictl pkg install <name>
+
+# Deny or remove
+sudo agictl pkg deny <name>
+sudo agictl pkg remove <name>
+```
+
+Alternatively, manage packages via agitop → ⚙ Settings → System Packages.
 
 ### Agent Not Spawning
 

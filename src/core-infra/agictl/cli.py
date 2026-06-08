@@ -157,6 +157,32 @@ def system_config_set(key, value):
         json_response(False, error=str(e))
         sys.exit(1)
 
+
+@config.command("set-ini")
+@click.argument("section")
+@click.argument("key")
+@click.argument("value")
+def system_config_set_ini(section, key, value):
+    """Write a configuration key/value to setup.ini.
+
+    Preserves all comments and formatting.
+    """
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+
+    if not os.path.isfile(ini_path):
+        json_response(False, error="setup.ini not found")
+        sys.exit(1)
+
+    try:
+        _update_ini_key(ini_path, section, key, value)
+        _sync_ini_to_source(ini_path)
+        json_response(True, section=section, key=key, value=value)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
 @system.command("set-key", hidden=True)
 @click.argument("key_type", type=click.Choice(["gemini", "versavoice", "xai", "openai", "anthropic"]))
 @click.argument("value")
@@ -2338,17 +2364,39 @@ def registry_remove(name):
     json_response(True, model=name, message=f"Removed '{name}' from SYCL registry. Note: [context_windows] and [local_models] entries preserved.")
 
 def _update_ini_key(ini_path, section, key, value):
-    """Update a single key in an INI file in-place."""
-    import re
+    """Update a single key in an INI file in-place.
+
+    If the key already exists under [section], its value is replaced.
+    If the key does not exist but the section does, the key is appended
+    after the last non-blank line of that section.
+    Operates line-by-line to avoid regex mis-matches across sections.
+    """
     with open(ini_path, "r") as f:
-        content = f.read()
-    # Match the key within the section (handles both key=value and key = value)
-    pattern = rf'(\[{re.escape(section)}\][^\[]*?^{re.escape(key)})\s*=\s*.*'
-    replacement = rf'\g<1>={value}'
-    new_content = re.sub(pattern, replacement, content, count=1, flags=re.MULTILINE)
-    if new_content != content:
-        with open(ini_path, "w") as f:
-            f.write(new_content)
+        lines = f.readlines()
+
+    current_section = None
+    key_found = False
+    section_end_idx = -1  # last content line index within target section
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped[1:-1]
+            continue
+        if current_section == section:
+            if stripped and not stripped.startswith("#"):
+                section_end_idx = i
+            eq = stripped.find("=")
+            if eq > 0 and stripped[:eq].strip() == key and not key_found:
+                lines[i] = f"{key}={value}\n"
+                key_found = True
+
+    if not key_found and section_end_idx >= 0:
+        # Append after the last content line in the section
+        lines.insert(section_end_idx + 1, f"{key}={value}\n")
+
+    with open(ini_path, "w") as f:
+        f.writelines(lines)
 
 
 def _read_paths_env_key(key):
@@ -3557,7 +3605,7 @@ def agent_ensure_protected():
 
 @agent.command("get-active")
 def agent_get_active():
-    """Return active agents in pipe format for Lifeline: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages"""
+    """Return active agents in pipe format for Lifeline: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode"""
     agents = agent_reader.get_active_agents()
     for a in agents:
         model = a.get("model") or ""
@@ -3572,9 +3620,10 @@ def agent_get_active():
         anchor_style = a.get("anchor_style") or "compact"
         num_ctx = a.get("num_ctx", 0)
         convo_depth = a.get("conversation_depth", 10)
-        resume_enabled = a.get("resume_enabled", 1)
+        resume_enabled = a.get("resume_enabled", 0)
         resume_max_msgs = a.get("resume_max_messages", 0)
-        print(f"{a['name']}|{a['os_user']}|{a['workspace']}|{model}|{timeout}|{runaway}|{runaway_size}|{injection_mode}|{token_budget}|{max_turns}|{tool_budget}|{triage_model}|{anchor_style}|{num_ctx}|{convo_depth}|{resume_enabled}|{resume_max_msgs}")
+        skill_mode = a.get("skill_injection_mode") or "hybrid"
+        print(f"{a['name']}|{a['os_user']}|{a['workspace']}|{model}|{timeout}|{runaway}|{runaway_size}|{injection_mode}|{token_budget}|{max_turns}|{tool_budget}|{triage_model}|{anchor_style}|{num_ctx}|{convo_depth}|{resume_enabled}|{resume_max_msgs}|{skill_mode}")
 
 
 
@@ -6507,6 +6556,486 @@ def search_web(query, count, categories):
 
 
 # ═══════════════════════════════════════════════════════
+# BROWSER — Headless browser automation (Playwright)
+# ═══════════════════════════════════════════════════════
+
+def _get_browser_config():
+    """Read browser configuration from setup.ini."""
+    import configparser
+    config = configparser.ConfigParser()
+    config.read("/etc/versa-agi/setup.ini")
+    return {
+        "enabled": config.get("browser", "enabled", fallback="false").lower() == "true",
+        "timeout": int(config.get("browser", "timeout", fallback="30")) * 1000,  # ms
+    }
+
+
+def _check_browser_access():
+    """Two-layer access check: system-wide + per-agent.
+
+    Layer 1: [browser] enabled in setup.ini (system-wide kill switch)
+    Layer 2: browser_enabled in agents.db (per-agent toggle)
+    Both must be true for execution.
+    """
+    config = _get_browser_config()
+    if not config["enabled"]:
+        json_response(False, error="Browser automation is disabled system-wide. Enable via agitop System Settings or setup.sh.")
+        sys.exit(1)
+
+    agent_name = get_agent_name()
+    conn = sqlite3.connect(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT browser_enabled FROM agents WHERE name=?", (agent_name,)).fetchone()
+    conn.close()
+    if not row or not row["browser_enabled"]:
+        json_response(False, error="Browser automation is disabled for this agent. Request access from the Primary User.")
+        sys.exit(1)
+
+    return config
+
+
+def _get_screenshot_dir(agent_name: str) -> str:
+    """Resolve screenshot directory from agents.db workspace column.
+
+    COA:        {workspace}/.agent/workspace/screenshots/
+    Sub-agents: {workspace}/workspace/screenshots/
+    """
+    conn = sqlite3.connect(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
+    conn.close()
+    if not row:
+        return "/tmp"
+    workspace = row["workspace"]
+    # COA has .agent/workspace symlink structure
+    agent_ws = os.path.join(workspace, ".agent", "workspace")
+    if os.path.exists(agent_ws) or os.path.islink(agent_ws):
+        return os.path.join(agent_ws, "screenshots")
+    return os.path.join(workspace, "workspace", "screenshots")
+
+
+def _validate_browser_url(url: str):
+    """Validate URL protocol — only http:// and https:// allowed."""
+    if not url.startswith(("http://", "https://")):
+        json_response(False, error=f"Invalid URL protocol. Only http:// and https:// are allowed. Got: {url[:50]}")
+        sys.exit(1)
+
+
+def _run_playwright_script(script: str, timeout_ms: int):
+    """Write and execute a Playwright Python script as the agent user.
+
+    Uses the same _get_exec_cmd() isolation pattern as 'execute python'.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(script)
+        temp_name = f.name
+    os.chmod(temp_name, 0o644)
+    try:
+        cmd = _get_exec_cmd("python3", temp_name)
+        timeout_sec = max(timeout_ms // 1000 + 10, 30)  # subprocess timeout = page timeout + 10s buffer
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        output = result.stdout
+        if result.stderr:
+            output += "\nSTDERR:\n" + result.stderr
+        return result.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, "Browser operation timed out"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if os.path.exists(temp_name):
+            os.remove(temp_name)
+
+
+@cli.group()
+def browser():
+    """Headless browser automation via Playwright."""
+    pass
+
+
+@browser.command("goto")
+@click.argument("url")
+@click.option("--screenshot", "take_screenshot", is_flag=True, help="Take a screenshot after loading")
+@click.option("--selector", default=None, help="CSS selector to extract text from (default: full page)")
+def browser_goto(url, take_screenshot, selector):
+    """Navigate to a URL and return page content."""
+    config = _check_browser_access()
+    _validate_browser_url(url)
+    timeout_ms = config["timeout"]
+    agent_name = get_agent_name()
+
+    screenshot_line = ""
+    if take_screenshot:
+        ss_dir = _get_screenshot_dir(agent_name)
+        screenshot_line = (
+            f"import os, time\n"
+            f"ss_dir = {repr(ss_dir)}\n"
+            f"os.makedirs(ss_dir, exist_ok=True)\n"
+            f"ss_path = os.path.join(ss_dir, f\"goto_{{int(time.time())}}.png\")\n"
+            f"page.screenshot(path=ss_path, full_page=True)\n"
+            f"print(\"SCREENSHOT:\" + ss_path)"
+        )
+
+    if selector:
+        extract_line = f'text = page.locator({repr(selector)}).inner_text(timeout={timeout_ms})\nprint("CONTENT:" + text)'
+    else:
+        extract_line = f'text = page.locator("body").inner_text(timeout={timeout_ms})\nprint("CONTENT:" + text[:8000])'
+
+    # Build body lines with consistent 4-space indent inside the 'with' block
+    body_lines = [
+        f"browser = p.chromium.launch(headless=True)",
+        f"page = browser.new_page()",
+        f"page.goto({repr(url)}, timeout={timeout_ms})",
+        f'print("TITLE:" + page.title())',
+    ]
+    body_lines.extend(extract_line.split("\n"))
+    if screenshot_line:
+        body_lines.extend(screenshot_line.split("\n"))
+    body_lines.append("browser.close()")
+    body = "\n    ".join(body_lines)
+
+    script = f"""
+import sys
+sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    # Try the venv site-packages directly
+    import glob
+    paths = glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages")
+    for p in paths:
+        sys.path.insert(0, p)
+    from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    {body}
+"""
+    success, output = _run_playwright_script(script, timeout_ms)
+    if not success:
+        json_response(False, error=f"Browser error: {output}")
+        return
+
+    # Parse structured output
+    result = {"url": url}
+    for line in output.splitlines():
+        if line.startswith("TITLE:"):
+            result["title"] = line[6:]
+        elif line.startswith("CONTENT:"):
+            result["content"] = line[8:]
+        elif line.startswith("SCREENSHOT:"):
+            result["screenshot"] = line[11:]
+
+    json_response(True, **result)
+
+
+@browser.command("click")
+@click.argument("url")
+@click.argument("selector")
+def browser_click(url, selector):
+    """Navigate to URL and click an element."""
+    config = _check_browser_access()
+    _validate_browser_url(url)
+    timeout_ms = config["timeout"]
+
+    script = f"""
+import sys, glob
+sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
+for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
+    sys.path.insert(0, p)
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto({repr(url)}, timeout={timeout_ms})
+    page.locator({repr(selector)}).click(timeout={timeout_ms})
+    page.wait_for_load_state("networkidle", timeout={timeout_ms})
+    print("TITLE:" + page.title())
+    print("URL:" + page.url)
+    text = page.locator("body").inner_text(timeout={timeout_ms})
+    print("CONTENT:" + text[:8000])
+    browser.close()
+"""
+    success, output = _run_playwright_script(script, timeout_ms)
+    if not success:
+        json_response(False, error=f"Click failed: {output}")
+        return
+
+    result = {"url": url, "selector": selector, "action": "click"}
+    for line in output.splitlines():
+        if line.startswith("TITLE:"):
+            result["title"] = line[6:]
+        elif line.startswith("URL:"):
+            result["current_url"] = line[4:]
+        elif line.startswith("CONTENT:"):
+            result["content"] = line[8:]
+    json_response(True, **result)
+
+
+@browser.command("fill")
+@click.argument("url")
+@click.argument("selector")
+@click.argument("value")
+def browser_fill(url, selector, value):
+    """Navigate to URL and fill a form field."""
+    config = _check_browser_access()
+    _validate_browser_url(url)
+    timeout_ms = config["timeout"]
+
+    script = f"""
+import sys, glob
+sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
+for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
+    sys.path.insert(0, p)
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto({repr(url)}, timeout={timeout_ms})
+    page.locator({repr(selector)}).fill({repr(value)}, timeout={timeout_ms})
+    print("FILLED:true")
+    print("TITLE:" + page.title())
+    browser.close()
+"""
+    success, output = _run_playwright_script(script, timeout_ms)
+    if not success:
+        json_response(False, error=f"Fill failed: {output}")
+        return
+
+    result = {"url": url, "selector": selector, "value": value, "action": "fill"}
+    for line in output.splitlines():
+        if line.startswith("TITLE:"):
+            result["title"] = line[6:]
+        elif line.startswith("FILLED:"):
+            result["filled"] = True
+    json_response(True, **result)
+
+
+@browser.command("screenshot")
+@click.argument("url")
+@click.option("--path", "save_path", default=None, help="Save path (default: agent workspace)")
+@click.option("--full-page", "full_page", is_flag=True, help="Capture full page (not just viewport)")
+def browser_screenshot(url, save_path, full_page):
+    """Navigate to URL and take a screenshot."""
+    config = _check_browser_access()
+    _validate_browser_url(url)
+    timeout_ms = config["timeout"]
+    agent_name = get_agent_name()
+
+    if not save_path:
+        ss_dir = _get_screenshot_dir(agent_name)
+        save_path = f"__AUTO__{ss_dir}"
+
+    script = f"""
+import sys, os, time, glob
+sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
+for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
+    sys.path.insert(0, p)
+from playwright.sync_api import sync_playwright
+
+save_path = {repr(save_path)}
+if save_path.startswith("__AUTO__"):
+    ss_dir = save_path[8:]
+    os.makedirs(ss_dir, exist_ok=True)
+    save_path = os.path.join(ss_dir, f"screenshot_{{int(time.time())}}.png")
+else:
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto({repr(url)}, timeout={timeout_ms})
+    page.screenshot(path=save_path, full_page={repr(full_page)})
+    print("SCREENSHOT:" + save_path)
+    print("TITLE:" + page.title())
+    browser.close()
+"""
+    success, output = _run_playwright_script(script, timeout_ms)
+    if not success:
+        json_response(False, error=f"Screenshot failed: {output}")
+        return
+
+    result = {"url": url, "action": "screenshot", "full_page": full_page}
+    for line in output.splitlines():
+        if line.startswith("SCREENSHOT:"):
+            result["path"] = line[11:]
+        elif line.startswith("TITLE:"):
+            result["title"] = line[6:]
+    json_response(True, **result)
+
+
+@browser.command("extract")
+@click.argument("url")
+@click.option("--selector", default="body", help="CSS selector (default: body)")
+@click.option("--attribute", default=None, help="Element attribute to extract (default: text content)")
+def browser_extract(url, selector, attribute):
+    """Extract structured content from a page."""
+    config = _check_browser_access()
+    _validate_browser_url(url)
+    timeout_ms = config["timeout"]
+
+    if attribute:
+        extract_expr = f'page.locator({repr(selector)}).get_attribute({repr(attribute)}, timeout={timeout_ms})'
+    else:
+        extract_expr = f'page.locator({repr(selector)}).all_text_contents()'
+
+    script = f"""
+import sys, json, glob
+sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
+for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
+    sys.path.insert(0, p)
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto({repr(url)}, timeout={timeout_ms})
+    result = {extract_expr}
+    print("EXTRACT:" + json.dumps(result))
+    print("TITLE:" + page.title())
+    browser.close()
+"""
+    success, output = _run_playwright_script(script, timeout_ms)
+    if not success:
+        json_response(False, error=f"Extract failed: {output}")
+        return
+
+    result = {"url": url, "selector": selector, "action": "extract"}
+    for line in output.splitlines():
+        if line.startswith("EXTRACT:"):
+            result["data"] = json.loads(line[8:])
+        elif line.startswith("TITLE:"):
+            result["title"] = line[6:]
+    if attribute:
+        result["attribute"] = attribute
+    json_response(True, **result)
+
+
+@browser.command("enable")
+@click.argument("agent_name")
+def browser_enable(agent_name):
+    """Enable browser automation for a sub-agent. COA-only.
+
+    Grants browser access and installs Chromium binaries for the agent's OS user.
+    Requires: system-wide [browser] enabled=true AND caller must be COA with browser_enabled=1.
+    """
+    # Guard: COA-exclusive
+    caller = os.environ.get("VERSA_AGENT_NAME", "")
+    if caller and caller not in ("coa",):
+        json_response(False, error="Permission denied: only COA can manage browser access for other agents")
+        sys.exit(1)
+
+    # Guard: system-wide enabled
+    config = _get_browser_config()
+    if not config["enabled"]:
+        json_response(False, error="Browser automation is disabled system-wide. Enable via agitop System Settings or setup.sh.")
+        sys.exit(1)
+
+    # Guard: COA must have browser access
+    conn = sqlite3.connect(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+
+    # Resolve COA name from setup.ini
+    import configparser
+    _ini = configparser.ConfigParser()
+    _ini.read("/etc/versa-agi/setup.ini")
+    coa_name = _ini.get("users", "coa", fallback="coa")
+
+    coa_row = conn.execute("SELECT browser_enabled FROM agents WHERE name=?", (coa_name,)).fetchone()
+    if not coa_row or not coa_row["browser_enabled"]:
+        json_response(False, error=f"COA ({coa_name}) does not have browser access. Request from Primary User via agitop.")
+        sys.exit(1)
+
+    # Guard: target cannot be protected agents
+    target = conn.execute("SELECT name, os_user, protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+    if not target:
+        conn.close()
+        json_response(False, error=f"Agent '{agent_name}' not found")
+        sys.exit(1)
+    if target["protected"]:
+        conn.close()
+        json_response(False, error=f"Cannot manage browser access for protected agent '{agent_name}'. Use agitop dashboard.")
+        sys.exit(1)
+
+    # Enable in DB
+    conn.execute("UPDATE agents SET browser_enabled = 1 WHERE name=?", (agent_name,))
+    conn.commit()
+    conn.close()
+
+    # Install Chromium for agent user
+    os_user = target["os_user"]
+    try:
+        harness_venv = "/usr/local/lib/versa-agi/venv"
+        playwright_bin = os.path.join(harness_venv, "bin", "playwright")
+        if os.path.isfile(playwright_bin):
+            subprocess.run(
+                ["sudo", "-u", os_user, playwright_bin, "install", "chromium"],
+                capture_output=True, timeout=120
+            )
+    except Exception as e:
+        json_response(True, agent=agent_name, browser_enabled=True,
+                      warning=f"DB updated but Chromium install failed: {e}. Agent may need manual install.")
+        return
+
+    json_response(True, agent=agent_name, os_user=os_user, browser_enabled=True,
+                  message=f"Browser automation enabled for {agent_name}")
+
+
+@browser.command("disable")
+@click.argument("agent_name")
+def browser_disable(agent_name):
+    """Disable browser automation for a sub-agent. COA-only.
+
+    Revokes browser access, removes Chromium binaries and screenshots.
+    """
+    # Guard: COA-exclusive
+    caller = os.environ.get("VERSA_AGENT_NAME", "")
+    if caller and caller not in ("coa",):
+        json_response(False, error="Permission denied: only COA can manage browser access for other agents")
+        sys.exit(1)
+
+    conn = sqlite3.connect(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+
+    target = conn.execute("SELECT name, os_user, protected, workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
+    if not target:
+        conn.close()
+        json_response(False, error=f"Agent '{agent_name}' not found")
+        sys.exit(1)
+    if target["protected"]:
+        conn.close()
+        json_response(False, error=f"Cannot manage browser access for protected agent '{agent_name}'. Use agitop dashboard.")
+        sys.exit(1)
+
+    # Disable in DB
+    conn.execute("UPDATE agents SET browser_enabled = 0 WHERE name=?", (agent_name,))
+    conn.commit()
+    conn.close()
+
+    # Cleanup: remove browser binaries
+    os_user = target["os_user"]
+    cache_dir = f"/home/{os_user}/.cache/ms-playwright/"
+    if os.path.isdir(cache_dir):
+        import shutil
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    # Cleanup: remove screenshots
+    workspace = target["workspace"]
+    for ss_path in [
+        os.path.join(workspace, ".agent", "workspace", "screenshots"),
+        os.path.join(workspace, "workspace", "screenshots"),
+    ]:
+        if os.path.isdir(ss_path):
+            import shutil
+            shutil.rmtree(ss_path, ignore_errors=True)
+
+    json_response(True, agent=agent_name, os_user=os_user, browser_enabled=False,
+                  message=f"Browser automation disabled for {agent_name}. Binaries and screenshots removed.")
+
+
+# ═══════════════════════════════════════════════════════
 # SKILL MANAGEMENT
 # ═══════════════════════════════════════════════════════
 
@@ -6878,6 +7407,272 @@ def skill_override(name):
         conn.close()
 
     json_response(True, skill=override_name, override_of=name, file=override_file, status="draft")
+
+
+# ═══════════════════════════════════════════════════════
+# SYSTEM PACKAGE MANAGEMENT
+# ═══════════════════════════════════════════════════════
+
+def _require_pu_or_root():
+    """Block agent users from privileged pkg operations."""
+    agent_user = os.getenv("AGICTL_AGENT_USER", "")
+    if agent_user:
+        json_response(False, error=f"Permission denied. '{agent_user}' cannot perform this operation. "
+                                   "Request the package via 'agictl pkg request' instead.")
+        sys.exit(1)
+
+def _validate_pkg_name(name):
+    """Validate package name against shell injection. Returns sanitized name or exits."""
+    import re
+    name = name.strip().lower()
+    if not re.match(r"^[a-z0-9][a-z0-9.+\-]+$", name):
+        json_response(False, error="Invalid package name format. Only lowercase alphanumeric characters, "
+                                   "dashes, dots, and plus signs are allowed.")
+        sys.exit(1)
+    return name
+
+def _get_agents_db_path():
+    """Resolve the agents.db path."""
+    return os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+
+@cli.group()
+def pkg():
+    """Manage system packages — request, approve, install, and track."""
+    pass
+
+
+@pkg.command("list")
+def pkg_list():
+    """List all registered system packages."""
+    db_path = _get_agents_db_path()
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, status, reason, requested_by, requested_at, resolved_at, notified_at "
+            "FROM system_packages ORDER BY requested_at DESC"
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    if not rows:
+        console = Console()
+        console.print("[dim]No system packages registered.[/]")
+        return
+
+    table = Table(title="System Packages")
+    table.add_column("Package", style="cyan", no_wrap=True)
+    table.add_column("Status", style="bold")
+    table.add_column("Reason")
+    table.add_column("Requested By", style="dim")
+    table.add_column("Requested At", style="dim")
+    table.add_column("Resolved At", style="dim")
+
+    status_styles = {"approved": "green", "requested": "yellow", "denied": "red"}
+    for row in rows:
+        s = row["status"]
+        style = status_styles.get(s, "")
+        table.add_row(
+            row["name"],
+            f"[{style}]{s}[/{style}]" if style else s,
+            row["reason"] or "",
+            row["requested_by"] or "",
+            row["requested_at"] or "",
+            row["resolved_at"] or "",
+        )
+
+    console = Console()
+    console.print(table)
+
+
+@pkg.command("request")
+@click.argument("name")
+@click.option("--reason", "-r", default=None, help="Why the package is needed")
+def pkg_request(name, reason):
+    """Request a system package for PU approval."""
+    name = _validate_pkg_name(name)
+    requester = get_agent_name()
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        # Check if already exists
+        existing = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        if existing:
+            json_response(False, error=f"Package '{name}' already registered with status '{existing[0]}'. "
+                                       f"Use 'agictl pkg list' to check status.")
+            conn.close()
+            return
+
+        conn.execute(
+            "INSERT INTO system_packages (name, status, reason, requested_by) VALUES (?, 'requested', ?, ?)",
+            (name, reason, requester)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, status="requested", requested_by=requester)
+
+
+@pkg.command("add")
+@click.argument("name")
+@click.option("--reason", "-r", default=None, help="Why the package is needed")
+def pkg_add(name, reason):
+    """Directly add a package as approved (PU-only, bypasses approval queue)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.execute(
+            "INSERT OR REPLACE INTO system_packages (name, status, reason, requested_by, requested_at, resolved_at) "
+            "VALUES (?, 'approved', ?, 'pu', datetime('now'), datetime('now'))",
+            (name, reason)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, status="approved", action="added")
+
+
+@pkg.command("approve")
+@click.argument("name")
+def pkg_approve(name):
+    """Approve a requested package (PU-only)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        if not row:
+            json_response(False, error=f"Package '{name}' not found in registry.")
+            conn.close()
+            return
+        if row[0] == "approved":
+            json_response(False, error=f"Package '{name}' is already approved.")
+            conn.close()
+            return
+
+        conn.execute(
+            "UPDATE system_packages SET status='approved', resolved_at=datetime('now'), notified_at=NULL WHERE name=?",
+            (name,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, status="approved", action="approved")
+
+
+@pkg.command("deny")
+@click.argument("name")
+def pkg_deny(name):
+    """Deny a requested package (PU-only)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        if not row:
+            json_response(False, error=f"Package '{name}' not found in registry.")
+            conn.close()
+            return
+
+        conn.execute(
+            "UPDATE system_packages SET status='denied', resolved_at=datetime('now') WHERE name=?",
+            (name,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, status="denied", action="denied")
+
+
+@pkg.command("remove")
+@click.argument("name")
+def pkg_remove(name):
+    """Remove a package from the registry (PU-only)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        row = conn.execute("SELECT name FROM system_packages WHERE name=?", (name,)).fetchone()
+        if not row:
+            json_response(False, error=f"Package '{name}' not found in registry.")
+            conn.close()
+            return
+
+        conn.execute("DELETE FROM system_packages WHERE name=?", (name,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, action="removed")
+
+
+@pkg.command("install")
+@click.argument("name")
+def pkg_install(name):
+    """Install an approved system package via apt-get (any user, approved-gate enforced)."""
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    # Verify package is approved before attempting install
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    if not row:
+        json_response(False, error=f"Package '{name}' is not in the system registry. "
+                                   f"Request it first: agictl pkg request {name} --reason \"...\"")
+        return
+    if row[0] != "approved":
+        json_response(False, error=f"Package '{name}' has status '{row[0]}'. Only 'approved' packages can be installed. "
+                                   f"Ask the Primary User to approve it first.")
+        return
+
+    # Execute apt-get install via sudo (watchdog→root sudoers rule)
+    try:
+        result = subprocess.run(
+            ["sudo", "/usr/bin/apt-get", "install", "-y", name],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode == 0:
+            json_response(True, package=name, action="installed",
+                          output=result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
+        else:
+            json_response(False, error=f"apt-get install failed (exit {result.returncode})",
+                          stderr=result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
+    except subprocess.TimeoutExpired:
+        json_response(False, error=f"Package installation timed out after 300 seconds.")
+    except Exception as e:
+        json_response(False, error=f"Installation error: {e}")
 
 
 if __name__ == "__main__":

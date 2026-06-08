@@ -4,6 +4,78 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
+## [0.14.1] — 2026-06-07
+
+### System Settings UX & Keyboard Pagination Refinements
+
+#### Added
+- **`PackageInstallModal`** — Interactive modal screen that runs `sudo agictl pkg install <package>` in a background thread and streams real-time stdout/stderr lines into a scrollable terminal window, providing direct progress feedback.
+- **Keyboard-driven pagination** — Subclassed `DataTable` as `PaginatedDataTable` to intercept `PageUp` and `PageDown` key events, updating the table's active data slice.
+- **Title-embedded pagination indicators** — Set `border_title` dynamically on Skills and Packages tables to display page numbers and key navigation help, eliminating button rows to maximize vertical workspace.
+
+#### Changed
+- **Skills Registry Table height** — Increased Skills Registry DataTable height from `8` to `16` to double visible rows.
+- **System Settings layout compacting** — Removed the old button-based `.pager-row` horizontal containers from the settings dialog layout, significantly reducing vertical spacing.
+
+## [0.14.0] — 2026-06-07
+
+### Package Registry Input, Centering & Pagination Refinements
+
+#### Added
+- **`PackageRequestModal`** — Input-driven ModalScreen prompting for package name and justification when requesting new system packages. Performs regex validation on package name matching agictl constraints.
+- **Pagination controls for System Settings** — Integrated page status indicators and Prev/Next navigation buttons for both Skills Registry and System Packages & Requests tables, resolving overflow issues.
+
+#### Changed
+- **Browser Automation modal centering** — Centered `BrowserAutomationModal` on the screen using transparent modal layout rules (`align: center middle`).
+- **Browser Automation state refresh** — Refactored modal closing to use `self.dismiss(True/False)` callbacks so SystemSettingsModal dynamically reloads status label and toggle button when changed.
+
+#### Fixed
+- **Confirm disable feedback** — Resolved issue where confirming browser automation disable did not visually refresh the active status banner in System Settings.
+
+## [0.12.4] — 2026-06-07
+
+### System Package Registry & Browser Automation UX
+
+#### Added
+- **`system_packages` SQLite table** — Registry for system-level packages (apt) with `status` ('requested', 'approved', 'denied'), `requested_by`, `resolved_at`, and `notified_at` columns. Schema migration for existing databases.
+- **`agictl pkg` command group** — 7 subcommands: `list`, `request`, `add` (PU-only), `approve` (PU-only), `deny` (PU-only), `remove` (PU-only), `install` (any user, approved-gate enforced). Shell injection guard via strict regex validation on package names.
+- **Sudoers rule: `versa_agi_pkg_installer`** — Allows watchdog to run `/usr/bin/apt-get install -y *` as root. Agent → agictl-wrapper → watchdog → Python (approval check) → sudo apt-get → root.
+- **Lifeline package notification** — One-shot `PKG_NOTICE` block injected into agent system prompt when approved packages are pending (`notified_at IS NULL`). Sets `notified_at` immediately after injection to prevent re-notification.
+- **`BrowserAutomationModal`** — New `ModalScreen` in system settings following the `SyclActivationModal` pattern. Shows current status, target action, real-time Playwright provisioning feedback, and auto-closes on completion.
+- **System Packages UI** — Collapsible DataTable in system settings with Approve, Deny, Install, Add/Request, and Remove action buttons. Contextual actions via row selection.
+- **`system_packages.md` skill** — Agent-facing skill documenting the request→approve→install workflow, privilege boundaries, one-shot Lifeline notification, and usage patterns.
+
+#### Changed
+- **Browser Automation (System Settings)** — Replaced checkbox with status-aware button (`Enable`/`Disable`) that opens `BrowserAutomationModal` with live feedback. Browser timeout remains in Save handler.
+- **Browser Automation (Agent Settings)** — Replaced "Browser Usage" Select list with "Browser Automation" status-aware button. Toggle is immediate (DB update + background Playwright install/cleanup), not deferred to Save.
+- **Skills Registry** — Wrapped in `Collapsible` widget for cleaner settings layout.
+- **CLI Reference updates** — Both `cli_reference.md` (COA) and `cli_reference_agent.md` (sub-agents) updated with `agictl pkg` command documentation. COA command group count updated to 17.
+- **Triage catalog** — `system_packages.md` added to the fallback skills catalog and triage reason mapping.
+
+## [0.12.3] — 2026-06-07
+
+### Headless Browser Automation (Playwright)
+
+#### Added
+- **`agictl browser` command group** — 5 subcommands (`goto`, `click`, `fill`, `screenshot`, `extract`) for headless Chromium page interaction. Each command spawns a fresh browser context as the calling agent's OS user for full process isolation. URL validation blocks `file://`, `javascript:`, and `data:` schemes.
+- **`agictl browser enable/disable` (COA delegation)** — Protected-agent-only commands to toggle `browser_enabled` on sub-agents and trigger Chromium provisioning/cleanup.
+- **`agictl_browser` LangGraph tool** — Harness wrapper conditionally registered at startup based on `setup.ini [browser] enabled`. Per-agent `browser_enabled` flag checked at CLI layer.
+- **`setup.ini [browser]` section** — System-wide `enabled` flag and `timeout` (default 30s) for page load control.
+- **`browser_enabled` column in agents.db** — Per-agent toggle with schema migration for existing databases. Added to `v_agent_registry` and `v_active_agents` views.
+- **`providers/playwright.sh`** — Provider script for system-wide Playwright/Chromium dependency verification and per-agent binary installation/cleanup.
+- **agitop Agent Settings: Browser toggle** — `Enabled/Disabled` select in `AgentEditModal` (non-protected agents only). On save: enabling triggers `playwright install chromium` for the agent user; disabling triggers `~/.cache/ms-playwright/` cleanup.
+- **agitop System Settings: Browser section** — `Enabled` checkbox and `Page Load Timeout (seconds)` input. Reads/writes `setup.ini` via the existing INI management pipeline.
+- **`browser_automation.md` skill** — Agent-facing skill documenting usage patterns, security guardrails, return format, and COA delegation commands.
+- **CLI Reference updates** — Both `cli_reference.md` (COA) and `cli_reference_agent.md` (sub-agents) updated with browser command documentation. Command group count updated to 16.
+
+#### Changed
+- **`requirements.txt`** — Added `playwright>=1.40.0` to the harness Python dependencies.
+
+#### Fixed
+- **Playwright installation script crash** — Removed invalid `local` variable declaration at script scope within the interactive Playwright prompt check in `setup.sh`.
+- **Missing Authorization headers in setup/repair curl requests** — Added explicit `Authorization: Bearer <key>` headers to all curl connectivity tests querying `/v1/models` in `setup_local.sh` and `setup.sh` (client repair routines). Fixes connection test failures (HTTP 401 Unauthorized) when querying authenticated inference servers during client-remote topology configuration.
+- **Automated master key injection for Intel SYCL** — Added detection of the remote inference URL's port (`:8080` for Intel SYCL) to auto-inject the default master key `versa-sk` with a terminal notice. Prevents prompting the user for a master key unless they are using Ollama or a custom port.
+
 ## [0.12.2] — 2026-06-05
 
 ### Configuration Cleanup

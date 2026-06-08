@@ -97,7 +97,7 @@ class AgentsPanel(DataTable):
         self.cursor_type = "row"
         self.border_title = "Agents (Global Registry & Telemetry)"
         self.add_columns(
-            "Agent", "Provider", "Model", "Role", "Inactive", "Protected", "Comms", "Req. By",
+            "Agent", "Provider", "Model", "Role", "Inactive", "Protected", "Browser", "Comms", "Req. By",
             f"Last Cycle ({_TZ})", "Sent", "Recv", "Tasks", "Tokens", "Budget", "Status"
         )
         self.refresh_data()
@@ -219,6 +219,9 @@ class AgentsPanel(DataTable):
             # Model display — short name only (provider shown in dedicated column)
             model_display = f"[dim]{agent_model}[/]" if agent_model else "[dim]default[/]"
 
+            browser_val = agent.get("browser_enabled", 0)
+            browser_display = "[green]●[/]" if browser_val else "[dim]○[/]"
+
             self.add_row(
                 name_markup,
                 provider_display,
@@ -226,6 +229,7 @@ class AgentsPanel(DataTable):
                 role + coa_warning,
                 inactive,
                 protected,
+                browser_display,
                 comms_markup,
                 req_by,
                 f"[cyan]{last_cycle}[/cyan]",
@@ -716,13 +720,25 @@ class TechnicalSetupModal(ModalScreen):
                 yield Static("[cyan]Resume Enabled[/] — whether the agent resumes from checkpoint state")
                 yield Select(
                     [("Yes (resume from checkpoint)", 1), ("No (fresh start each cycle)", 0)],
-                    value=agent.get("resume_enabled", 1),
+                    value=agent.get("resume_enabled", 0),
                     id="select-resume-enabled",
                     allow_blank=False,
                 )
                 yield Static("[cyan]Resume Max Messages[/] — trim checkpoint state to last N messages (0 = unlimited)")
                 yield Input(value=str(agent.get("resume_max_messages", 0)), placeholder="0 = unlimited", id="input-resume-max-msgs", type="integer")
                 yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
+                yield Static("")
+                yield Static("[bold cyan]─── Skill Injection ───[/]")
+                yield Static("[cyan]Skill Injection Mode[/] — how triage-driven skills are loaded at spawn")
+                yield Select(
+                    [("Hybrid (core injected + lazy manifest)", "hybrid"),
+                     ("Full (inject all skills)", "full"),
+                     ("Lazy (manifest only)", "lazy")],
+                    value=agent.get("skill_injection_mode", "hybrid") or "hybrid",
+                    id="select-skill-mode",
+                    allow_blank=False,
+                )
+                yield Static("[dim]Hybrid: core skills always injected, triage skills listed as a manifest for on-demand loading.[/]")
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="btn-save-setup")
                 yield Button("Cancel", variant="default", id="msg-dialog-close")
@@ -767,6 +783,10 @@ class TechnicalSetupModal(ModalScreen):
                     ok = ok and reader.update_agent_field(self.agent_name, "resume_enabled", resume_val)
                     resume_max = int(self.query_one("#input-resume-max-msgs", Input).value)
                     ok = ok and reader.update_agent_field(self.agent_name, "resume_max_messages", resume_max)
+                    # Save skill injection mode
+                    skill_mode_select = self.query_one("#select-skill-mode", Select)
+                    skill_mode_val = skill_mode_select.value if isinstance(skill_mode_select.value, str) else "hybrid"
+                    ok = ok and reader.update_agent_field(self.agent_name, "skill_injection_mode", skill_mode_val)
                     if ok:
                         self.app.notify(f"Settings saved for {self.agent_name}", title="Technical Setup")
                     else:
@@ -1252,6 +1272,7 @@ class AgentEditModal(ModalScreen):
         is_protected = agent.get("protected") == 1
         current_inactive = agent.get("inactive", 0)
         current_comms = agent.get("can_message_connections", 0)
+        current_browser = agent.get("browser_enabled", 0)
         current_ctx_mode = agent.get("context_injection_mode") or "relevant"
         current_status = agent.get("status") or ""
         current_anchor = agent.get("anchor_style") or "compact"
@@ -1314,6 +1335,14 @@ class AgentEditModal(ModalScreen):
                         id="select-comms",
                         allow_blank=False,
                     )
+                # Browser Automation — available for all agents (including COA)
+                yield Static("[cyan]Browser Automation[/] — allow agent to use headless browser")
+                _ba_enabled = current_browser == 1
+                _ba_label = "Disable" if _ba_enabled else "Enable"
+                _ba_variant = "error" if _ba_enabled else "success"
+                _ba_status = "[green]● Enabled[/]" if _ba_enabled else "[red]● Disabled[/]"
+                yield Static(f"Status: {_ba_status}", id="agent-browser-status-label")
+                yield Button(f"{_ba_label} Browser Automation", variant=_ba_variant, id="btn-agent-browser-toggle")
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="btn-save-settings")
                 yield Button("Cancel", variant="default", id="msg-dialog-close")
@@ -1413,6 +1442,8 @@ class AgentEditModal(ModalScreen):
                         ok_comms = reader.update_agent_field(self.agent_name, "can_message_connections", comms_val)
                     except Exception:
                         pass  # Protected agents don't have the select
+                    # Browser toggle is handled immediately by btn-agent-browser-toggle (not deferred to Save)
+                    ok_browser = True
                     # Update anchor style
                     ok_anchor = True
                     try:
@@ -1422,7 +1453,7 @@ class AgentEditModal(ModalScreen):
                             ok_anchor = reader.update_agent_field(self.agent_name, "anchor_style", anchor_val)
                     except Exception:
                         pass
-                    if all([ok_model, ok_ctx, ok_depth, ok_status, ok_inactive, ok_comms, ok_anchor]):
+                    if all([ok_model, ok_ctx, ok_depth, ok_status, ok_inactive, ok_comms, ok_anchor, ok_browser]):
                         self.app.notify(f"Saved settings for {self.agent_name}", title="Agent Settings")
                         agents_panel.refresh_data()
                     else:
@@ -1437,6 +1468,55 @@ class AgentEditModal(ModalScreen):
                 ))
         elif event.button.id == "msg-dialog-close":
             self.app.pop_screen()
+        elif event.button.id == "btn-agent-browser-toggle":
+            self._toggle_agent_browser()
+
+    def _update_browser_toggle_ui(self, val: int) -> None:
+        """Update browser toggle button and status label in UI."""
+        try:
+            btn = self.query_one("#btn-agent-browser-toggle", Button)
+            status_label = self.query_one("#agent-browser-status-label", Static)
+            if val == 1:
+                btn.label = "Disable Browser Automation"
+                btn.variant = "error"
+                status_label.update("Status: [green]● Enabled[/]")
+            else:
+                btn.label = "Enable Browser Automation"
+                btn.variant = "success"
+                status_label.update("Status: [red]● Disabled[/]")
+        except Exception:
+            pass
+
+    def _toggle_agent_browser(self) -> None:
+        """Fetch current agent browser state and push provisioning/cleanup modal."""
+        import sqlite3 as _sql3
+        try:
+            _conn = _sql3.connect("/var/lib/versa-agi/agents.db", timeout=5)
+            _row = _conn.execute(
+                "SELECT browser_enabled, os_user FROM agents WHERE name=?",
+                (self.agent_name,)
+            ).fetchone()
+            if not _row:
+                _conn.close()
+                self.app.notify("Agent not found in database", severity="error")
+                return
+            current_val = _row[0] or 0
+            os_user = _row[1] or ""
+            new_val = 0 if current_val == 1 else 1
+            _conn.close()
+        except Exception as e:
+            self.app.notify(f"DB error: {e}", severity="error")
+            return
+
+        if os_user:
+            self.app.push_screen(
+                AgentBrowserToggleModal(
+                    agent_name=self.agent_name,
+                    new_val=new_val,
+                    os_user=os_user,
+                    parent_modal=self
+                )
+            )
 
 
 class MemoryViewModal(ModalScreen):
@@ -1559,3 +1639,174 @@ class MemoryViewModal(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "msg-dialog-close":
             self.app.pop_screen()
+
+
+class AgentBrowserToggleModal(ModalScreen):
+    """Modal that toggles browser automation for an agent and streams real-time installation/cleanup feedback."""
+
+    CSS = """
+    AgentBrowserToggleModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #browser-toggle-dialog {
+        width: 75;
+        height: 20;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $surface;
+    }
+    #browser-toggle-terminal {
+        height: 1fr;
+        background: $boost;
+        border: solid $surface-lighten-1;
+        padding: 0 1;
+        scrollbar-gutter: stable;
+        color: $text-muted;
+    }
+    #browser-toggle-actions {
+        margin-top: 1;
+        height: auto;
+        align: right middle;
+    }
+    """
+
+    def __init__(self, agent_name: str, new_val: int, os_user: str, parent_modal=None, **kwargs):
+        super().__init__(**kwargs)
+        self.agent_name = agent_name
+        self.new_val = new_val
+        self.os_user = os_user
+        self.parent_modal = parent_modal
+        self._terminal_text = ""
+        self._running = False
+
+    def compose(self) -> ComposeResult:
+        action = "Enabling" if self.new_val == 1 else "Disabling"
+        with Vertical(id="browser-toggle-dialog"):
+            yield Static(f"[bold yellow]🌐 Browser Automation — {action} for {self.agent_name}[/]\n", id="browser-toggle-title")
+            yield VerticalScroll(Static(id="browser-toggle-terminal-text"), id="browser-toggle-terminal")
+            with Horizontal(id="browser-toggle-actions"):
+                yield Button("Cancel/Close", variant="default", id="btn-browser-toggle-close")
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-browser-toggle-close", Button).disabled = True
+        self._running = True
+        import threading
+        threading.Thread(target=self._run_toggle, daemon=True).start()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-browser-toggle-close":
+            self.dismiss(True)
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        import re as _re
+        return _re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+
+    def _append_text(self, text: str) -> None:
+        self._terminal_text += text
+        try:
+            term = self.query_one("#browser-toggle-terminal-text", Static)
+            term.update(self._terminal_text)
+            self.query_one("#browser-toggle-terminal", VerticalScroll).scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _enable_close(self) -> None:
+        btn = self.query_one("#btn-browser-toggle-close", Button)
+        btn.disabled = False
+        btn.loading = False
+
+    def _write_db_val(self, val: int) -> bool:
+        import sqlite3 as _sql3
+        try:
+            _conn = _sql3.connect("/var/lib/versa-agi/agents.db", timeout=5)
+            _conn.execute(
+                "UPDATE agents SET browser_enabled=?, updated_at=datetime('now') WHERE name=?",
+                (val, self.agent_name)
+            )
+            _conn.commit()
+            _conn.close()
+            return True
+        except Exception:
+            return False
+
+    def _run_toggle(self) -> None:
+        import subprocess as _sp
+        import os as _os
+        try:
+            if self.new_val == 1:
+                pw_bin = "/usr/local/lib/versa-agi/venv/bin/playwright"
+                if _os.path.isfile(pw_bin):
+                    # Fix Playwright driver permissions (pip install may not preserve +x on node binary)
+                    import glob as _glob
+                    for driver_dir in _glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages/playwright/driver"):
+                        node_bin = _os.path.join(driver_dir, "node")
+                        if _os.path.isfile(node_bin):
+                            _os.chmod(node_bin, 0o755)
+                        pkg_bin_dir = _os.path.join(driver_dir, "package", "bin")
+                        if _os.path.isdir(pkg_bin_dir):
+                            for f in _os.listdir(pkg_bin_dir):
+                                fp = _os.path.join(pkg_bin_dir, f)
+                                if _os.path.isfile(fp):
+                                    _os.chmod(fp, 0o755)
+                    self.app.call_from_thread(self._append_text, f"$ sudo -u {self.os_user} -H {pw_bin} install chromium\n")
+                    cmd = ["sudo", "-u", self.os_user, "-H", pw_bin, "install", "chromium"]
+                    process = _sp.Popen(
+                        cmd,
+                        stdout=_sp.PIPE,
+                        stderr=_sp.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    while True:
+                        line = process.stdout.readline()
+                        if not line:
+                            break
+                        self.app.call_from_thread(self._append_text, self._strip_ansi(line))
+                    process.wait()
+                    if process.returncode == 0:
+                        self._write_db_val(1)
+                        if self.parent_modal:
+                            self.app.call_from_thread(self.parent_modal._update_browser_toggle_ui, 1)
+                        self.app.call_from_thread(self._append_text, f"\n[green]✓ Playwright Chromium installed successfully for {self.agent_name}[/]\n")
+                        self.app.call_from_thread(
+                            self.app.notify, f"Playwright Chromium installed for {self.agent_name}", title="Browser Provisioning"
+                        )
+                    else:
+                        self.app.call_from_thread(self._append_text, f"\n[red]✗ Installation failed with exit code {process.returncode}[/]\n")
+                        self.app.call_from_thread(
+                            self.app.notify, f"Failed to install Chromium for {self.agent_name}", title="Error", severity="error"
+                        )
+                else:
+                    self.app.call_from_thread(self._append_text, f"[red]Playwright binary not found at {pw_bin}[/]\n")
+            else:
+                self.app.call_from_thread(self._append_text, f"Removing browser binaries from /home/{self.os_user}/.cache/ms-playwright/...\n")
+                cache_dir = f"/home/{self.os_user}/.cache/ms-playwright/"
+                if _os.path.isdir(cache_dir):
+                    cmd = ["sudo", "-u", self.os_user, "rm", "-rf", cache_dir]
+                    self.app.call_from_thread(self._append_text, f"$ sudo -u {self.os_user} rm -rf {cache_dir}\n")
+                    res = _sp.run(cmd, capture_output=True, text=True, timeout=30)
+                    if res.returncode == 0:
+                        self._write_db_val(0)
+                        if self.parent_modal:
+                            self.app.call_from_thread(self.parent_modal._update_browser_toggle_ui, 0)
+                        self.app.call_from_thread(self._append_text, f"[green]✓ Cleaned up cache directory successfully.[/]\n")
+                    else:
+                        self.app.call_from_thread(self._append_text, f"[red]✗ Cleanup failed: {res.stderr}[/]\n")
+                else:
+                    self._write_db_val(0)
+                    if self.parent_modal:
+                        self.app.call_from_thread(self.parent_modal._update_browser_toggle_ui, 0)
+                    self.app.call_from_thread(self._append_text, "Cache directory does not exist or is already removed.\n")
+                
+                self.app.call_from_thread(self._append_text, f"\n[green]✓ Browser automation disabled for {self.agent_name}[/]\n")
+                self.app.call_from_thread(
+                    self.app.notify, f"Browser binaries removed for {self.agent_name}", title="Browser Cleanup"
+                )
+        except Exception as e:
+            self.app.call_from_thread(self._append_text, f"\n[red]Error during browser toggle: {e}[/]\n")
+        finally:
+            self._running = False
+            self.app.call_from_thread(self._enable_close)
+

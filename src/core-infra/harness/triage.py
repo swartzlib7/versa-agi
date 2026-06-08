@@ -114,7 +114,8 @@ _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and resp
 - "reminder_management.md" — Creating and managing reminders
 - "self_introduction.md" — Introducing the agent to new contacts
 - "founder_story.md" — Sharing the VersaVoice origin story
-- "solution_architect.md" — System/environment setup guidance for PU"""
+- "solution_architect.md" — System/environment setup guidance for PU
+- "system_packages.md" — Requesting and installing system packages (apt)"""
 
 _SKILLS_CATALOG_PATH = "/var/lib/versa-agi/skills_catalog.md"
 
@@ -377,6 +378,10 @@ def _get_skill_reasons(result: TriageResult) -> dict:
     # Solution architect
     if "solution_architect.md" in result.skills_to_inject:
         reasons["solution_architect.md"] = "Environment setup or stack installation needed. Guide the PU through safe configuration."
+
+    # System packages
+    if "system_packages.md" in result.skills_to_inject:
+        reasons["system_packages.md"] = "A system-level package (apt) may need to be requested or installed. Follow the request → approve → install workflow."
 
     # Remaining skills get generic reasons
     for skill in result.skills_to_inject:
