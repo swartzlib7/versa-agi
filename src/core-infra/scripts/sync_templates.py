@@ -64,7 +64,7 @@ def sync():
                 shutil.copy2(src_path, dest_path)
                 subprocess.run(["chown", f"{watchdog_user}:{watchdog_user}", dest_path], check=False)
                 subprocess.run(["chmod", "640", dest_path], check=False)
-                results["poise_updated"].append(dest_name)
+                results["poise_updated"].append((dest_name, src_name))
             except Exception as e:
                 results["errors"].append(f"Failed to sync {src_name}: {e}")
 
@@ -104,7 +104,7 @@ def sync():
                     shutil.copy2(poise_source, dest_path)
                     subprocess.run(["chown", f"{watchdog_user}:{watchdog_user}", dest_path], check=False)
                     subprocess.run(["chmod", "640", dest_path], check=False)
-                    results["poise_updated"].append(f"{name}.md")
+                    results["poise_updated"].append((f"{name}.md", f"roles/{role_id}/poise.md"))
                 except Exception as e:
                     results["errors"].append(f"Failed to sync poise for {name}: {e}")
 
@@ -210,11 +210,29 @@ def sync():
     if results["errors"]:
         print("Completed with errors:")
         for err in results["errors"]:
-            print(f" - {err}")
-    
-    print(f"Synced Poise Templates: {len(results['poise_updated'])}")
-    print(f"Deployed Skills to Agents: {len(results['skills_deployed_to'])}")
-    print(f"Database Skills Synced: +{db_inserted} / -{db_deleted}")
+            print(f"  ✗ {err}")
+
+    # ── Verbose output ──
+    poise_count = len(results["poise_updated"])
+    skills_count = len(results["skills_deployed_to"])
+
+    print(f"\nSynced Poise Templates: {poise_count}")
+    if poise_count > 0:
+        for dest, src in results["poise_updated"]:
+            print(f"  ✓ {dest} ← {src}")
+
+    print(f"\nDeployed Skills to Agents: {skills_count}")
+    if skills_count > 0:
+        for s in results["skills_deployed_to"]:
+            print(f"  ✓ {s}")
+
+    print(f"\nDatabase Skills Synced: +{db_inserted} / -{db_deleted}")
+    if db_inserted > 0 or db_deleted > 0:
+        # Re-read to show what was added/removed
+        if db_inserted > 0:
+            print(f"  + {db_inserted} new skill(s) registered")
+        if db_deleted > 0:
+            print(f"  - {db_deleted} orphaned skill(s) removed")
 
 if __name__ == "__main__":
     sync()

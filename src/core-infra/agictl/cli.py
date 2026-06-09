@@ -5783,6 +5783,20 @@ def awareness_revise(entry_id, content, agent_name):
             json_response(False, error=f"Awareness entry id={entry_id} not found")
             sys.exit(1)
         old = dict(old)
+        # Ownership guard: only the owning agent (or a protected agent) can revise
+        if old['agent_name'] != agent_name:
+            is_protected = False
+            try:
+                aconn = sqlite3.connect(agents_db, timeout=5)
+                prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+                aconn.close()
+                is_protected = prow and prow[0] == 1
+            except Exception:
+                pass
+            if not is_protected:
+                conn.close()
+                json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{old['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can revise entries.")
+                sys.exit(1)
         # Mark old as superseded
         conn.execute("UPDATE agent_awareness SET status='superseded', updated_at=datetime('now') WHERE id=?", (entry_id,))
         # Create new entry with same metadata
@@ -5809,15 +5823,30 @@ def awareness_complete(entry_id, agent_name):
         agent_name = get_agent_name()
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
-        row = conn.execute("SELECT type FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT type, agent_name FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
         if not row:
             conn.close()
             json_response(False, error=f"Awareness entry id={entry_id} not found")
             sys.exit(1)
+        # Ownership guard: only the owning agent (or a protected agent) can complete
+        if row['agent_name'] != agent_name:
+            is_protected = False
+            try:
+                aconn = sqlite3.connect(agents_db, timeout=5)
+                prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+                aconn.close()
+                is_protected = prow and prow[0] == 1
+            except Exception:
+                pass
+            if not is_protected:
+                conn.close()
+                json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{row['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can complete entries.")
+                sys.exit(1)
         conn.execute("UPDATE agent_awareness SET status='completed', updated_at=datetime('now') WHERE id=?", (entry_id,))
         conn.commit()
         conn.close()
-        json_response(True, action="awareness_complete", id=entry_id, type=row[0])
+        json_response(True, action="awareness_complete", id=entry_id, type=row['type'])
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -5855,6 +5884,63 @@ def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_nam
         print(json.dumps([dict(r) for r in rows], indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
+
+@awareness.command("table")
+@click.option("--type", "entry_type", type=click.Choice(['conclusion', 'action']), default=None, help="Filter by type")
+@click.option("--subject", "subject_type", type=click.Choice(['connection','project','game','system','self']), default=None)
+@click.option("--status", "entry_status", default=None, help="Filter by status (default: all)")
+@click.option("--agent", "agent_name", default=None, help="Filter by agent (default: all)")
+@click.option("--limit", type=int, default=15, help="Limit the number of entries returned")
+def awareness_table(entry_type, subject_type, entry_status, agent_name, limit):
+    """Output awareness entries in a token-efficient markdown table."""
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM agent_awareness WHERE 1=1"
+        params = []
+        if entry_type:
+            query += " AND type=?"
+            params.append(entry_type)
+        if subject_type:
+            query += " AND subject_type=?"
+            params.append(subject_type)
+        if entry_status:
+            query += " AND status=?"
+            params.append(entry_status)
+        if agent_name:
+            query += " AND agent_name=?"
+            params.append(agent_name)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        
+        if not rows:
+            print("No awareness entries found.")
+            return
+
+        table_header = "| ID | Type | Subject | Content |"
+        if not agent_name:
+            table_header = "| ID | Agent | Type | Subject | Content |"
+            
+        print(table_header)
+        print("|" + "|".join(["---"] * (5 if not agent_name else 4)) + "|")
+        
+        for r in reversed(rows): # Reverse to show chronological order when limited
+            content = str(r["content"]).replace("\n", " ").replace("|", "\\|")
+            subj = str(r["subject_type"])
+            if r["subject_id"]:
+                subj += f"({r['subject_id']})"
+            
+            if not agent_name:
+                print(f"| {r['id']} | {r['agent_name']} | {r['type']} | {subj} | {content} |")
+            else:
+                print(f"| {r['id']} | {r['type']} | {subj} | {content} |")
+                
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
 @awareness.command("get")
 @click.argument("entry_id", type=int)

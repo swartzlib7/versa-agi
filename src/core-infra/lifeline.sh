@@ -241,38 +241,40 @@ while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT
     # Build merged content: poise only (preferences now in global system memory)
     MERGED_CONTENT="$(cat "${POISE_FILE}")"
 
-    # ─── Anchor Injection (anchor_style) ──
-    # If anchor_style=full, prepend the philosophical anchor before the poise content
-    ANCHOR_FILE="/etc/versa-agi/poise/anchor_full.md"
-    if [ "${AGENT_ANCHOR_STYLE}" = "full" ] && [ -f "${ANCHOR_FILE}" ]; then
-      MERGED_CONTENT="$(cat "${ANCHOR_FILE}")
-${MERGED_CONTENT}"
-      log "Anchor: full (prepended ${ANCHOR_FILE})"
+    # ─── Detect Template Mode ──
+    # Template-style poise files use {PLACEHOLDER} markers for all dynamic injection.
+    # Legacy poise files get content appended/prepended by lifeline directly.
+    IS_TEMPLATE=false
+    if echo "${MERGED_CONTENT}" | grep -q '{AGENT_NAME}'; then
+      IS_TEMPLATE=true
+      log "TEMPLATE MODE: ${AGENT_NAME} — poise uses placeholder injection"
     fi
 
+    # ─── Build individual content blocks ──
+    # These are used by BOTH template and legacy paths.
+
+    # Anchor content
+    ANCHOR_CONTENT=""
+    ANCHOR_FILE="/etc/versa-agi/poise/anchor_full.md"
+    if [ "${AGENT_ANCHOR_STYLE}" = "full" ] && [ -f "${ANCHOR_FILE}" ]; then
+      ANCHOR_CONTENT="$(cat "${ANCHOR_FILE}")"
+      log "Anchor: full (loaded ${ANCHOR_FILE})"
+    fi
+
+    # Task protocol content
+    TASK_PROTOCOL_CONTENT=""
     TASK_PROTOCOL="/etc/versa-agi/poise/task_protocol.md"
     if [ -f "${TASK_PROTOCOL}" ]; then
-      MERGED_CONTENT="${MERGED_CONTENT}
-
----
-
-## ── SYSTEM TASK MANAGEMENT PROTOCOL ──
+      TASK_PROTOCOL_CONTENT="## ── SYSTEM TASK MANAGEMENT PROTOCOL ──
 
 $(cat "${TASK_PROTOCOL}")"
     fi
 
-    # Append INSTRUCTIONS (per-cycle dynamic data — rules are in poise)
-    # Resolve system timezone for scheduling accuracy
+    # Cycle parameters content
     SYSTEM_TZ=$(date '+%Z (%:z)')
     SYSTEM_TIME=$(date '+%Y-%m-%dT%H:%M:%S%z')
-
     AGENT_HOME=$(dirname "${AGENT_PATH}")
-
-    MERGED_CONTENT="${MERGED_CONTENT}
-
----
-
-## ── CYCLE PARAMETERS ──
+    CYCLE_PARAMS_CONTENT="## ── CYCLE PARAMETERS ──
 
 - **YOUR HOME DIRECTORY**: \`${AGENT_HOME}\` — this is your OS user home. All your work happens here or in subdirectories. NEVER create or modify files outside this path.
 - **YOUR WORKSPACE**: \`${AGENT_PATH}\` — this is your working directory (CWD at cycle start). Project clones go in \`${AGENT_PATH}/workspace/\`. Agent data is at \`${AGENT_PATH}/.agent/\`.
@@ -282,20 +284,18 @@ $(cat "${TASK_PROTOCOL}")"
 - **Message addressing**: Address EVERY part of EACH new message. Satisfy requests in a SINGLE message. Long-form content → Markdown file with \`--markdown-paths\`.
 - **Efficiency**: Be decisive. Avoid lengthy monologues. Execute multiple tool actions concurrently when possible. Consider the recipient's language."
 
-    # Append AGENT REGISTRY (resolved fresh each spawn — hash check handles regeneration)
+    # Agent registry content
+    AGENT_REGISTRY_CONTENT=""
     AGENT_REGISTRY_FOR_SYSTEM=$(/usr/local/bin/agictl agent summary 2>/dev/null || true)
     if [ -n "${AGENT_REGISTRY_FOR_SYSTEM}" ]; then
-      MERGED_CONTENT="${MERGED_CONTENT}
-
----
-
-## ── AGENT REGISTRY ──
+      AGENT_REGISTRY_CONTENT="## ── AGENT REGISTRY ──
 
 agictl agent list for full details — you and your agentic team:
 ${AGENT_REGISTRY_FOR_SYSTEM}"
     fi
 
-    # Duties extracted to separate variable for WHY section placement (not part of WHAT/rules)
+    # Duties content (sub-agent only — COA never has a duties.md)
+    # Injected for sub-agents via the legacy path; COA template omits {DUTIES_CONTEXT}.
     DUTIES_CONTEXT=""
     DUTIES_FILE="/var/lib/versa-agi/${AGENT_NAME}/duties.md"
     if [ -f "${DUTIES_FILE}" ]; then
@@ -306,12 +306,43 @@ $(cat "${DUTIES_FILE}")
 "
     fi
 
-    # ── VV Communication Override for sub-agents with external comms ──
-    # Sub-agent poise templates state "You do NOT have a VersaVoice account" (correct default).
-    # When a sub-agent HAS been provisioned with a VV sub-account, this override supersedes
-    # that poise rule so the agent knows to reply via agictl message send.
-    if [ "${AGENT_NAME}" != "coa" ] && [ "${AGENT_NAME}" != "watchdog" ] && [ -n "${SUB_ACCOUNT_ID}" ]; then
+    # ─── Build MERGED_CONTENT for system.md ──
+    if [ "${IS_TEMPLATE}" = true ]; then
+      # Template mode: keep poise as-is (placeholders stay for system.md reference)
+      # system.md in template mode is the raw template — the resolved prompt is SYSTEM_PROMPT
+      :
+    else
+      # Legacy mode: concatenate blocks onto MERGED_CONTENT
+      if [ -n "${ANCHOR_CONTENT}" ]; then
+        MERGED_CONTENT="${ANCHOR_CONTENT}
+${MERGED_CONTENT}"
+      fi
+
+      if [ -n "${TASK_PROTOCOL_CONTENT}" ]; then
+        MERGED_CONTENT="${MERGED_CONTENT}
+
+---
+
+${TASK_PROTOCOL_CONTENT}"
+      fi
+
       MERGED_CONTENT="${MERGED_CONTENT}
+
+---
+
+${CYCLE_PARAMS_CONTENT}"
+
+      if [ -n "${AGENT_REGISTRY_CONTENT}" ]; then
+        MERGED_CONTENT="${MERGED_CONTENT}
+
+---
+
+${AGENT_REGISTRY_CONTENT}"
+      fi
+
+      # ── VV Communication Override for sub-agents with external comms ──
+      if [ "${AGENT_NAME}" != "coa" ] && [ "${AGENT_NAME}" != "watchdog" ] && [ -n "${SUB_ACCOUNT_ID}" ]; then
+        MERGED_CONTENT="${MERGED_CONTENT}
 
 ---
 
@@ -324,6 +355,7 @@ $(cat "${DUTIES_FILE}")
 - After replying, mark the message processed: agictl message mark-processed MESSAGE_ID
 - For internal agent-to-agent communication, continue using: agictl message internal <agent_name> \"text\"
 - See \`.agent/skills/communication.md\` for full messaging rules and mode selection."
+      fi
     fi
 
     # Only regenerate if content changed (hash comparison)
@@ -332,12 +364,8 @@ $(cat "${DUTIES_FILE}")
 
     if [ "${MERGED_HASH}" != "${EXISTING_HASH}" ]; then
       mkdir -p "${AGENT_PATH}/.agent"
-      # Directory ownership (agent:agi_agents) is set by setup.sh / agictl agent approve.
-      # Lifeline (watchdog) writes here via agi_agents group membership.
       rm -f "${SYSTEM_MD}"
       echo "${MERGED_CONTENT}" > "${SYSTEM_MD}"
-      # system.md: Lifeline writes, everyone reads, nobody modifies mid-cycle
-      # watchdog owns the file (just created it); change group to agi_agents for visibility
       chown "$(whoami):agi_agents" "${SYSTEM_MD}"
       chmod 444 "${SYSTEM_MD}"
       log "Generated system.md for ${AGENT_NAME} (poise + agreement merged)"
@@ -753,6 +781,13 @@ ${HIDDEN_STR}
     id_last=$(jq -r '.identity.last_name // "unknown"' "${SYSTEM_CONFIG}" 2>/dev/null)
     id_lang=$(jq -r '.identity.language // "en"' "${SYSTEM_CONFIG}" 2>/dev/null)
     id_sub=$(jq -r '.versavoice.sub_account_id // "unknown"' "${SYSTEM_CONFIG}" 2>/dev/null)
+    
+    agent_title="Assistant"
+    agent_role="Agent"
+    if [ "${AGENT_NAME}" = "coa" ]; then
+      agent_role="Chief Orchestrator Agent (COA)"
+      agent_title="Chief Assistant"
+    fi
     AGENT_IDENTITY="Your name is ${id_first} ${id_last}.
 Your VersaVoice AI sub_account_id is: ${id_sub}.
 Your language is: ${id_lang}."
@@ -797,15 +832,7 @@ Your language is: ${id_lang}."
     fi
   fi
 
-  # ── Upgrade notification injection ──
-  UPGRADE_NOTICE=""
-  UPGRADE_LOG="/var/lib/versa-agi/${AGENT_NAME}/upgrade_log.json"
-  if [ -f "${UPGRADE_LOG}" ]; then
-    LAST_UPGRADE=$(jq -r '.[-1] | "System upgrade at \(.local_time): \(.summary)"' "${UPGRADE_LOG}" 2>/dev/null || true)
-    if [ -n "${LAST_UPGRADE}" ] && [ "${LAST_UPGRADE}" != "null" ]; then
-      UPGRADE_NOTICE="Recent system upgrade: ${LAST_UPGRADE}. "
-    fi
-  fi
+
 
 
   # ─── Overdue Context Injection ────────────────────────
@@ -876,6 +903,8 @@ ${MEM_ITEMS}
   # COA: full game board + all active awareness entries.
   # Sub-agents: only their assigned project's game context (read-only) + own awareness.
   ENVIRONMENTAL_AWARENESS=""
+  GAMES_BLOCK=""
+  AWARENESS_TABLE=""
   if [ -f "${TASKS_DB}" ]; then
     if [ "${AGENT_NAME}" = "coa" ]; then
       # ── COA: Full Game Board ──
@@ -883,7 +912,6 @@ ${MEM_ITEMS}
         "SELECT id, name, postulate, posture, autonomy, freedoms_summary, barriers_summary, environment_assessed_at FROM games WHERE status='active' ORDER BY name;" 2>/dev/null || true)
 
       if [ -n "${ACTIVE_GAMES}" ]; then
-        GAMES_BLOCK=""
         while IFS='|' read -r G_ID G_NAME G_POST G_POSTURE G_AUTO G_FREE G_BARR G_ASSESSED; do
           [ -z "${G_ID}" ] && continue
           GAMES_BLOCK="${GAMES_BLOCK}
@@ -894,7 +922,16 @@ ${MEM_ITEMS}
     Barriers: ${G_BARR:-Not yet assessed}
     Last assessed: ${G_ASSESSED:-Never}"
         done <<< "${ACTIVE_GAMES}"
+      fi
 
+      # ── COA: All Active Awareness (conclusions + actions) ──
+      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active 2>/dev/null || true)
+      if [[ "${AWARENESS_TABLE}" != *"| ID |"* ]]; then
+        AWARENESS_TABLE=""
+      fi
+
+      # Build combined block for legacy path
+      if [ -n "${GAMES_BLOCK}" ]; then
         ENVIRONMENTAL_AWARENESS="
 ── ENVIRONMENTAL AWARENESS ──
 These are the active games you are running. Assess freedom vs barriers each cycle.
@@ -902,17 +939,22 @@ These are the active games you are running. Assess freedom vs barriers each cycl
 ACTIVE GAMES:${GAMES_BLOCK}
 "
       fi
-
-      # ── COA: All Active Awareness (conclusions + actions) ──
-      ACTIVE_AWARENESS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness list --status active --agent "${AGENT_NAME}" 2>/dev/null || true)
-      if [ -n "${ACTIVE_AWARENESS}" ] && echo "${ACTIVE_AWARENESS}" | jq -e '.[0]' >/dev/null 2>&1; then
-        AWARENESS_ITEMS=$(echo "${ACTIVE_AWARENESS}" | jq -r '.[] | "  [\(.type | ascii_upcase)] #\(.id) [\(.subject_type)\(if .subject_id then "/\(.subject_id)" else "" end)]: \(.content)"' 2>/dev/null || true)
-        if [ -n "${AWARENESS_ITEMS}" ]; then
-          ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
-YOUR ACTIVE AWARENESS (review these — revise any that no longer hold):
-${AWARENESS_ITEMS}
-"
+      if [ -n "${AWARENESS_TABLE}" ]; then
+        AW_TOTAL_SHOWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
+        AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
+        AW_WARN=""
+        if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
+          AW_WARN=" ⚠ YOUR entries OVER CAP — audit and revise/complete stale entries before adding new ones."
         fi
+        if [ "${AW_OWN}" = "${AW_TOTAL_SHOWN}" ]; then
+          AW_HDR="YOUR ACTIVE AWARENESS (${AW_OWN} entries — cap: ~20${AW_WARN}):"
+        else
+          AW_HDR="YOUR ACTIVE AWARENESS (${AW_TOTAL_SHOWN} entries shown; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
+        fi
+        ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
+${AW_HDR}
+${AWARENESS_TABLE}
+"
       fi
     else
       # ── Sub-Agent: Read-Only Game Context (via assigned projects) ──
@@ -920,7 +962,6 @@ ${AWARENESS_ITEMS}
         "SELECT DISTINCT g.id, g.name, g.postulate, g.posture, g.autonomy FROM games g INNER JOIN projects p ON p.game_id = g.id INNER JOIN project_members pm ON pm.project_id = p.id WHERE pm.member_type='agent' AND pm.member_id='${AGENT_NAME}' AND g.status='active';" 2>/dev/null || true)
 
       if [ -n "${ASSIGNED_GAMES}" ]; then
-        GAMES_BLOCK=""
         while IFS='|' read -r G_ID G_NAME G_POST G_POSTURE G_AUTO; do
           [ -z "${G_ID}" ] && continue
           GAMES_BLOCK="${GAMES_BLOCK}
@@ -937,15 +978,19 @@ ${GAMES_BLOCK}
       fi
 
       # ── Sub-Agent: Own Active Awareness Only ──
-      ACTIVE_AWARENESS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness list --status active --agent "${AGENT_NAME}" 2>/dev/null || true)
-      if [ -n "${ACTIVE_AWARENESS}" ] && echo "${ACTIVE_AWARENESS}" | jq -e '.[0]' >/dev/null 2>&1; then
-        AWARENESS_ITEMS=$(echo "${ACTIVE_AWARENESS}" | jq -r '.[] | "  [\(.type | ascii_upcase)] #\(.id) [\(.subject_type)\(if .subject_id then "/\(.subject_id)" else "" end)]: \(.content)"' 2>/dev/null || true)
-        if [ -n "${AWARENESS_ITEMS}" ]; then
-          ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
-YOUR ACTIVE AWARENESS (review and revise as needed):
-${AWARENESS_ITEMS}
-"
+      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active --agent "${AGENT_NAME}" 2>/dev/null || true)
+      if [[ "${AWARENESS_TABLE}" == *"| ID |"* ]]; then
+        AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
+        AW_WARN=""
+        if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
+          AW_WARN=" ⚠ OVER CAP — audit and revise/complete stale entries before adding new ones."
         fi
+        ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
+YOUR ACTIVE AWARENESS (${AW_OWN} entries — cap: ~20${AW_WARN}):
+${AWARENESS_TABLE}
+"
+      else
+        AWARENESS_TABLE=""
       fi
     fi
   fi
@@ -1015,14 +1060,108 @@ The following system packages you requested have been approved. You may now inst
   fi
 
   # ─── System Prompt Assembly ──
-  # Priority hierarchy: WHO → WHY → WHAT → OPERATIONAL → MEMORY → HISTORY
-  # WHO (identity) is first for primacy — the agent grounds in who it is.
-  # WHY (purpose/awareness) gives strategic context before behavioral rules.
-  # WHAT (poise) is the behavioral ruleset — interpreted through identity + purpose.
-  # OPERATIONAL plumbing (security, flood guard, etc.) follows.
-  # MEMORY and HISTORY come last for recency — the freshest context.
+  # Template mode: replace {PLACEHOLDER} markers in the poise template with real data.
+  # Legacy mode: concatenate blocks in the original WHO→WHY→WHAT→OPERATIONAL order.
   if [ -n "${MERGED_CONTENT}" ]; then
-    SYSTEM_PROMPT="${AGENT_IDENTITY}
+    if [ "${IS_TEMPLATE}" = true ]; then
+      # --- TEMPLATE STYLE ---
+      # The poise file IS the prompt layout. Replace all placeholders with live data.
+      # Uses bash parameter expansion ${var//pattern/replacement} for multiline safety.
+
+      # Build anti-runaway block (local models only)
+      ANTI_RUNAWAY=""
+      if [ "${VERSA_GPU_BACKEND:-}" = "local" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
+        ANTI_RUNAWAY="CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When you have accomplished your goal, END YOUR CYCLE by responding with a normal conversational message."
+      fi
+
+      # Build awareness labels for template injection (with volume counts for hygiene cap)
+      AWARENESS_LABEL=""
+      if [ -n "${AWARENESS_TABLE}" ]; then
+        # COA sees ALL agents' awareness (orchestration visibility) — count reflects the table
+        AW_TOTAL_SHOWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
+        AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
+        AW_WARN=""
+        if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
+          AW_WARN=" ⚠ YOUR entries OVER CAP — audit and supersede/complete stale entries before adding new ones."
+        fi
+        if [ "${AW_OWN}" = "${AW_TOTAL_SHOWN}" ]; then
+          # Sub-agent or no other entries — simple count
+          AWARENESS_LABEL="YOUR ACTIVE AWARENESS (${AW_OWN} entries — cap: ~20${AW_WARN}):"
+        else
+          # COA — show total vs own for clarity
+          AWARENESS_LABEL="YOUR ACTIVE AWARENESS (${AW_TOTAL_SHOWN} entries shown; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
+        fi
+        AWARENESS_LABEL="${AWARENESS_LABEL}
+${AWARENESS_TABLE}"
+      fi
+
+      GAMES_LABEL=""
+      if [ -n "${GAMES_BLOCK}" ]; then
+        GAMES_LABEL="ACTIVE GAMES:${GAMES_BLOCK}"
+      fi
+
+      # ── Identity replacements (single-line, sed-safe) ──
+      SYSTEM_PROMPT="${MERGED_CONTENT}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{AGENT_ROLE\}/${agent_role}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{AGENT_TITLE\}/${agent_title}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{AGENT_NAME\}/${id_first} ${id_last}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{SUB_ACCOUNT_ID\}/${id_sub}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{AGENT_LANGUAGE\}/${id_lang}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{PRIMARY_USER_NAME\}/${sponsor_name}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{PRIMARY_USER_UID\}/${sponsor_uid}}"
+
+      # ── Sanitize & in replacement values ──
+      # Bash ${var//pattern/replacement} interprets & as "matched text" in the replacement.
+      # User data (messages, memory, task titles) can contain literal & characters.
+      # Escape & → \& in all variables that may contain user-generated content.
+      ANCHOR_CONTENT="${ANCHOR_CONTENT//&/\\&}"
+      TASK_PROTOCOL_CONTENT="${TASK_PROTOCOL_CONTENT//&/\\&}"
+      CYCLE_PARAMS_CONTENT="${CYCLE_PARAMS_CONTENT//&/\\&}"
+      AGENT_REGISTRY_CONTENT="${AGENT_REGISTRY_CONTENT//&/\\&}"
+      GAMES_LABEL="${GAMES_LABEL//&/\\&}"
+      AWARENESS_LABEL="${AWARENESS_LABEL//&/\\&}"
+      DUTIES_CONTEXT="${DUTIES_CONTEXT//&/\\&}"
+      TASK_SUMMARY="${TASK_SUMMARY//&/\\&}"
+      OVERDUE_CONTEXT="${OVERDUE_CONTEXT//&/\\&}"
+      CONTEXT_SUMMARY="${CONTEXT_SUMMARY//&/\\&}"
+      CONVERSATION_CONTEXT="${CONVERSATION_CONTEXT//&/\\&}"
+      SECURITY_WARNING="${SECURITY_WARNING//&/\\&}"
+      MSG_FLOOD_GUARD="${MSG_FLOOD_GUARD//&/\\&}"
+      PKG_NOTICE="${PKG_NOTICE//&/\\&}"
+      OPERATIONAL_MEMORY="${OPERATIONAL_MEMORY//&/\\&}"
+
+      # ── Structural block replacements (multiline) ──
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{ANCHOR\}/${ANCHOR_CONTENT}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{TASK_PROTOCOL\}/${TASK_PROTOCOL_CONTENT}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{CYCLE_PARAMETERS\}/${CYCLE_PARAMS_CONTENT}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{AGENT_REGISTRY\}/${AGENT_REGISTRY_CONTENT}}"
+
+      # ── Runtime data replacements ──
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{ACTIVE_GAMES\}/${GAMES_LABEL}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{ACTIVE_AWARENESS\}/${AWARENESS_LABEL}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{DUTIES_CONTEXT\}/${DUTIES_CONTEXT}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{TASK_SUMMARY\}/${TASK_SUMMARY}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{OVERDUE_CONTEXT\}/${OVERDUE_CONTEXT}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{CONTEXT_SUMMARY\}/${CONTEXT_SUMMARY}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{CONVERSATION_CONTEXT\}/${CONVERSATION_CONTEXT}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{SECURITY_WARNING\}/${SECURITY_WARNING}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{FLOOD_GUARD\}/${MSG_FLOOD_GUARD}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{PKG_NOTICE\}/${PKG_NOTICE}}"
+
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{OPERATIONAL_MEMORY\}/${OPERATIONAL_MEMORY}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{ANTI_RUNAWAY\}/${ANTI_RUNAWAY}}"
+
+      # ── Squeeze empty placeholder residue ──
+      # When placeholders resolve to empty strings, consecutive blank lines remain.
+      # cat -s collapses 3+ blank lines to a single blank line.
+      SYSTEM_PROMPT=$(printf '%s' "${SYSTEM_PROMPT}" | cat -s)
+
+      log "TEMPLATE: Resolved all placeholders for ${AGENT_NAME}"
+
+    else
+      # --- LEGACY STYLE ---
+      # Identity injected manually at the top, environmental context above poise
+      SYSTEM_PROMPT="${AGENT_IDENTITY}
 
 ${PRIMARY_USER_CONTEXT}
 
@@ -1036,12 +1175,13 @@ ${MERGED_CONTENT}
 
 ---
 
-${SECURITY_WARNING}${MSG_FLOOD_GUARD}${PKG_NOTICE}${UPGRADE_NOTICE}
+${SECURITY_WARNING}${MSG_FLOOD_GUARD}${PKG_NOTICE}
 
 ${OPERATIONAL_MEMORY}
 
 ${CONTEXT_SUMMARY}
 ${CONVERSATION_CONTEXT}"
+    fi
   else
     log "WARN: ${AGENT_NAME} — no poise content, system prompt will lack rules"
     SYSTEM_PROMPT="${AGENT_IDENTITY}
@@ -1054,7 +1194,7 @@ ${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 
 ---
 
-${SECURITY_WARNING}${MSG_FLOOD_GUARD}${PKG_NOTICE}${UPGRADE_NOTICE}
+${SECURITY_WARNING}${MSG_FLOOD_GUARD}${PKG_NOTICE}
 
 ${OPERATIONAL_MEMORY}
 
@@ -1062,11 +1202,13 @@ ${CONTEXT_SUMMARY}
 ${CONVERSATION_CONTEXT}"
   fi
 
-  # Inject local-model specific anti-runaway safeguards
-  if [ "${VERSA_GPU_BACKEND:-}" = "local" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
-    SYSTEM_PROMPT="${SYSTEM_PROMPT}
+  # Inject local-model specific anti-runaway safeguards (legacy path only — template handles via {ANTI_RUNAWAY})
+  if [ "${IS_TEMPLATE}" != true ]; then
+    if [ "${VERSA_GPU_BACKEND:-}" = "local" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
+      SYSTEM_PROMPT="${SYSTEM_PROMPT}
 
 CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When you have accomplished your goal, END YOUR CYCLE by responding with a normal conversational message."
+    fi
   fi
 
   WAKE_PROMPT="You are waking up for a new work cycle.

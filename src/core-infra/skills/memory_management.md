@@ -59,10 +59,16 @@ agictl awareness add conclusion \
   --context "PU feedback: 'just say done'"
 ```
 
-> **Revise, don't duplicate.** If a previous conclusion is now outdated, revise it:
+> **Revise, don't duplicate.** Before writing a new conclusion, you MUST check your current awareness:
+> ```bash
+> agictl awareness table --status active
+> ```
+> If a similar entry exists, do NOT duplicate it. If it needs updating, revise it:
 > ```bash
 > agictl awareness revise <entry_id> --content "Updated understanding..."
 > ```
+> 
+> **Idle Cycle Rule**: If this cycle was completely idle (e.g., you just checked wait statuses, nothing changed, and no new messages were received), DO NOT log a new conclusion. It is correct and expected to exit an idle cycle without adding redundant awareness entries.
 
 ### Step 3: Act — What should I do about it?
 
@@ -132,7 +138,7 @@ Confirm your awareness and memory were persisted:
 
 ```bash
 # Check awareness entries from this cycle
-agictl awareness list --status active
+agictl awareness table --status active
 
 # Check factual memory
 agictl memory connection list
