@@ -1610,14 +1610,14 @@ done
 SKILLS_SOURCE="${DEPLOYED_CORE_INFRA}/skills"
 SKILLS_DEST="${DEPLOYED_COA_ENV}/.agent/skills"
 mkdir -p "${SKILLS_DEST}"
-chown "${COA_USER}:${COA_USER}" "${SKILLS_DEST}"
-chmod 755 "${SKILLS_DEST}"
+chown "${COA_USER}:agi_agents" "${SKILLS_DEST}"
+chmod 775 "${SKILLS_DEST}"
 
 if [ -d "${SKILLS_SOURCE}" ]; then
   for skill_file in "${SKILLS_SOURCE}"/*.md; do
     [ -f "${skill_file}" ] || continue
     cp -f "${skill_file}" "${SKILLS_DEST}/"
-    chown "${WATCHDOG_USER}:${COA_USER}" "${SKILLS_DEST}/$(basename "${skill_file}")"
+    chown "${WATCHDOG_USER}:agi_agents" "${SKILLS_DEST}/$(basename "${skill_file}")"
     chmod 440 "${SKILLS_DEST}/$(basename "${skill_file}")"
 
     # Deploy co-located asset directory if it exists (e.g. solution_architect/templates/)
@@ -1626,11 +1626,11 @@ if [ -d "${SKILLS_SOURCE}" ]; then
     if [ -d "${asset_src}" ]; then
       rm -rf "${SKILLS_DEST}/${skill_name}"
       cp -r "${asset_src}" "${SKILLS_DEST}/${skill_name}"
-      chown -R "${COA_USER}:${COA_USER}" "${SKILLS_DEST}/${skill_name}"
+      chown -R "${COA_USER}:agi_agents" "${SKILLS_DEST}/${skill_name}"
       chmod -R 755 "${SKILLS_DEST}/${skill_name}"
     fi
   done
-  ok "skills/ — shipped skills deployed and locked (${WATCHDOG_USER}:${COA_USER} 440), directory writable for new skills"
+  ok "skills/ — shipped skills deployed and locked (${WATCHDOG_USER}:agi_agents 440), directory writable for new skills"
 else
   warn "Skills source not found at ${SKILLS_SOURCE} — no system skills deployed"
 fi
@@ -1768,7 +1768,7 @@ if [ -f "${DB_FILE}" ]; then
   fi
 fi
 
-# ─── Step 8d: Seed Shared Tooling Project ───
+# ─── Step 8d: Seed Shared System Projects ───
 AGICTL_PATH="${DEPLOYED_CORE_INFRA}/bin/agictl"
 if [ -f "${AGICTL_PATH}" ]; then
   # Inject AGi-Tools project via agictl (auto-handles DB insert and workspace scaffolding)
@@ -1776,6 +1776,34 @@ if [ -f "${AGICTL_PATH}" ]; then
   # Assign COA explicitly to map their workspace symlink
   sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "AGi-Tools" --agent "${COA_USER}" >/dev/null 2>&1 || true
   ok "AGi-Tools shared repository seeded"
+
+  # AGi-Knowledgebase — collaborative PU/agent documentation workspace.
+  # Content source for the LAN-accessible Grav CMS documentation site
+  # (provisioned separately via the knowledgebase skill + Vagrant).
+  sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "AGi-Knowledgebase" --desc "Shared collaborative documentation produced by the Primary User and agents — content source for the LAN Grav CMS site" >/dev/null 2>&1 || true
+  sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "AGi-Knowledgebase" --agent "${COA_USER}" >/dev/null 2>&1 || true
+  ok "AGi-Knowledgebase shared repository seeded"
+
+  # Backfill: assign shared system projects to all existing sub-agents.
+  # New agents get these automatically at `agictl agent add` — this covers
+  # agents created before a shared project was introduced (update installs).
+  # `project assign` is a no-op (non-zero exit) for already-assigned agents.
+  # Runs as root (setup context): assign's internal `sudo -u {agent}` calls
+  # are passwordless from root, whereas watchdog's sudoers only covers
+  # agi_agents targets + agictl-as-root (no arbitrary root commands).
+  if [ -f "${AGENTS_DB}" ]; then
+    EXISTING_SUB_AGENTS=$(sqlite3 "${AGENTS_DB}" \
+      "SELECT name FROM agents WHERE name NOT IN ('${COA_USER}','watchdog');" 2>/dev/null || true)
+    if [ -n "${EXISTING_SUB_AGENTS}" ]; then
+      while IFS= read -r SUB_AGENT; do
+        [ -z "${SUB_AGENT}" ] && continue
+        for SHARED_PROJECT in "AGi-Tools" "AGi-Knowledgebase"; do
+          "${AGICTL_PATH}" project assign "${SHARED_PROJECT}" --agent "${SUB_AGENT}" >/dev/null 2>&1 || true
+        done
+      done <<< "${EXISTING_SUB_AGENTS}"
+      ok "Shared system projects backfilled to existing sub-agents"
+    fi
+  fi
 fi
 
 # ─── Step 9: Execution Mode & AI Backend ────────────
@@ -2769,14 +2797,38 @@ apply_system_permissions() {
     
     # ── §3. Agent-Writable Areas ──
     
-    # .agent/skills/ directory — coa:coa 755 (agent CAN create new skills)
-    [ -d "${DEPLOYED_COA_ENV}/.agent/skills" ] && chown "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/skills" && chmod 755 "${DEPLOYED_COA_ENV}/.agent/skills"
+    # .agent/skills/ directory — coa:agi_agents 775 (agent CAN create new skills)
+    [ -d "${DEPLOYED_COA_ENV}/.agent/skills" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/skills" && chmod 775 "${DEPLOYED_COA_ENV}/.agent/skills"
     
-    # .agent/skills/*.md (shipped) — watchdog:coa 440 (agent CANNOT modify)
+    # .agent/skills/*.md (shipped) — watchdog:agi_agents 440 (agent CANNOT modify)
+    # Only lock skills that exist in the shipped source — agent-authored skills
+    # (created via 'agictl skill new' or directly by COA) must stay editable.
     for skill_file in "${DEPLOYED_COA_ENV}/.agent/skills"/*.md; do
       [ -f "${skill_file}" ] || continue
-      chown "${WATCHDOG_USER}:${COA_USER}" "${skill_file}"
+      [ -f "${DEPLOYED_CORE_INFRA}/skills/$(basename "${skill_file}")" ] || continue
+      chown "${WATCHDOG_USER}:agi_agents" "${skill_file}"
       chmod 440 "${skill_file}"
+    done
+
+    # Agent-authored skill artifacts (anything NOT in the shipped source) —
+    # normalize to coa:agi_agents, group-writable (664 files / 2775 dirs).
+    # Heals watchdog-owned artifacts left by 'agictl skill new' (agictl
+    # elevates to watchdog) and coa:coa group drift from direct authoring.
+    for _skill_item in "${DEPLOYED_COA_ENV}/.agent/skills"/*; do
+      [ -e "${_skill_item}" ] || continue
+      _skill_base="$(basename "${_skill_item}")"
+      if [ -f "${_skill_item}" ]; then
+        case "${_skill_base}" in *.md) ;; *) continue ;; esac
+        [ -f "${DEPLOYED_CORE_INFRA}/skills/${_skill_base}" ] && continue
+        chown "${COA_USER}:agi_agents" "${_skill_item}"
+        chmod 664 "${_skill_item}"
+      elif [ -d "${_skill_item}" ]; then
+        # Asset dirs of shipped skills are managed by the deploy step
+        [ -d "${DEPLOYED_CORE_INFRA}/skills/${_skill_base}" ] && continue
+        chown -R "${COA_USER}:agi_agents" "${_skill_item}"
+        find "${_skill_item}" -type d -exec chmod 2775 {} + 2>/dev/null || true
+        find "${_skill_item}" -type f -exec chmod 664 {} + 2>/dev/null || true
+      fi
     done
     
     # workspace/ — coa:agi_agents 2770 (setgid ensures new project dirs inherit agi_agents group §3.6)

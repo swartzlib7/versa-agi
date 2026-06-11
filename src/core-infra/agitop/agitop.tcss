@@ -334,6 +334,12 @@ TaskEditModal {
     height: auto;
 }
 
+.task-progress-entry {
+    height: auto;
+    margin-left: 2;
+    padding-bottom: 1;
+}
+
 .task-dialog-buttons {
     height: auto;
     margin-top: 1;

@@ -1,5 +1,3 @@
-# Task Management Protocol
-
 Your execution lifecycle is governed by `tasks.db`. The Lifeline spawns you when a Task triggers a wake event based on its `status` and `due_date`.
 
 Use `agictl task` to manage your workload according to these parameters:

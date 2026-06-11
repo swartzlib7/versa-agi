@@ -140,9 +140,11 @@ sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN browser_enabled BOOLEAN DEFA
 sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN skill_injection_mode TEXT DEFAULT 'hybrid';" 2>/dev/null || true
 
 # ─── Schema Migration: resume_enabled default change (1 → 0) ───
-# New agents get 0 via schema default. Existing agents with legacy default of 1
-# are migrated to 0 for consistency (fresh start prevents identity drift).
-sqlite3 "${DB_PATH}" "UPDATE agents SET resume_enabled = 0 WHERE resume_enabled = 1;" 2>/dev/null || true
+# REMOVED (Iteration 23): the unconditional `UPDATE agents SET resume_enabled=0
+# WHERE resume_enabled=1` ran on EVERY setup --update, silently resetting any
+# agent the Primary User had deliberately switched ON via the dashboard.
+# The Iteration 19 legacy-default migration has long since been applied; new
+# agents get 0 via the schema default.
 
 # ─── View Migration: drop and recreate views to include new columns ───
 # Views are cheap to recreate and must reflect the current column set.

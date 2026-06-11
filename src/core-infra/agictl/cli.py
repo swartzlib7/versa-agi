@@ -739,6 +739,40 @@ def _load_sycl_registry():
 SYCL_MODEL_MAP = _load_sycl_registry()
 
 
+def _resolve_protected_identities():
+    """Resolve COA/watchdog agent names and the COA display name.
+
+    setup.ini [users] defines the agent keys (OS usernames); the COA display
+    name (first + last, e.g. first_name=Versa last_name=(COA)) comes from her
+    identity config (synced from VersaVoice), falling back to setup.ini
+    [agent] first_name/last_name. Never hardcode these identities.
+    Returns (coa_user, watchdog_user, coa_display).
+    """
+    import configparser
+    coa_user, watchdog_user = "coa", "watchdog"
+    first, last = "", ""
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            coa_user = cfg.get("users", "coa", fallback=coa_user) or coa_user
+            watchdog_user = cfg.get("users", "watchdog", fallback=watchdog_user) or watchdog_user
+            first = cfg.get("agent", "first_name", fallback="") or ""
+            last = cfg.get("agent", "last_name", fallback="") or ""
+            break
+    try:
+        # coa_config.json is a structural filename (hardcoded system-wide) —
+        # deliberately NOT derived from the configured username.
+        with open("/etc/versa-agi/coa_config.json") as f:
+            identity = json.load(f).get("identity", {})
+            first = identity.get("first_name") or first
+            last = identity.get("last_name") or last
+    except Exception:
+        pass
+    coa_display = " ".join(p for p in (first, last) if p)
+    return coa_user, watchdog_user, coa_display
+
+
 def _resolve_gpu_backend():
     """Read gpu_backend from setup.ini. Returns 'standard' or 'intel'."""
     import configparser
@@ -2673,10 +2707,13 @@ def agent_approve(name, force):
         duties_dest = os.path.join(agent_data_dir, "duties.md")
         duties_is_default = False
         if not os.path.exists(duties_dest):
+            # No h1/h2 headings — this file is injected verbatim under a
+            # '## ── DUTIES & ASSIGNMENT ──' section header by Lifeline, so its
+            # internal headings must start at ### to preserve the hierarchy.
             with open(duties_dest, "w") as f:
-                f.write(f"# Assignment — {name}\n\n**Role:** {role_label}\n\n")
-                f.write("## Duties\n\n_Define this agent's specific duties, projects, and objectives here._\n\n")
-                f.write("## Notes\n\n_Add any operational notes, constraints, or context._\n")
+                f.write(f"**Agent:** {name}  |  **Role:** {role_label}\n\n")
+                f.write("### Duties\n\n_Define this agent's specific duties, projects, and objectives here._\n\n")
+                f.write("### Notes\n\n_Add any operational notes, constraints, or context._\n")
             duties_is_default = True
 
         # ── Create .agent/system.md placeholder ──
@@ -2718,26 +2755,35 @@ def agent_approve(name, force):
             subprocess.run(["chown", f"watchdog:agi_agents", system_md_file], check=False)
             subprocess.run(["chmod", "444", system_md_file], check=False)
 
-        # ── Auto-assign to shared AGi-Tools project if it exists ──
+        # ── Auto-assign to shared system projects if they exist ──
+        # Shared system projects live physically in COA's workspace and are
+        # symlinked into every agent's workspace/ at creation time:
+        #   AGi-Tools          — shared scripts and tooling
+        #   AGi-Knowledgebase  — collaborative PU/agent documentation (Grav CMS source)
+        SHARED_SYSTEM_PROJECTS = ["AGi-Tools", "AGi-Knowledgebase"]
         try:
             conn_tasks = sqlite3.connect(tasks_db, timeout=5)
             conn_tasks.row_factory = sqlite3.Row
-            tools_proj = conn_tasks.execute("SELECT id, workspace_path FROM projects WHERE name='AGi-Tools'").fetchone()
-            if tools_proj:
-                tools_path = tools_proj["workspace_path"]
-                tools_id = tools_proj["id"]
-                agent_tools_link = os.path.join(agent_root, "workspace", "AGi-Tools")
-                if os.path.exists(tools_path) and not os.path.exists(agent_tools_link):
-                    os.symlink(tools_path, agent_tools_link)
-                    subprocess.run(["chown", "-h", f"{os_user}:agi_agents", agent_tools_link], check=False)
-                
+            for shared_name in SHARED_SYSTEM_PROJECTS:
+                shared_proj = conn_tasks.execute(
+                    "SELECT id, workspace_path FROM projects WHERE name=?", (shared_name,)
+                ).fetchone()
+                if not shared_proj:
+                    continue
+                shared_path = shared_proj["workspace_path"]
+                shared_id = shared_proj["id"]
+                agent_shared_link = os.path.join(agent_root, "workspace", shared_name)
+                if os.path.exists(shared_path) and not os.path.exists(agent_shared_link):
+                    os.symlink(shared_path, agent_shared_link)
+                    subprocess.run(["chown", "-h", f"{os_user}:agi_agents", agent_shared_link], check=False)
+
                 # Auto-assign physical db record to grant query access
                 conn_tasks.execute(
                     "INSERT OR IGNORE INTO project_members (project_id, member_type, member_id, display_name, workspace_path, branch, roles) "
                     "VALUES (?, 'agent', ?, ?, ?, 'main', 'contributor')",
-                    (tools_id, name, name.upper(), agent_tools_link)
+                    (shared_id, name, name.upper(), agent_shared_link)
                 )
-                conn_tasks.commit()
+            conn_tasks.commit()
             conn_tasks.close()
         except Exception:
             pass
@@ -2989,11 +3035,18 @@ def agent_deploy_skills(name):
         coa_only_rows = conn.execute(
             "SELECT name FROM skills WHERE scope='coa_only'"
         ).fetchall()
+        # Agent-created skills live in COA's skills dir, not the shipped source.
+        # They are distributed via 'agent share-skill' — exclude them here so
+        # rsync --delete does not wipe previously-shared copies from sub-agents.
+        agent_created_rows = conn.execute(
+            "SELECT name FROM skills WHERE type='agent_created'"
+        ).fetchall()
         conn.close()
         os_user = row["os_user"] if row else f"agi-{name}"
     except Exception:
         os_user = f"agi-{name}"
         coa_only_rows = []
+        agent_created_rows = []
     agent_root = f"/home/{os_user}"
     skills_source = "/home/watchdog/core-infra/skills/"
     skills_dest = os.path.join(agent_root, ".agent", "skills") + "/"
@@ -3021,6 +3074,11 @@ def agent_deploy_skills(name):
         skill_name = coa_row["name"]
         rsync_cmd.extend(["--exclude", f"{skill_name}.md"])
         rsync_cmd.extend(["--exclude", f"{skill_name}/"])  # co-located assets
+    # Exclude agent-created skills (managed via share-skill, not this mirror)
+    for ac_row in agent_created_rows:
+        skill_name = ac_row["name"]
+        rsync_cmd.extend(["--exclude", f"{skill_name}.md"])
+        rsync_cmd.extend(["--exclude", f"{skill_name}/"])
 
     rsync_cmd.extend([skills_source, skills_dest])
 
@@ -3578,16 +3636,23 @@ def agent_count(active):
     print(len(agents))
 
 @agent.command("summary")
-def agent_summary():
+@click.option("--exclude-watchdog", is_flag=True, help="Omit the watchdog infrastructure row (sub-agent registry view — watchdog is not a messageable peer)")
+def agent_summary(exclude_watchdog):
     """Return agent summary as markdown table for context injection."""
+    coa_user, watchdog_user, coa_display = _resolve_protected_identities()
     agents = agent_reader.get_all_agents()
     agents = sorted(agents, key=lambda x: (not x.get("protected", False), x["name"]))
     print("| Name | Workspace | Role | Model | Status | Inactive | Requested By | Created At |")
     print("|---|---|---|---|---|---|---|---|")
     for a in agents:
-        name_str = a.get("name", "").capitalize()
-        if name_str.lower() == "coa":
-            name_str = "Versa"
+        raw_name = a.get("name", "") or ""
+        if exclude_watchdog and raw_name == watchdog_user:
+            continue
+        name_str = raw_name.capitalize()
+        if raw_name == coa_user:
+            # Render the COA's configured display name (e.g. "Versa (COA)" —
+            # the marker ships as last_name in setup.ini) instead of the raw key.
+            name_str = coa_display or name_str
         inactive_str = "True" if a.get("inactive") else "False"
         status = a.get("status") or ""
         print(f"| {name_str} | {a.get('workspace', '')} | {a.get('role') or ''} | {a.get('model') or ''} | {status} | {inactive_str} | {a.get('requested_by') or ''} | {a.get('created_at') or ''} |")
@@ -3650,12 +3715,76 @@ def task_list(show_all):
 @task.command("get")
 @click.argument("task_id", type=int)
 def task_get(task_id):
-    """Output full task context as JSON."""
+    """Output full task context as JSON (includes recent progress journal)."""
     task_data = tasks_reader.get_task(task_id)
     if task_data:
+        try:
+            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT created_at, agent_name, note FROM task_progress "
+                "WHERE task_id = ? ORDER BY id DESC LIMIT 10",
+                (task_id,)
+            ).fetchall()
+            conn.close()
+            # Reverse so entries read oldest → newest
+            task_data["recent_progress"] = [dict(r) for r in reversed(rows)]
+        except Exception:
+            task_data["recent_progress"] = []
         print(json.dumps(task_data, indent=2, default=str))
     else:
         json_response(False, error=f"Task {task_id} not found")
+
+@task.command("progress")
+@click.argument("task_id", type=int)
+@click.argument("note", required=False)
+@click.option("--last", "last_n", default=20, type=int, help="When listing: number of recent entries (default 20)")
+def task_progress(task_id, note, last_n):
+    """Append to or list a task's progress journal.
+
+    With text: appends a timestamped, attributed entry (append-only).
+    Without text: lists the journal as JSON, oldest first.
+
+    Leave yourself breadcrumbs across cycles: what you did, how far you got,
+    what to do next. Entries are injected into your wake context while the
+    task is active — they survive fresh-start cycles where chat history
+    does not.
+    """
+    note = (note or "").strip()
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+
+        if not note:
+            # List mode
+            rows = conn.execute(
+                "SELECT id, created_at, agent_name, note FROM task_progress "
+                "WHERE task_id = ? ORDER BY id DESC LIMIT ?",
+                (task_id, last_n)
+            ).fetchall()
+            conn.close()
+            print(json.dumps([dict(r) for r in reversed(rows)], indent=2, default=str))
+            return
+
+        # Append mode
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            conn.close()
+            json_response(False, error=f"Task {task_id} not found")
+            sys.exit(1)
+        agent_name = os.environ.get("VERSA_AGENT_NAME", "coa")
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
+            (task_id, agent_name, note)
+        )
+        conn.execute("UPDATE tasks SET updated_at = datetime('now') WHERE id = ?", (task_id,))
+        conn.commit()
+        entry_id = c.lastrowid
+        conn.close()
+        json_response(True, task_id=task_id, entry_id=entry_id, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
 
 @task.command("add")
 @click.argument("title")
@@ -5219,7 +5348,10 @@ def project_assign(name, agent_name, connection_uid, roles, branch):
                 subprocess.run(["sudo", "-u", agent_os_user, "mkdir", "-p", agent_workspace_base], check=False)
                 if not os.path.exists(agent_project_path):
                     subprocess.run(["sudo", "-u", agent_os_user, "ln", "-s", proj_workspace, agent_project_path], check=False)
-                    subprocess.run(["sudo", "chown", "-h", f"{agent_os_user}:agi_agents", agent_project_path], check=False)
+                    # Group ownership via the agent itself (symlink owner): a bare
+                    # root `sudo chown` is NOT in watchdog's sudoers (only agictl is)
+                    # and would hang on a password prompt when invoked as watchdog.
+                    subprocess.run(["sudo", "-u", agent_os_user, "chgrp", "-h", "agi_agents", agent_project_path], check=False)
                 # Enforce shared workspace group permissions on the target directory
                 # This ensures the sub-agent (and any future assignees) can write through the agi_agents group
                 # Runs as coa (file owner + agi_agents member) — watchdog can sudo to coa via agi_agents sudoers
@@ -7211,12 +7343,17 @@ Reference them using relative paths from the agent's workspace.
                 f"for the `{name}` skill.\n\n"
                 f"Files here are deployed to sub-agents alongside the skill `.md` file.\n")
 
-    # Set permissions (COA-owned, writable)
+    # Set permissions. agictl elevates to watchdog, so these files are created
+    # watchdog-owned — chown to the agent only works when running as root
+    # (e.g. invoked from setup.sh). Either way, make everything group-writable
+    # (agi_agents) so COA can author the draft regardless of file owner.
     agent_user = "coa"
-    subprocess.run(["chown", f"{agent_user}:{agent_user}", skill_file], check=False)
-    subprocess.run(["chmod", "644", skill_file], check=False)
-    subprocess.run(["chown", "-R", f"{agent_user}:{agent_user}", asset_dir], check=False)
-    subprocess.run(["chmod", "755", asset_dir], check=False)
+    if os.geteuid() == 0:
+        subprocess.run(["chown", f"{agent_user}:agi_agents", skill_file], check=False)
+        subprocess.run(["chown", "-R", f"{agent_user}:agi_agents", asset_dir], check=False)
+    subprocess.run(["chmod", "664", skill_file], check=False)
+    subprocess.run(["chmod", "2775", asset_dir], check=False)  # setgid: new files inherit agi_agents
+    subprocess.run(["chmod", "664", asset_readme], check=False)
 
     # Register in DB
     conn = sqlite3.connect(agents_db, timeout=5)
@@ -7470,8 +7607,8 @@ def skill_override(name):
     with open(override_file, "w") as f:
         f.write(override_content)
 
-    # Set permissions (COA-owned, writable)
-    subprocess.run(["chown", "coa:coa", override_file], check=False)
+    # Set permissions (COA-owned, group-writable for agi_agents)
+    subprocess.run(["chown", "coa:agi_agents", override_file], check=False)
     subprocess.run(["chmod", "644", override_file], check=False)
 
     # Register in DB

@@ -9,7 +9,7 @@ import threading
 from textual.screen import ModalScreen
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll, Container
-from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, Collapsible
+from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, Collapsible, TextArea
 
 
 _SETUP_INI_PATHS = [
@@ -214,9 +214,33 @@ def _get_packages_rows() -> list[dict]:
     except Exception:
         return []
 
-def _read_skill_file(skill_name: str) -> str:
-    """Read the full content of a skill .md file from the canonical source."""
-    skill_path = f"/home/watchdog/core-infra/skills/{skill_name}.md"
+def _get_coa_skills_dir() -> str:
+    """Resolve COA's .agent/skills directory from the agents registry."""
+    try:
+        conn = sqlite3.connect("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
+        row = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+        conn.close()
+        if row and row[0]:
+            return os.path.join(row[0], ".agent", "skills")
+    except Exception:
+        pass
+    return "/home/coa/coa-env/.agent/skills"
+
+
+def _resolve_skill_path(skill_data: dict) -> str:
+    """Resolve a skill's canonical source file.
+
+    Shipped/system skills live in the watchdog core-infra source; agent-created
+    skills are authored in COA's .agent/skills/ and never exist under watchdog.
+    """
+    name = skill_data.get("name", "")
+    if skill_data.get("type") == "agent_created":
+        return os.path.join(_get_coa_skills_dir(), f"{name}.md")
+    return f"/home/watchdog/core-infra/skills/{name}.md"
+
+
+def _read_skill_file(skill_path: str) -> str:
+    """Read the full content of a skill .md file from its canonical source."""
     if not os.path.exists(skill_path):
         return f"(Skill file not found: {skill_path})"
     try:
@@ -238,12 +262,147 @@ def _read_skill_file(skill_name: str) -> str:
         return f"(Error: {e})"
 
 
+def _write_skill_file(skill_path: str, content: str) -> tuple:
+    """Write skill content back to its source file. Returns (ok, error)."""
+    try:
+        with open(skill_path, "w") as f:
+            f.write(content)
+        return True, ""
+    except PermissionError:
+        # sudo tee preserves the existing inode (owner/permissions unchanged)
+        try:
+            result = subprocess.run(
+                ["sudo", "tee", skill_path],
+                input=content, text=True, capture_output=True, timeout=10
+            )
+            if result.returncode == 0:
+                return True, ""
+            return False, (result.stderr or "sudo tee failed").strip()
+        except Exception as e:
+            return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
+def _mark_skill_updated(skill_name: str) -> None:
+    """Flag an edited skill for Lifeline re-distribution (synced → updated)."""
+    try:
+        conn = sqlite3.connect("/var/lib/versa-agi/agents.db", timeout=5)
+        conn.execute(
+            "UPDATE skills SET status = CASE WHEN status = 'synced' THEN 'updated' ELSE status END, "
+            "updated_at = datetime('now') WHERE name = ?",
+            (skill_name,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _delete_skill(skill_data: dict) -> tuple:
+    """Remove a skill: source file, assets, distributed copies, registry row.
+
+    Returns (ok, error). Only agent-created skills may be removed — shipped
+    skills are system-managed and restored by setup --update.
+    """
+    name = skill_data.get("name", "")
+    if skill_data.get("type") != "agent_created":
+        return False, "Shipped system skills cannot be removed (managed by setup)"
+
+    try:
+        # Source file + co-located asset directory (rm -f tolerates stale
+        # registry rows whose file no longer exists)
+        src = _resolve_skill_path(skill_data)
+        asset_dir = os.path.join(os.path.dirname(src), name)
+        subprocess.run(["sudo", "rm", "-f", src], capture_output=True, timeout=10)
+        subprocess.run(["sudo", "rm", "-rf", asset_dir], capture_output=True, timeout=10)
+
+        # Distributed copies in sub-agent skill directories
+        try:
+            conn = sqlite3.connect("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
+            rows = conn.execute(
+                "SELECT os_user FROM agents WHERE name NOT IN ('coa', 'watchdog') AND os_user IS NOT NULL"
+            ).fetchall()
+            conn.close()
+        except Exception:
+            rows = []
+        for (os_user,) in rows:
+            agent_skills = f"/home/{os_user}/.agent/skills"
+            subprocess.run(["sudo", "rm", "-f", os.path.join(agent_skills, f"{name}.md")],
+                           capture_output=True, timeout=10)
+            subprocess.run(["sudo", "rm", "-rf", os.path.join(agent_skills, name)],
+                           capture_output=True, timeout=10)
+
+        # Registry row
+        conn = sqlite3.connect("/var/lib/versa-agi/agents.db", timeout=5)
+        conn.execute("DELETE FROM skills WHERE name = ?", (name,))
+        conn.commit()
+        conn.close()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+class SkillRemoveConfirmModal(ModalScreen):
+    """Confirmation dialog for removing an agent-created skill."""
+
+    CSS = """
+    SkillRemoveConfirmModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #skill-remove-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $error;
+        background: $surface;
+    }
+    #skill-remove-actions {
+        margin-top: 1;
+        height: auto;
+    }
+    #skill-remove-actions Button {
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, skill_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self.skill_name = skill_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="skill-remove-dialog"):
+            yield Static(f"[bold red]⚠ Remove Skill: {self.skill_name}[/]\n")
+            yield Static(
+                "This deletes the skill source file, its asset directory,\n"
+                "all copies distributed to sub-agents, and the registry entry.\n\n"
+                "[bold]This cannot be undone.[/]"
+            )
+            with Horizontal(id="skill-remove-actions"):
+                yield Button("Remove Permanently", variant="error", id="btn-skill-remove-confirm")
+                yield Button("Cancel", variant="default", id="btn-skill-remove-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "btn-skill-remove-confirm")
+
+
 class SkillViewModal(ModalScreen):
-    """Read-only modal for viewing skill file contents."""
+    """Skill modal — view, edit (with source write-back), and remove."""
+
+    CSS = """
+    #skill-content-editor {
+        height: 1fr;
+        border: solid $surface-lighten-1;
+    }
+    """
 
     def __init__(self, skill_data: dict, **kwargs):
         super().__init__(**kwargs)
         self.skill_data = skill_data
+        self.skill_path = _resolve_skill_path(skill_data)
+        self._changed = False
 
     def compose(self) -> ComposeResult:
         name = self.skill_data.get("name", "")
@@ -257,21 +416,87 @@ class SkillViewModal(ModalScreen):
             f"[bold]📖 {name}[/]\n"
             f"[cyan]Type:[/] {skill_type}  [cyan]Origin:[/] {origin}  "
             f"[cyan]Status:[/] {status}  [cyan]Assets:[/] {has_assets}\n"
-            f"[cyan]Description:[/] {desc}"
+            f"[cyan]Description:[/] {desc}\n"
+            f"[dim]Source: {self.skill_path}[/]"
         )
 
-        content = _read_skill_file(name)
+        content = _read_skill_file(self.skill_path)
+        self._file_exists = os.path.exists(self.skill_path)
 
         with Vertical(id="skill-dialog"):
             yield Static(header, id="skill-dialog-header")
             with VerticalScroll(id="skill-content-scroll"):
                 yield Markdown(content, id="skill-content-body")
+            yield TextArea(content if self._file_exists else "", id="skill-content-editor")
             with Horizontal(id="skill-dialog-actions"):
+                yield Button("Edit", variant="warning", id="skill-edit")
+                yield Button("Save", variant="success", id="skill-save")
+                yield Button("Remove", variant="error", id="skill-remove")
                 yield Button("Close", variant="primary", id="skill-view-close")
+
+    def on_mount(self) -> None:
+        self.query_one("#skill-content-editor", TextArea).display = False
+        self.query_one("#skill-save", Button).display = False
+        if not self._file_exists:
+            # Stale registry entry — nothing to edit, but Remove stays available
+            self.query_one("#skill-edit", Button).disabled = True
+        if self.skill_data.get("type") != "agent_created":
+            # Shipped skills are system-managed — restored by setup --update
+            self.query_one("#skill-remove", Button).disabled = True
+
+    def _enter_edit_mode(self) -> None:
+        self.query_one("#skill-content-scroll", VerticalScroll).display = False
+        self.query_one("#skill-content-editor", TextArea).display = True
+        self.query_one("#skill-edit", Button).display = False
+        self.query_one("#skill-save", Button).display = True
+
+    def _exit_edit_mode(self, new_content: str) -> None:
+        self.query_one("#skill-content-body", Markdown).update(new_content)
+        self.query_one("#skill-content-scroll", VerticalScroll).display = True
+        self.query_one("#skill-content-editor", TextArea).display = False
+        self.query_one("#skill-edit", Button).display = True
+        self.query_one("#skill-save", Button).display = False
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "skill-view-close":
-            self.app.pop_screen()
+            self.dismiss(self._changed)
+        elif event.button.id == "skill-edit":
+            self._enter_edit_mode()
+        elif event.button.id == "skill-save":
+            content = self.query_one("#skill-content-editor", TextArea).text
+            ok, err = _write_skill_file(self.skill_path, content)
+            if ok:
+                name = self.skill_data.get("name", "")
+                _mark_skill_updated(name)
+                self._changed = True
+                self._exit_edit_mode(content)
+                if self.skill_data.get("type") == "agent_created":
+                    self.app.notify(
+                        f"Skill '{name}' saved — re-syncs to sub-agents on next Lifeline tick",
+                        title="Skills"
+                    )
+                else:
+                    self.app.notify(
+                        f"Skill '{name}' saved — note: setup --update overwrites shipped skills from the repo",
+                        title="Skills", severity="warning"
+                    )
+            else:
+                self.app.notify(f"Save failed: {err}", title="Skills", severity="error")
+        elif event.button.id == "skill-remove":
+            self.app.push_screen(
+                SkillRemoveConfirmModal(self.skill_data.get("name", "")),
+                callback=self._on_remove_confirmed,
+            )
+
+    def _on_remove_confirmed(self, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        ok, err = _delete_skill(self.skill_data)
+        if ok:
+            self.app.notify(f"Skill '{self.skill_data.get('name', '')}' removed", title="Skills")
+            self.dismiss(True)
+        else:
+            self.app.notify(f"Remove failed: {err}", title="Skills", severity="error")
 
 
 class RouterModeConfirmModal(ModalScreen):
@@ -643,7 +868,7 @@ class SystemSettingsModal(ModalScreen):
                 yield Static("")
                 skills_table = PaginatedDataTable(self._handle_skills_key, id="skills-registry-table")
                 yield skills_table
-                yield Static("[dim]Double-click or press Enter to view a skill · Manage via: agictl skill list[/]")
+                yield Static("[dim]Double-click or press Enter to view/edit/remove a skill · CLI: agictl skill list[/]")
 
                 # ── System Packages (full width below skills, always visible) ──
                 yield Static("")
@@ -686,9 +911,17 @@ class SystemSettingsModal(ModalScreen):
         try:
             idx = int(event.row_key.value)
             skill_data = self._skills_rows[idx]
-            self.app.push_screen(SkillViewModal(skill_data))
+            self.app.push_screen(SkillViewModal(skill_data), callback=self._on_skill_modal_close)
         except (ValueError, IndexError):
             pass
+
+    def _on_skill_modal_close(self, changed: bool) -> None:
+        """Refresh the skills table after an edit or removal."""
+        if changed:
+            self._skills_rows = _get_skills_rows()
+            max_page = max(0, (len(self._skills_rows) - 1) // self._page_size)
+            self._skills_page = min(self._skills_page, max_page)
+            self._update_skills_table()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-toggle-strategy":

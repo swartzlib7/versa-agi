@@ -120,6 +120,34 @@ class TaskEditModal(ModalScreen):
                 id="task-edit-assignee",
                 allow_blank=False,
             )
+
+            # ── Progress Journal (read-only) ──
+            # Agent-authored breadcrumbs via 'agictl task progress <id> "..."' —
+            # the cross-cycle continuity carrier, surfaced here for the PU.
+            progress = []
+            if self._tasks_reader and isinstance(task.get("id"), int):
+                progress = self._tasks_reader.get_task_progress(task["id"])
+            yield Static("")
+            yield Static(
+                f"[b]Progress Journal[/b] [dim]({len(progress)} "
+                f"entr{'y' if len(progress) == 1 else 'ies'} — newest first)[/]"
+            )
+            if progress:
+                from rich.markup import escape
+                for entry in reversed(progress):
+                    ts = _utc_to_local(str(entry.get("created_at") or ""))[:16]
+                    author = entry.get("agent_name") or "?"
+                    note = escape(str(entry.get("note") or ""))
+                    yield Static(
+                        f"[cyan]{ts}[/] [yellow]{author}[/] — {note}",
+                        classes="task-progress-entry",
+                    )
+            else:
+                yield Static(
+                    "[dim]No entries yet — agents journal progress with: "
+                    "agictl task progress <id> \"DONE: ... NEXT: ...\"[/]"
+                )
+
             yield Static("", id="task-edit-error")
             with Horizontal(classes="task-dialog-buttons"):
                 yield Button("Save", variant="success", id="task-dialog-save")

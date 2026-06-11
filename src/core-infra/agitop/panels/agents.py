@@ -716,15 +716,19 @@ class TechnicalSetupModal(ModalScreen):
                 yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
                 yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
                 yield Static("")
-                yield Static("[bold cyan]─── LangGraph Resume Control ───[/]")
-                yield Static("[cyan]Resume Enabled[/] — whether the agent resumes from checkpoint state")
+                yield Static("[bold cyan]─── Rolling Chat History (LangGraph Resume) ───[/]")
+                yield Static(
+                    "[cyan]Resume Enabled[/] — carry previous cycles' conversation into new cycles (per project thread).\n"
+                    "[dim]OFF (default): each cycle starts fresh — durable state lives in tasks, memory, and awareness,\n"
+                    "not chat history. ON: only for long single-thread collaborations needing verbatim continuity.[/]"
+                )
                 yield Select(
-                    [("Yes (resume from checkpoint)", 1), ("No (fresh start each cycle)", 0)],
+                    [("No (fresh start each cycle — default)", 0), ("Yes (roll chat history across cycles)", 1)],
                     value=agent.get("resume_enabled", 0),
                     id="select-resume-enabled",
                     allow_blank=False,
                 )
-                yield Static("[cyan]Resume Max Messages[/] — trim checkpoint state to last N messages (0 = unlimited)")
+                yield Static("[cyan]Resume Max Messages[/] — on resume, keep only the last N messages of rolled history (0 = unlimited; ignored when Resume is off)")
                 yield Input(value=str(agent.get("resume_max_messages", 0)), placeholder="0 = unlimited", id="input-resume-max-msgs", type="integer")
                 yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
                 yield Static("")
@@ -779,7 +783,8 @@ class TechnicalSetupModal(ModalScreen):
                         pass  # Cloud models don't have the select
                     # Save resume controls
                     resume_select = self.query_one("#select-resume-enabled", Select)
-                    resume_val = resume_select.value if isinstance(resume_select.value, int) else 1
+                    # Fallback must match the system default (0 = fresh start)
+                    resume_val = resume_select.value if isinstance(resume_select.value, int) else 0
                     ok = ok and reader.update_agent_field(self.agent_name, "resume_enabled", resume_val)
                     resume_max = int(self.query_one("#input-resume-max-msgs", Input).value)
                     ok = ok and reader.update_agent_field(self.agent_name, "resume_max_messages", resume_max)

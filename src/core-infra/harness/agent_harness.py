@@ -8,7 +8,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Literal
 
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage, trim_messages
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage, RemoveMessage, trim_messages
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, MessagesState, START, END
@@ -25,6 +25,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
+from harness.model_context import get_trimmer_char_limit
 
 from pydantic import BaseModel, Field
 
@@ -135,6 +136,8 @@ class TaskInput(BaseModel):
         "Examples: 'task list', 'task list --all', 'task get 73', "
         "'task add \"Title\" --desc \"Description\" --priority high --due-date \"2026-05-20 12:00:00\"', "
         "'task update 73 --status in_progress', 'task update 73 --status done', "
+        "'task progress 73 \"DONE: X. NEXT: Y.\"' (append progress journal entry), "
+        "'task progress 73' (list journal), "
         "'task done 73', 'task cancel 73', 'task snooze 73 10', "
         "'task reminder \"Check deployment\" --category instruction'."
     ))
@@ -149,6 +152,8 @@ def agictl_task(command: str) -> str:
       - 'task get 73' — full task details
       - 'task add "Setup server" --desc "Docker setup" --priority high --due-date "2026-05-20 12:00:00"'
       - 'task update 73 --status in_progress'
+      - 'task progress 73 "DONE: research. NEXT: draft doc."' — append progress entry (your breadcrumbs for next cycle)
+      - 'task progress 73' — read the progress journal
       - 'task done 73' — mark complete
       - 'task cancel 73'
       - 'task snooze 73 10' — snooze for 10 minutes
@@ -586,7 +591,30 @@ def get_llm(model_name: str, num_ctx: int = 0):
 
     if gpu_backend in ["intel", "remote"]:
         base_url = f"{inference_url}/v1"
-        return ChatOpenAI(base_url=base_url, api_key="sk-local", model=model_name, temperature=0.2)
+        # Intel SYCL / llama.cpp uses GGUF basenames as model IDs
+        # (e.g. "gemma-4-26B-A4B-it-UD-Q4_K_M"), not Ollama-style short
+        # names (e.g. "gemma4:26b"). Translate via models.ini [sycl_models].
+        resolved_name = model_name
+        try:
+            import configparser
+            ini = configparser.ConfigParser(delimiters=('=',))
+            for ini_path in ["/etc/versa-agi/models.ini",
+                             os.path.join(os.path.dirname(os.path.dirname(
+                                 os.path.abspath(__file__))), "models.ini")]:
+                if os.path.isfile(ini_path):
+                    ini.read(ini_path)
+                    break
+            if ini.has_section("sycl_models"):
+                raw = ini.get("sycl_models", model_name, fallback="")
+                if raw:
+                    parts = raw.strip().split(",")
+                    if len(parts) >= 2:
+                        gguf_file = parts[1].strip()
+                        # Strip .gguf extension — server uses basename without it
+                        resolved_name = gguf_file.replace(".gguf", "")
+        except Exception:
+            pass  # Fall through with original name
+        return ChatOpenAI(base_url=base_url, api_key="sk-local", model=resolved_name, temperature=0.2)
     else:
         kwargs = {"base_url": inference_url, "model": model_name, "temperature": 0.2}
         if num_ctx and num_ctx > 0:
@@ -823,25 +851,105 @@ def main():
 
     # Context Trimming: pre_model_hook trims messages before sending to LLM.
     # Full history is preserved in the checkpoint — only the LLM input is trimmed.
-    # Uses char count as a proxy for tokens (~4 chars/token).
-    # Dynamically aligned with num_ctx when provided.
-    if args.num_ctx and args.num_ctx > 0:
-        CONTEXT_WINDOW_CHARS = args.num_ctx * 4  # ~4 chars/token
-    else:
-        CONTEXT_WINDOW_CHARS = 128000  # default fallback (~32K tokens)
+    # Uses actual character count as a conservative proxy for tokens (~3 chars/token).
+    # Model-aware: cloud providers have known context limits; local models use num_ctx.
+
+    # ── Model-Aware Context Window ──
+    # get_trimmer_char_limit returns the raw model budget (token window × 80%
+    # headroom × 3 chars/token). The system prompt and tool schemas are sent
+    # with EVERY request but are not part of state["messages"] — the trimmer
+    # never sees them. Subtract them explicitly so the headroom is real, with
+    # a floor so a pathologically large prompt cannot zero out the budget.
+    MODEL_CHAR_BUDGET = get_trimmer_char_limit(args.model, args.num_ctx)
+    TOOL_SCHEMA_CHARS = sum(
+        len(t.name) + len(t.description or "") + len(str(t.args))
+        for t in ALL_TOOLS
+    )
+    TRIM_BUDGET_FLOOR = 32_000  # ~10K tokens — minimum working context
+    CONTEXT_WINDOW_CHARS = max(
+        MODEL_CHAR_BUDGET - len(enhanced_prompt) - TOOL_SCHEMA_CHARS,
+        TRIM_BUDGET_FLOOR,
+    )
+    tlog(f"CONTEXT BUDGET: model={MODEL_CHAR_BUDGET:,} chars − system prompt "
+         f"{len(enhanced_prompt):,} − tool schemas {TOOL_SCHEMA_CHARS:,} "
+         f"→ trim limit {CONTEXT_WINDOW_CHARS:,} chars")
+
+    # Per-message serialization overhead (role, type, name, structural JSON).
+    # Conservative flat estimate — keeps the proxy honest for many-message histories.
+    MESSAGE_OVERHEAD_CHARS = 40
+
+    def _count_dict_part(part: dict) -> int:
+        """Count all string payloads in a content part — not just 'text'.
+
+        Providers return list-content parts keyed by type: 'text', 'thinking'/
+        'reasoning' (extended thinking blocks, re-sent on every turn), 'data'
+        (base64 media), 'executable_code', etc. Counting only 'text' undercounts
+        — sometimes massively (base64 images, long thinking traces).
+        """
+        total = 0
+        for value in part.values():
+            if isinstance(value, str):
+                total += len(value)
+            elif isinstance(value, dict):
+                total += _count_dict_part(value)
+            elif isinstance(value, list):
+                for v in value:
+                    if isinstance(v, str):
+                        total += len(v)
+                    elif isinstance(v, dict):
+                        total += _count_dict_part(v)
+        return total
+
+    def _count_message_chars(messages):
+        """Count total characters across all messages for context window management.
+
+        Sums: message .content (str or multimodal list — ALL part payloads),
+        tool_call name/arguments, tool_call_id fields, and a flat per-message
+        serialization overhead — all of which contribute to the API token count.
+        Used with a conservative ~3 chars ≈ 1 token budget conversion.
+        """
+        total = 0
+        for m in messages:
+            total += MESSAGE_OVERHEAD_CHARS
+            # Content: string or multimodal list
+            if isinstance(m.content, str):
+                total += len(m.content)
+            elif isinstance(m.content, list):
+                for part in m.content:
+                    if isinstance(part, str):
+                        total += len(part)
+                    elif isinstance(part, dict):
+                        total += _count_dict_part(part)
+            # Tool calls: name + arguments are sent to the LLM as structured input
+            if hasattr(m, "tool_calls") and m.tool_calls:
+                for tc in m.tool_calls:
+                    total += len(tc.get("name", "") or "")
+                    args_val = tc.get("args", {})
+                    if isinstance(args_val, str):
+                        total += len(args_val)
+                    else:
+                        total += len(str(args_val))
+            # Tool call ID (present on ToolMessage responses)
+            if hasattr(m, "tool_call_id") and m.tool_call_id:
+                total += len(m.tool_call_id)
+        return total
 
     def pre_model_hook(state):
         """Trim messages to fit context window before LLM call.
         Returns llm_input_messages (not messages) to preserve full checkpoint history."""
+        all_msgs = state["messages"]
         trimmed = trim_messages(
-            state["messages"],
+            all_msgs,
             max_tokens=CONTEXT_WINDOW_CHARS,
             strategy="last",
-            token_counter=len,       # char-based proxy; ~4 chars/token
+            token_counter=_count_message_chars,
             include_system=True,     # always preserve system prompt
             start_on="human",        # ensure valid message ordering
             allow_partial=False,
         )
+        if len(trimmed) < len(all_msgs):
+            tlog(f"CONTEXT TRIM: {len(all_msgs)} → {len(trimmed)} messages "
+                 f"({_count_message_chars(trimmed):,} chars, limit: {CONTEXT_WINDOW_CHARS:,})")
         return {"llm_input_messages": trimmed}
 
     agent_kwargs = {
@@ -932,6 +1040,12 @@ def main():
             # When resume_max_messages > 0, trim the checkpoint state to keep
             # only the last N messages. Older messages remain in the DB file
             # (reclaimed by vacuum pruning), but the active state is trimmed.
+            #
+            # IMPORTANT: the messages channel uses the add_messages reducer,
+            # which UPSERTS by message ID and never deletes. Passing a subset
+            # of existing messages is a silent no-op (the June 2026 incident:
+            # "50 messages after resume-trim" that were never actually
+            # trimmed). Deletion requires explicit RemoveMessage objects.
             if session_type == "RESUME" and args.resume_max_messages > 0:
                 try:
                     snapshot = agent.get_state(config)
@@ -941,16 +1055,49 @@ def main():
                         max_msgs = args.resume_max_messages
                         if msg_count > max_msgs:
                             # Preserve the first SystemMessage if present
-                            first_sys = None
-                            if isinstance(saved_msgs[0], SystemMessage):
-                                first_sys = saved_msgs[0]
-                                # Trim from the rest, keeping last (max_msgs - 1)
-                                trimmed = [first_sys] + saved_msgs[-(max_msgs - 1):]
+                            first_sys = saved_msgs[0] if isinstance(saved_msgs[0], SystemMessage) else None
+                            body = saved_msgs[1:] if first_sys else saved_msgs
+                            keep_n = (max_msgs - 1) if first_sys else max_msgs
+                            start = max(len(body) - keep_n, 0)
+
+                            # ── Human-Boundary Anchor ──
+                            # The pre_model_hook trims with start_on="human" — a kept
+                            # window that doesn't begin at a HumanMessage gets fully
+                            # discarded at every LLM call (dead context). Anchor the
+                            # window start on a HumanMessage:
+                            #   1. Expand backwards up to max_msgs extra messages
+                            #      (bounded — total keep ≤ 2 × max_msgs).
+                            #   2. Else shrink forward to the next HumanMessage.
+                            #   3. Else (no HumanMessage at all) drop the history —
+                            #      it would be discarded by the trimmer anyway.
+                            anchor = None
+                            for i in range(start, max(start - max_msgs, -1), -1):
+                                if isinstance(body[i], HumanMessage):
+                                    anchor = i
+                                    break
+                            if anchor is None:
+                                for i in range(start + 1, len(body)):
+                                    if isinstance(body[i], HumanMessage):
+                                        anchor = i
+                                        break
+                            if anchor is None:
+                                keep = [first_sys] if first_sys else []
+                                tlog("RESUME TRIM: No HumanMessage boundary in history — dropping unusable context")
                             else:
-                                trimmed = saved_msgs[-max_msgs:]
-                            # Replace the full state with the trimmed version
-                            agent.update_state(config, {"messages": trimmed}, as_node="__start__")
-                            tlog(f"RESUME TRIM: {msg_count} → {len(trimmed)} messages (max: {max_msgs})")
+                                keep = ([first_sys] if first_sys else []) + body[anchor:]
+                            keep_ids = {m.id for m in keep if m.id}
+                            removals = [
+                                RemoveMessage(id=m.id)
+                                for m in saved_msgs
+                                if m.id and m.id not in keep_ids
+                            ]
+                            if removals:
+                                agent.update_state(config, {"messages": removals}, as_node="__start__")
+                            # Verify against actual state — the log must report reality
+                            post = agent.get_state(config)
+                            post_count = len(post.values.get("messages", [])) if post else -1
+                            tlog(f"RESUME TRIM: {msg_count} → {post_count} messages "
+                                 f"({len(removals)} removed, max: {max_msgs})")
                         else:
                             tlog(f"RESUME TRIM: {msg_count} messages within limit ({max_msgs}) — no trim needed")
                 except Exception as e:
@@ -1041,16 +1188,31 @@ def main():
                 # ── Budget Warnings ──
                 # Break the stream and re-invoke with the warning as a genuine HumanMessage.
                 # The agent sees it as new input and can wrap up gracefully.
+                #
+                # SAFETY GATE: never interject while the just-streamed chunk is an
+                # AIMessage with unresolved tool_calls. Breaking there checkpoints a
+                # dangling tool call (its ToolMessage never runs), and the re-invoke
+                # raises INVALID_CHAT_HISTORY — crashing the cycle. Hold the warning
+                # until the next safe chunk (the tool result lands one chunk later).
+                pending_tool_calls = (
+                    "agent" in chunk
+                    and hasattr(msg, "tool_calls")
+                    and bool(msg.tool_calls)
+                )
                 remaining = max_steps - step_count
                 warning = None
 
-                if step_count >= budget_95 and not warned_95:
+                if pending_tool_calls:
+                    pass  # defer warning to the next chunk
+                elif step_count >= budget_95 and not warned_95:
                     warned_95 = True
+                    warned_80 = True  # suppress a stale 80% warning after this one
                     warning = (
                         f"⚠️ CRITICAL: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
                         "STOP all work immediately. You MUST: "
-                        "1) Update your current task with progress notes: agictl task update <id> --status in_progress --desc 'progress so far...'. "
+                        "1) Journal your progress on the current task: agictl task progress <id> 'DONE: ... NEXT: ... BLOCKERS: ...'. "
                         "2) End your cycle with a summary: agictl cycle end 'Summary of what was done and what remains'. "
+                        "Your progress entry is injected into your next wake context — it is how your future self resumes. "
                         "You will be respawned on the next tick to continue."
                     )
                 elif step_count >= budget_80 and not warned_80:
@@ -1058,7 +1220,7 @@ def main():
                     warning = (
                         f"⚠️ BUDGET WARNING: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
                         "Begin wrapping up your current work. "
-                        "Update your task with progress: agictl task update <id> --desc 'progress notes...'. "
+                        "Journal your progress: agictl task progress <id> 'DONE: ... NEXT: ...'. "
                         "If you cannot complete the task in the remaining steps, "
                         "save your progress and end the cycle — you will be respawned to continue."
                     )
@@ -1073,7 +1235,10 @@ def main():
                     break
 
                 # ── Hard Budget Enforcement ──
-                if step_count >= max_steps:
+                # Same safety gate: allow one extra chunk so a pending tool call
+                # resolves — terminating between AIMessage and ToolMessage leaves
+                # a dangling tool call in the checkpoint.
+                if step_count >= max_steps and not pending_tool_calls:
                     tlog(f"\n[BUDGET EXCEEDED] Hard limit reached ({step_count}/{max_steps}). Terminating cycle.")
                     cycle_ended = True
                     break

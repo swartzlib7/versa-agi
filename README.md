@@ -385,6 +385,7 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 
 | Model | Standard (Ollama) | Intel (SYCL) | Notes |
 |---|---|---|---|
+| `gemma4:e2b` | ✓ | — | Gemma 4 Edge 2B — ultra-light, ~3GB VRAM (Ollama only) |
 | `gemma4:e4b` | ✓ | ✓ | Gemma 4 Expert 4B — ~5GB VRAM, fast inference |
 | `gemma4:26b` | ✓ | ✓ | Gemma 4 Expert 26B MoE — ~16GB VRAM |
 | `gemma4:31b` | ✓ | ✓ | Gemma 4 31B — ~18GB VRAM, highest quality |

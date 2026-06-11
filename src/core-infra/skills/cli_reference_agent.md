@@ -53,6 +53,8 @@ agictl task list --mine                               # Tasks assigned to you
 agictl task get <id>                                  # Full task details
 agictl task add "Title" [options]                     # Create task (returns JSON with task_id)
 agictl task update <id> [options]                     # Update specific fields
+agictl task progress <id> "<text>"                    # Append a progress entry (journal — injected into your next wake)
+agictl task progress <id> [--last N]                  # No text: list the progress journal (oldest first)
 agictl task done <id>                                 # Shortcut: mark as done
 agictl task cancel <id>                               # Shortcut: mark as cancelled
 agictl task snooze <id> <minutes>                     # Set wake_after (min 5 minutes)
@@ -64,6 +66,8 @@ agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 **task update options**: `--status planned|in_progress|waiting|blocked|cancelled|done`, `--desc`, `--priority`, `--assignee`, `--due-date "YYYY-MM-DD HH:MM:SS"`, `--requested-by`
 
 > `--due-date` is **mandatory** when creating tasks and when setting status back to `planned`. If a task cannot be completed by its due date, **roll the due date forward** — do not leave it in the past.
+
+> **TASK PROGRESS**: You have no memory between cycles. Before ending any cycle with unfinished work, leave a breadcrumb: `agictl task progress <id> "DONE: ... NEXT: ... BLOCKERS: ..."`. Entries are append-only, timestamped, and automatically injected into your wake context while the task is active. Use `task progress` for journaling; reserve `task update --desc` for changing the task's actual description.
 
 **Reminder categories**: `general`, `preference`, `instruction`, `constraint`
 

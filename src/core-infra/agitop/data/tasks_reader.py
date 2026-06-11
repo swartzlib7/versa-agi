@@ -144,6 +144,15 @@ class TasksReader:
         rows = self._query("SELECT * FROM tasks WHERE id = ?", (task_id,))
         return rows[0] if rows else None
 
+    def get_task_progress(self, task_id: int, limit: int = 20) -> list[dict]:
+        """Get a task's progress journal entries, oldest first."""
+        rows = self._query(
+            "SELECT id, created_at, agent_name, note FROM task_progress "
+            "WHERE task_id = ? ORDER BY id DESC LIMIT ?",
+            (task_id, limit),
+        )
+        return list(reversed(rows))
+
     def add_task(self, title: str, assigned_to: str = 'coa', project_id: Optional[int] = None,
                  description: Optional[str] = None, priority: str = 'normal') -> bool:
         if project_id is not None:

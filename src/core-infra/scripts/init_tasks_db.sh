@@ -13,6 +13,11 @@ DB_PATH="${1:-/var/lib/versa-agi/coa/tasks.db}"
 
 echo "Initializing tasks database: ${DB_PATH}"
 
+# Migration: task_notes was renamed to task_progress before first release of
+# the feature — rename in place if an early deployment created the old table.
+sqlite3 "${DB_PATH}" "ALTER TABLE task_notes RENAME TO task_progress;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "DROP INDEX IF EXISTS idx_task_notes_task;" 2>/dev/null || true
+
 sqlite3 "${DB_PATH}" <<'SQL'
 CREATE TABLE IF NOT EXISTS tasks (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +45,21 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
 CREATE INDEX IF NOT EXISTS idx_tasks_tags ON tasks(tags);
+
+-- ── Task Progress (append-only per-task progress journal) ──
+-- Agents leave themselves breadcrumbs across stateless cycles: what was done,
+-- how far they got, what's next. Replaces lossy description overwrites and
+-- removes the need for cross-cycle chat history as a progress carrier.
+CREATE TABLE IF NOT EXISTS task_progress (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id     INTEGER NOT NULL,
+  agent_name  TEXT,
+  note        TEXT NOT NULL,
+  created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
 
 -- ── Games (Strategic Pursuit Container) ──
 

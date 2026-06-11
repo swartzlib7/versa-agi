@@ -20,11 +20,12 @@ _MODELS_INI_PATHS = [
 # Built-in fallback map — used only when models.ini is unavailable.
 # Kept in sync with models.ini [context_windows] section.
 _FALLBACK_CONTEXT_MAP: dict[str, tuple[int, int]] = {
-    # Cloud models (context managed server-side)
-    "gemini":       (0, 0),
-    "grok":         (0, 0),
-    "gpt":          (0, 0),
-    "claude":       (0, 0),
+    # Cloud models (context managed server-side, max = actual limit for trimmer)
+    # Generic prefixes are conservative — per-model entries in models.ini win.
+    "gemini":       (0, 1000000),
+    "grok":         (0, 1000000),
+    "gpt":          (0, 131072),
+    "claude":       (0, 200000),
     # Qwen 3
     "qwen3:32b":    (32768, 131072),
     "qwen3.6:35b":  (32768, 131072),
@@ -169,3 +170,46 @@ def is_cloud_model(model_name: str) -> bool:
     """Check if a model is cloud-managed (context handled server-side)."""
     recommended, _ = get_model_context(model_name)
     return recommended == 0
+
+
+# ── Trimmer Budget Constants ──
+# HEADROOM is applied to the TOKEN window first (the unit the API enforces),
+# then converted to chars with a deliberately conservative density.
+#
+# Why 3 chars/token (not 4): the June 2026 token-limit incident measured the
+# real density of agent histories (tool-call JSON, ids, structured args) at
+# ~3.35 chars/token (9.38 MB ↔ ~2.8M tokens). Converting at 4 chars/token
+# produced a char budget that already equaled ~100% of the model's token
+# window, silently consuming the entire headroom. 3 chars/token keeps the
+# trimmed payload at or below the intended token fraction even for the
+# densest tool-heavy content.
+TRIMMER_HEADROOM = 0.80      # fraction of the model token window the trimmer may fill
+TRIMMER_CHARS_PER_TOKEN = 3  # conservative density (measured worst case ~3.35)
+
+
+def get_trimmer_char_limit(model_name: str, num_ctx: int = 0) -> int:
+    """Return the character budget for pre_model_hook context trimming.
+
+    The budget is computed in TOKENS first (window × headroom), then converted
+    to chars at a conservative 3 chars/token:
+
+      Local models with custom num_ctx: num_ctx × 0.80 × 3 chars/token.
+      Cloud/local models from registry: max_tokens × 0.80 × 3 chars/token.
+      Fallback: 96,000 chars (~32K tokens).
+
+    NOTE: this is the raw model budget. The harness additionally subtracts the
+    system prompt and tool schema sizes (which are sent with every request but
+    are not part of the graph message state) before using it for trimming.
+    """
+    # Local model with explicit custom num_ctx
+    if num_ctx and num_ctx > 0:
+        return int(num_ctx * TRIMMER_HEADROOM * TRIMMER_CHARS_PER_TOKEN)
+
+    # Cloud or local model — lookup max from registry
+    _, max_tokens = get_model_context(model_name)
+    if max_tokens and max_tokens > 0:
+        return int(max_tokens * TRIMMER_HEADROOM * TRIMMER_CHARS_PER_TOKEN)
+
+    # Unknown model — conservative fallback (~32K tokens)
+    return 96_000
+

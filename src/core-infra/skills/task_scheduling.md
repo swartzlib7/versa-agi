@@ -137,17 +137,21 @@ agictl task add "Phase 2: [description]" --due-date <date> --desc "Parent: #<par
 
 You have **no memory between cycles**. Everything must be persisted:
 
-1. **Task descriptions** — Update the task description with progress notes before ending your cycle:
+1. **Progress journal (primary)** — Append a journal entry to the task before ending your cycle:
    ```bash
-   agictl task update <id> --desc "PROGRESS: [what was done]. NEXT: [what remains]. BLOCKERS: [any issues]."
+   agictl task progress <id> "DONE: [what was done]. NEXT: [what remains]. BLOCKERS: [any issues]."
    ```
+   Entries are append-only and timestamped — they build a history instead of overwriting it,
+   and are automatically injected into your wake context while the task is active.
 2. **Git commits** — Commit partial work so the next cycle can pick up where you left off.
 3. **System memory** — For context that spans multiple tasks, use `agictl memory system set` or `agictl memory connection set`.
+
+> Reserve `task update --desc` for changing what the task *is* — use `task progress` for tracking how far you've gotten.
 
 ### Step 4 — Cycle Handoff
 
 Before ending any cycle where work is incomplete:
-1. Update task descriptions with progress
+1. Journal progress on each task you touched (`agictl task progress <id> "..."`)
 2. Commit partial code/files
 3. Snooze or reschedule remaining sub-tasks with realistic due dates
 4. End your cycle with a clear summary of what was done and what remains

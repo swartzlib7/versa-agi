@@ -140,6 +140,9 @@ def sync():
             ]
             res = subprocess.run(rsync_cmd, capture_output=True, text=True)
             if res.returncode == 0:
+                # Fix directory ownership AFTER rsync (rsync -a preserves source owner)
+                subprocess.run(["chown", f"{coa_user}:agi_agents", coa_skills_dest], check=False)
+                subprocess.run(["chmod", "775", coa_skills_dest], check=False)
                 for skill_file in glob.glob(os.path.join(coa_skills_dest, "*.md")):
                     subprocess.run(["chown", f"{watchdog_user}:agi_agents", skill_file], check=False)
                     subprocess.run(["chmod", "440", skill_file], check=False)

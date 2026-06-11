@@ -146,10 +146,31 @@ if [ -n "${SKILLS_TO_SYNC}" ]; then
       log "WARN: Failed to deploy skills to ${SUB_AGENT}"
   done <<< "${SUB_AGENTS}"
 
-  # Bulk-update all pending skills to 'synced'
+  # Agent-created skills live in COA's .agent/skills/ — NOT the shipped source
+  # that deploy-skills mirrors. Distribute them explicitly via share-skill and
+  # only mark synced on success (a missing source file stays 'ready' and warns).
+  COA_WS=$(sqlite3 "${AGENTS_DB}" "SELECT workspace FROM agents WHERE name='coa';" 2>/dev/null)
+  AGENT_CREATED_SKILLS=$(sqlite3 "${AGENTS_DB}" \
+    "SELECT name FROM skills WHERE status IN ('ready', 'updated') AND type='agent_created' AND scope='all';" 2>/dev/null || true)
+  while IFS= read -r SKILL_NAME; do
+    [ -z "${SKILL_NAME}" ] && continue
+    SKILL_SRC="${COA_WS}/.agent/skills/${SKILL_NAME}.md"
+    if [ -f "${SKILL_SRC}" ]; then
+      if /usr/local/bin/agictl agent share-skill "${SKILL_SRC}" >/dev/null 2>&1; then
+        sqlite3 "${AGENTS_DB}" \
+          "UPDATE skills SET status='synced', updated_at=datetime('now') WHERE name='${SKILL_NAME}';" 2>/dev/null || true
+      else
+        log "WARN: SKILL_SYNC: share-skill failed for agent-created skill '${SKILL_NAME}'"
+      fi
+    else
+      log "WARN: SKILL_SYNC: source missing for agent-created skill '${SKILL_NAME}' (${SKILL_SRC}) — status left unchanged"
+    fi
+  done <<< "${AGENT_CREATED_SKILLS}"
+
+  # Shipped skills are covered by deploy-skills; coa_only skills need no deploy
   sqlite3 "${AGENTS_DB}" \
-    "UPDATE skills SET status='synced', updated_at=datetime('now') WHERE status IN ('ready', 'updated');" 2>/dev/null || true
-  log "SKILL_SYNC: Deployed ${SYNC_COUNT} skill(s) to sub-agents"
+    "UPDATE skills SET status='synced', updated_at=datetime('now') WHERE status IN ('ready', 'updated') AND (type != 'agent_created' OR scope = 'coa_only');" 2>/dev/null || true
+  log "SKILL_SYNC: Processed ${SYNC_COUNT} pending skill(s)"
 fi
 
 # ── Generate skills catalog for triage prompt injection ──
@@ -176,6 +197,17 @@ SPAWNED_COUNT=0
 # ─── Setup INI Path ───────────────────────────────────
 SETUP_INI="/etc/versa-agi/setup.ini"
 
+# ─── Protected Identity Resolution (setup.ini [users]) ───
+# COA and watchdog usernames are INI-driven — never hardcode them in
+# identity comparisons. Note: /var/lib/versa-agi/coa/ and coa_config.json
+# remain LITERAL by design — structural paths hardcoded across the system,
+# independent of the configured usernames.
+COA_USER=$(sed -n '/^\[users\]/,/^\[/{s/^coa=//p}' "${SETUP_INI}" 2>/dev/null | head -1)
+COA_USER="${COA_USER:-coa}"
+WATCHDOG_USER=$(sed -n '/^\[users\]/,/^\[/{s/^watchdog=//p}' "${SETUP_INI}" 2>/dev/null | head -1)
+WATCHDOG_USER="${WATCHDOG_USER:-watchdog}"
+COA_CONFIG="/etc/versa-agi/coa_config.json"
+
 # ─── Local AI Concurrency Cap ─────────────────────────
 # Limits how many local-model agents can be spawned per tick.
 # Aligned with sycl_parallel (inference server slot count) to prevent OOM.
@@ -199,7 +231,7 @@ fi
 # Normalized format: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode
 while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE; do
   [ -z "${AGENT_NAME}" ] && continue
-  [ "${AGENT_NAME}" = "watchdog" ] && continue
+  [ "${AGENT_NAME}" = "${WATCHDOG_USER}" ] && continue
   # Use default model if no per-agent override
   [ -z "${AGENT_MODEL}" ] && AGENT_MODEL="${DEFAULT_MODEL}"
   # Default anchor style to compact
@@ -226,6 +258,16 @@ while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT
     log "WARN: No config for ${AGENT_NAME} at ${SYSTEM_CONFIG} - run setup.sh"
     continue
   fi
+
+  # ─── Agent Credentials (read FIRST, reset per iteration) ──
+  # MUST be read before any prompt block references them. A previous bug
+  # interpolated ${SUB_ACCOUNT_ID} into the COMMUNICATION OVERRIDE before it
+  # was refreshed for the current agent — leaking the prior agent's
+  # sub-account ID from the same tick into this agent's prompt.
+  SUB_ACCOUNT_ID=""
+  API_TOKEN=""
+  SUB_ACCOUNT_ID=$(jq -r '.versavoice.sub_account_id // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
+  API_TOKEN=$(jq -r '.versavoice.api_token // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
 
   # ─── System Prompt Generation (poise merge) ──
   # Canonical poise location — deployed by setup.sh from repo templates.
@@ -273,11 +315,17 @@ $(cat "${TASK_PROTOCOL}")"
     # Cycle parameters content
     SYSTEM_TZ=$(date '+%Z (%:z)')
     SYSTEM_TIME=$(date '+%Y-%m-%dT%H:%M:%S%z')
-    AGENT_HOME=$(dirname "${AGENT_PATH}")
+    # Resolve the agent's real OS home from passwd — authoritative regardless
+    # of workspace layout. dirname(AGENT_PATH) was wrong for sub-agents whose
+    # workspace IS their home (/home/agi-x → /home), textually authorizing the
+    # entire /home tree in the prompt.
+    AGENT_HOME=$(getent passwd "${AGENT_USER}" | cut -d: -f6)
+    [ -z "${AGENT_HOME}" ] && AGENT_HOME="${AGENT_PATH}"
     CYCLE_PARAMS_CONTENT="## ── CYCLE PARAMETERS ──
 
 - **YOUR HOME DIRECTORY**: \`${AGENT_HOME}\` — this is your OS user home. All your work happens here or in subdirectories. NEVER create or modify files outside this path.
-- **YOUR WORKSPACE**: \`${AGENT_PATH}\` — this is your working directory (CWD at cycle start). Project clones go in \`${AGENT_PATH}/workspace/\`. Agent data is at \`${AGENT_PATH}/.agent/\`.
+- **YOUR ENVIRONMENT ROOT**: \`${AGENT_PATH}\` — your working directory (CWD at cycle start). Agent data is at \`${AGENT_PATH}/.agent/\`.
+- **YOUR WORKSPACE**: \`${AGENT_PATH}/workspace/\` — ALL project work goes here (project clones, scratch dirs). Never work in the environment root itself.
 - **STEP BUDGET**: You have **${AGENT_MAX_TURNS:-50} steps** this cycle. Each tool call counts. Plan accordingly — break large tasks into sub-tasks and schedule remainders. You will receive a warning when running low.
 - **System time**: ${SYSTEM_TIME} — **Timezone**: ${SYSTEM_TZ}. ALWAYS use this timezone for scheduling. NEVER assume UTC.
 - **SSH key**: ~/.ssh/versa_agi_ed25519 (public: ~/.ssh/versa_agi_ed25519.pub). For first-time git project assignments, send the public key to the Primary User for deploy key setup.
@@ -285,8 +333,12 @@ $(cat "${TASK_PROTOCOL}")"
 - **Efficiency**: Be decisive. Avoid lengthy monologues. Execute multiple tool actions concurrently when possible. Consider the recipient's language."
 
     # Agent registry content
+    # Sub-agents get a peer view: watchdog is infrastructure, not a
+    # messageable teammate — omit it from their registry.
     AGENT_REGISTRY_CONTENT=""
-    AGENT_REGISTRY_FOR_SYSTEM=$(/usr/local/bin/agictl agent summary 2>/dev/null || true)
+    REGISTRY_FLAGS=""
+    [ "${AGENT_NAME}" != "${COA_USER}" ] && REGISTRY_FLAGS="--exclude-watchdog"
+    AGENT_REGISTRY_FOR_SYSTEM=$(/usr/local/bin/agictl agent summary ${REGISTRY_FLAGS} 2>/dev/null || true)
     if [ -n "${AGENT_REGISTRY_FOR_SYSTEM}" ]; then
       AGENT_REGISTRY_CONTENT="## ── AGENT REGISTRY ──
 
@@ -296,14 +348,21 @@ ${AGENT_REGISTRY_FOR_SYSTEM}"
 
     # Duties content (sub-agent only — COA never has a duties.md)
     # Injected for sub-agents via the legacy path; COA template omits {DUTIES_CONTEXT}.
+    # Stock placeholder detection: 'agictl agent approve' seeds duties.md with an
+    # unfilled template. Injecting that gives the model an authoritative-looking
+    # empty section it will try to fill by improvising duties — skip it instead.
     DUTIES_CONTEXT=""
     DUTIES_FILE="/var/lib/versa-agi/${AGENT_NAME}/duties.md"
     if [ -f "${DUTIES_FILE}" ]; then
-      DUTIES_CONTEXT="
+      if grep -q '_Define this agent.s specific duties' "${DUTIES_FILE}" 2>/dev/null; then
+        log "DUTIES: ${AGENT_NAME} — duties.md is still the stock template, section skipped (COA: fill via 'agictl agent set-duties ${AGENT_NAME} <file>')"
+      else
+        DUTIES_CONTEXT="
 ## ── DUTIES & ASSIGNMENT ──
 
 $(cat "${DUTIES_FILE}")
 "
+      fi
     fi
 
     # ─── Build MERGED_CONTENT for system.md ──
@@ -341,14 +400,14 @@ ${AGENT_REGISTRY_CONTENT}"
       fi
 
       # ── VV Communication Override for sub-agents with external comms ──
-      if [ "${AGENT_NAME}" != "coa" ] && [ "${AGENT_NAME}" != "watchdog" ] && [ -n "${SUB_ACCOUNT_ID}" ]; then
+      if [ "${AGENT_NAME}" != "${COA_USER}" ] && [ "${AGENT_NAME}" != "${WATCHDOG_USER}" ] && [ -n "${SUB_ACCOUNT_ID}" ]; then
         MERGED_CONTENT="${MERGED_CONTENT}
 
 ---
 
 ## ── COMMUNICATION OVERRIDE ──
 
-> **Your poise states you do not have a VersaVoice account — this has been superseded.** You have been granted a VersaVoice sub-account and can communicate directly with contacts.
+> **Your poise states you do not have a VersaVoice account — this has been superseded.** You have been granted a VersaVoice sub-account and can communicate directly with your established contacts — including the Primary User when a direct connection exists. Routine reporting still goes to the COA.
 
 - Your VersaVoice sub_account_id is: ${SUB_ACCOUNT_ID}
 - Reply to contacts using: agictl message send RECIPIENT_UID \"MESSAGE_TEXT\" --mode MODE
@@ -400,13 +459,9 @@ ${AGENT_REGISTRY_CONTENT}"
   # ALWAYS run inbox fetch first, even during cooldown, so new messages are detected immediately.
   # Flow: Fetch inbox → MCP sync → Cooldown check (bypass if new messages) → Work check → Spawn
 
-  # Read agent's sub-account ID and API token from system_config.json
-  SUB_ACCOUNT_ID=""
-  API_TOKEN=""
-  if [ -f "${SYSTEM_CONFIG}" ]; then
-    SUB_ACCOUNT_ID=$(jq -r '.versavoice.sub_account_id // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
-    API_TOKEN=$(jq -r '.versavoice.api_token // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
-  fi
+  # NOTE: SUB_ACCOUNT_ID / API_TOKEN are read at the top of the loop iteration
+  # (immediately after SYSTEM_CONFIG validation) so every prompt block sees the
+  # current agent's values.
 
   AGENT_DB="/var/lib/versa-agi/${AGENT_NAME}/agent_memory.db"
 
@@ -607,11 +662,11 @@ ${AGENT_REGISTRY_CONTENT}"
       log "TOKEN_BUDGET_EXCEEDED: ${AGENT_NAME} used ${MONTHLY_TOKENS} tokens (budget: ${TOKEN_BUDGET}, ${BUDGET_PCT}%) — skipping spawn"
       if [ ! -f "${TOKEN_WARN_MARKER}" ]; then
         # Notify PU once daily
-        COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
-        COA_TOKEN=$(jq -r '.versavoice.api_token // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
-        PU_UID=$(jq -r '.primary_user.uid // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
+        COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' ${COA_CONFIG} 2>/dev/null || true)
+        COA_TOKEN=$(jq -r '.versavoice.api_token // empty' ${COA_CONFIG} 2>/dev/null || true)
+        PU_UID=$(jq -r '.primary_user.uid // empty' ${COA_CONFIG} 2>/dev/null || true)
         if [ -n "${COA_SUB}" ] && [ -n "${COA_TOKEN}" ] && [ -n "${PU_UID}" ]; then
-          AGICTL_CONFIG="/etc/versa-agi/coa_config.json" /usr/local/bin/agictl message send \
+          AGICTL_CONFIG="${COA_CONFIG}" /usr/local/bin/agictl message send \
             "${COA_SUB}" "${PU_UID}" "⚠️ Agent ${AGENT_NAME} has exceeded its monthly token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET} tokens, ${BUDGET_PCT}%). Spawn blocked until budget is increased or month resets." \
             --mode translate --token "${COA_TOKEN}" 2>/dev/null || true
         fi
@@ -622,11 +677,11 @@ ${AGENT_REGISTRY_CONTENT}"
     elif [ "${BUDGET_PCT}" -ge 90 ]; then
       log "TOKEN_WARNING: ${AGENT_NAME} at ${BUDGET_PCT}% of token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET})"
       if [ ! -f "${TOKEN_WARN_MARKER}" ]; then
-        COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
-        COA_TOKEN=$(jq -r '.versavoice.api_token // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
-        PU_UID=$(jq -r '.primary_user.uid // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
+        COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' ${COA_CONFIG} 2>/dev/null || true)
+        COA_TOKEN=$(jq -r '.versavoice.api_token // empty' ${COA_CONFIG} 2>/dev/null || true)
+        PU_UID=$(jq -r '.primary_user.uid // empty' ${COA_CONFIG} 2>/dev/null || true)
         if [ -n "${COA_SUB}" ] && [ -n "${COA_TOKEN}" ] && [ -n "${PU_UID}" ]; then
-          AGICTL_CONFIG="/etc/versa-agi/coa_config.json" /usr/local/bin/agictl message send \
+          AGICTL_CONFIG="${COA_CONFIG}" /usr/local/bin/agictl message send \
             "${COA_SUB}" "${PU_UID}" "⚠️ Agent ${AGENT_NAME} is approaching its monthly token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET} tokens, ${BUDGET_PCT}%). Consider increasing the budget or reducing agent activity." \
             --mode translate --token "${COA_TOKEN}" 2>/dev/null || true
         fi
@@ -698,12 +753,12 @@ ${AGENT_REGISTRY_CONTENT}"
     /usr/local/bin/agictl task freeze-all "${AGENT_NAME}" 2>/dev/null || true
 
     # Notify Primary User via VersaVoice
-    COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
-    COA_TOKEN=$(jq -r '.versavoice.api_token // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
-    PU_UID=$(jq -r '.primary_user.uid // empty' /etc/versa-agi/coa_config.json 2>/dev/null || true)
+    COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' ${COA_CONFIG} 2>/dev/null || true)
+    COA_TOKEN=$(jq -r '.versavoice.api_token // empty' ${COA_CONFIG} 2>/dev/null || true)
+    PU_UID=$(jq -r '.primary_user.uid // empty' ${COA_CONFIG} 2>/dev/null || true)
     if [ -n "${COA_SUB}" ] && [ -n "${COA_TOKEN}" ] && [ -n "${PU_UID}" ]; then
       CB_MSG="🚨 Circuit Breaker Tripped — Agent '${AGENT_NAME}' has been auto-frozen after ${CB_TRIGGER} (last exit code: ${CB_LAST_EXIT}). This prevents runaway API cost from repeated failures. To recover: run 'agictl agent activate ${AGENT_NAME}' or use the agitop dashboard."
-      AGICTL_CONFIG="/etc/versa-agi/coa_config.json" /usr/local/bin/agictl message send \
+      AGICTL_CONFIG="${COA_CONFIG}" /usr/local/bin/agictl message send \
         "${COA_SUB}" "${PU_UID}" "${CB_MSG}" \
         --mode translate --token "${COA_TOKEN}" 2>/dev/null || true
     fi
@@ -765,7 +820,7 @@ ${AGENT_REGISTRY_CONTENT}"
         HIDDEN_STR="(This represents your entire active cycle history)"
       fi
       CONTEXT_SUMMARY="
-RECENT ACTIVITY (your last 5 cycles, chronological):
+## ── RECENT ACTIVITY (your last 5 cycles, chronological, local time) ──
 ${RECENT_CYCLES}
 ${HIDDEN_STR}
 "
@@ -784,7 +839,7 @@ ${HIDDEN_STR}
     
     agent_title="Assistant"
     agent_role="Agent"
-    if [ "${AGENT_NAME}" = "coa" ]; then
+    if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
       agent_role="Chief Orchestrator Agent (COA)"
       agent_title="Chief Assistant"
     fi
@@ -812,7 +867,9 @@ Your language is: ${id_lang}."
     [ -n "${pu_city}" ] && pu_profile="${pu_profile} Dialect Region (city/region influencing speech patterns): ${pu_city}."
     [ -n "${pu_abilities}" ] && pu_profile="${pu_profile} Abilities: ${pu_abilities}."
     if [ -n "${pu_profile}" ]; then
-      PRIMARY_USER_CONTEXT="${PRIMARY_USER_CONTEXT}\n  Profile:${pu_profile}"
+      # Real newline — bash does not expand \n inside double quotes
+      PRIMARY_USER_CONTEXT="${PRIMARY_USER_CONTEXT}
+  Profile:${pu_profile}"
     fi
   else
     PRIMARY_USER_CONTEXT="${PRIMARY_USER_CONTEXT}. Use the agictl REST gateway to find their UID and name if needed."
@@ -840,7 +897,7 @@ Your language is: ${id_lang}."
   OVERDUE_CONTEXT=""
   if [ -n "${OVERDUE_DETAILS:-}" ]; then
     OVERDUE_CONTEXT="
-OVERDUE PLANNED TASKS (missed due date — you MUST reschedule or cancel each):
+## ── OVERDUE PLANNED TASKS (missed due date — you MUST reschedule or cancel each) ──
 ${OVERDUE_DETAILS}
 "
   fi
@@ -856,27 +913,51 @@ ${OVERDUE_DETAILS}
 
     if [ -n "${AGENT_TASKS}" ]; then
       TASK_COUNT=$(echo "${AGENT_TASKS}" | wc -l)
+      # Only reference messages when there actually are unprocessed ones —
+      # the sentence previously rendered unconditionally and pointed at a
+      # message section that was not always present.
+      TASK_MSG_HINT="[!] Review and progress these tasks this cycle."
+      if [ "${UNPROCESSED:-0}" -gt 0 ]; then
+        TASK_MSG_HINT="[!] You have ${UNPROCESSED} unprocessed message(s) — address them first (see your conversation context), then review these tasks."
+      fi
       TASK_SUMMARY="
---- YOUR ACTIVE TASKS (${TASK_COUNT} task(s) assigned to you) ---
-[!] Review these tasks after addressing any new messages above.
+## ── YOUR ACTIVE TASKS (${TASK_COUNT} task(s) assigned to you) ──
+${TASK_MSG_HINT}
 [!] Use 'agictl task get <id>' for full details. Update status with 'agictl task update <id> --status <status>'.
 [!] Format: #ID | Title | Status | Priority | Due Date
 
 ${AGENT_TASKS}
---- END ACTIVE TASKS ---
+── END ACTIVE TASKS ──
 "
+
+      # Recent progress journal entries on those tasks — the agent's own
+      # breadcrumbs from previous cycles (the continuity carrier for
+      # fresh-start cycles).
+      TASK_PROGRESS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
+        "SELECT '#' || p.task_id, substr(p.created_at, 1, 16), COALESCE(p.agent_name, '?'), substr(replace(p.note, char(10), ' '), 1, 300) FROM task_progress p JOIN tasks t ON t.id = p.task_id WHERE t.assigned_to='${AGENT_NAME}' AND t.status NOT IN ('done', 'cancelled', 'frozen') ORDER BY p.id DESC LIMIT 10;" 2>/dev/null | tac || true)
+
+      if [ -n "${TASK_PROGRESS}" ]; then
+        TASK_SUMMARY="${TASK_SUMMARY}
+## ── TASK PROGRESS (your own breadcrumbs from previous cycles — oldest first) ──
+[!] Format: #TaskID | Timestamp (UTC) | Author | Entry
+[!] Continue from where these leave off. Append new entries with 'agictl task progress <id> \"...\"'.
+
+${TASK_PROGRESS}
+── END TASK PROGRESS ──
+"
+      fi
     fi
 
     # COA-only: global sub-agent task summary for orchestration awareness
-    if [ "${AGENT_NAME}" = "coa" ]; then
+    if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
       SUB_AGENT_TASKS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
         "SELECT assigned_to, COUNT(*) as count, GROUP_CONCAT(DISTINCT status) as statuses FROM tasks WHERE assigned_to != 'coa' AND status NOT IN ('done', 'cancelled', 'frozen') GROUP BY assigned_to ORDER BY assigned_to;" 2>/dev/null || true)
 
       if [ -n "${SUB_AGENT_TASKS}" ]; then
         TASK_SUMMARY="${TASK_SUMMARY}
---- SUB-AGENT TASK OVERVIEW (for orchestration — do NOT work on these yourself) ---
+## ── SUB-AGENT TASK OVERVIEW (for orchestration — do NOT work on these yourself) ──
 ${SUB_AGENT_TASKS}
---- END SUB-AGENT OVERVIEW ---
+── END SUB-AGENT OVERVIEW ──
 "
       fi
     fi
@@ -891,7 +972,8 @@ ${SUB_AGENT_TASKS}
       MEM_ITEMS=$(echo "${SYS_MEM}" | jq -r '.data[] | "  \(.key): \(.value)"' 2>/dev/null || true)
       if [ -n "${MEM_ITEMS}" ]; then
         OPERATIONAL_MEMORY="
-OPERATIONAL MEMORY (your learned constraints, discoveries, and instructions — review before acting):
+## ── OPERATIONAL MEMORY ──
+Your learned constraints, discoveries, and instructions — review before acting:
 ${MEM_ITEMS}
 "
       fi
@@ -905,8 +987,12 @@ ${MEM_ITEMS}
   ENVIRONMENTAL_AWARENESS=""
   GAMES_BLOCK=""
   AWARENESS_TABLE=""
+  # Injection limit matches the documented hygiene cap (~20). Headers below
+  # always state "showing N of M" so the agent is never told to audit
+  # entries it cannot see.
+  AW_LIMIT=20
   if [ -f "${TASKS_DB}" ]; then
-    if [ "${AGENT_NAME}" = "coa" ]; then
+    if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
       # ── COA: Full Game Board ──
       ACTIVE_GAMES=$(sqlite3 -separator '|' "${TASKS_DB}" \
         "SELECT id, name, postulate, posture, autonomy, freedoms_summary, barriers_summary, environment_assessed_at FROM games WHERE status='active' ORDER BY name;" 2>/dev/null || true)
@@ -925,7 +1011,7 @@ ${MEM_ITEMS}
       fi
 
       # ── COA: All Active Awareness (conclusions + actions) ──
-      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active 2>/dev/null || true)
+      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active --limit "${AW_LIMIT}" 2>/dev/null || true)
       if [[ "${AWARENESS_TABLE}" != *"| ID |"* ]]; then
         AWARENESS_TABLE=""
       fi
@@ -933,27 +1019,30 @@ ${MEM_ITEMS}
       # Build combined block for legacy path
       if [ -n "${GAMES_BLOCK}" ]; then
         ENVIRONMENTAL_AWARENESS="
-── ENVIRONMENTAL AWARENESS ──
+## ── ENVIRONMENTAL AWARENESS ──
 These are the active games you are running. Assess freedom vs barriers each cycle.
 
 ACTIVE GAMES:${GAMES_BLOCK}
 "
       fi
       if [ -n "${AWARENESS_TABLE}" ]; then
-        AW_TOTAL_SHOWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
+        AW_TOTAL=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
+        AW_SHOWN="${AW_TOTAL}"
+        AW_HIDDEN_HINT=""
+        if [ "${AW_TOTAL}" -gt "${AW_LIMIT}" ] 2>/dev/null; then
+          AW_SHOWN="${AW_LIMIT}"
+          AW_HIDDEN_HINT="
+[!] Older active entries are not shown — list all with 'agictl awareness table --status active --limit 100'."
+        fi
         AW_WARN=""
         if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
           AW_WARN=" ⚠ YOUR entries OVER CAP — audit and revise/complete stale entries before adding new ones."
         fi
-        if [ "${AW_OWN}" = "${AW_TOTAL_SHOWN}" ]; then
-          AW_HDR="YOUR ACTIVE AWARENESS (${AW_OWN} entries — cap: ~20${AW_WARN}):"
-        else
-          AW_HDR="YOUR ACTIVE AWARENESS (${AW_TOTAL_SHOWN} entries shown; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
-        fi
+        AW_HDR="YOUR ACTIVE AWARENESS (showing ${AW_SHOWN} of ${AW_TOTAL} active; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
         ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
 ${AW_HDR}
-${AWARENESS_TABLE}
+${AWARENESS_TABLE}${AW_HIDDEN_HINT}
 "
       fi
     else
@@ -971,23 +1060,30 @@ ${AWARENESS_TABLE}
         done <<< "${ASSIGNED_GAMES}"
 
         ENVIRONMENTAL_AWARENESS="
-── ENVIRONMENTAL AWARENESS (Read-Only — set by COA) ──
+## ── ENVIRONMENTAL AWARENESS (Read-Only — set by COA) ──
 Your work serves these strategic games. The posture is set by COA — align your work accordingly.
 ${GAMES_BLOCK}
 "
       fi
 
       # ── Sub-Agent: Own Active Awareness Only ──
-      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active --agent "${AGENT_NAME}" 2>/dev/null || true)
+      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active --agent "${AGENT_NAME}" --limit "${AW_LIMIT}" 2>/dev/null || true)
       if [[ "${AWARENESS_TABLE}" == *"| ID |"* ]]; then
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
+        AW_SHOWN="${AW_OWN}"
+        AW_HIDDEN_HINT=""
+        if [ "${AW_OWN}" -gt "${AW_LIMIT}" ] 2>/dev/null; then
+          AW_SHOWN="${AW_LIMIT}"
+          AW_HIDDEN_HINT="
+[!] Older active entries are not shown — list all with 'agictl awareness table --status active --limit 100'."
+        fi
         AW_WARN=""
         if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
           AW_WARN=" ⚠ OVER CAP — audit and revise/complete stale entries before adding new ones."
         fi
         ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
-YOUR ACTIVE AWARENESS (${AW_OWN} entries — cap: ~20${AW_WARN}):
-${AWARENESS_TABLE}
+YOUR ACTIVE AWARENESS (showing ${AW_SHOWN} of ${AW_OWN} active — cap: ~20${AW_WARN}):
+${AWARENESS_TABLE}${AW_HIDDEN_HINT}
 "
       else
         AWARENESS_TABLE=""
@@ -1071,28 +1167,29 @@ The following system packages you requested have been approved. You may now inst
       # Build anti-runaway block (local models only)
       ANTI_RUNAWAY=""
       if [ "${VERSA_GPU_BACKEND:-}" = "local" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
-        ANTI_RUNAWAY="CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When you have accomplished your goal, END YOUR CYCLE by responding with a normal conversational message."
+        ANTI_RUNAWAY="CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When this session ends or the goal is accomplished, run \`agictl cycle end \"summary\"\` first, then finish with a short conversational message."
       fi
 
       # Build awareness labels for template injection (with volume counts for hygiene cap)
       AWARENESS_LABEL=""
       if [ -n "${AWARENESS_TABLE}" ]; then
         # COA sees ALL agents' awareness (orchestration visibility) — count reflects the table
-        AW_TOTAL_SHOWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
+        AW_TOTAL=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
+        AW_SHOWN="${AW_TOTAL}"
+        AW_HIDDEN_HINT=""
+        if [ "${AW_TOTAL}" -gt "${AW_LIMIT}" ] 2>/dev/null; then
+          AW_SHOWN="${AW_LIMIT}"
+          AW_HIDDEN_HINT="
+[!] Older active entries are not shown — list all with 'agictl awareness table --status active --limit 100'."
+        fi
         AW_WARN=""
         if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
           AW_WARN=" ⚠ YOUR entries OVER CAP — audit and supersede/complete stale entries before adding new ones."
         fi
-        if [ "${AW_OWN}" = "${AW_TOTAL_SHOWN}" ]; then
-          # Sub-agent or no other entries — simple count
-          AWARENESS_LABEL="YOUR ACTIVE AWARENESS (${AW_OWN} entries — cap: ~20${AW_WARN}):"
-        else
-          # COA — show total vs own for clarity
-          AWARENESS_LABEL="YOUR ACTIVE AWARENESS (${AW_TOTAL_SHOWN} entries shown; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
-        fi
+        AWARENESS_LABEL="YOUR ACTIVE AWARENESS (showing ${AW_SHOWN} of ${AW_TOTAL} active; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
         AWARENESS_LABEL="${AWARENESS_LABEL}
-${AWARENESS_TABLE}"
+${AWARENESS_TABLE}${AW_HIDDEN_HINT}"
       fi
 
       GAMES_LABEL=""
@@ -1160,18 +1257,21 @@ ${AWARENESS_TABLE}"
 
     else
       # --- LEGACY STYLE ---
-      # Identity injected manually at the top, environmental context above poise
+      # Order: WHO (identity) → WHAT (poise/protocol rules) → WHY (dynamic
+      # context) → OPS → MEMORY → HISTORY. Behavioral rules precede the data
+      # they govern (matches the COA template layout), and the static blocks
+      # form a stable prompt prefix for provider-side caching.
       SYSTEM_PROMPT="${AGENT_IDENTITY}
 
 ${PRIMARY_USER_CONTEXT}
 
 ---
 
-${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
+${MERGED_CONTENT}
 
 ---
 
-${MERGED_CONTENT}
+${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 
 ---
 
@@ -1207,7 +1307,7 @@ ${CONVERSATION_CONTEXT}"
     if [ "${VERSA_GPU_BACKEND:-}" = "local" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
       SYSTEM_PROMPT="${SYSTEM_PROMPT}
 
-CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When you have accomplished your goal, END YOUR CYCLE by responding with a normal conversational message."
+CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When this session ends or the goal is accomplished, run \`agictl cycle end \"summary\"\` first, then finish with a short conversational message."
     fi
   fi
 
@@ -1354,7 +1454,25 @@ Wake reason: ${WAKE_REASON}."
       log "CHECKPOINT: Resuming thread ${THREAD_ID} for ${AGENT_NAME}"
     fi
   elif [ "${AGENT_RESUME_ENABLED}" = "0" ]; then
-    log "CHECKPOINT: Resume disabled for ${AGENT_NAME} — starting fresh each cycle"
+    # Fresh start must be enforced by WIPING the thread state, not just by
+    # omitting --resume: the harness creates a checkpointer whenever
+    # --thread-id is set, and LangGraph loads existing thread state
+    # regardless of the --resume flag (see Iteration 13 bug fixes). Without
+    # this wipe, "fresh start" agents silently resume an ever-growing
+    # checkpoint history each cycle.
+    # MUST run as the agent user: checkpoints.db is agent-owned (e.g. coa:coa 644)
+    # and watchdog has no write access to the file or its directory (journal).
+    # A direct sqlite3 DELETE as watchdog fails silently and the wipe never happens.
+    if [ -f "${CHECKPOINT_DB}" ]; then
+      sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" \
+        "DELETE FROM checkpoints WHERE thread_id='${THREAD_ID}'; \
+         DELETE FROM writes WHERE thread_id='${THREAD_ID}';" 2>/dev/null || true
+      REMAINING=$(sqlite3 "${CHECKPOINT_DB}" \
+        "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${THREAD_ID}';" 2>/dev/null || echo "?")
+      log "CHECKPOINT: Resume disabled for ${AGENT_NAME} — thread ${THREAD_ID} cleared (${REMAINING} rows remain), starting fresh"
+    else
+      log "CHECKPOINT: Resume disabled for ${AGENT_NAME} — no checkpoint DB, starting fresh"
+    fi
   fi
 
   # Run Gemini CLI with TEXT output for readable debugging logs.
@@ -1425,7 +1543,7 @@ Wake reason: ${WAKE_REASON}."
 
   # ─── Resolve Session File (needed for both runaway msg and token extraction) ──
   SESSION_FILE_PATH="/var/lib/versa-agi/coa/cycles/cycle_telemetry.json"
-  if [ "${AGENT_NAME}" != "coa" ]; then
+  if [ "${AGENT_NAME}" != "${COA_USER}" ]; then
     SESSION_FILE_PATH="/var/lib/versa-agi/${AGENT_NAME}/cycles/cycle_telemetry.json"
   fi
 
@@ -1495,7 +1613,7 @@ Wake reason: ${WAKE_REASON}."
   TOKENS_IN=0; TOKENS_OUT=0; TOKENS_THINK=0; TOKENS_TOTAL=0; TOKENS_CACHED=0
 
   TELEMETRY_FILE="/var/lib/versa-agi/coa/cycles/cycle_telemetry.json"
-  if [ "${AGENT_NAME}" != "coa" ]; then
+  if [ "${AGENT_NAME}" != "${COA_USER}" ]; then
     TELEMETRY_FILE="/var/lib/versa-agi/${AGENT_NAME}/cycles/cycle_telemetry.json"
   fi
   
@@ -1571,8 +1689,10 @@ Wake reason: ${WAKE_REASON}."
           THREAD_COUNT=$(sqlite3 "${CHECKPOINT_DB}" \
             "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${TID}';" 2>/dev/null || echo "0")
           if [ "${THREAD_COUNT:-0}" -gt "${CHECKPOINT_KEEP_STEPS}" ]; then
-            # Delete older checkpoint rows and their associated writes
-            sqlite3 "${CHECKPOINT_DB}" "
+            # Delete older checkpoint rows and their associated writes.
+            # MUST run as the agent user (DB owner) — watchdog has read-only
+            # access, so a direct DELETE fails silently and pruning never runs.
+            sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" "
               DELETE FROM writes WHERE thread_id='${TID}' AND checkpoint_id NOT IN (
                 SELECT checkpoint_id FROM checkpoints WHERE thread_id='${TID}'
                 ORDER BY rowid DESC LIMIT ${CHECKPOINT_KEEP_STEPS}
@@ -1589,8 +1709,8 @@ Wake reason: ${WAKE_REASON}."
         done <<< "${THREAD_IDS}"
       fi
       if [ "${PRUNED}" -gt 0 ]; then
-        # Reclaim disk space
-        sqlite3 "${CHECKPOINT_DB}" "VACUUM;" 2>/dev/null || true
+        # Reclaim disk space (as DB owner — see note above)
+        sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" "VACUUM;" 2>/dev/null || true
         DB_SIZE_MB=$(du -m "${CHECKPOINT_DB}" 2>/dev/null | cut -f1)
         log "CHECKPOINT PRUNE: ${AGENT_NAME} — removed ${PRUNED} old rows, kept last ${CHECKPOINT_KEEP_STEPS} per thread (DB: ${DB_SIZE_MB}MB)"
       fi

@@ -248,15 +248,35 @@ class AgentReader:
         return rows[0]["count"] if rows else 0
 
     def get_recent_cycle_summaries(self, agent_name: str, limit: int = 5) -> list[str]:
-        """Get chronological summaries of recent cycles for context injection."""
+        """Get chronological summaries of recent cycles for context injection.
+
+        Timestamps are rendered in the system's local timezone so they agree
+        with the "System time" stated in CYCLE PARAMETERS (stored values are
+        UTC). Consecutive identical summaries — the signature of a respawn
+        loop — are collapsed into a single entry annotated with a repeat
+        count, keeping the loop signal without wasting prompt tokens.
+        """
+        # Over-fetch so duplicate collapsing can still yield `limit` entries
         rows = self._query_cycles(
-            "SELECT detail FROM ("
-            "  SELECT started_at || ': ' || COALESCE(summary, '(no summary)') as detail, started_at "
+            "SELECT summary, ts FROM ("
+            "  SELECT COALESCE(summary, '(no summary)') AS summary, "
+            "         datetime(started_at, 'localtime') AS ts, started_at "
             "  FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT ?"
             ") ORDER BY started_at ASC",
-            (f"{agent_name}-%", limit)
+            (f"{agent_name}-%", limit * 3)
         )
-        return [r["detail"] for r in rows if r["detail"]]
+        collapsed: list[list] = []  # [ts, summary, count]
+        for r in rows:
+            if collapsed and collapsed[-1][1] == r["summary"]:
+                collapsed[-1][0] = r["ts"]  # keep the most recent timestamp
+                collapsed[-1][2] += 1
+            else:
+                collapsed.append([r["ts"], r["summary"], 1])
+        collapsed = collapsed[-limit:]
+        return [
+            f"{ts}: {summary}" + (f" (repeated ×{count})" if count > 1 else "")
+            for ts, summary, count in collapsed
+        ]
 
     def update_last_cycle_tokens(self, agent_name: str, t_in: int, t_out: int, t_think: int, t_total: int, exit_code: int = None, t_cached: int = 0, session_path: str = None) -> bool:
         try:

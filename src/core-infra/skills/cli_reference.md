@@ -111,6 +111,8 @@ agictl task list --all                                # ALL tasks including done
 agictl task get <id>                                  # Full task context as JSON
 agictl task add "Title" [options]                     # Insert new task (returns JSON with task_id)
 agictl task update <id> [options]                     # Update specific fields (returns JSON)
+agictl task progress <id> "<text>"                    # Append a progress entry (append-only journal, returns JSON)
+agictl task progress <id> [--last N]                  # No text: list the progress journal (oldest first, JSON)
 agictl task done <id>                                 # Shortcut: mark as done
 agictl task cancel <id>                               # Shortcut: mark as cancelled
 agictl task snooze <id> <minutes>                     # Set wake_after (min 5 minutes)
@@ -122,6 +124,8 @@ agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 **task update options**: `--status planned|in_progress|waiting|blocked|cancelled|done`, `--desc`, `--priority`, `--assignee`, `--due-date "YYYY-MM-DD HH:MM:SS"`, `--requested-by`
 
 > **CONSTRAINT**: `--due-date` is **mandatory** when creating tasks (default status is `planned`) and when setting status back to `planned`. The Lifeline will automatically wake you when a planned task's due date is reached — this is how you schedule future work. If a task cannot be completed by its due date, **roll the due date forward** — do not leave it in the past.
+
+> **TASK PROGRESS**: Agents have no memory between cycles. Before ending a cycle with unfinished work, journal progress with `agictl task progress <id> "DONE: ... NEXT: ... BLOCKERS: ..."`. Entries are append-only and timestamped; the last 10 entries across an agent's active tasks are injected into its wake context, and `task get` returns the 10 most recent per task (`recent_progress`). Use `task progress` to journal; reserve `task update --desc` for changing the description itself.
 
 **Reminder categories**: `general`, `preference`, `instruction`, `constraint`
 

@@ -93,7 +93,7 @@ The Primary User experiences your work as a conversation. You are a collaborator
 4. DECIDE: Align work with postulates, define gaps.
 5. MID-WORK CHECK: Re-check inbox after outbound messages.
 6. BLOCKED TASKS: Mark blocked, report blocker immediately.
-7. PERSIST: Awareness-first (Reflect, Conclude, Act, Profile, Commit).
+7. PERSIST: Awareness-first (Reflect, Conclude, Act, Profile, Commit) + journal task progress (agictl task progress <id> "...").
 8. EXIT: Update status and end cycle.
 ```
 
