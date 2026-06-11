@@ -739,6 +739,150 @@ def _load_sycl_registry():
 SYCL_MODEL_MAP = _load_sycl_registry()
 
 
+def _resolve_models_ini_path():
+    """Return the first existing models.ini path (canonical, then dev fallback)."""
+    for path in _MODELS_INI_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _load_providers():
+    """Load the [providers] registry from models.ini.
+
+    Returns dict: {slug: {"enabled": bool, "label": str, "cls": str}}.
+    Format per row:  slug = enabled|Display Name|langchain_class
+    """
+    import configparser
+    ini = configparser.ConfigParser(delimiters=('=',))
+    path = _resolve_models_ini_path()
+    if path:
+        ini.read(path)
+    out = {}
+    if not ini.has_section("providers"):
+        return out
+    for slug, raw in ini.items("providers"):
+        parts = [p.strip() for p in raw.split("|")]
+        enabled = parts[0].lower() == "true" if parts else False
+        label = parts[1] if len(parts) > 1 else slug
+        cls = parts[2] if len(parts) > 2 else ""
+        out[slug.strip()] = {"enabled": enabled, "label": label, "cls": cls}
+    return out
+
+
+def _load_catalog():
+    """Load the unified [catalog] from models.ini.
+
+    Returns dict keyed by model name:
+      {"class": str, "provider": str, "enabled": bool, "coa": bool,
+       "ctx_recommended": int, "ctx_max": int, "label": str}
+    Format per row:
+      key = class|provider|enabled|coa_approved|ctx_recommended|ctx_max|Display Label
+    """
+    import configparser
+    ini = configparser.ConfigParser(delimiters=('=',))
+    path = _resolve_models_ini_path()
+    if path:
+        ini.read(path)
+    out = {}
+    if not ini.has_section("catalog"):
+        return out
+    for key, raw in ini.items("catalog"):
+        parts = raw.split("|")
+        if len(parts) < 7:
+            continue
+        try:
+            ctx_rec = int(parts[4].strip() or "0")
+            ctx_max = int(parts[5].strip() or "0")
+        except ValueError:
+            ctx_rec, ctx_max = 0, 0
+        out[key.strip()] = {
+            "class": parts[0].strip(),
+            "provider": parts[1].strip(),
+            "enabled": parts[2].strip().lower() == "true",
+            "coa": parts[3].strip().lower() == "true",
+            "ctx_recommended": ctx_rec,
+            "ctx_max": ctx_max,
+            "label": "|".join(parts[6:]).strip(),
+        }
+    return out
+
+
+def _replace_ini_section_body(path, section, body_lines):
+    """Replace the body of an INI section in-place, preserving all other content.
+
+    Everything between the ``[section]`` header line and the next ``[...]`` header
+    (or EOF) is replaced with ``body_lines``. Comments that live ABOVE the section
+    header are preserved; only the section's own body is rewritten. If the section
+    does not exist it is appended at the end of the file.
+    """
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    header = f"[{section}]"
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            break
+
+    new_body = [(l if l.endswith("\n") else l + "\n") for l in body_lines]
+
+    if start is None:
+        # Append a fresh section at EOF
+        if lines and lines[-1].strip() != "":
+            lines.append("\n")
+        lines.append(header + "\n")
+        lines.extend(new_body)
+        with open(path, "w") as f:
+            f.writelines(lines)
+        return
+
+    # Find the end of the section (next header or EOF)
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].strip().startswith("[") and lines[j].strip().endswith("]"):
+            end = j
+            break
+
+    # Preserve a single trailing blank line before the next section, if present
+    tail = []
+    if end < len(lines):
+        tail = ["\n"]
+
+    rebuilt = lines[:start + 1] + new_body + tail + lines[end:]
+    with open(path, "w") as f:
+        f.writelines(rebuilt)
+
+
+def _write_full_ini_section(path, section, entries, header_comment=None):
+    """Create or overwrite an INI section with ``entries`` (list of (key, value)).
+
+    Used by ``model migrate`` to author [providers]/[catalog]. Preserves the rest
+    of the file; appends the section (with optional comment) if it does not exist.
+    """
+    body = []
+    if not any(l.strip() == f"[{section}]" for l in open(path)):
+        # Section absent — append with optional comment block
+        with open(path, "r") as f:
+            content = f.read()
+        chunk = "\n"
+        if header_comment:
+            chunk += header_comment.rstrip("\n") + "\n"
+        chunk += f"[{section}]\n"
+        for k, v in entries:
+            chunk += f"{k:<29} = {v}\n"
+        if not content.endswith("\n"):
+            chunk = "\n" + chunk
+        with open(path, "w") as f:
+            f.write(content + chunk)
+        return
+    # Section present — replace its body
+    for k, v in entries:
+        body.append(f"{k:<29} = {v}\n")
+    _replace_ini_section_body(path, section, body)
+
+
 def _resolve_protected_identities():
     """Resolve COA/watchdog agent names and the COA display name.
 
@@ -1049,6 +1193,22 @@ def _read_ini_csv(section, key):
         raw = cfg.get(section, key).strip()
         return [m.strip() for m in raw.split(",") if m.strip()], ini_path
     return [], ini_path
+
+
+def _read_ini_value(section, key, default=""):
+    """Read a single scalar value from setup.ini (canonical, then dev fallback)."""
+    import configparser
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if not os.path.isfile(ini_path):
+        return default
+    cfg = configparser.ConfigParser()
+    try:
+        cfg.read(ini_path)
+    except configparser.Error:
+        return default
+    return cfg.get(section, key, fallback=default).strip()
 
 
 def _update_ini_csv(section, key, values, ini_path=None):
@@ -2213,6 +2373,200 @@ def model_refresh():
 # ─── Model Registry Subcommand Group ────────────────────
 # CRUD operations for the [sycl_models] section in models.ini
 
+@model.command("sync")
+def model_sync():
+    """Regenerate derived model config from the [catalog] source of truth.
+
+    Rewrites the [models] and [third_party_models] label sections in every
+    models.ini copy, and refreshes the cloud/third-party model registries in
+    paths.env (VERSA_CLOUD_MODELS, VERSA_THIRD_PARTY_MODELS,
+    VERSA_THIRD_PARTY_ENABLED, VERSA_COA_APPROVED_MODELS).
+
+    Local models and topology-dependent keys (VERSA_LOCAL_MODELS) are owned by
+    the local pipeline and left untouched in this edition. Idempotent — a no-op
+    when [catalog] is absent (pre-migration systems).
+    """
+    catalog = _load_catalog()
+    providers = _load_providers()
+
+    if not catalog:
+        json_response(True, changed=False,
+                      message="No [catalog] section found — nothing to sync (run 'agictl model migrate').")
+        return
+
+    cloud, third_party, coa = [], [], []
+    cloud_labels, tp_labels = [], []
+    tp_provider_active = set()
+
+    for key, m in catalog.items():
+        cls = m["class"]
+        if cls == "cloud":
+            if m["enabled"]:
+                cloud.append(key)
+                if m["coa"]:
+                    coa.append(key)
+            cloud_labels.append((key, m["label"]))
+        elif cls == "third_party":
+            prov = providers.get(m["provider"], {})
+            available = m["enabled"] and prov.get("enabled", False)
+            if available:
+                third_party.append(key)
+                tp_provider_active.add(m["provider"])
+                if m["coa"]:
+                    coa.append(key)
+            tp_labels.append((key, m["label"]))
+        # local rows are advisory in this edition — not synced here
+
+    # ── Regenerate label sections in every models.ini copy ──
+    files_written = []
+    errors = []
+    for path in _MODELS_INI_PATHS:
+        if not os.path.exists(path):
+            continue
+        try:
+            _replace_ini_section_body(
+                path, "models",
+                [f"{k:<29} = {lbl}\n" for k, lbl in cloud_labels])
+            _replace_ini_section_body(
+                path, "third_party_models",
+                [f"{k:<29} = {lbl}\n" for k, lbl in tp_labels])
+            files_written.append(path)
+        except PermissionError:
+            errors.append(f"permission denied: {path} (use sudo)")
+        except Exception as e:
+            errors.append(f"{path}: {e}")
+
+    # ── Refresh paths.env registries (deployed systems only) ──
+    paths_updated = False
+    if os.path.isfile(PATHS_ENV_FILE):
+        try:
+            _update_paths_env_key("VERSA_CLOUD_MODELS", ",".join(cloud))
+            _update_paths_env_key("VERSA_THIRD_PARTY_MODELS", ",".join(third_party))
+            _update_paths_env_key("VERSA_THIRD_PARTY_ENABLED",
+                                  "true" if tp_provider_active else "false")
+            _update_paths_env_key("VERSA_COA_APPROVED_MODELS", ",".join(coa))
+            paths_updated = True
+        except PermissionError:
+            errors.append(f"permission denied: {PATHS_ENV_FILE} (use sudo)")
+        except Exception as e:
+            errors.append(f"{PATHS_ENV_FILE}: {e}")
+
+    if errors:
+        json_response(False, error="; ".join(errors),
+                      files_written=files_written, paths_env_updated=paths_updated)
+        sys.exit(1)
+
+    json_response(True, changed=True,
+                  cloud_models=cloud, third_party_models=third_party,
+                  coa_approved=coa, third_party_enabled=bool(tp_provider_active),
+                  files_written=files_written, paths_env_updated=paths_updated,
+                  message="Model catalog synced.")
+
+
+@model.command("migrate")
+@click.option("--force", is_flag=True, help="Rebuild [catalog]/[providers] even if they already exist")
+def model_migrate(force):
+    """Build the unified [providers]/[catalog] from legacy config (idempotent).
+
+    Folds the legacy models.ini label/context sections and the model-related
+    setup.ini keys (cloud_models, coa_approved_models, [third_party] providers,
+    local_ai.local_models) into the new source-of-truth sections. Safe to run
+    repeatedly — no-op when a catalog already exists unless --force is given.
+    """
+    import configparser
+
+    target = _resolve_models_ini_path()
+    if not target:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+
+    existing = _load_catalog()
+    if existing and not force:
+        json_response(True, changed=False,
+                      message=f"[catalog] already present ({len(existing)} models). Use --force to rebuild.")
+        return
+
+    # Legacy models.ini sections (labels + context windows)
+    mini = configparser.ConfigParser(delimiters=('=',))
+    mini.read(target)
+
+    def _label(section, key, default):
+        if mini.has_section(section):
+            return mini.get(section, key, fallback=default).strip() or default
+        return default
+
+    def _ctx(key, default_max):
+        if mini.has_section("context_windows"):
+            val = mini.get("context_windows", key, fallback="")
+            if "," in val:
+                try:
+                    a, b = val.split(",")[0].strip(), val.split(",")[1].strip()
+                    return int(a or "0"), int(b or str(default_max))
+                except ValueError:
+                    pass
+        return 0, default_max
+
+    # setup.ini model config (_read_ini_csv returns (list, path))
+    coa_approved = set(_read_ini_csv("gemini", "coa_approved_models")[0])
+    cloud_models = _read_ini_csv("gemini", "cloud_models")[0]
+    local_models = _read_ini_csv("local_ai", "local_models")[0]
+    tp_providers = _read_ini_csv("third_party", "providers")[0]
+
+    catalog_rows = []
+
+    # ── Cloud ──
+    for k in cloud_models:
+        rec, mx = _ctx(k, 1000000)
+        lbl = _label("models", k, k)
+        coa = "true" if k in coa_approved else "false"
+        catalog_rows.append((k, f"cloud|google|true|{coa}|{rec}|{mx}|{lbl}"))
+
+    # ── Third-party (per provider) ──
+    provider_rows = [
+        ("google", "true|Google Gemini|ChatGoogleGenerativeAI"),
+    ]
+    cls_map = {"xai": "ChatOpenAI", "openai": "ChatOpenAI",
+               "anthropic": "ChatAnthropic"}
+    label_map = {"xai": "xAI (Grok)", "openai": "OpenAI (GPT)",
+                 "anthropic": "Anthropic (Claude)"}
+    for slug in tp_providers:
+        raw_enabled = _read_ini_value("third_party", f"{slug}_enabled", "false")
+        p_enabled = "true" if raw_enabled.strip().lower() == "true" else "false"
+        p_cls = cls_map.get(slug, "ChatOpenAI")
+        p_label = label_map.get(slug, slug)
+        provider_rows.append((slug, f"{p_enabled}|{p_label}|{p_cls}"))
+        for k in _read_ini_csv("third_party", f"{slug}_models")[0]:
+            rec, mx = _ctx(k, 131072)
+            lbl = _label("third_party_models", k, k)
+            coa = "true" if k in coa_approved else "false"
+            catalog_rows.append((k, f"third_party|{slug}|true|{coa}|{rec}|{mx}|{lbl}"))
+    provider_rows.append(("ollama", "true|Local (Ollama / SYCL)|ChatOllama"))
+
+    # ── Local (advisory) ──
+    local_keys = local_models or (
+        [k for k, _ in mini.items("local_models")] if mini.has_section("local_models") else [])
+    for k in local_keys:
+        rec, mx = _ctx(k, 4096)
+        lbl = _label("local_models", k, k)
+        catalog_rows.append((k, f"local|ollama|true|false|{rec}|{mx}|{lbl}"))
+
+    try:
+        _write_full_ini_section(
+            target, "providers", provider_rows,
+            header_comment="# Provider Registry — generated by `agictl model migrate`")
+        _write_full_ini_section(
+            target, "catalog", catalog_rows,
+            header_comment="# Unified Model Catalog — generated by `agictl model migrate`")
+    except PermissionError:
+        json_response(False, error=f"permission denied: {target} (use sudo)")
+        sys.exit(1)
+
+    json_response(True, changed=True, models=len(catalog_rows),
+                  providers=len(provider_rows), file=target,
+                  message="Migrated legacy model config into [providers]/[catalog]. "
+                          "Run 'agictl model sync' to refresh derived config.")
+
+
 @model.group()
 def registry():
     """Manage the SYCL model registry (add, update, remove, list)."""
@@ -3259,8 +3613,11 @@ def agent_kill(name):
     import subprocess as _sp
     name = name.lower()
 
-    # Guard: only COA or watchdog can kill agents
-    caller = os.environ.get("VERSA_AGENT_NAME", "")
+    # Guard: only COA or watchdog can kill agents.
+    # AGICTL_AGENT_USER is set by the agictl-wrapper to the real OS caller and
+    # forwarded across the sudo->watchdog elevation (unlike VERSA_AGENT_NAME,
+    # which sudo strips). Empty => direct root/PU invocation, which is allowed.
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
     if caller and caller not in ("coa", "watchdog"):
         json_response(False, error=f"Permission denied: only COA or watchdog can kill agents (caller: {caller})")
         sys.exit(1)
@@ -3771,7 +4128,11 @@ def task_progress(task_id, note, last_n):
             conn.close()
             json_response(False, error=f"Task {task_id} not found")
             sys.exit(1)
-        agent_name = os.environ.get("VERSA_AGENT_NAME", "coa")
+        # Author resolution: prefer the explicit env hint, but fall back to the
+        # canonical resolver (AGICTL_CONFIG basename → OS user → config) rather
+        # than a hardcoded "coa" — otherwise a missing VERSA_AGENT_NAME silently
+        # misattributes every sub-agent's entries to the COA.
+        agent_name = os.environ.get("VERSA_AGENT_NAME") or get_agent_name()
         c = conn.cursor()
         c.execute(
             "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
@@ -3790,7 +4151,7 @@ def task_progress(task_id, note, last_n):
 @click.argument("title")
 @click.option("--desc", default=None, help="Extended task description")
 @click.option("--priority", default="normal", type=click.Choice(["low", "normal", "high", "urgent"]))
-@click.option("--assignee", default=None, help="Agent assigned to the task (defaults to current agent via VERSA_AGENT_NAME, then 'coa')")
+@click.option("--assignee", default=None, help="Agent assigned to the task (defaults to the current agent, resolved from VERSA_AGENT_NAME or the agent config)")
 @click.option("--project", default=None, type=int, help="Project ID to link the task to")
 @click.option("--callback", default=None, type=click.Choice(["notify_sponsor", "notify_connection", "await_reply", "check_connection", "none"]))
 @click.option("--source-msg", default=None, type=int, help="Source message ID")
@@ -3798,9 +4159,10 @@ def task_progress(task_id, note, last_n):
 @click.option("--due-date", default=None, help="Due date (YYYY-MM-DD HH:MM:SS) — required for planned tasks")
 def task_add(title, desc, priority, assignee, project, callback, source_msg, requested_by, due_date):
     """Insert a new task. Returns JSON with created record."""
-    # Dynamic assignee default: current agent name from env, fallback to 'coa'
+    # Dynamic assignee default: current agent, resolved robustly (env hint →
+    # canonical resolver) rather than a hardcoded 'coa'.
     if assignee is None:
-        assignee = os.environ.get("VERSA_AGENT_NAME", "coa")
+        assignee = os.environ.get("VERSA_AGENT_NAME") or get_agent_name()
     # Tasks default to 'planned' status — due_date is mandatory
     if not due_date:
         json_response(False, error="--due-date is required for planned tasks")
@@ -7139,8 +7501,10 @@ def browser_enable(agent_name):
     Grants browser access and installs Chromium binaries for the agent's OS user.
     Requires: system-wide [browser] enabled=true AND caller must be COA with browser_enabled=1.
     """
-    # Guard: COA-exclusive
-    caller = os.environ.get("VERSA_AGENT_NAME", "")
+    # Guard: COA-exclusive. AGICTL_AGENT_USER is the wrapper-set OS caller,
+    # forwarded across sudo elevation (VERSA_AGENT_NAME is stripped by sudo).
+    # Empty => direct root/PU invocation, which is allowed.
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
     if caller and caller not in ("coa",):
         json_response(False, error="Permission denied: only COA can manage browser access for other agents")
         sys.exit(1)
@@ -7208,8 +7572,10 @@ def browser_disable(agent_name):
 
     Revokes browser access, removes Chromium binaries and screenshots.
     """
-    # Guard: COA-exclusive
-    caller = os.environ.get("VERSA_AGENT_NAME", "")
+    # Guard: COA-exclusive. AGICTL_AGENT_USER is the wrapper-set OS caller,
+    # forwarded across sudo elevation (VERSA_AGENT_NAME is stripped by sudo).
+    # Empty => direct root/PU invocation, which is allowed.
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
     if caller and caller not in ("coa",):
         json_response(False, error="Permission denied: only COA can manage browser access for other agents")
         sys.exit(1)

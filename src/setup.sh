@@ -2518,6 +2518,26 @@ FROM agents ORDER BY protected DESC, name ASC;
       ok "paths.env synced (cloud + local + proxy + COA approved)"
     fi
 
+    # ── Unified Model Catalog (Edition 2.x) ──
+    # Rebuild models.ini [providers]/[catalog] from setup.ini (authoritative in
+    # this edition), then regenerate the derived label sections + the cloud/
+    # third-party paths.env registries from the catalog. Idempotent; failures
+    # are non-fatal so the update never aborts on model-catalog issues.
+    # NOTE: --force keeps setup.ini authoritative for now. Once dashboard-driven
+    # catalog editing lands, drop --force so runtime edits are preserved.
+    if command -v agictl >/dev/null 2>&1; then
+      if agictl model migrate --force >/dev/null 2>&1; then
+        ok "Model catalog rebuilt from setup.ini ([providers] + [catalog])"
+      else
+        warn "Model catalog migrate skipped (non-fatal)"
+      fi
+      if agictl model sync >/dev/null 2>&1; then
+        ok "Model catalog synced (derived sections + paths.env)"
+      else
+        warn "Model catalog sync skipped (non-fatal)"
+      fi
+    fi
+
     # Legacy Inference Endpoint configuration removed (deprecated)
     echo ""
   fi
