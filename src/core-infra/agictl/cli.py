@@ -747,56 +747,88 @@ def _resolve_models_ini_path():
     return None
 
 
-def _load_providers():
-    """Load the [providers] registry from models.ini.
+def _read_raw_section(path, section):
+    """Return an ordered {key: raw_value} dict for an INI section (case-preserving).
 
-    Returns dict: {slug: {"enabled": bool, "label": str, "cls": str}}.
-    Format per row:  slug = enabled|Display Name|langchain_class
+    Empty dict when the file/section is absent. Keys keep their original case so
+    they round-trip with _upsert_models_ini_entry / _remove_ini_entry.
     """
     import configparser
     ini = configparser.ConfigParser(delimiters=('=',))
+    ini.optionxform = str
+    if path and os.path.exists(path):
+        try:
+            ini.read(path)
+        except configparser.Error:
+            return {}
+    if not ini.has_section(section):
+        return {}
+    return {k.strip(): v for k, v in ini.items(section)}
+
+
+# ── Isolation model (Edition 2.x) ──────────────────────────
+# Model/provider config has two physically separated origins inside models.ini:
+#   • baseline   : [catalog] / [providers]            — regenerated from setup.ini
+#                                                        by `agictl model migrate`
+#                                                        (DO NOT hand-edit)
+#   • user layer : [catalog_custom] / [providers_custom] — owned by the CLI /
+#                                                        dashboard, never touched
+#                                                        by migrate
+# The loaders below are the single merge point: the custom layer overlays the
+# baseline per-key (whole-row override), so every downstream consumer
+# (`_sync_catalog`, paths.env, agitop, the harness) sees one merged view.
+
+def _load_providers():
+    """Load the merged provider registry (baseline [providers] + [providers_custom]).
+
+    Returns dict: {slug: {"enabled": bool, "label": str, "cls": str,
+                          "origin": "baseline"|"custom"|"override"}}.
+    Format per row:  slug = enabled|Display Name|langchain_class
+    """
     path = _resolve_models_ini_path()
-    if path:
-        ini.read(path)
+    base = _read_raw_section(path, "providers")
+    custom = _read_raw_section(path, "providers_custom")
     out = {}
-    if not ini.has_section("providers"):
-        return out
-    for slug, raw in ini.items("providers"):
+
+    def _parse(slug, raw, origin):
         parts = [p.strip() for p in raw.split("|")]
         enabled = parts[0].lower() == "true" if parts else False
         label = parts[1] if len(parts) > 1 else slug
         cls = parts[2] if len(parts) > 2 else ""
-        out[slug.strip()] = {"enabled": enabled, "label": label, "cls": cls}
+        out[slug] = {"enabled": enabled, "label": label, "cls": cls, "origin": origin}
+
+    for slug, raw in base.items():
+        _parse(slug, raw, "baseline")
+    for slug, raw in custom.items():
+        _parse(slug, raw, "override" if slug in base else "custom")
     return out
 
 
 def _load_catalog():
-    """Load the unified [catalog] from models.ini.
+    """Load the merged model catalog (baseline [catalog] + [catalog_custom]).
 
     Returns dict keyed by model name:
       {"class": str, "provider": str, "enabled": bool, "coa": bool,
-       "ctx_recommended": int, "ctx_max": int, "label": str}
+       "ctx_recommended": int, "ctx_max": int, "label": str,
+       "origin": "baseline"|"custom"|"override"}
     Format per row:
       key = class|provider|enabled|coa_approved|ctx_recommended|ctx_max|Display Label
     """
-    import configparser
-    ini = configparser.ConfigParser(delimiters=('=',))
     path = _resolve_models_ini_path()
-    if path:
-        ini.read(path)
+    base = _read_raw_section(path, "catalog")
+    custom = _read_raw_section(path, "catalog_custom")
     out = {}
-    if not ini.has_section("catalog"):
-        return out
-    for key, raw in ini.items("catalog"):
+
+    def _parse(key, raw, origin):
         parts = raw.split("|")
         if len(parts) < 7:
-            continue
+            return
         try:
             ctx_rec = int(parts[4].strip() or "0")
             ctx_max = int(parts[5].strip() or "0")
         except ValueError:
             ctx_rec, ctx_max = 0, 0
-        out[key.strip()] = {
+        out[key] = {
             "class": parts[0].strip(),
             "provider": parts[1].strip(),
             "enabled": parts[2].strip().lower() == "true",
@@ -804,7 +836,13 @@ def _load_catalog():
             "ctx_recommended": ctx_rec,
             "ctx_max": ctx_max,
             "label": "|".join(parts[6:]).strip(),
+            "origin": origin,
         }
+
+    for key, raw in base.items():
+        _parse(key, raw, "baseline")
+    for key, raw in custom.items():
+        _parse(key, raw, "override" if key in base else "custom")
     return out
 
 
@@ -881,6 +919,160 @@ def _write_full_ini_section(path, section, entries, header_comment=None):
     for k, v in entries:
         body.append(f"{k:<29} = {v}\n")
     _replace_ini_section_body(path, section, body)
+
+
+def _upsert_models_ini_entry(path, section, key, value):
+    """Update an existing ``key = value`` row in a models.ini section, or append it.
+
+    Unlike ``_update_models_ini_entry`` (add-if-missing only), this replaces the
+    value when the key already exists. Keys may contain ':' (e.g. ``gemma4:e4b``).
+    """
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    current = None
+    found = False
+    section_exists = False
+    insert_at = -1  # last line index belonging to the target section
+    entry = f"{key:<29} = {value}\n"
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            current = s[1:-1]
+            if current == section:
+                section_exists = True
+                insert_at = i  # header line; insert right after if section is empty
+            continue
+        if current == section:
+            eq = s.find("=")
+            if eq > 0:
+                insert_at = i  # track last real key line; skip blanks/comments
+                if s[:eq].strip() == key and not found:
+                    lines[i] = entry
+                    found = True
+
+    if not found:
+        if section_exists:
+            lines.insert(insert_at + 1, entry)
+        else:
+            # Section absent — append it
+            if lines and lines[-1].strip() != "":
+                lines.append("\n")
+            lines.append(f"[{section}]\n")
+            lines.append(entry)
+
+    with open(path, "w") as f:
+        f.writelines(lines)
+
+
+def _remove_ini_entry(path, section, key):
+    """Remove a ``key = …`` row from a models.ini section. Returns True if removed."""
+    with open(path, "r") as f:
+        lines = f.readlines()
+    current = None
+    out = []
+    removed = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            current = s[1:-1]
+            out.append(line)
+            continue
+        if current == section and s and not s.startswith("#"):
+            eq = s.find("=")
+            if eq > 0 and s[:eq].strip() == key:
+                removed = True
+                continue
+        out.append(line)
+    if removed:
+        with open(path, "w") as f:
+            f.writelines(out)
+    return removed
+
+
+def _sync_catalog():
+    """Regenerate derived model config from the [catalog] source of truth.
+
+    Rewrites the [models]/[third_party_models] label sections in every models.ini
+    copy and refreshes the cloud/third-party paths.env registries. Local models
+    and VERSA_LOCAL_MODELS are owned by the local pipeline and left untouched.
+
+    Returns (success: bool, payload: dict). Never raises for expected I/O issues —
+    permission problems are reported in payload['error'].
+    """
+    catalog = _load_catalog()
+    providers = _load_providers()
+
+    if not catalog:
+        return True, {"changed": False,
+                      "message": "No [catalog] section found — nothing to sync (run 'agictl model migrate')."}
+
+    cloud, third_party, coa = [], [], []
+    cloud_labels, tp_labels = [], []
+    tp_provider_active = set()
+
+    for key, m in catalog.items():
+        cls = m["class"]
+        if cls == "cloud":
+            if m["enabled"]:
+                cloud.append(key)
+                if m["coa"]:
+                    coa.append(key)
+            cloud_labels.append((key, m["label"]))
+        elif cls == "third_party":
+            prov = providers.get(m["provider"], {})
+            available = m["enabled"] and prov.get("enabled", False)
+            if available:
+                third_party.append(key)
+                tp_provider_active.add(m["provider"])
+                if m["coa"]:
+                    coa.append(key)
+            tp_labels.append((key, m["label"]))
+        # local rows are advisory in this edition — not synced here
+
+    files_written = []
+    errors = []
+    for path in _MODELS_INI_PATHS:
+        if not os.path.exists(path):
+            continue
+        try:
+            _replace_ini_section_body(
+                path, "models",
+                [f"{k:<29} = {lbl}\n" for k, lbl in cloud_labels])
+            _replace_ini_section_body(
+                path, "third_party_models",
+                [f"{k:<29} = {lbl}\n" for k, lbl in tp_labels])
+            files_written.append(path)
+        except PermissionError:
+            errors.append(f"permission denied: {path} (use sudo)")
+        except Exception as e:
+            errors.append(f"{path}: {e}")
+
+    paths_updated = False
+    if os.path.isfile(PATHS_ENV_FILE):
+        try:
+            _update_paths_env_key("VERSA_CLOUD_MODELS", ",".join(cloud))
+            _update_paths_env_key("VERSA_THIRD_PARTY_MODELS", ",".join(third_party))
+            _update_paths_env_key("VERSA_THIRD_PARTY_ENABLED",
+                                  "true" if tp_provider_active else "false")
+            _update_paths_env_key("VERSA_COA_APPROVED_MODELS", ",".join(coa))
+            paths_updated = True
+        except PermissionError:
+            errors.append(f"permission denied: {PATHS_ENV_FILE} (use sudo)")
+        except Exception as e:
+            errors.append(f"{PATHS_ENV_FILE}: {e}")
+
+    payload = {
+        "changed": True,
+        "cloud_models": cloud, "third_party_models": third_party,
+        "coa_approved": coa, "third_party_enabled": bool(tp_provider_active),
+        "files_written": files_written, "paths_env_updated": paths_updated,
+    }
+    if errors:
+        payload["error"] = "; ".join(errors)
+        return False, payload
+    payload["message"] = "Model catalog synced."
+    return True, payload
 
 
 def _resolve_protected_identities():
@@ -2386,109 +2578,23 @@ def model_sync():
     the local pipeline and left untouched in this edition. Idempotent — a no-op
     when [catalog] is absent (pre-migration systems).
     """
-    catalog = _load_catalog()
-    providers = _load_providers()
-
-    if not catalog:
-        json_response(True, changed=False,
-                      message="No [catalog] section found — nothing to sync (run 'agictl model migrate').")
-        return
-
-    cloud, third_party, coa = [], [], []
-    cloud_labels, tp_labels = [], []
-    tp_provider_active = set()
-
-    for key, m in catalog.items():
-        cls = m["class"]
-        if cls == "cloud":
-            if m["enabled"]:
-                cloud.append(key)
-                if m["coa"]:
-                    coa.append(key)
-            cloud_labels.append((key, m["label"]))
-        elif cls == "third_party":
-            prov = providers.get(m["provider"], {})
-            available = m["enabled"] and prov.get("enabled", False)
-            if available:
-                third_party.append(key)
-                tp_provider_active.add(m["provider"])
-                if m["coa"]:
-                    coa.append(key)
-            tp_labels.append((key, m["label"]))
-        # local rows are advisory in this edition — not synced here
-
-    # ── Regenerate label sections in every models.ini copy ──
-    files_written = []
-    errors = []
-    for path in _MODELS_INI_PATHS:
-        if not os.path.exists(path):
-            continue
-        try:
-            _replace_ini_section_body(
-                path, "models",
-                [f"{k:<29} = {lbl}\n" for k, lbl in cloud_labels])
-            _replace_ini_section_body(
-                path, "third_party_models",
-                [f"{k:<29} = {lbl}\n" for k, lbl in tp_labels])
-            files_written.append(path)
-        except PermissionError:
-            errors.append(f"permission denied: {path} (use sudo)")
-        except Exception as e:
-            errors.append(f"{path}: {e}")
-
-    # ── Refresh paths.env registries (deployed systems only) ──
-    paths_updated = False
-    if os.path.isfile(PATHS_ENV_FILE):
-        try:
-            _update_paths_env_key("VERSA_CLOUD_MODELS", ",".join(cloud))
-            _update_paths_env_key("VERSA_THIRD_PARTY_MODELS", ",".join(third_party))
-            _update_paths_env_key("VERSA_THIRD_PARTY_ENABLED",
-                                  "true" if tp_provider_active else "false")
-            _update_paths_env_key("VERSA_COA_APPROVED_MODELS", ",".join(coa))
-            paths_updated = True
-        except PermissionError:
-            errors.append(f"permission denied: {PATHS_ENV_FILE} (use sudo)")
-        except Exception as e:
-            errors.append(f"{PATHS_ENV_FILE}: {e}")
-
-    if errors:
-        json_response(False, error="; ".join(errors),
-                      files_written=files_written, paths_env_updated=paths_updated)
+    ok, payload = _sync_catalog()
+    if not ok:
+        json_response(False, **payload)
         sys.exit(1)
-
-    json_response(True, changed=True,
-                  cloud_models=cloud, third_party_models=third_party,
-                  coa_approved=coa, third_party_enabled=bool(tp_provider_active),
-                  files_written=files_written, paths_env_updated=paths_updated,
-                  message="Model catalog synced.")
+    json_response(True, **payload)
 
 
-@model.command("migrate")
-@click.option("--force", is_flag=True, help="Rebuild [catalog]/[providers] even if they already exist")
-def model_migrate(force):
-    """Build the unified [providers]/[catalog] from legacy config (idempotent).
+def _build_migration_rows(target):
+    """Derive ([providers], [catalog]) rows from setup.ini + legacy models.ini.
 
-    Folds the legacy models.ini label/context sections and the model-related
-    setup.ini keys (cloud_models, coa_approved_models, [third_party] providers,
-    local_ai.local_models) into the new source-of-truth sections. Safe to run
-    repeatedly — no-op when a catalog already exists unless --force is given.
+    Returns (provider_rows, catalog_rows) as ordered lists of (key, value). The
+    canonical ``target`` models.ini supplies legacy label/context enrichment.
     """
     import configparser
-
-    target = _resolve_models_ini_path()
-    if not target:
-        json_response(False, error="models.ini not found")
-        sys.exit(1)
-
-    existing = _load_catalog()
-    if existing and not force:
-        json_response(True, changed=False,
-                      message=f"[catalog] already present ({len(existing)} models). Use --force to rebuild.")
-        return
-
-    # Legacy models.ini sections (labels + context windows)
     mini = configparser.ConfigParser(delimiters=('=',))
-    mini.read(target)
+    if target and os.path.exists(target):
+        mini.read(target)
 
     def _label(section, key, default):
         if mini.has_section(section):
@@ -2550,21 +2656,415 @@ def model_migrate(force):
         lbl = _label("local_models", k, k)
         catalog_rows.append((k, f"local|ollama|true|false|{rec}|{mx}|{lbl}"))
 
-    try:
-        _write_full_ini_section(
-            target, "providers", provider_rows,
-            header_comment="# Provider Registry — generated by `agictl model migrate`")
-        _write_full_ini_section(
-            target, "catalog", catalog_rows,
-            header_comment="# Unified Model Catalog — generated by `agictl model migrate`")
-    except PermissionError:
-        json_response(False, error=f"permission denied: {target} (use sudo)")
+    return provider_rows, catalog_rows
+
+
+_BASELINE_PROVIDERS_HEADER = (
+    "# Provider Registry — BASELINE (generated from setup.ini by "
+    "`agictl model migrate`).\n"
+    "# DO NOT hand-edit; add/override providers via `agictl provider` "
+    "(writes [providers_custom]).")
+_BASELINE_CATALOG_HEADER = (
+    "# Unified Model Catalog — BASELINE (generated from setup.ini by "
+    "`agictl model migrate`).\n"
+    "# DO NOT hand-edit; add/override models via `agictl model catalog` "
+    "(writes [catalog_custom]).")
+
+
+def _clear_ini_section(path, section):
+    """Empty an INI section's body in place (keeps the header). No-op if absent."""
+    if section in {l.strip()[1:-1] for l in open(path)
+                   if l.strip().startswith("[") and l.strip().endswith("]")}:
+        _replace_ini_section_body(path, section, [])
+
+
+@model.command("migrate")
+@click.option("--force", is_flag=True,
+              help="Factory reset: also wipe [catalog_custom]/[providers_custom] (discards all CLI/dashboard edits)")
+def model_migrate(force):
+    """Regenerate the setup.ini baseline ([catalog]/[providers]) in models.ini.
+
+    The **baseline** sections are rebuilt from setup.ini on every run, so model
+    additions, edits, and removals made in setup.ini always propagate. The
+    **user layer** ([catalog_custom]/[providers_custom], owned by the CLI and
+    dashboard) is left untouched and overlays the baseline at read time — so
+    runtime edits survive. `setup.sh` calls this (then `model sync`) on every run.
+
+    `--force` additionally wipes the user layer for a full factory reset to
+    setup.ini. Idempotent in both modes.
+    """
+    target = _resolve_models_ini_path()
+    if not target:
+        json_response(False, error="models.ini not found")
         sys.exit(1)
 
-    json_response(True, changed=True, models=len(catalog_rows),
-                  providers=len(provider_rows), file=target,
-                  message="Migrated legacy model config into [providers]/[catalog]. "
-                          "Run 'agictl model sync' to refresh derived config.")
+    provider_rows, catalog_rows = _build_migration_rows(target)
+    write_targets = _models_ini_write_targets() or [target]
+
+    try:
+        for path in write_targets:
+            _write_full_ini_section(path, "providers", provider_rows,
+                                    header_comment=_BASELINE_PROVIDERS_HEADER)
+            _write_full_ini_section(path, "catalog", catalog_rows,
+                                    header_comment=_BASELINE_CATALOG_HEADER)
+            if force:
+                _clear_ini_section(path, "providers_custom")
+                _clear_ini_section(path, "catalog_custom")
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    json_response(True, changed=True,
+                  mode="force-reset" if force else "baseline",
+                  models=len(catalog_rows), providers=len(provider_rows),
+                  files=write_targets,
+                  message=(("Reset baseline and cleared the custom layer from setup.ini. "
+                            if force else
+                            "Regenerated [catalog]/[providers] baseline from setup.ini "
+                            "(custom layer preserved). ")
+                           + "Run 'agictl model sync' to refresh derived config."))
+
+
+# ─── Model Catalog Subcommand Group ─────────────────────
+# Full CRUD over the unified [catalog] section (all model classes).
+
+def _models_ini_write_targets():
+    """models.ini paths to write to (every existing copy). Errors if none exist."""
+    return [p for p in _MODELS_INI_PATHS if os.path.exists(p)]
+
+
+def _auto_sync_and_respond(base_payload, do_sync):
+    """Shared tail for mutating catalog/provider commands: optionally sync, then respond."""
+    if do_sync:
+        ok, sync_payload = _sync_catalog()
+        base_payload["synced"] = ok
+        if not ok:
+            base_payload["sync_error"] = sync_payload.get("error")
+            json_response(False, **base_payload)
+            sys.exit(1)
+    else:
+        base_payload["synced"] = False
+    json_response(True, **base_payload)
+
+
+@model.group()
+def catalog():
+    """Manage the unified model catalog (cloud, third-party, local)."""
+    pass
+
+
+@catalog.command("list")
+@click.option("--class", "model_class",
+              type=click.Choice(["cloud", "third_party", "local"]), default=None,
+              help="Filter by model class")
+@click.option("--table", "as_table", is_flag=True, help="Human-readable table instead of JSON")
+def catalog_list(model_class, as_table):
+    """List catalog entries, optionally filtered by class."""
+    cat = _load_catalog()
+    rows = []
+    for key, m in cat.items():
+        if model_class and m["class"] != model_class:
+            continue
+        rows.append({"key": key, **m})
+    if as_table:
+        if not rows:
+            click.echo("No catalog entries.")
+            return
+        click.echo(f"{'KEY':<32} {'CLASS':<12} {'PROVIDER':<10} {'EN':<3} {'COA':<4} {'CTX_MAX':<9} LABEL")
+        for r in rows:
+            click.echo(f"{r['key']:<32} {r['class']:<12} {r['provider']:<10} "
+                       f"{'✓' if r['enabled'] else '·':<3} {'✓' if r['coa'] else '·':<4} "
+                       f"{r['ctx_max']:<9} {r['label']}")
+        return
+    json_response(True, count=len(rows), models=rows)
+
+
+@catalog.command("add")
+@click.argument("key")
+@click.option("--class", "model_class", required=True,
+              type=click.Choice(["cloud", "third_party", "local"]))
+@click.option("--provider", required=True, help="Provider slug (must exist in [providers])")
+@click.option("--label", required=True, help="Display label for pickers")
+@click.option("--ctx-recommended", type=int, default=0, help="Recommended context window (0 for cloud)")
+@click.option("--ctx-max", type=int, default=0, help="Maximum context window (drives trim budget)")
+@click.option("--coa-approved/--no-coa-approved", default=False, help="Allow assignment to the COA")
+@click.option("--enabled/--disabled", default=True, help="Offer the model at runtime")
+@click.option("--gguf-repo", default=None, help="(local) HuggingFace repo — also registers [sycl_models]")
+@click.option("--gguf-file", default=None, help="(local) GGUF filename")
+@click.option("--size", "size_gb", type=int, default=None, help="(local) approximate GGUF size in GB")
+@click.option("--no-sync", is_flag=True, help="Skip regenerating derived config")
+def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
+                coa_approved, enabled, gguf_repo, gguf_file, size_gb, no_sync):
+    """Add a model to the catalog.
+
+    For third-party models the provider must be enabled (and keyed) before the
+    model is routed at runtime. For local models, pass --gguf-* to also register
+    SYCL download metadata; run 'agictl model add <key>' afterwards to download.
+    """
+    cat = _load_catalog()
+    if key in cat:
+        json_response(False, error=f"Model '{key}' already in catalog. Use 'catalog update'.")
+        sys.exit(1)
+    providers = _load_providers()
+    if provider not in providers:
+        json_response(False, error=f"Provider '{provider}' not in [providers]. "
+                      f"Add it first: agictl provider add {provider} --label '<name>' --class <ChatX>. "
+                      f"Known: {', '.join(providers.keys()) or '(none)'}")
+        sys.exit(1)
+
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+
+    value = (f"{model_class}|{provider}|{'true' if enabled else 'false'}|"
+             f"{'true' if coa_approved else 'false'}|{ctx_recommended}|{ctx_max}|{label}")
+    try:
+        for path in targets:
+            # User additions live in the custom overlay — never clobbered by migrate.
+            _upsert_models_ini_entry(path, "catalog_custom", key, value)
+            # Local models: also seed legacy metadata + SYCL registry so the
+            # existing local pipeline/pickers see them (advisory this edition).
+            if model_class == "local":
+                _upsert_models_ini_entry(path, "local_models", key, label)
+                if ctx_max:
+                    _upsert_models_ini_entry(path, "context_windows", key,
+                                             f"{ctx_recommended},{ctx_max}")
+                if gguf_repo and gguf_file and size_gb:
+                    _upsert_models_ini_entry(path, "sycl_models", key,
+                                             f"{gguf_repo},{gguf_file},{size_gb}")
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    payload = {"model": key, "class": model_class, "provider": provider,
+               "message": f"Added '{key}' to catalog."}
+    if model_class == "local":
+        payload["hint"] = f"Run 'sudo agictl model add {key}' to download/enable at runtime."
+    _auto_sync_and_respond(payload, do_sync=not no_sync)
+
+
+@catalog.command("update")
+@click.argument("key")
+@click.option("--label", default=None)
+@click.option("--provider", default=None)
+@click.option("--class", "model_class", default=None,
+              type=click.Choice(["cloud", "third_party", "local"]))
+@click.option("--ctx-recommended", type=int, default=None)
+@click.option("--ctx-max", type=int, default=None)
+@click.option("--enable/--disable", "enabled", default=None, help="Enable or disable the model")
+@click.option("--coa-approve/--coa-revoke", "coa", default=None, help="Toggle COA eligibility")
+@click.option("--no-sync", is_flag=True)
+def catalog_update(key, label, provider, model_class, ctx_recommended, ctx_max,
+                   enabled, coa, no_sync):
+    """Update fields on an existing catalog entry (only provided fields change)."""
+    cat = _load_catalog()
+    if key not in cat:
+        json_response(False, error=f"Model '{key}' not in catalog.")
+        sys.exit(1)
+    m = cat[key]
+    if provider is not None:
+        providers = _load_providers()
+        if provider not in providers:
+            json_response(False, error=f"Provider '{provider}' not in [providers].")
+            sys.exit(1)
+        m["provider"] = provider
+    if model_class is not None:
+        m["class"] = model_class
+    if label is not None:
+        m["label"] = label
+    if ctx_recommended is not None:
+        m["ctx_recommended"] = ctx_recommended
+    if ctx_max is not None:
+        m["ctx_max"] = ctx_max
+    if enabled is not None:
+        m["enabled"] = enabled
+    if coa is not None:
+        m["coa"] = coa
+
+    value = (f"{m['class']}|{m['provider']}|{'true' if m['enabled'] else 'false'}|"
+             f"{'true' if m['coa'] else 'false'}|{m['ctx_recommended']}|{m['ctx_max']}|{m['label']}")
+    try:
+        for path in _models_ini_write_targets():
+            # Edits always land in the custom overlay — for a baseline model this
+            # writes a full-row override that wins at read time (and survives migrate).
+            _upsert_models_ini_entry(path, "catalog_custom", key, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    _auto_sync_and_respond({"model": key, "origin": m.get("origin"),
+                            "message": f"Updated '{key}'."}, do_sync=not no_sync)
+
+
+@catalog.command("remove")
+@click.argument("key")
+@click.option("--no-sync", is_flag=True)
+def catalog_remove(key, no_sync):
+    """Remove a model from the catalog.
+
+    Custom (CLI/dashboard-added) models are deleted outright. Models that come
+    from the setup.ini **baseline** cannot be deleted here (migrate would just
+    re-add them) — they are *disabled* via a custom override instead. To drop a
+    baseline model entirely, remove it from setup.ini.
+    """
+    cat = _load_catalog()
+    if key not in cat:
+        json_response(False, error=f"Model '{key}' not in catalog.")
+        sys.exit(1)
+    m = cat[key]
+    baseline_backed = m.get("origin") in ("baseline", "override")
+
+    try:
+        for path in _models_ini_write_targets():
+            if baseline_backed:
+                # Write a disabling override into the custom layer (preserve other fields).
+                value = (f"{m['class']}|{m['provider']}|false|"
+                         f"{'true' if m['coa'] else 'false'}|{m['ctx_recommended']}|"
+                         f"{m['ctx_max']}|{m['label']}")
+                _upsert_models_ini_entry(path, "catalog_custom", key, value)
+            else:
+                _remove_ini_entry(path, "catalog_custom", key)
+                _remove_ini_entry(path, "local_models", key)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    if baseline_backed:
+        msg = (f"'{key}' is a setup.ini baseline model — disabled via override "
+               f"(remove it from setup.ini to drop entirely).")
+    else:
+        msg = f"Removed custom model '{key}' from catalog."
+    _auto_sync_and_respond({"model": key, "disabled_only": baseline_backed,
+                            "message": msg}, do_sync=not no_sync)
+
+
+# ─── Provider Command Group ─────────────────────────────
+# CRUD over the [providers] registry in models.ini.
+
+@cli.group()
+def provider():
+    """Manage cloud/local model providers (xAI, OpenAI, Anthropic, ...)."""
+    pass
+
+
+@provider.command("list")
+@click.option("--table", "as_table", is_flag=True)
+def provider_list(as_table):
+    """List registered providers and their enabled state."""
+    provs = _load_providers()
+    rows = [{"slug": s, **info} for s, info in provs.items()]
+    if as_table:
+        if not rows:
+            click.echo("No providers registered.")
+            return
+        click.echo(f"{'SLUG':<12} {'EN':<3} {'CLASS':<26} LABEL")
+        for r in rows:
+            click.echo(f"{r['slug']:<12} {'✓' if r['enabled'] else '·':<3} {r['cls']:<26} {r['label']}")
+        return
+    json_response(True, count=len(rows), providers=rows)
+
+
+@provider.command("add")
+@click.argument("slug")
+@click.option("--label", required=True, help="Display name (e.g. 'Mistral')")
+@click.option("--class", "cls", required=True, help="LangChain class (e.g. ChatOpenAI, ChatAnthropic)")
+@click.option("--enable/--disable", "enabled", default=False, help="Enable immediately")
+@click.option("--no-sync", is_flag=True)
+def provider_add(slug, label, cls, enabled, no_sync):
+    """Register a new provider. The API key is set separately via 'system set-key'."""
+    provs = _load_providers()
+    if slug in provs:
+        json_response(False, error=f"Provider '{slug}' already exists. Use 'provider enable/disable'.")
+        sys.exit(1)
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    value = f"{'true' if enabled else 'false'}|{label}|{cls}"
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "providers_custom", slug, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    _auto_sync_and_respond(
+        {"provider": slug, "enabled": enabled,
+         "message": f"Registered provider '{slug}'. Set its key with "
+                    f"'sudo agictl system set-key {slug} <key>' if supported."},
+        do_sync=not no_sync)
+
+
+def _provider_set_enabled(slug, enabled, no_sync):
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found. Add it with 'provider add'.")
+        sys.exit(1)
+    info = provs[slug]
+    # Override always lands in the custom layer — for a baseline provider this
+    # writes a full-row override that wins at read time (and survives migrate).
+    value = f"{'true' if enabled else 'false'}|{info['label']}|{info['cls']}"
+    try:
+        for path in _models_ini_write_targets():
+            _upsert_models_ini_entry(path, "providers_custom", slug, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    _auto_sync_and_respond(
+        {"provider": slug, "enabled": enabled, "origin": info.get("origin"),
+         "message": f"Provider '{slug}' {'enabled' if enabled else 'disabled'}."},
+        do_sync=not no_sync)
+
+
+@provider.command("enable")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_enable(slug, no_sync):
+    """Enable a provider (its models become routable once a key is present)."""
+    _provider_set_enabled(slug, True, no_sync)
+
+
+@provider.command("disable")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_disable(slug, no_sync):
+    """Disable a provider (its models are removed from the runtime registry)."""
+    _provider_set_enabled(slug, False, no_sync)
+
+
+@provider.command("remove")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_remove(slug, no_sync):
+    """Remove a provider from the registry (catalog rows referencing it remain).
+
+    Custom providers are deleted; setup.ini **baseline** providers cannot be
+    deleted here (migrate would re-add them) and are *disabled* via a custom
+    override instead. To drop a baseline provider, remove it from setup.ini.
+    """
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found.")
+        sys.exit(1)
+    info = provs[slug]
+    baseline_backed = info.get("origin") in ("baseline", "override")
+    try:
+        for path in _models_ini_write_targets():
+            if baseline_backed:
+                value = f"false|{info['label']}|{info['cls']}"
+                _upsert_models_ini_entry(path, "providers_custom", slug, value)
+            else:
+                _remove_ini_entry(path, "providers_custom", slug)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    if baseline_backed:
+        msg = (f"'{slug}' is a setup.ini baseline provider — disabled via override "
+               f"(remove it from setup.ini to drop entirely).")
+    else:
+        msg = f"Removed custom provider '{slug}'."
+    _auto_sync_and_respond({"provider": slug, "disabled_only": baseline_backed,
+                            "message": msg}, do_sync=not no_sync)
 
 
 @model.group()
