@@ -127,10 +127,10 @@ graph TD
     A3 ==>|Synchronize towards| Intent
 
     %% Styling 
-    style uGPN fill:#ccc,stroke:#333,stroke-width:2px,color:#7c0606,font-weight:bold,font-size:15px;
-    style Node1 fill:#777,stroke:#444,stroke-width:1px,color:#fff;
-    style Node2 fill:#777,stroke:#444,stroke-width:1px,color:#fff;
-    style Node3 fill:#777,stroke:#444,stroke-width:1px,color:#fff;
+    style uGPN fill:#13151a,stroke:#333,stroke-width:2px,color:#fff;
+    style Node1 fill:#1e1e24,stroke:#444,stroke-width:1px,color:#fff;
+    style Node2 fill:#1e1e24,stroke:#444,stroke-width:1px,color:#fff;
+    style Node3 fill:#1e1e24,stroke:#444,stroke-width:1px,color:#fff;
 ```
 
 ## Architecture
