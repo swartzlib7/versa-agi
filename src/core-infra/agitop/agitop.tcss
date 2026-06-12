@@ -152,57 +152,68 @@ SelectCurrent {
     height: auto;
 }
 
-/* ─── Agents + Projects Row ────────────────────── */
+/* ─── Agents Panel ─────────────────────────────── */
 
-#agents-projects-row {
+#agents-panel {
+    width: 1fr;
     height: auto;
     min-height: 5;
     max-height: 10;
     margin-top: 1;
-}
-
-#agents-panel {
-    width: 2fr;
-    height: 1fr;
     border: solid $accent;
     padding: 0 1;
     background: $surface-darken-1;
 }
 
-#projects-panel {
-    width: 1fr;
-    height: 1fr;
-    border: solid $success;
-    padding: 0 1;
-    background: $surface-darken-1;
-    margin-left: 1;
+/* ─── Tasks / Messages / Projects tabs ─────────── */
+/* Tab bar ~3 rows + 24-row content. Parent height must match (not 33) or a blank
+   strip appears below the tables. Panels fill TabPane via height: 100%. */
+
+#work-tabs {
+    width: 100%;
+    height: 27;
+    margin-top: 1;
 }
 
-/* ─── Tasks Panel ────────────────────────────── */
+#work-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
 
-#tasks-collapsible {
-    margin-top: 1;
+#work-tabs TabPane {
+    height: 100%;
+    padding: 0;
 }
 
 #tasks-panel {
     width: 1fr;
-    height: auto;
-    min-height: 10;
+    height: 100%;
     border: solid $warning;
     padding: 0 1;
     background: $surface-darken-1;
 }
 
-/* ─── Messages Panel ──────────────────────────── */
-
-#messages-collapsible {
-    margin-top: 1;
+#messages-panel {
+    width: 1fr;
+    height: 100%;
+    border: solid $primary;
+    padding: 0 1;
+    background: $surface-darken-1;
 }
 
-#messages-panel {
-    height: auto;
-    min-height: 15;
-    border: solid $primary;
+#messages-panel-body {
+    height: 100%;
+}
+
+#messages-table {
+    height: 1fr;
+    min-height: 0;
+}
+
+#projects-panel {
+    width: 1fr;
+    height: 100%;
+    border: solid $success;
     padding: 0 1;
     background: $surface-darken-1;
 }
@@ -315,23 +326,38 @@ TaskEditModal {
     content-align: center middle;
 }
 
-#task-dialog-desc {
+#task-edit-desc {
+    height: 10;
+    margin-bottom: 1;
+}
+
+.task-field-row {
     height: auto;
-    max-height: 8;
-    overflow-y: auto;
+    width: 100%;
     margin-bottom: 1;
 }
 
-#task-edit-status {
-    margin-bottom: 1;
+.task-field-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
 }
 
-#task-edit-due {
-    margin-bottom: 1;
+.task-field-col:last-child {
+    margin-right: 0;
 }
 
 #task-edit-error {
     height: auto;
+}
+
+#task-progress-scroll {
+    height: 14;
+    min-height: 5;
+    max-height: 18;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: solid $accent;
 }
 
 .task-progress-entry {
@@ -708,6 +734,83 @@ ApiKeysModal {
 #api-keys-feedback {
     margin-top: 1;
     padding: 1;
+}
+
+/* ─── Model Manager Modal ────────────────────── */
+
+.model-manager-btn {
+    background: #1a73e8;
+    color: #ffffff;
+}
+
+.model-manager-btn:hover {
+    background: #1765cc;
+}
+
+ModelManagerModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#model-manager-dialog {
+    width: 92%;
+    height: 92%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #1a73e8;
+}
+
+#mm-help {
+    margin-bottom: 1;
+}
+
+.mm-subheader {
+    margin-top: 1;
+}
+
+#model-manager-dialog DataTable {
+    height: auto;
+    max-height: 16;
+    margin: 1 0;
+}
+
+.mm-actions {
+    height: auto;
+    align: center middle;
+}
+
+.mm-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
+}
+
+#mm-feedback {
+    margin-top: 1;
+    padding: 0 1;
+}
+
+.mm-form-row {
+    height: auto;
+    margin-top: 1;
+}
+
+.mm-form-col {
+    width: 1fr;
+    height: auto;
+    margin: 0 1;
+}
+
+/* Model Manager sub-modals (Add/Edit forms) — centered like other modals. */
+CatalogFormModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ProviderFormModal {
+    align: center middle;
+    background: $surface 80%;
 }
 
 /* ─── Cycle Log Modal ────────────────────────── */

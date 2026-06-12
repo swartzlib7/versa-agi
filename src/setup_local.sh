@@ -1286,8 +1286,8 @@ SRVEOF
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_parallel=.*/sycl_parallel='"${SYCL_PARALLEL}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_ctx_size=.*/sycl_ctx_size='"${SYCL_CTX_SIZE}"'/}' "${SETUP_INI}"
       fi
-      # Server mode: disable cloud proxy — inference server only serves local models
-      sed -i '/^\[cloud_models\]/,/^\[/{s/^enabled=.*/enabled=false/}' "${SETUP_INI}"
+      # Server mode: disable third-party cloud proxy — inference server only serves local models
+      sed -i '/^\[third_party\]/,/^\[/{s/^enabled=.*/enabled=false/}' "${SETUP_INI}"
       ok "Updated: ${SETUP_INI}"
     fi
   done

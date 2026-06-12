@@ -675,6 +675,181 @@ def system_vacuum():
     json_response(True, databases=results)
 
 
+# ─── Config Reconciliation (deterministic regeneration) ───
+# Run by setup.sh on EVERY run (fresh + --update): the shipped templates are the
+# authority for structure, comments, stock model lists, and new/removed keys;
+# user-provided content is preserved. See `system reconcile-config`.
+
+def _parse_ini_pairs(path):
+    """Parse {(section, key): value} from an INI file (line-based, comment-safe)."""
+    pairs = {}
+    section = None
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                section = s[1:-1]
+            elif section and s and not s.startswith("#") and "=" in s:
+                k, v = s.split("=", 1)
+                pairs[(section, k.strip())] = v.strip()
+    return pairs
+
+
+def _ini_section_body_lines(path, section):
+    """Return the raw body lines of an INI section (between its header and the next)."""
+    body, in_sec = [], False
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                if in_sec:
+                    break
+                in_sec = (s[1:-1] == section)
+                continue
+            if in_sec:
+                body.append(line.rstrip("\n"))
+    while body and not body[-1].strip():
+        body.pop()
+    return body
+
+
+def _is_stock_setup_key(section, key):
+    """True for setup.ini keys owned by the shipped template (never carried forward).
+
+    These are the stock model-selection lists — the release decides them; the
+    operator customizes models via the dashboard/CLI custom layer instead.
+    """
+    if section == "gemini" and key in ("cloud_models", "coa_approved_models"):
+        return True
+    if section == "third_party" and (key == "providers" or key.endswith("_models")):
+        return True
+    return False
+
+
+def _reconcile_setup_ini(template, deployed):
+    """Regenerate the deployed setup.ini from the template, carrying user values forward.
+
+    The new file is the template verbatim (structure, comments, stock lists, new
+    keys with defaults), except that for every template key also present in the
+    deployed file the deployed value wins — unless the key is stock-owned
+    (`_is_stock_setup_key`). Deployed-only (deprecated) keys drop by design.
+    Returns the number of carried-forward values.
+    """
+    user_vals = _parse_ini_pairs(deployed)
+    out = []
+    section = None
+    carried = 0
+    with open(template) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                section = s[1:-1]
+                out.append(line)
+                continue
+            if section and s and not s.startswith("#") and "=" in s:
+                key = s.split("=", 1)[0].strip()
+                if (section, key) in user_vals and not _is_stock_setup_key(section, key):
+                    prefix = line[:line.index("=") + 1]
+                    out.append(f"{prefix}{user_vals[(section, key)]}\n")
+                    carried += 1
+                    continue
+            out.append(line)
+    with open(deployed, "w") as f:
+        f.writelines(out)
+    return carried
+
+
+# Shared local sections: shipped rows + registry-added user rows coexist here,
+# so reconciliation is a per-key union (deployed-only keys are preserved).
+_MODELS_UNION_SECTIONS = ("local_models", "context_windows", "sycl_models")
+
+
+def _reconcile_models_ini(template, deployed):
+    """Regenerate the deployed models.ini from the template, preserving user content.
+
+    Preserved across regeneration:
+      - [catalog_custom] / [providers_custom] bodies verbatim (the user layer)
+      - deployed-only keys in the shared local sections (registry-added models)
+    Everything else (header comments, [catalog]/[providers] stock, shipped local
+    rows) comes fresh from the template; `model migrate` rebuilds the baseline
+    from setup.ini right after.
+    """
+    custom_bodies = {
+        sec: _ini_section_body_lines(deployed, sec)
+        for sec in ("catalog_custom", "providers_custom")
+    }
+    tmpl_pairs = _parse_ini_pairs(template)
+    dep_pairs = _parse_ini_pairs(deployed)
+    union_extras = [
+        (sec, k, v)
+        for (sec, k), v in dep_pairs.items()
+        if sec in _MODELS_UNION_SECTIONS and (sec, k) not in tmpl_pairs
+    ]
+
+    shutil.copyfile(template, deployed)
+    for sec, body in custom_bodies.items():
+        if body:
+            _replace_ini_section_body(deployed, sec, body)
+    for sec, k, v in union_extras:
+        _upsert_models_ini_entry(deployed, sec, k, v)
+
+    custom_rows = sum(
+        1 for body in custom_bodies.values()
+        for l in body if "=" in l and not l.strip().startswith("#"))
+    return {"custom_rows_preserved": custom_rows,
+            "local_rows_unioned": len(union_extras)}
+
+
+@system.command("reconcile-config", hidden=True)
+@click.option("--setup-template", required=True, type=click.Path(exists=True),
+              help="Shipped setup.ini template (installer directory)")
+@click.option("--models-template", required=True, type=click.Path(exists=True),
+              help="Shipped models.ini template (installer directory)")
+def system_reconcile_config(setup_template, models_template):
+    """Regenerate deployed setup.ini + models.ini from the shipped templates.
+
+    Deterministic config refresh run by setup.sh on EVERY run (fresh and
+    --update alike). The template is authority for structure, comments, stock
+    model lists, and new/removed keys; user-provided content is preserved:
+    setup.ini user-owned values (keys, tokens, mode, hardware, ...), and
+    models.ini [catalog_custom]/[providers_custom] plus registry-added rows in
+    [local_models]/[context_windows]/[sycl_models]. Follow with
+    'agictl model migrate' + 'agictl model sync'.
+    """
+    # Operator-only (same rationale as `model migrate`): agents must not be able
+    # to re-stamp system config. setup.sh runs as root (AGICTL_AGENT_USER unset).
+    if os.environ.get("AGICTL_AGENT_USER", ""):
+        json_response(False, error="'system reconcile-config' is Primary User / operator only.")
+        sys.exit(1)
+
+    result = {}
+    try:
+        # setup.ini: regenerate only when a deployed copy exists (fresh installs
+        # create it later, in setup.sh Step 13, from interactively collected values).
+        if os.path.exists(SETUP_INI_CANONICAL):
+            result["setup_ini_values_carried"] = _reconcile_setup_ini(
+                setup_template, SETUP_INI_CANONICAL)
+            result["setup_ini"] = "regenerated"
+        else:
+            result["setup_ini"] = "absent (fresh install — created in Step 13)"
+
+        models_deployed = _MODELS_INI_PATHS[0]
+        if os.path.exists(models_deployed):
+            result.update(_reconcile_models_ini(models_template, models_deployed))
+            result["models_ini"] = "regenerated"
+        else:
+            shutil.copyfile(models_template, models_deployed)
+            result["models_ini"] = "seeded from template"
+    except PermissionError:
+        json_response(False, error="permission denied writing config (run as root)")
+        sys.exit(1)
+    except Exception as e:
+        json_response(False, error=f"reconcile failed: {e}")
+        sys.exit(1)
+
+    json_response(True, **result)
+
+
 # ═══════════════════════════════════════════════════════
 # 1b. MODEL — Local model management
 # ═══════════════════════════════════════════════════════
@@ -993,8 +1168,11 @@ def _remove_ini_entry(path, section, key):
 def _sync_catalog():
     """Regenerate derived model config from the [catalog] source of truth.
 
-    Rewrites the [models]/[third_party_models] label sections in every models.ini
-    copy and refreshes the cloud/third-party paths.env registries. Local models
+    Refreshes the cloud/third-party paths.env registries (VERSA_CLOUD_MODELS,
+    VERSA_THIRD_PARTY_MODELS, VERSA_THIRD_PARTY_ENABLED, VERSA_COA_APPROVED_MODELS)
+    from the merged catalog + provider-enabled state. Edition 2.x readers (agitop
+    picker, harness model_context) read display labels / context windows from
+    [catalog] directly, so no legacy label sections are generated. Local models
     and VERSA_LOCAL_MODELS are owned by the local pipeline and left untouched.
 
     Returns (success: bool, payload: dict). Never raises for expected I/O issues —
@@ -1008,7 +1186,6 @@ def _sync_catalog():
                       "message": "No [catalog] section found — nothing to sync (run 'agictl model migrate')."}
 
     cloud, third_party, coa = [], [], []
-    cloud_labels, tp_labels = [], []
     tp_provider_active = set()
 
     for key, m in catalog.items():
@@ -1018,7 +1195,6 @@ def _sync_catalog():
                 cloud.append(key)
                 if m["coa"]:
                     coa.append(key)
-            cloud_labels.append((key, m["label"]))
         elif cls == "third_party":
             prov = providers.get(m["provider"], {})
             available = m["enabled"] and prov.get("enabled", False)
@@ -1027,26 +1203,9 @@ def _sync_catalog():
                 tp_provider_active.add(m["provider"])
                 if m["coa"]:
                     coa.append(key)
-            tp_labels.append((key, m["label"]))
         # local rows are advisory in this edition — not synced here
 
-    files_written = []
     errors = []
-    for path in _MODELS_INI_PATHS:
-        if not os.path.exists(path):
-            continue
-        try:
-            _replace_ini_section_body(
-                path, "models",
-                [f"{k:<29} = {lbl}\n" for k, lbl in cloud_labels])
-            _replace_ini_section_body(
-                path, "third_party_models",
-                [f"{k:<29} = {lbl}\n" for k, lbl in tp_labels])
-            files_written.append(path)
-        except PermissionError:
-            errors.append(f"permission denied: {path} (use sudo)")
-        except Exception as e:
-            errors.append(f"{path}: {e}")
 
     paths_updated = False
     if os.path.isfile(PATHS_ENV_FILE):
@@ -1066,7 +1225,7 @@ def _sync_catalog():
         "changed": True,
         "cloud_models": cloud, "third_party_models": third_party,
         "coa_approved": coa, "third_party_enabled": bool(tp_provider_active),
-        "files_written": files_written, "paths_env_updated": paths_updated,
+        "paths_env_updated": paths_updated,
     }
     if errors:
         payload["error"] = "; ".join(errors)
@@ -2569,10 +2728,11 @@ def model_refresh():
 def model_sync():
     """Regenerate derived model config from the [catalog] source of truth.
 
-    Rewrites the [models] and [third_party_models] label sections in every
-    models.ini copy, and refreshes the cloud/third-party model registries in
-    paths.env (VERSA_CLOUD_MODELS, VERSA_THIRD_PARTY_MODELS,
-    VERSA_THIRD_PARTY_ENABLED, VERSA_COA_APPROVED_MODELS).
+    Refreshes the cloud/third-party model registries in paths.env
+    (VERSA_CLOUD_MODELS, VERSA_THIRD_PARTY_MODELS, VERSA_THIRD_PARTY_ENABLED,
+    VERSA_COA_APPROVED_MODELS) from the merged catalog. Edition 2.x readers
+    (agitop picker, harness model_context) read labels/context windows from
+    [catalog] directly, so no legacy label sections are regenerated.
 
     Local models and topology-dependent keys (VERSA_LOCAL_MODELS) are owned by
     the local pipeline and left untouched in this edition. Idempotent — a no-op
@@ -2585,23 +2745,55 @@ def model_sync():
     json_response(True, **payload)
 
 
-def _build_migration_rows(target):
-    """Derive ([providers], [catalog]) rows from setup.ini + legacy models.ini.
+def _catalog_baseline_meta(ini):
+    """Parse the [catalog] BASELINE rows into {key: (label, ctx_recommended, ctx_max)}.
 
-    Returns (provider_rows, catalog_rows) as ordered lists of (key, value). The
-    canonical ``target`` models.ini supplies legacy label/context enrichment.
+    This is the single stock-metadata source for cloud/third-party models: the
+    shipped template's [catalog] (re-read from the file being migrated). `migrate`
+    re-selects *membership* from setup.ini but carries label + context windows from
+    here, so there is one canonical metadata shape (no parallel legacy sections).
+    """
+    meta = {}
+    if not ini.has_section("catalog"):
+        return meta
+    for key, raw in ini.items("catalog"):
+        parts = raw.split("|")
+        if len(parts) < 7:
+            continue
+        try:
+            rec = int(parts[4].strip() or "0")
+            mx = int(parts[5].strip() or "0")
+        except ValueError:
+            rec, mx = 0, 0
+        meta[key.strip()] = (parts[6].strip() or key.strip(), rec, mx)
+    return meta
+
+
+def _build_migration_rows(target):
+    """Derive ([providers], [catalog]) rows from setup.ini + the template catalog.
+
+    Returns (provider_rows, catalog_rows) as ordered lists of (key, value).
+
+    Edition 2.x (reconciled): setup.ini decides *membership* (which models ship)
+    plus COA eligibility and provider enablement. Cloud/third-party *metadata*
+    (display label + context windows) is sourced from the [catalog] baseline of
+    the ``target`` models.ini — the shipped template's catalog — which is the sole
+    stock-metadata source. Local rows remain sourced from the pipeline-owned
+    [local_models]/[context_windows] sections (intentionally left untouched).
     """
     import configparser
     mini = configparser.ConfigParser(delimiters=('=',))
     if target and os.path.exists(target):
         mini.read(target)
 
-    def _label(section, key, default):
-        if mini.has_section(section):
-            return mini.get(section, key, fallback=default).strip() or default
+    cat_meta = _catalog_baseline_meta(mini)
+
+    def _local_label(key, default):
+        if mini.has_section("local_models"):
+            return mini.get("local_models", key, fallback=default).strip() or default
         return default
 
-    def _ctx(key, default_max):
+    def _local_ctx(key, default_max):
         if mini.has_section("context_windows"):
             val = mini.get("context_windows", key, fallback="")
             if "," in val:
@@ -2620,14 +2812,14 @@ def _build_migration_rows(target):
 
     catalog_rows = []
 
-    # ── Cloud ──
+    # ── Cloud (metadata from the [catalog] template; default if unseen) ──
     for k in cloud_models:
-        rec, mx = _ctx(k, 1000000)
-        lbl = _label("models", k, k)
+        lbl, rec, mx = cat_meta.get(k, (k, 0, 1000000))
+        mx = mx if mx > 0 else 1000000
         coa = "true" if k in coa_approved else "false"
         catalog_rows.append((k, f"cloud|google|true|{coa}|{rec}|{mx}|{lbl}"))
 
-    # ── Third-party (per provider) ──
+    # ── Third-party (per provider; metadata from the [catalog] template) ──
     provider_rows = [
         ("google", "true|Google Gemini|ChatGoogleGenerativeAI"),
     ]
@@ -2642,18 +2834,18 @@ def _build_migration_rows(target):
         p_label = label_map.get(slug, slug)
         provider_rows.append((slug, f"{p_enabled}|{p_label}|{p_cls}"))
         for k in _read_ini_csv("third_party", f"{slug}_models")[0]:
-            rec, mx = _ctx(k, 131072)
-            lbl = _label("third_party_models", k, k)
+            lbl, rec, mx = cat_meta.get(k, (k, 0, 131072))
+            mx = mx if mx > 0 else 131072
             coa = "true" if k in coa_approved else "false"
             catalog_rows.append((k, f"third_party|{slug}|true|{coa}|{rec}|{mx}|{lbl}"))
     provider_rows.append(("ollama", "true|Local (Ollama / SYCL)|ChatOllama"))
 
-    # ── Local (advisory) ──
+    # ── Local (advisory; pipeline-owned [local_models]/[context_windows]) ──
     local_keys = local_models or (
         [k for k, _ in mini.items("local_models")] if mini.has_section("local_models") else [])
     for k in local_keys:
-        rec, mx = _ctx(k, 4096)
-        lbl = _label("local_models", k, k)
+        rec, mx = _local_ctx(k, 4096)
+        lbl = _local_label(k, k)
         catalog_rows.append((k, f"local|ollama|true|false|{rec}|{mx}|{lbl}"))
 
     return provider_rows, catalog_rows
@@ -2693,6 +2885,22 @@ def model_migrate(force):
     `--force` additionally wipes the user layer for a full factory reset to
     setup.ini. Idempotent in both modes.
     """
+    # Guard: `migrate` is an install/operator-time action — it regenerates the
+    # baseline from setup.ini (which only operators edit). The COA's own model work
+    # goes through `model catalog`/`provider`/`sync`; it never needs to migrate, and
+    # `--force` would let it factory-reset itself unattended. So restrict the whole
+    # command to the Primary User / operator. AGICTL_AGENT_USER is set by
+    # agictl-wrapper to the real OS caller for agent invocations; a direct
+    # root/PU/dashboard (sudo) call leaves it empty and is allowed (e.g. setup.sh).
+    if os.environ.get("AGICTL_AGENT_USER", ""):
+        json_response(
+            False,
+            error="'model migrate' is Primary User / operator only (run by setup.sh "
+                  "or the operator). Agents manage models via 'model catalog', "
+                  "'provider', and 'model sync'.",
+        )
+        sys.exit(1)
+
     target = _resolve_models_ini_path()
     if not target:
         json_response(False, error="models.ini not found")
@@ -2992,6 +3200,40 @@ def provider_add(slug, label, cls, enabled, no_sync):
         {"provider": slug, "enabled": enabled,
          "message": f"Registered provider '{slug}'. Set its key with "
                     f"'sudo agictl system set-key {slug} <key>' if supported."},
+        do_sync=not no_sync)
+
+
+@provider.command("update")
+@click.argument("slug")
+@click.option("--label", default=None, help="New display name")
+@click.option("--class", "cls", default=None, help="LangChain class (e.g. ChatOpenAI)")
+@click.option("--enable/--disable", "enabled", default=None, help="Enable or disable the provider")
+@click.option("--no-sync", is_flag=True)
+def provider_update(slug, label, cls, enabled, no_sync):
+    """Update fields on an existing provider (only provided fields change).
+
+    Edits always land in the user layer ([providers_custom]); for a setup.ini
+    baseline provider this writes a full-row override that wins at read time and
+    survives `model migrate`.
+    """
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found. Add it with 'provider add'.")
+        sys.exit(1)
+    info = provs[slug]
+    new_enabled = info["enabled"] if enabled is None else enabled
+    new_label = info["label"] if label is None else label
+    new_cls = info["cls"] if cls is None else cls
+    value = f"{'true' if new_enabled else 'false'}|{new_label}|{new_cls}"
+    try:
+        for path in _models_ini_write_targets():
+            _upsert_models_ini_entry(path, "providers_custom", slug, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    _auto_sync_and_respond(
+        {"provider": slug, "enabled": new_enabled, "origin": info.get("origin"),
+         "message": f"Updated provider '{slug}'."},
         do_sync=not no_sync)
 
 

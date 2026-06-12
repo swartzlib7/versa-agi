@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, VerticalScroll
-from textual.widgets import Header, Footer, Collapsible
+from textual.containers import VerticalScroll
+from textual.widgets import Header, Footer, TabbedContent, TabPane
 from textual.binding import Binding
 
 from agitop.data import AgentReader, MessageReader, TasksReader
@@ -56,14 +56,15 @@ class AgitopApp(App):
 
         with VerticalScroll(id="dashboard"):
             yield SystemPanel(self.system, self.config, self.status, self.agent_reader, id="system-panel")
-            with Horizontal(id="agents-projects-row"):
-                yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
-                yield ProjectsPanel(self.tasks_reader, id="projects-panel")
+            yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
             yield FooterStatsPanel(self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel")
-            with Collapsible(title="Tasks", id="tasks-collapsible", collapsed=True):
-                yield TasksPanel(self.tasks_reader, message_reader=self.message_reader, id="tasks-panel")
-            with Collapsible(title="Messages", id="messages-collapsible", collapsed=True):
-                yield MessagesPanel(self.message_reader, config=self.config, agent_reader=self.agent_reader, id="messages-panel")
+            with TabbedContent(initial="projects-tab", id="work-tabs"):
+                with TabPane("Projects", id="projects-tab"):
+                    yield ProjectsPanel(self.tasks_reader, id="projects-panel")
+                with TabPane("Tasks", id="tasks-tab"):
+                    yield TasksPanel(self.tasks_reader, message_reader=self.message_reader, id="tasks-panel")
+                with TabPane("Messages", id="messages-tab"):
+                    yield MessagesPanel(self.message_reader, config=self.config, agent_reader=self.agent_reader, id="messages-panel")
 
         yield Footer()
 

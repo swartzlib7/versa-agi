@@ -1,6 +1,8 @@
 import os
 import sys
 import json
+import time
+import uuid
 import sqlite3
 import shlex
 import argparse
@@ -12,6 +14,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -20,6 +23,142 @@ def tlog(msg: str):
     """Timestamped print for result file traceability."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
+
+
+_PLACEHOLDER_TOOL_CONTENT = "[Result unavailable — the cycle ended before this tool call completed.]"
+
+
+def _canonicalize_messages(msgs, max_msgs=0):
+    """Produce a provider-valid message list from a checkpoint history.
+
+    Every major LLM provider rejects a malformed tool-call transcript
+    (``INVALID_CHAT_HISTORY`` / ``400``). This function returns a sequence that
+    is valid by construction, guaranteeing:
+
+      * Every ``AIMessage`` tool_call is immediately followed by a ``ToolMessage``
+        answering it. If the real result was lost (crash mid-execution, an
+        earlier prune, a partial trim) a synthetic placeholder is inserted
+        ADJACENT to its parent — so even a dangling call buried in the middle
+        of the history is repaired, not just one at the tail.
+      * Every ``ToolMessage`` immediately follows the ``AIMessage`` that produced
+        its ``tool_call_id``. Orphans (no preceding producer), duplicate answers,
+        and foreign results are dropped.
+      * An optional depth trim keeps only the last ``max_msgs`` messages, anchored
+        so the window begins at a ``HumanMessage`` (the pre_model_hook trims with
+        ``start_on="human"``, so a non-human start would be discarded anyway).
+        When no ``HumanMessage`` exists the history is dropped entirely.
+
+    Pure function (no I/O). Returns ``(clean, changed, stats)`` where ``changed``
+    is ``True`` iff the id-sequence differs from the input — placeholders carry
+    fresh ids and drops/trims/reorders change the sequence, so any modification
+    flips it and only then must the caller persist.
+    """
+    original_ids = [getattr(m, "id", None) for m in msgs]
+    stats = {"trimmed": 0, "orphans": 0, "placeholders": 0}
+
+    # ── 1. Depth trim, anchored at a HumanMessage ──
+    work = list(msgs)
+    if max_msgs > 0 and len(work) > max_msgs:
+        first_sys = work[0] if work and isinstance(work[0], SystemMessage) else None
+        body = work[1:] if first_sys else work
+        keep_n = (max_msgs - 1) if first_sys else max_msgs
+        start = max(len(body) - keep_n, 0)
+        anchor = None
+        # Expand backwards toward an earlier HumanMessage (bounded), else
+        # shrink forward to the next one.
+        for i in range(start, max(start - max_msgs, -1), -1):
+            if isinstance(body[i], HumanMessage):
+                anchor = i
+                break
+        if anchor is None:
+            for i in range(start + 1, len(body)):
+                if isinstance(body[i], HumanMessage):
+                    anchor = i
+                    break
+        kept_body = body[anchor:] if anchor is not None else []
+        work = ([first_sys] if first_sys else []) + kept_body
+        stats["trimmed"] = len(msgs) - len(work)
+
+    # ── 2. Repair tool_call / ToolMessage pairing and ordering ──
+    clean = []
+    i, n = 0, len(work)
+    while i < n:
+        m = work[i]
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            clean.append(m)
+            expected = [tc["id"] for tc in m.tool_calls]
+            names = {tc["id"]: tc.get("name", "unknown") for tc in m.tool_calls}
+            expected_set = set(expected)
+            # Consume the run of ToolMessages immediately following this AIMessage.
+            answered = {}
+            j = i + 1
+            while j < n and isinstance(work[j], ToolMessage):
+                tm = work[j]
+                tcid = getattr(tm, "tool_call_id", None)
+                if tcid in expected_set and tcid not in answered:
+                    answered[tcid] = tm
+                else:
+                    stats["orphans"] += 1  # duplicate / foreign result
+                j += 1
+            # Emit answers in the tool_call order, synthesizing where missing.
+            for cid in expected:
+                if cid in answered:
+                    clean.append(answered[cid])
+                else:
+                    clean.append(ToolMessage(
+                        content=_PLACEHOLDER_TOOL_CONTENT,
+                        tool_call_id=cid,
+                        name=names[cid],
+                        id=str(uuid.uuid4()),
+                    ))
+                    stats["placeholders"] += 1
+            i = j
+        elif isinstance(m, ToolMessage):
+            # ToolMessage with no preceding producing AIMessage — orphan.
+            stats["orphans"] += 1
+            i += 1
+        else:
+            clean.append(m)
+            i += 1
+
+    changed = [getattr(m, "id", None) for m in clean] != original_ids
+    return clean, changed, stats
+
+
+# Transient HTTP statuses worth retrying — timeouts, conflicts, rate limits,
+# the "headers too large" edge case (431), and all 5xx. Excludes 400/401/403/404
+# and other deterministic client errors (retrying those is pointless).
+_TRANSIENT_HTTP_STATUS = {408, 409, 425, 429, 431, 500, 502, 503, 504}
+
+# Transient exception class names across providers (openai, anthropic, google,
+# httpx). Matched by name so we don't have to import every SDK.
+_TRANSIENT_EXC_NAMES = {
+    "APIConnectionError", "APITimeoutError", "InternalServerError",
+    "RateLimitError", "ServiceUnavailable", "ResourceExhausted",
+    "DeadlineExceeded", "ServiceUnavailableError", "InternalServerError",
+    "Timeout", "ConnectError", "ConnectTimeout", "ReadTimeout",
+    "RemoteProtocolError", "PoolTimeout",
+}
+
+
+def _is_transient_transport_error(e) -> bool:
+    """True if `e` is a transient transport/edge failure worth retrying.
+
+    Provider-agnostic: checks an HTTP status code (directly or on a nested
+    response) against the transient set, then falls back to matching transient
+    exception class names anywhere in the MRO. Deterministic client errors
+    (400/401/403/404, validation, INVALID_CHAT_HISTORY) are NOT transient.
+    """
+    status = getattr(e, "status_code", None)
+    if status is None:
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+    if isinstance(status, int) and status in _TRANSIENT_HTTP_STATUS:
+        return True
+    for cls in type(e).__mro__:
+        if cls.__name__ in _TRANSIENT_EXC_NAMES:
+            return True
+    return False
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
@@ -983,125 +1122,58 @@ def main():
         except Exception:
             session_type = "NEW"  # Table may not exist yet
 
-        # Pass 2: Always validate checkpoint integrity on RESUME
-        # Previously gated by a sentinel file written by lifeline — but that was fragile
-        # (circuit breaker, permission issues, or early exits could prevent the sentinel).
-        # The tail scan is cheap enough to run unconditionally.
+        # ── Checkpoint integrity & depth trim (single atomic pass) ──
+        # On RESUME the persisted history can be malformed in ways every provider
+        # rejects (INVALID_CHAT_HISTORY): dangling tool_calls (an AIMessage whose
+        # ToolMessage never landed), orphan ToolMessages (no preceding producer),
+        # or a window not starting at a HumanMessage. Instead of mutating in place
+        # with RemoveMessage batches — which can PARTIAL-FAIL and leave a corrupted
+        # state (the thread 93-0 incident) — we compute a canonical, valid sequence
+        # and clear-and-reseed it ATOMICALLY via the REMOVE_ALL_MESSAGES sentinel.
+        # That single write cannot partial-fail and repairs even a dangling call
+        # buried mid-history (the placeholder is inserted adjacent to its parent).
         if session_type == "RESUME":
             try:
                 snapshot = agent.get_state(config)
-                if snapshot and snapshot.values.get("messages"):
-                    saved_msgs = snapshot.values["messages"]
-                    # Scan the FULL message history for dangling tool calls.
-                    # Previously only scanned the last 10, but corrupted calls can
-                    # exist deeper in the history if a previous kill left orphans
-                    # that were then buried by subsequent resume messages.
-                    total_dangling = set()
-                    repair_msgs = []
-
-                    for i, msg in enumerate(saved_msgs):
-                        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-                            tool_call_ids = {tc["id"] for tc in msg.tool_calls}
-                            answered_ids = set()
-                            for subsequent in saved_msgs[i + 1:]:
-                                if isinstance(subsequent, ToolMessage) and hasattr(subsequent, "tool_call_id"):
-                                    answered_ids.add(subsequent.tool_call_id)
-                            dangling = tool_call_ids - answered_ids
-                            if dangling:
-                                total_dangling |= dangling
-                                for tc in msg.tool_calls:
-                                    if tc["id"] in dangling:
-                                        repair_msgs.append(ToolMessage(
-                                            content="[Cycle terminated before this tool call completed. Result unavailable.]",
-                                            tool_call_id=tc["id"],
-                                            name=tc.get("name", "unknown"),
-                                        ))
-
-                    if repair_msgs:
-                        tlog(f"CHECKPOINT REPAIR: Patching {len(repair_msgs)} dangling tool call(s) from previous crashed cycle")
-                        agent.update_state(config, {"messages": repair_msgs})
-                        tlog(f"CHECKPOINT REPAIR: State repaired — {len(repair_msgs)} placeholder ToolMessage(s) injected")
-                    else:
-                        tlog(f"CHECKPOINT: Clean resume — no dangling calls (thread: {args.thread_id})")
-                else:
+                current = snapshot.values.get("messages", []) if snapshot else []
+                if not current:
                     tlog(f"CHECKPOINT: Resume with empty state (thread: {args.thread_id})")
+                else:
+                    clean, changed, stats = _canonicalize_messages(current, args.resume_max_messages)
+                    if changed:
+                        agent.update_state(
+                            config,
+                            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + clean},
+                            as_node="__start__",
+                        )
+                        post = agent.get_state(config)
+                        post_count = len(post.values.get("messages", [])) if post else -1
+                        depth = args.resume_max_messages if args.resume_max_messages > 0 else "unlimited"
+                        tlog(
+                            f"CHECKPOINT REPAIR: {len(current)} → {post_count} messages "
+                            f"(trimmed {stats['trimmed']}, orphans dropped {stats['orphans']}, "
+                            f"placeholders {stats['placeholders']}, max: {depth})"
+                        )
+                        if not clean:
+                            session_type = "NEW"
+                    else:
+                        tlog(
+                            f"CHECKPOINT: Clean resume — {len(current)} messages, "
+                            f"no repair needed (thread: {args.thread_id})"
+                        )
             except Exception as e:
-                tlog(f"CHECKPOINT REPAIR: Failed — {e}. Deleting corrupted thread.")
+                # Any failure means we cannot guarantee a valid history. Wipe the
+                # thread so the next invoke starts from a known-good empty state
+                # rather than risk an INVALID_CHAT_HISTORY crash.
+                tlog(f"CHECKPOINT REPAIR: Failed — {e}. Wiping thread for a clean start.")
                 session_type = "NEW"
                 try:
                     checkpointer.conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (args.thread_id,))
                     checkpointer.conn.execute("DELETE FROM writes WHERE thread_id = ?", (args.thread_id,))
                     checkpointer.conn.commit()
-                    tlog(f"CHECKPOINT: Corrupted thread {args.thread_id} deleted — starting fresh")
+                    tlog(f"CHECKPOINT: Corrupted thread {args.thread_id} wiped — starting fresh")
                 except Exception as de:
-                    tlog(f"CHECKPOINT: Could not delete corrupted thread — {de}")
-
-            # ── Resume Depth Trimming ──
-            # When resume_max_messages > 0, trim the checkpoint state to keep
-            # only the last N messages. Older messages remain in the DB file
-            # (reclaimed by vacuum pruning), but the active state is trimmed.
-            #
-            # IMPORTANT: the messages channel uses the add_messages reducer,
-            # which UPSERTS by message ID and never deletes. Passing a subset
-            # of existing messages is a silent no-op (the June 2026 incident:
-            # "50 messages after resume-trim" that were never actually
-            # trimmed). Deletion requires explicit RemoveMessage objects.
-            if session_type == "RESUME" and args.resume_max_messages > 0:
-                try:
-                    snapshot = agent.get_state(config)
-                    if snapshot and snapshot.values.get("messages"):
-                        saved_msgs = snapshot.values["messages"]
-                        msg_count = len(saved_msgs)
-                        max_msgs = args.resume_max_messages
-                        if msg_count > max_msgs:
-                            # Preserve the first SystemMessage if present
-                            first_sys = saved_msgs[0] if isinstance(saved_msgs[0], SystemMessage) else None
-                            body = saved_msgs[1:] if first_sys else saved_msgs
-                            keep_n = (max_msgs - 1) if first_sys else max_msgs
-                            start = max(len(body) - keep_n, 0)
-
-                            # ── Human-Boundary Anchor ──
-                            # The pre_model_hook trims with start_on="human" — a kept
-                            # window that doesn't begin at a HumanMessage gets fully
-                            # discarded at every LLM call (dead context). Anchor the
-                            # window start on a HumanMessage:
-                            #   1. Expand backwards up to max_msgs extra messages
-                            #      (bounded — total keep ≤ 2 × max_msgs).
-                            #   2. Else shrink forward to the next HumanMessage.
-                            #   3. Else (no HumanMessage at all) drop the history —
-                            #      it would be discarded by the trimmer anyway.
-                            anchor = None
-                            for i in range(start, max(start - max_msgs, -1), -1):
-                                if isinstance(body[i], HumanMessage):
-                                    anchor = i
-                                    break
-                            if anchor is None:
-                                for i in range(start + 1, len(body)):
-                                    if isinstance(body[i], HumanMessage):
-                                        anchor = i
-                                        break
-                            if anchor is None:
-                                keep = [first_sys] if first_sys else []
-                                tlog("RESUME TRIM: No HumanMessage boundary in history — dropping unusable context")
-                            else:
-                                keep = ([first_sys] if first_sys else []) + body[anchor:]
-                            keep_ids = {m.id for m in keep if m.id}
-                            removals = [
-                                RemoveMessage(id=m.id)
-                                for m in saved_msgs
-                                if m.id and m.id not in keep_ids
-                            ]
-                            if removals:
-                                agent.update_state(config, {"messages": removals}, as_node="__start__")
-                            # Verify against actual state — the log must report reality
-                            post = agent.get_state(config)
-                            post_count = len(post.values.get("messages", [])) if post else -1
-                            tlog(f"RESUME TRIM: {msg_count} → {post_count} messages "
-                                 f"({len(removals)} removed, max: {max_msgs})")
-                        else:
-                            tlog(f"RESUME TRIM: {msg_count} messages within limit ({max_msgs}) — no trim needed")
-                except Exception as e:
-                    tlog(f"RESUME TRIM: Failed — {e} (continuing with full state)")
+                    tlog(f"CHECKPOINT: Could not wipe thread — {de}")
 
     # ── Startup Context Log ──
     # Printed AFTER checkpoint inspection so session_type is accurate.
@@ -1141,7 +1213,10 @@ def main():
     # ── Message Initialization ──
     # On resume: triage-enhanced wake prompt adds new context to existing checkpoint state
     # On fresh: triage-enhanced wake prompt is the initial human message
-    messages = [HumanMessage(content=enhanced_wake)]
+    # Stable ids so a transient-retry can re-pass the same input idempotently
+    # (add_messages upserts by id — without a fixed id it would assign a new
+    # UUID on retry and duplicate the wake/warning message).
+    messages = [HumanMessage(content=enhanced_wake, id=str(uuid.uuid4()))]
 
     step_count = 0
     max_steps = args.max_steps
@@ -1153,97 +1228,128 @@ def main():
     input_messages = messages  # Initial input for first stream invocation
     _harness_crashed = False
 
+    # Bounded retry for transient transport errors (e.g. a 431/5xx/connection
+    # blip from the model edge). The graph is checkpointed, so on a transient
+    # failure we simply re-invoke and resume from the last checkpoint; only an
+    # exhausted retry budget (or a non-transient error) crashes the cycle.
+    MAX_TRANSIENT_RETRIES = 4
+
     try:
         while step_count < max_steps and not cycle_ended:
             # Each stream invocation processes until a budget threshold or completion.
             # With checkpointing, the graph state persists between invocations —
             # we only need to pass NEW messages (e.g., the budget warning).
-            for chunk in agent.stream({"messages": input_messages}, config=config):
-                step_count += 1
-                if "agent" in chunk:
-                    msg = chunk["agent"]["messages"][0]
-                    messages.append(msg)
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        tool_names = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
-                        tlog(f"[STEP {step_count}/{max_steps}] AGENT → tool call: {tool_names}")
+            #
+            # The inner `while True` retries this invocation on a transient
+            # transport error: the checkpointer holds all completed steps, so we
+            # re-invoke with the SAME input (idempotent by id) to resume.
+            transient_attempt = 0
+            stream_natural_end = False
+            while True:
+                try:
+                    for chunk in agent.stream({"messages": input_messages}, config=config):
+                        step_count += 1
+                        if "agent" in chunk:
+                            msg = chunk["agent"]["messages"][0]
+                            messages.append(msg)
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                tool_names = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
+                                tlog(f"[STEP {step_count}/{max_steps}] AGENT → tool call: {tool_names}")
+                            else:
+                                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                                preview = content[:200].replace("\n", " ")
+                                tlog(f"[STEP {step_count}/{max_steps}] AGENT → {preview}")
+                        elif "tools" in chunk:
+                            msg = chunk["tools"]["messages"][0]
+                            messages.append(msg)
+                            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                            preview = content[:200].replace("\n", " ")
+                            tlog(f"[STEP {step_count}/{max_steps}] TOOL  ← {preview}")
+
+                            # ── Cycle End Detection ──
+                            # When the agent calls `agictl cycle end`, break immediately so
+                            # telemetry writes before the process terminates.
+                            if "\U0001f6d1 Cycle ended:" in content:
+                                tlog(f"\n--- CYCLE END DETECTED (step {step_count}) ---")
+                                cycle_ended = True
+                                break
+
+                        # ── Budget Warnings ──
+                        # Break the stream and re-invoke with the warning as a genuine HumanMessage.
+                        # The agent sees it as new input and can wrap up gracefully.
+                        #
+                        # SAFETY GATE: never interject while the just-streamed chunk is an
+                        # AIMessage with unresolved tool_calls. Breaking there checkpoints a
+                        # dangling tool call (its ToolMessage never runs), and the re-invoke
+                        # raises INVALID_CHAT_HISTORY — crashing the cycle. Hold the warning
+                        # until the next safe chunk (the tool result lands one chunk later).
+                        pending_tool_calls = (
+                            "agent" in chunk
+                            and hasattr(msg, "tool_calls")
+                            and bool(msg.tool_calls)
+                        )
+                        remaining = max_steps - step_count
+                        warning = None
+
+                        if pending_tool_calls:
+                            pass  # defer warning to the next chunk
+                        elif step_count >= budget_95 and not warned_95:
+                            warned_95 = True
+                            warned_80 = True  # suppress a stale 80% warning after this one
+                            warning = (
+                                f"⚠️ CRITICAL: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
+                                "STOP all work immediately. You MUST: "
+                                "1) Journal your progress on the current task: agictl task progress <id> 'DONE: ... NEXT: ... BLOCKERS: ...'. "
+                                "2) End your cycle with a summary: agictl cycle end 'Summary of what was done and what remains'. "
+                                "Your progress entry is injected into your next wake context — it is how your future self resumes. "
+                                "You will be respawned on the next tick to continue."
+                            )
+                        elif step_count >= budget_80 and not warned_80:
+                            warned_80 = True
+                            warning = (
+                                f"⚠️ BUDGET WARNING: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
+                                "Begin wrapping up your current work. "
+                                "Journal your progress: agictl task progress <id> 'DONE: ... NEXT: ...'. "
+                                "If you cannot complete the task in the remaining steps, "
+                                "save your progress and end the cycle — you will be respawned to continue."
+                            )
+
+                        if warning:
+                            tlog(f"[BUDGET] Injecting warning into agent conversation (step {step_count})")
+                            tlog(f"[BUDGET] {warning}")
+                            # Break this stream — re-invoke with warning as the only new input.
+                            # The checkpointer holds all prior state; the agent sees this as a new human message.
+                            input_messages = [HumanMessage(content=warning, id=str(uuid.uuid4()))]
+                            messages.append(input_messages[0])
+                            break
+
+                        # ── Hard Budget Enforcement ──
+                        # Same safety gate: allow one extra chunk so a pending tool call
+                        # resolves — terminating between AIMessage and ToolMessage leaves
+                        # a dangling tool call in the checkpoint.
+                        if step_count >= max_steps and not pending_tool_calls:
+                            tlog(f"\n[BUDGET EXCEEDED] Hard limit reached ({step_count}/{max_steps}). Terminating cycle.")
+                            cycle_ended = True
+                            break
                     else:
-                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        preview = content[:200].replace("\n", " ")
-                        tlog(f"[STEP {step_count}/{max_steps}] AGENT → {preview}")
-                elif "tools" in chunk:
-                    msg = chunk["tools"]["messages"][0]
-                    messages.append(msg)
-                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    preview = content[:200].replace("\n", " ")
-                    tlog(f"[STEP {step_count}/{max_steps}] TOOL  ← {preview}")
+                        # Stream completed naturally (agent produced final response with no tool calls)
+                        stream_natural_end = True
+                except Exception as e:
+                    # Transient transport blip (431/5xx/connection): back off and
+                    # resume from the checkpoint with the SAME input (idempotent).
+                    if _is_transient_transport_error(e) and transient_attempt < MAX_TRANSIENT_RETRIES:
+                        transient_attempt += 1
+                        delay = min(2 ** transient_attempt, 8)
+                        tlog(
+                            f"TRANSIENT API ERROR (attempt {transient_attempt}/{MAX_TRANSIENT_RETRIES}): "
+                            f"{type(e).__name__}: {e}. Resuming from checkpoint in {delay}s."
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise  # non-transient, or retry budget exhausted → crash
+                break  # stream invocation finished without a transient error
 
-                    # ── Cycle End Detection ──
-                    # When the agent calls `agictl cycle end`, break immediately so
-                    # telemetry writes before the process terminates.
-                    if "\U0001f6d1 Cycle ended:" in content:
-                        tlog(f"\n--- CYCLE END DETECTED (step {step_count}) ---")
-                        cycle_ended = True
-                        break
-
-                # ── Budget Warnings ──
-                # Break the stream and re-invoke with the warning as a genuine HumanMessage.
-                # The agent sees it as new input and can wrap up gracefully.
-                #
-                # SAFETY GATE: never interject while the just-streamed chunk is an
-                # AIMessage with unresolved tool_calls. Breaking there checkpoints a
-                # dangling tool call (its ToolMessage never runs), and the re-invoke
-                # raises INVALID_CHAT_HISTORY — crashing the cycle. Hold the warning
-                # until the next safe chunk (the tool result lands one chunk later).
-                pending_tool_calls = (
-                    "agent" in chunk
-                    and hasattr(msg, "tool_calls")
-                    and bool(msg.tool_calls)
-                )
-                remaining = max_steps - step_count
-                warning = None
-
-                if pending_tool_calls:
-                    pass  # defer warning to the next chunk
-                elif step_count >= budget_95 and not warned_95:
-                    warned_95 = True
-                    warned_80 = True  # suppress a stale 80% warning after this one
-                    warning = (
-                        f"⚠️ CRITICAL: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
-                        "STOP all work immediately. You MUST: "
-                        "1) Journal your progress on the current task: agictl task progress <id> 'DONE: ... NEXT: ... BLOCKERS: ...'. "
-                        "2) End your cycle with a summary: agictl cycle end 'Summary of what was done and what remains'. "
-                        "Your progress entry is injected into your next wake context — it is how your future self resumes. "
-                        "You will be respawned on the next tick to continue."
-                    )
-                elif step_count >= budget_80 and not warned_80:
-                    warned_80 = True
-                    warning = (
-                        f"⚠️ BUDGET WARNING: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
-                        "Begin wrapping up your current work. "
-                        "Journal your progress: agictl task progress <id> 'DONE: ... NEXT: ...'. "
-                        "If you cannot complete the task in the remaining steps, "
-                        "save your progress and end the cycle — you will be respawned to continue."
-                    )
-
-                if warning:
-                    tlog(f"[BUDGET] Injecting warning into agent conversation (step {step_count})")
-                    tlog(f"[BUDGET] {warning}")
-                    # Break this stream — re-invoke with warning as the only new input.
-                    # The checkpointer holds all prior state; the agent sees this as a new human message.
-                    input_messages = [HumanMessage(content=warning)]
-                    messages.append(input_messages[0])
-                    break
-
-                # ── Hard Budget Enforcement ──
-                # Same safety gate: allow one extra chunk so a pending tool call
-                # resolves — terminating between AIMessage and ToolMessage leaves
-                # a dangling tool call in the checkpoint.
-                if step_count >= max_steps and not pending_tool_calls:
-                    tlog(f"\n[BUDGET EXCEEDED] Hard limit reached ({step_count}/{max_steps}). Terminating cycle.")
-                    cycle_ended = True
-                    break
-            else:
-                # Stream completed naturally (agent produced final response with no tool calls)
+            if stream_natural_end:
                 break
 
         final_message = messages[-1].content

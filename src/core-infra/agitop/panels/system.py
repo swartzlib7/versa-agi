@@ -76,6 +76,8 @@ class SystemPanel(Static):
                     yield Button("🗜 VACUUM DBs", id="btn-vacuum", variant="default", classes="panel-btn")
                 with Horizontal(classes="btn-grid-row"):
                     yield Button("🔑 API KEYS", id="btn-api-keys", variant="default", classes="panel-btn api-keys-btn")
+                    yield Button("🧩 MODELS", id="btn-model-manager", variant="default", classes="panel-btn model-manager-btn")
+                with Horizontal(classes="btn-grid-row"):
                     yield Button("◀ REFRESH - 5m ▶", id="btn-refresh-cycle", variant="default", classes="panel-btn")
             with Vertical(classes="sys-col clock-col"):
                 yield Static("", id="m-clock")
@@ -138,6 +140,9 @@ class SystemPanel(Static):
         elif button_id == "btn-api-keys":
             from agitop.panels.api_keys_modal import ApiKeysModal
             self.app.push_screen(ApiKeysModal())
+        elif button_id == "btn-model-manager":
+            from agitop.panels.model_manager_modal import ModelManagerModal
+            self.app.push_screen(ModelManagerModal())
         elif button_id == "btn-refresh-cycle":
             self._refresh_idx = (self._refresh_idx + 1) % len(self.REFRESH_INTERVALS)
             self._update_refresh_label()

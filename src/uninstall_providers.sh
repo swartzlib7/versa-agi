@@ -138,10 +138,10 @@ if [ -f "/etc/versa-agi/setup.ini" ] && [ "/etc/versa-agi/setup.ini" != "${SCRIP
 fi
 
 for SETUP_INI in "${_INI_FILES[@]}"; do
-  sed -i '/^\[cloud_models\]/,/^\[/{s/^enabled=.*/enabled=false/}' "${SETUP_INI}"
-  sed -i '/^\[cloud_models\]/,/^\[/{s/^xai_enabled=.*/xai_enabled=false/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^enabled=.*/enabled=false/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^xai_enabled=.*/xai_enabled=false/}' "${SETUP_INI}"
   # Clear API key from setup.ini for security
-  sed -i '/^\[cloud_models\]/,/^\[/{s/^xai_api_key=.*/xai_api_key=/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^xai_api_key=.*/xai_api_key=/}' "${SETUP_INI}"
   ok "Updated: ${SETUP_INI}"
 done
 

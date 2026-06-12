@@ -95,7 +95,7 @@ class AgentsPanel(DataTable):
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
-        self.border_title = "Agents (Global Registry & Telemetry)"
+        self.border_title = "Agents (Registry & Telemetry)"
         self.add_columns(
             "Agent", "Provider", "Model", "Role", "Inactive", "Protected", "Browser", "Comms", "Req. By",
             f"Last Cycle ({_TZ})", "Sent", "Recv", "Tasks", "Tokens", "Budget", "Status"
@@ -543,17 +543,36 @@ class RemovalConfirmModal(ModalScreen):
             self.app.pop_screen()
 
 
+def _load_catalog_labels(ini) -> dict[str, tuple[str, str]]:
+    """Merge [catalog] + [catalog_custom] → {key: (class, label)} (custom wins).
+
+    The unified catalog is the single source of truth for model display labels
+    (Edition 2.x). Each row is ``class|provider|enabled|coa|ctx_rec|ctx_max|label``.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for section in ("catalog", "catalog_custom"):
+        if not ini.has_section(section):
+            continue
+        for key, raw in ini.items(section):
+            parts = raw.split("|")
+            if len(parts) < 7:
+                continue
+            cls = parts[0].strip()
+            label = "|".join(parts[6:]).strip() or key.strip()
+            out[key.strip()] = (cls, label)
+    return out
+
+
 def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple[str, str]]:
     """Load available models, filtered by execution mode and enabled backends.
     
     Returns list of (label, key) tuples. When system_reader is provided,
     filters models based on which backends are enabled (cloud/local/proxy).
-    
-    Sections read from models.ini:
-      [models]              — Cloud Native (Gemini) display labels
-      [third_party_models]  — Third-Party Cloud Providers (xAI, etc.)
-      [local_models]        — Local AI models (Ollama / SYCL) display labels
-      [context_windows]     — Context window sizes (read by model_context.py)
+
+    Display labels come from the unified [catalog]/[catalog_custom] sections
+    (Edition 2.x source of truth). Local labels also overlay the pipeline-owned
+    [local_models] section so registry-added models keep their names. Backend
+    membership/filtering still comes from paths.env via system_reader.
     """
     import configparser, os
     ini = configparser.ConfigParser(delimiters=('=',))
@@ -565,23 +584,18 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
             ini.read(path)
             break
 
-    # Load cloud model labels from [models] section
-    cloud_entries = []
-    if ini.has_section("models"):
-        for key, label in ini.items("models"):
-            cloud_entries.append((label.strip(), key.strip()))
+    catalog = _load_catalog_labels(ini)
 
-    # Load third-party model labels from [third_party_models] section
-    proxy_entries = []
-    if ini.has_section("third_party_models"):
-        for key, label in ini.items("third_party_models"):
-            proxy_entries.append((label.strip(), key.strip()))
+    # Cloud + third-party labels from the catalog (by class)
+    cloud_entries = [(lbl, key) for key, (cls, lbl) in catalog.items() if cls == "cloud"]
+    proxy_entries = [(lbl, key) for key, (cls, lbl) in catalog.items() if cls == "third_party"]
 
-    # Load local model labels from [local_models] section
-    local_label_map = {}
+    # Local labels: catalog local rows, overlaid with the pipeline-owned
+    # [local_models] section (registry-added models that aren't in the catalog).
+    local_label_map = {key: lbl for key, (cls, lbl) in catalog.items() if cls == "local"}
     if ini.has_section("local_models"):
         for key, label in ini.items("local_models"):
-            local_label_map[key.strip()] = label.strip()
+            local_label_map.setdefault(key.strip(), label.strip())
 
     if not cloud_entries and not proxy_entries and not local_label_map:
         # Fallback if ini not found

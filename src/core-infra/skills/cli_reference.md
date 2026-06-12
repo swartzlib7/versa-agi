@@ -8,12 +8,13 @@ You do NOT have direct access to your SQLite database or system configuration fi
 
 ## Command Groups
 
-agictl is organized into 17 data-model-driven command groups:
+agictl is organized into 18 data-model-driven command groups:
 
 | Group | Purpose |
 |---|---|
 | `system` | System config, identity, workspace, security |
-| `model` | LLM model management (list, add, remove, activate) |
+| `model` | LLM model management — catalog, registry, sync/migrate (COA/operator only) |
+| `provider` | Model provider registry (xAI, OpenAI, Anthropic, …) (COA/operator only) |
 | `agent` | Agent registry, status, lifecycle |
 | `task` | Cognitive task queue |
 | `message` | VersaVoice communication |
@@ -37,11 +38,14 @@ agictl is organized into 17 data-model-driven command groups:
 ```bash
 agictl system config get                              # Return ALL config as JSON
 agictl system config get identity.first_name          # Read a specific key (dot-notation)
-agictl system config set <key> <value>                # Write a config value (returns JSON)
+agictl system config set <key> <value>                # Write a config value to coa_config.json (returns JSON)
+agictl system config set-ini <section> <key> <value>  # Write a key to setup.ini (preserves comments/formatting)
 agictl system whoami                                  # Your identity as JSON (name, role, language, sub_account_id, sponsor)
 agictl system workspace-link <path>                   # Symlink workspace to user path (STUB)
 agictl system workspace-unlink                        # Remove workspace symlink (STUB)
 agictl system security blacklist add|remove|list [uid] # Manage security blacklist (STUB)
+agictl system sync-profiles                           # Refresh PU + connection profiles from VersaVoice (Lifeline runs weekly)
+agictl system vacuum                                  # Compact all system databases (VACUUM) — safe anytime
 ```
 
 ### Credential Management (Root Only)
@@ -65,6 +69,7 @@ agictl agent approve <name> [--force]                 # Provision OS user, home,
 agictl agent list-roles                               # List available role templates (poise registry)
 agictl agent activate <name>                          # Set inactive=0 + clear circuit_breaker + unfreeze tasks (warns if > 3 active)
 agictl agent deactivate <name>                        # Set inactive=1
+agictl agent kill <name>                              # COA-only: terminate running cycle + halt (recover via 'agent activate'; protected agents exempt)
 agictl agent request-remove <name> [--reason TEXT]    # Flag for removal (sets removal_requested, deactivates, notifies PU)
 agictl agent cancel-remove <name>                     # Cancel pending removal (reactivates agent)
 agictl agent remove <name>                            # Context-aware: non-root → request-remove, root → confirm-remove
@@ -137,6 +142,9 @@ agictl task count-total-blocked <agent_name>          # Count all blocked tasks
 agictl task get-blocked-detail <agent_name>           # Blocked task diagnostics
 agictl task check-followup <agent_name>               # Check callback_action routing
 agictl task inject-followup <agent_name>              # Inject connection follow-up task
+agictl task freeze-all <agent_name>                   # Freeze all non-terminal tasks (saves prior status)
+agictl task unfreeze-all <agent_name>                 # Restore all frozen tasks to their prior status
+agictl task count-frozen <agent_name>                 # Count frozen tasks
 ```
 
 ## 4. message — Communication
@@ -189,6 +197,7 @@ agictl message fail-stale <sub_account> <seconds>          # Force-fail stuck me
 agictl message blacklisted <sub_account>                   # UIDs matching security blacklist
 agictl message attachment-path <msg_id> <path>             # Record local attachment path
 agictl message stamp-cycle <sub_account> <cycle_id>        # Stamp unprocessed msgs with cycle_id (lifeline use)
+agictl message sync-outbox <agent_uid> [file]              # Bulk-import outbox JSON to SQLite (stdin default)
 ```
 
 ## 5. cycle — Telemetry Lifecycle
@@ -199,6 +208,7 @@ agictl cycle end "Summary" [--agent NAME]             # Mark end + kill executio
 agictl cycle trigger [--agent NAME]                   # Wake signal to Lifeline (STUB)
 agictl cycle tokens <agent> <in> <out> <think> <total> [--exit-code N]  # Log token metrics + exit code
 agictl cycle recent <agent>                           # Chronological summaries for context
+agictl cycle count <agent>                            # Total cycles executed by the agent
 ```
 
 ## 6. project — Project Management
@@ -206,11 +216,17 @@ agictl cycle recent <agent>                           # Chronological summaries 
 ```bash
 agictl project list                                   # All projects as JSON (from tasks.db)
 agictl project add <name> [--desc TEXT] [--remote URL] [--git-init]  # Register (STUB)
+agictl project update <name> [--remote URL] [--branch B] [--desc TEXT] [--platform github|gitlab] [--access-token T] [--type git|local]
 agictl project pause <name>                           # Set status to paused (STUB)
 agictl project resume <name>                          # Set status to active (STUB)
 agictl project archive <name> [--zip]                 # Soft-delete / archive (STUB)
+agictl project assign <name> (--agent NAME | --connection UID) [--roles contributor] [--branch B]  # Assign + provision agent workspace
+agictl project unassign <name> (--agent NAME | --connection UID)     # Remove member (agents: freeze tasks + clean workspace)
+agictl project members <name>                         # List all members (agents + connections) as JSON
 agictl project git-setup                              # Manual fallback: configure git identity + SSH (auto-generated at provisioning)
 ```
+
+> **Assignment**: `project assign --agent <name>` provisions the sub-agent's project workspace and (for git projects) a working branch. The owner cannot be unassigned — transfer ownership first. Unassigning an agent freezes its project tasks and cleans up its workspace.
 
 ## 7. connection — Social Graph
 
@@ -342,18 +358,78 @@ agictl skill override <name>                          # Create override for a sh
 
 > Agent skill distribution is handled by Lifeline via `rsync` — skills marked `ready` or `updated` are deployed to all active sub-agents on the next tick.
 
-## 14. model — LLM Model Management
+## 14. model — LLM Model Management (COA / operator only)
+
+> **Scope**: Model and provider management is a **COA + operator** capability — **not** for sub-agents. Sub-agents only see their assigned model via `system whoami`; they never run `model`/`provider` commands. Every agent `agictl` call elevates to the `watchdog` user, which **owns `models.ini` and `paths.env`** — so the COA can self-serve catalog/provider CRUD, `sync`, and `migrate` **without root**. Only `model activate` and `system set-key` reach for root (to write `setup.ini` / restart the inference service).
+
+### Mental model (Edition 2.x)
+
+- **`models.ini` is the model database**, with two layers that merge at read time:
+  - **Baseline** — `[catalog]` + `[providers]`, regenerated from `setup.ini` by `model migrate`. Do not hand-edit.
+  - **Custom** — `[catalog_custom]` + `[providers_custom]`, owned by the CLI/dashboard. Overlays the baseline, so your edits survive `migrate`.
+- **`[catalog]` is the single source of truth** for every model (cloud / third-party / local): class, provider, enabled, COA-approved, context windows, label.
+- **`paths.env`** is the derived runtime registry the harness + pickers read (`VERSA_CLOUD_MODELS`, `VERSA_THIRD_PARTY_MODELS`, `VERSA_THIRD_PARTY_ENABLED`, `VERSA_COA_APPROVED_MODELS`, …). Never hand-edit it — regenerate with `sync`.
+- **`sync`** → `model sync` regenerates `paths.env` from the merged catalog. This is your tool — mutating `catalog`/`provider` commands auto-sync unless `--no-sync`, and you can run it by hand after a `models.ini` edit.
+- **`migrate`** is an **install/operator-time** action (regenerates the baseline from `setup.ini`) — run by `setup.sh` or the operator. The CLI **blocks `migrate` for agents** (including the COA): you never need it, and you should never be able to factory-reset yourself unattended.
+- **`setup.ini` model lists are derived, not editable**: every `setup.sh` run regenerates the deployed `setup.ini` + `models.ini` from the shipped templates (`system reconcile-config`, operator-only), re-stamping the stock model lists while preserving user values and the custom layer. Stock is decided by the release; the only customization surface is the dashboard/CLI custom layer.
+
+### Model lifecycle
 
 ```bash
-agictl model list [--table]                           # List registered models with pull status
-agictl model add <name> [--provider gemini|ollama]    # Register a new model
-agictl model remove <name>                            # Remove a model from registry
-agictl model run <name>                               # Pull/download a model
-agictl model activate <name>                          # Set as active model for this agent
-agictl model refresh                                  # Refresh model registry from providers
+agictl model list [--table]                           # Registered models with pull status
+agictl model add <name> [--provider gemini|ollama]    # Register/enable a model at runtime
+agictl model remove <name>                            # Remove a model from the runtime registry
+agictl model run <name>                               # Pull/download a (local) model
+agictl model activate <name>                          # Set the active model for this agent (root: writes setup.ini, restarts inference)
+agictl model refresh                                  # Refresh registry from providers
+agictl model sync                                     # Regenerate paths.env from the catalog (your tool)
+# agictl model migrate [--force]                      # Operator/setup-time baseline rebuild — BLOCKED for agents (run by setup.sh)
 ```
 
-> **GPU Backend**: Model management adapts to the configured backend (`standard` = Ollama, `intel` = SYCL/GGUF, `remote` = inference server).
+### model catalog — unified model catalog (CRUD)
+
+```bash
+agictl model catalog list [--class cloud|third_party|local] [--table]
+agictl model catalog add <key> --class cloud|third_party|local --provider <slug> --label "<name>" \
+    [--ctx-recommended N] [--ctx-max N] [--coa-approved|--no-coa-approved] [--enabled|--disabled] \
+    [--gguf-repo R --gguf-file F --size GB]           # local-only: also seeds the SYCL registry
+agictl model catalog update <key> [--label] [--provider] [--class C] [--ctx-recommended N] [--ctx-max N] \
+    [--enable|--disable] [--coa-approve|--coa-revoke]
+agictl model catalog remove <key>                     # Custom model → deleted; baseline model → disabled via override
+```
+
+> Third-party models require their **provider** to exist, be enabled, and be keyed before they route at runtime. Additions/edits land in `[catalog_custom]`. A `setup.ini` **baseline** model can't be deleted here (migrate would re-add it) — it is *disabled* via an override; to drop it entirely, remove it from `setup.ini`. Mutating commands auto-run `sync` unless `--no-sync`.
+
+### provider — model providers (CRUD)
+
+```bash
+agictl provider list [--table]                        # Providers + enabled state
+agictl provider add <slug> --label "<name>" --class <ChatX> [--enable|--disable]
+agictl provider update <slug> [--label] [--class <ChatX>] [--enable|--disable]
+agictl provider enable <slug>                         # Its models become routable (once a key is present)
+agictl provider disable <slug>                        # Removes its models from the runtime registry
+agictl provider remove <slug>                         # Custom provider → deleted; baseline provider → disabled via override
+```
+
+> `--class` is the LangChain chat class: `ChatGoogleGenerativeAI`, `ChatOpenAI`, `ChatAnthropic`, `ChatOllama`. The provider's **API key** is set separately: `sudo agictl system set-key <slug> <key>` (supported: `gemini`, `versavoice`, `xai`, `openai`, `anthropic`). Edits land in `[providers_custom]`; baseline providers are disabled via override, not deleted.
+
+### model registry — SYCL / GGUF download registry
+
+```bash
+agictl model registry list                            # Registered SYCL/GGUF models
+agictl model registry add <name> --repo <hf_repo> --file <gguf> --size <GB> \
+    [--ctx-recommended N] [--ctx-max N] [--label "<display>"]
+agictl model registry update <name> [--repo] [--file] [--size GB] [--ctx-recommended N] [--ctx-max N] [--label]
+agictl model registry remove <name>                   # Removes the [sycl_models] entry (ctx/label rows preserved)
+```
+
+> `[sycl_models]` carries the HuggingFace download metadata for local Intel-GPU/GGUF models. After registering, `agictl model run <name>` downloads it. For most local models prefer `model catalog add --class local --gguf-*`, which registers both the catalog row and the SYCL metadata in one step.
+
+> **Local model backend**: Local models are routed by the configured GPU backend — `VERSA_GPU_BACKEND` (`sycl` = Intel/GGUF, `ollama` = standard, `remote` = inference server) — **not** by the catalog provider slug. A local row shows provider `ollama` in the catalog but may actually run on SYCL.
+
+### Remote (server) topology
+
+On a remote inference **Server**, manage local models (Ollama or SYCL) by running these CLI commands directly on the box. A **client** then picks up the new configuration on its next `agictl model refresh` (or dashboard refresh).
 
 ## 15. identity — VersaVoice Sub-Account Provisioning
 

@@ -79,7 +79,7 @@ class TaskEditModal(ModalScreen):
         if current_assignee and current_assignee not in assignee_values:
             assignee_options.append((current_assignee, current_assignee))
 
-        with VerticalScroll(id="task-dialog"):
+        with Vertical(id="task-dialog"):
             yield Static(f"[bold]#{task_id}[/]", id="task-dialog-title")
             yield Static("[b]Title[/b]")
             yield Input(
@@ -92,34 +92,38 @@ class TaskEditModal(ModalScreen):
                 desc,
                 id="task-edit-desc",
             )
-            yield Static("")
-            yield Static("[b]Status[/b]")
-            yield Select(
-                TASK_STATUSES,
-                value=current_status,
-                id="task-edit-status",
-                allow_blank=False,
-            )
-            yield Static("[b]Due Date[/b] [dim](YYYY-MM-DD HH:MM:SS)[/]")
-            yield Input(
-                value=current_due,
-                placeholder="YYYY-MM-DD HH:MM:SS",
-                id="task-edit-due",
-            )
-            yield Static("[b]Project[/b]")
-            yield Select(
-                project_options,
-                value=project_value,
-                id="task-edit-project",
-                allow_blank=False,
-            )
-            yield Static("[b]Assigned To[/b]")
-            yield Select(
-                assignee_options,
-                value=current_assignee,
-                id="task-edit-assignee",
-                allow_blank=False,
-            )
+            with Horizontal(classes="task-field-row"):
+                with Vertical(classes="task-field-col"):
+                    yield Static("[b]Project[/b]")
+                    yield Select(
+                        project_options,
+                        value=project_value,
+                        id="task-edit-project",
+                        allow_blank=False,
+                    )
+                with Vertical(classes="task-field-col"):
+                    yield Static("[b]Assigned To[/b]")
+                    yield Select(
+                        assignee_options,
+                        value=current_assignee,
+                        id="task-edit-assignee",
+                        allow_blank=False,
+                    )
+                with Vertical(classes="task-field-col"):
+                    yield Static("[b]Status[/b]")
+                    yield Select(
+                        TASK_STATUSES,
+                        value=current_status,
+                        id="task-edit-status",
+                        allow_blank=False,
+                    )
+                with Vertical(classes="task-field-col"):
+                    yield Static("[b]Due Date[/b] [dim](YYYY-MM-DD HH:MM:SS)[/]")
+                    yield Input(
+                        value=current_due,
+                        placeholder="YYYY-MM-DD HH:MM:SS",
+                        id="task-edit-due",
+                    )
 
             # ── Progress Journal (read-only) ──
             # Agent-authored breadcrumbs via 'agictl task progress <id> "..."' —
@@ -132,21 +136,22 @@ class TaskEditModal(ModalScreen):
                 f"[b]Progress Journal[/b] [dim]({len(progress)} "
                 f"entr{'y' if len(progress) == 1 else 'ies'} — newest first)[/]"
             )
-            if progress:
-                from rich.markup import escape
-                for entry in reversed(progress):
-                    ts = _utc_to_local(str(entry.get("created_at") or ""))[:16]
-                    author = entry.get("agent_name") or "?"
-                    note = escape(str(entry.get("note") or ""))
+            with VerticalScroll(id="task-progress-scroll"):
+                if progress:
+                    from rich.markup import escape
+                    for entry in reversed(progress):
+                        ts = _utc_to_local(str(entry.get("created_at") or ""))[:16]
+                        author = entry.get("agent_name") or "?"
+                        note = escape(str(entry.get("note") or ""))
+                        yield Static(
+                            f"[cyan]{ts}[/] [yellow]{author}[/] — {note}",
+                            classes="task-progress-entry",
+                        )
+                else:
                     yield Static(
-                        f"[cyan]{ts}[/] [yellow]{author}[/] — {note}",
-                        classes="task-progress-entry",
+                        "[dim]No entries yet — agents journal progress with: "
+                        "agictl task progress <id> \"DONE: ... NEXT: ...\"[/]"
                     )
-            else:
-                yield Static(
-                    "[dim]No entries yet — agents journal progress with: "
-                    "agictl task progress <id> \"DONE: ... NEXT: ...\"[/]"
-                )
 
             yield Static("", id="task-edit-error")
             with Horizontal(classes="task-dialog-buttons"):
@@ -270,12 +275,18 @@ class TasksPanel(DataTable):
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
-        self.add_columns(
-            "ID", "Title", "Desc", "Status", "Priority", "Requested By", "Project",
-            "Assign To", "Assign By", "Tags", f"Due ({_TZ})",
-            "Callback Action", "Src Msg",
-            "Wake", "Wake Cycles", "Spawns", f"Create ({_TZ})", f"Update ({_TZ})", f"Comp ({_TZ})"
-        )
+        # Explicit widths — Title and Desc widest; compact cols for ids/status/dates.
+        self.add_column("ID", width=5)
+        self.add_column("Title", width=50)
+        self.add_column("Desc", width=40)
+        self.add_column("Status", width=11)
+        self.add_column("Priority", width=9)
+        self.add_column("Requested By", width=14)
+        self.add_column("Project", width=16)
+        self.add_column("Assign To", width=12)
+        self.add_column("Assign By", width=12)
+        self.add_column("Tags", width=12)
+        self.add_column(f"Due ({_TZ})", width=19)
         self._task_data = {}
         self._project_cache: dict[int, str] = {}
         self._name_cache: dict[str, str] = {}
@@ -352,7 +363,7 @@ class TasksPanel(DataTable):
             p_formatted = f"[{color}]{priority}[/]"
 
             desc = str(task.get("description") or "--")
-            desc_truncated = desc[:60] + "..." if len(desc) > 63 else desc
+            desc_truncated = desc[:300] + "..." if len(desc) > 303 else desc
 
             task_id = str(task.get("id") or "")
             if task_id:
@@ -370,14 +381,6 @@ class TasksPanel(DataTable):
                 str(task.get("assigned_by") or "--"),
                 str(task.get("tags") or "--"),
                 str(task.get("due_date") or "--") if not task.get("due_date") else _utc_to_local(str(task.get("due_date"))),
-                str(task.get("callback_action") or "--"),
-                str(task.get("source_message_id") or "--"),
-                str(task.get("wake_after") or "--") if not task.get("wake_after") else _utc_to_local(str(task.get("wake_after"))),
-                str(task.get("wake_cycle_count") or "0"),
-                str(task.get("spawn_attempts") or "0"),
-                str(task.get("created_at") or "--") if not task.get("created_at") else _utc_to_local(str(task.get("created_at"))),
-                str(task.get("updated_at") or "--") if not task.get("updated_at") else _utc_to_local(str(task.get("updated_at"))),
-                str(task.get("completed_at") or "--") if not task.get("completed_at") else _utc_to_local(str(task.get("completed_at"))),
                 key=task_id
             )
 

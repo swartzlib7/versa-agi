@@ -265,7 +265,15 @@ class ProjectsPanel(DataTable):
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.border_title = "Projects  │  ENTER for details  │  DEL to delete archived"
-        self.add_columns("ID", "Name", "Type", "Platform", "Branch", "Game", "Status", "Members")
+        self.add_column("ID", width=5)
+        self.add_column("Name", width=24)
+        self.add_column("Desc", width=80)
+        self.add_column("Status", width=10)
+        self.add_column("Type", width=8)
+        self.add_column("Platform", width=10)
+        self.add_column("Branch", width=12)
+        self.add_column("Game", width=16)
+        self.add_column("Members", width=12)
         self.refresh_data()
 
     def refresh_data(self) -> None:
@@ -293,14 +301,18 @@ class ProjectsPanel(DataTable):
             if game_id and self.tasks_reader:
                 game_name = self.tasks_reader.get_game_name(game_id)
 
+            desc = str(proj.get("description") or "--")
+            desc_truncated = desc[:300] + "..." if len(desc) > 303 else desc
+
             self.add_row(
                 pid,
                 str(proj.get("name") or "Unnamed"),
+                desc_truncated,
+                s_formatted,
                 str(proj.get("type") or "local"),
                 str(proj.get("platform") or "--"),
                 str(proj.get("branch") or "--"),
                 game_name,
-                s_formatted,
                 members_summary,
                 key=pid
             )

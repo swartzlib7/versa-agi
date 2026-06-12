@@ -8,7 +8,7 @@ from typing import Optional
 from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
-from textual.containers import Vertical, Horizontal, VerticalScroll
+from textual.containers import Vertical, Horizontal, VerticalScroll, VerticalScroll
 from textual.widgets import DataTable, Static, Button, Checkbox, Select, TextArea, Markdown
 from textual.widget import Widget
 import subprocess
@@ -380,7 +380,7 @@ class MessagesPanel(Widget):
         self._primary_name: Optional[str] = None
         self._primary_uid: Optional[str] = None
         self._uid_to_agent: dict[str, str] = {}
-        self.table = DataTable()
+        self.table = DataTable(id="messages-table")
         self._msg_data: dict[str, dict] = {}
         self._channel_filter: str = None  # None = all, 'vv', 'internal'
         self._page = 0
@@ -410,27 +410,38 @@ class MessagesPanel(Widget):
         return self._primary_uid
 
     def compose(self) -> ComposeResult:
-        with Horizontal(classes="panel-header"):
-            with Horizontal(id="channel-filters"):
-                yield Static("Channel: ", classes="filter-label")
-                yield Button("All", id="btn-ch-all", variant="success", classes="panel-btn-sm")
-                yield Button("VV", id="btn-ch-vv", variant="default", classes="panel-btn-sm")
-                yield Button("Internal", id="btn-ch-internal", variant="default", classes="panel-btn-sm")
-            yield Static(" | ", classes="header-sep")
-            yield Static("✉ New Message", id="btn-new-message", classes="action-link-green")
-            yield Static(" | ", classes="header-sep")
-            yield Static("Fetch REST Inbox (All)", id="btn-fetch-inbox", classes="action-link-green")
-            yield Static(" | ", classes="header-sep")
-            yield Checkbox("Use VersaVoice API", id="chk-vv-enabled", value=self._is_vv_enabled())
+        with Vertical(id="messages-panel-body"):
+            with Horizontal(classes="panel-header"):
+                with Horizontal(id="channel-filters"):
+                    yield Static("Channel: ", classes="filter-label")
+                    yield Button("All", id="btn-ch-all", variant="success", classes="panel-btn-sm")
+                    yield Button("VV", id="btn-ch-vv", variant="default", classes="panel-btn-sm")
+                    yield Button("Internal", id="btn-ch-internal", variant="default", classes="panel-btn-sm")
+                yield Static(" | ", classes="header-sep")
+                yield Static("✉ New Message", id="btn-new-message", classes="action-link-green")
+                yield Static(" | ", classes="header-sep")
+                yield Static("Fetch REST Inbox (All)", id="btn-fetch-inbox", classes="action-link-green")
+                yield Static(" | ", classes="header-sep")
+                yield Checkbox("Use VersaVoice API", id="chk-vv-enabled", value=self._is_vv_enabled())
 
-        yield self.table
+            yield self.table
 
     def on_mount(self) -> None:
         self._update_title()
         self.table.cursor_type = "row"
-        self.table.add_columns(
-            "ID", "Agent Ch", "Msg Src", "Dir", "From", "To", "Text", "Mode", "Status", "Attach", f"Date/Time ({_TZ})", "Cycle"
-        )
+        # Compact metadata cols; Text is the primary readable field.
+        self.table.add_column("ID", width=6)
+        self.table.add_column("Agent Ch", width=10)
+        self.table.add_column("Msg Src", width=8)
+        self.table.add_column("Dir", width=4)
+        self.table.add_column("From", width=12)
+        self.table.add_column("To", width=12)
+        self.table.add_column("Text", width=90)
+        self.table.add_column("Mode", width=8)
+        self.table.add_column("Status", width=10)
+        self.table.add_column("Attach", width=6)
+        self.table.add_column(f"Date/Time ({_TZ})", width=14)
+        self.table.add_column("Cycle", width=8)
         self.refresh_data()
 
     def _update_title(self) -> None:
@@ -562,8 +573,8 @@ class MessagesPanel(Widget):
                 time_str = raw_ts
             cycle = str(msg.get("cycle_id") or "--")
 
-            # Truncate message text
-            desc_truncated = clean_text[:60] + "..." if len(clean_text) > 63 else clean_text
+            # Truncate message text (preview — full text in row-select modal)
+            desc_truncated = clean_text[:360] + "..." if len(clean_text) > 363 else clean_text
             desc_truncated = desc_truncated.replace("[", "\\[")
 
             arrow = "[green]→[/]" if direction == "sent" else "[cyan]←[/]"

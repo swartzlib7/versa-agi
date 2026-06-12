@@ -1,7 +1,8 @@
 # ─────────────────────────────────────────────────────
 # Versa AGi — Model Context Window Registry
 #
-# Reads context window data from models.ini [context_windows].
+# Reads context window data from the unified models.ini [catalog]
+# (overlaying the pipeline-owned [context_windows] for registry-added locals).
 # Falls back to a built-in map when models.ini is unavailable.
 # Used by: agent_harness.py, agitop, agictl
 # ─────────────────────────────────────────────────────
@@ -63,10 +64,14 @@ NUM_CTX_OPTIONS: list[tuple[int, str]] = [
 
 
 def _load_context_map() -> dict[str, tuple[int, int]]:
-    """Load context window map from models.ini [context_windows] section.
+    """Load context window map from models.ini.
 
-    Returns the parsed map, or the built-in fallback if models.ini
-    is unavailable or the section is missing.
+    Edition 2.x: the unified [catalog]/[catalog_custom] sections are the
+    authoritative source (ctx_recommended,ctx_max per row). The pipeline-owned
+    [context_windows] section is overlaid *underneath* — it fills in keys not in
+    the catalog (e.g. SYCL-registry-added local models) but never overrides a
+    catalog row, so dashboard/CLI edits always win. Falls back to the built-in
+    map if models.ini is unavailable / yields nothing.
     """
     ini = configparser.ConfigParser(delimiters=('=',))
     for path in _MODELS_INI_PATHS:
@@ -74,19 +79,33 @@ def _load_context_map() -> dict[str, tuple[int, int]]:
             ini.read(path)
             break
 
-    if not ini.has_section("context_windows"):
-        return _FALLBACK_CONTEXT_MAP.copy()
-
     result: dict[str, tuple[int, int]] = {}
-    for key, value in ini.items("context_windows"):
-        try:
-            parts = value.strip().split(",")
-            if len(parts) == 2:
-                recommended = int(parts[0].strip())
-                max_ctx = int(parts[1].strip())
-                result[key.strip()] = (recommended, max_ctx)
-        except (ValueError, IndexError):
+
+    # Base layer: legacy / registry-owned [context_windows] (fills gaps)
+    if ini.has_section("context_windows"):
+        for key, value in ini.items("context_windows"):
+            try:
+                parts = value.strip().split(",")
+                if len(parts) == 2:
+                    result[key.strip()] = (int(parts[0].strip()), int(parts[1].strip()))
+            except (ValueError, IndexError):
+                continue
+
+    # Authoritative layer: unified catalog (wins over the base layer)
+    for section in ("catalog", "catalog_custom"):
+        if not ini.has_section(section):
             continue
+        for key, raw in ini.items(section):
+            parts = raw.split("|")
+            if len(parts) < 7:
+                continue
+            try:
+                rec = int(parts[4].strip() or "0")
+                mx = int(parts[5].strip() or "0")
+            except ValueError:
+                continue
+            if mx > 0:
+                result[key.strip()] = (rec, mx)
 
     return result if result else _FALLBACK_CONTEXT_MAP.copy()
 
