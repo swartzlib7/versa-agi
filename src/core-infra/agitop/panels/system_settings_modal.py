@@ -230,11 +230,11 @@ def _get_coa_skills_dir() -> str:
 def _resolve_skill_path(skill_data: dict) -> str:
     """Resolve a skill's canonical source file.
 
-    Shipped/system skills live in the watchdog core-infra source; agent-created
-    skills are authored in COA's .agent/skills/ and never exist under watchdog.
+    Shipped/system skills live in the watchdog core-infra source. Agent-created
+    and override skills are authored in COA's .agent/skills/.
     """
     name = skill_data.get("name", "")
-    if skill_data.get("type") == "agent_created":
+    if skill_data.get("type") in ("agent_created", "override"):
         return os.path.join(_get_coa_skills_dir(), f"{name}.md")
     return f"/home/watchdog/core-infra/skills/{name}.md"
 
@@ -302,12 +302,15 @@ def _mark_skill_updated(skill_name: str) -> None:
 def _delete_skill(skill_data: dict) -> tuple:
     """Remove a skill: source file, assets, distributed copies, registry row.
 
-    Returns (ok, error). Only agent-created skills may be removed — shipped
-    skills are system-managed and restored by setup --update.
+    Returns (ok, error). Agent-created and override skills may be removed.
+    Shipped system skills are managed by setup --update and cannot be deleted.
     """
     name = skill_data.get("name", "")
-    if skill_data.get("type") != "agent_created":
+    skill_type = skill_data.get("type", "")
+    if skill_type == "system":
         return False, "Shipped system skills cannot be removed (managed by setup)"
+    if skill_type not in ("agent_created", "override"):
+        return False, f"Skill type '{skill_type}' cannot be removed from the dashboard"
 
     try:
         # Source file + co-located asset directory (rm -f tolerates stale
@@ -361,9 +364,13 @@ class SkillRemoveConfirmModal(ModalScreen):
     #skill-remove-actions {
         margin-top: 1;
         height: auto;
+        align: center middle;
     }
     #skill-remove-actions Button {
-        margin-right: 1;
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
     }
     """
 
@@ -386,6 +393,55 @@ class SkillRemoveConfirmModal(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         self.dismiss(event.button.id == "btn-skill-remove-confirm")
+
+
+class PackageRemoveConfirmModal(ModalScreen):
+    """Confirmation dialog for removing a package from the registry."""
+
+    CSS = """
+    PackageRemoveConfirmModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #pkg-remove-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $error;
+        background: $surface;
+    }
+    #pkg-remove-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #pkg-remove-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(self, pkg_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self.pkg_name = pkg_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pkg-remove-dialog"):
+            yield Static(f"[bold red]⚠ Remove Package: {self.pkg_name}[/]\n")
+            yield Static(
+                "This removes the package from the system packages registry.\n\n"
+                "It does not uninstall the package via apt.\n\n"
+                "[bold]This cannot be undone.[/]"
+            )
+            with Horizontal(id="pkg-remove-actions"):
+                yield Button("Remove Permanently", variant="error", id="btn-pkg-remove-confirm")
+                yield Button("Cancel", variant="default", id="btn-pkg-remove-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "btn-pkg-remove-confirm")
 
 
 class SkillViewModal(ModalScreen):
@@ -440,7 +496,7 @@ class SkillViewModal(ModalScreen):
         if not self._file_exists:
             # Stale registry entry — nothing to edit, but Remove stays available
             self.query_one("#skill-edit", Button).disabled = True
-        if self.skill_data.get("type") != "agent_created":
+        if self.skill_data.get("type") == "system":
             # Shipped skills are system-managed — restored by setup --update
             self.query_one("#skill-remove", Button).disabled = True
 
@@ -470,7 +526,7 @@ class SkillViewModal(ModalScreen):
                 _mark_skill_updated(name)
                 self._changed = True
                 self._exit_edit_mode(content)
-                if self.skill_data.get("type") == "agent_created":
+                if self.skill_data.get("type") in ("agent_created", "override"):
                     self.app.notify(
                         f"Skill '{name}' saved — re-syncs to sub-agents on next Lifeline tick",
                         title="Skills"
@@ -814,64 +870,77 @@ class SystemSettingsModal(ModalScreen):
                         yield Static("[dim]Prevents runaway API cost from repeated spawn failures[/]")
                         yield Static("[dim]Only exit codes 1 (error), 42 (input error), 99 (runaway) trigger the breaker.[/]")
                         yield Static("")
-                        yield Static("[cyan]Consecutive Failure Threshold[/]")
-                        yield Input(value=cb_consecutive, placeholder="e.g. 5", id="input-cb-consecutive", type="integer")
-                        yield Static("[cyan]Hourly Failure Threshold[/]")
-                        yield Input(value=cb_hourly, placeholder="e.g. 20", id="input-cb-hourly", type="integer")
+                        with Horizontal(classes="task-field-row"):
+                            with Vertical(classes="task-field-col"):
+                                yield Static("[cyan]Consecutive Failure Threshold[/]")
+                                yield Input(value=cb_consecutive, placeholder="e.g. 5", id="input-cb-consecutive", type="integer")
+                            with Vertical(classes="task-field-col"):
+                                yield Static("[cyan]Hourly Failure Threshold[/]")
+                                yield Input(value=cb_hourly, placeholder="e.g. 20", id="input-cb-hourly", type="integer")
 
-                        # Browser Automation
-                        yield Static("")
-                        yield Static("[bold cyan]Browser Automation[/]")
-                        yield Static("[dim]Headless Chromium for page navigation and extraction[/]")
-                        _browser_label = "Disable" if browser_enabled else "Enable"
-                        _browser_variant = "error" if browser_enabled else "success"
-                        _browser_status = "[green]● Enabled[/]" if browser_enabled else "[red]● Disabled[/]"
-                        yield Static(f"Status: {_browser_status}", id="browser-status-label")
-                        yield Button(f"{_browser_label} Browser Automation", variant=_browser_variant, id="btn-browser-toggle")
-                        yield Static("")
-                        yield Static("[cyan]Page Load Timeout (seconds)[/]")
-                        yield Input(value=browser_timeout, placeholder="e.g. 30", id="input-browser-timeout", type="integer")
-
-                    # ── Right Column ──
-                    with Vertical(classes="settings-col"):
                         # COA Autonomous Mode
-                        yield Static("")
-                        yield Static("[bold cyan]COA Autonomous Mode[/]")
-                        yield Checkbox("Autonomous (NOPASSWD: ALL)", id="chk-coa-autonomous", value=coa_autonomous)
-                        yield Static("[bold yellow]⚠ Only enable on dedicated hardware[/]")
-                        yield Static("")
+                        with Vertical(classes="settings-section-box"):
+                            yield Static("[bold cyan]COA Autonomous Mode[/]")
+                            yield Static("[dim]Grants COA unrestricted sudo access (NOPASSWD: ALL).[/]")
+                            with Horizontal(classes="settings-inline-row"):
+                                yield Checkbox("Enable sudo access", id="chk-coa-autonomous", value=coa_autonomous)
+                                yield Static("[bold yellow]⚠ Only enable on dedicated hardware[/]")
 
                         # Model Loading Strategy (Intel SYCL only)
                         if self._show_strategy:
                             _strat_label = "Router" if loading_strategy == "router" else "Single"
                             _strat_color = "green" if loading_strategy == "router" else "yellow"
-                            yield Static(f"[bold cyan]Model Loading[/]  [bold {_strat_color}]{_strat_label}[/]")
-                            if loading_strategy == "router":
-                                yield Static("[dim]All models available on demand — no Docker restart to switch[/]")
-                            else:
-                                yield Static("[dim]One model in VRAM — Docker restart required to switch[/]")
-                            yield Button(
-                                f"Switch to {'Single' if loading_strategy == 'router' else 'Router'} Mode",
-                                variant="warning", id="btn-toggle-strategy",
-                            )
+                            with Vertical(classes="settings-section-box"):
+                                with Horizontal(classes="settings-split-row"):
+                                    with Vertical(classes="settings-split-col"):
+                                        yield Static(f"[bold cyan]Model Loading[/]  [bold {_strat_color}]{_strat_label}[/]")
+                                        if loading_strategy == "router":
+                                            yield Static("[dim]All models available on demand — no Docker restart to switch[/]")
+                                        else:
+                                            yield Static("[dim]One model in VRAM — Docker restart required to switch[/]")
+                                    with Vertical(classes="settings-split-col settings-split-actions"):
+                                        yield Button(
+                                            f"Switch to {'Single' if loading_strategy == 'router' else 'Router'} Mode",
+                                            variant="warning", id="btn-toggle-strategy",
+                                        )
+
+                    # ── Right Column ──
+                    with Vertical(classes="settings-col"):
+                        # Browser Automation
+                        _browser_label = "Disable" if browser_enabled else "Enable"
+                        _browser_variant = "error" if browser_enabled else "success"
+                        _browser_status = "[bold green]● Enabled[/]" if browser_enabled else "[bold red]● Disabled[/]"
+                        with Vertical(classes="settings-section-box"):
+                            with Horizontal(classes="settings-split-row"):
+                                with Vertical(classes="settings-split-col"):
+                                    yield Static(
+                                        f"[bold cyan]Browser Automation[/]  {_browser_status}",
+                                        id="browser-status-label",
+                                    )
+                                    yield Static("[dim]Headless Chromium for page navigation and extraction[/]")
+                                    yield Static("")
+                                    yield Static("[cyan]Page Load Timeout (seconds)[/]")
+                                    yield Input(value=browser_timeout, placeholder="e.g. 30", id="input-browser-timeout", type="integer")
+                                with Vertical(classes="settings-split-col settings-split-actions"):
+                                    yield Button(f"{_browser_label} Browser Automation", variant=_browser_variant, id="btn-browser-toggle")
 
                         # Web Search
-                        yield Static("")
-                        yield Static("[bold cyan]Web Search[/]")
-                        yield Static("[dim]Local SearXNG integration for agent research[/]")
-                        yield Checkbox("Enabled", id="chk-search-enabled", value=search_enabled)
-                        yield Static("")
-                        yield Static("[cyan]SearXNG URL[/]")
-                        yield Input(value=searxng_url, placeholder="http://localhost:8888", id="input-searxng-url")
+                        with Vertical(classes="settings-section-box"):
+                            yield Static("[bold cyan]Web Search[/]")
+                            yield Static("[dim]Local SearXNG integration for agent research[/]")
+                            yield Checkbox("Enabled", id="chk-search-enabled", value=search_enabled)
+                            yield Static("")
+                            yield Static("[cyan]SearXNG URL[/]")
+                            yield Input(value=searxng_url, placeholder="http://localhost:8888", id="input-searxng-url")
 
                 # ── Skills Registry (full width below grid, always visible) ──
-                yield Static("")
+                yield Static("", classes="settings-divider")
                 skills_table = PaginatedDataTable(self._handle_skills_key, id="skills-registry-table")
                 yield skills_table
                 yield Static("[dim]Double-click or press Enter to view/edit/remove a skill · CLI: agictl skill list[/]")
 
                 # ── System Packages (full width below skills, always visible) ──
-                yield Static("")
+                yield Static("", classes="settings-divider")
                 pkg_table = PaginatedDataTable(self._handle_packages_key, id="packages-table")
                 yield pkg_table
                 with Horizontal(id="packages-actions"):
@@ -881,9 +950,11 @@ class SystemSettingsModal(ModalScreen):
                     yield Button("Add/Request", variant="primary", id="btn-pkg-add")
                     yield Button("Remove", variant="default", id="btn-pkg-remove")
 
-            with Horizontal(id="settings-dialog-actions"):
-                yield Button("Save", variant="success", id="btn-save-settings")
-                yield Button("Cancel", variant="default", id="btn-settings-close")
+            with Vertical(id="settings-dialog-footer"):
+                yield Static("", classes="settings-divider")
+                with Horizontal(id="settings-dialog-actions"):
+                    yield Button("Save", variant="success", id="btn-save-settings")
+                    yield Button("Cancel", variant="default", id="btn-settings-close")
 
     def on_mount(self) -> None:
         """Populate the skills and packages DataTables after mount."""
@@ -1048,8 +1119,8 @@ class SystemSettingsModal(ModalScreen):
         try:
             browser_enabled = _read_ini_value("browser", "enabled", "false").lower() == "true"
             status_lbl = self.query_one("#browser-status-label", Static)
-            _browser_status = "[green]● Enabled[/]" if browser_enabled else "[red]● Disabled[/]"
-            status_lbl.update(f"Status: {_browser_status}")
+            _browser_status = "[bold green]● Enabled[/]" if browser_enabled else "[bold red]● Disabled[/]"
+            status_lbl.update(f"[bold cyan]Browser Automation[/]  {_browser_status}")
 
             btn = self.query_one("#btn-browser-toggle", Button)
             btn.label = "Disable Browser Automation" if browser_enabled else "Enable Browser Automation"
@@ -1170,25 +1241,31 @@ class SystemSettingsModal(ModalScreen):
         except Exception:
             pass
 
-    def _handle_pkg_action(self, button_id: str) -> None:
-        """Handle package approve/deny/install/remove for selected row."""
+    def _get_selected_pkg_name(self) -> str | None:
+        """Return the selected package name, or None after notifying the user."""
         try:
             pkg_table = self.query_one("#packages-table", DataTable)
             cursor_row = pkg_table.cursor_row
             if cursor_row is None or cursor_row < 0:
                 self.app.notify("Select a package first", severity="warning")
-                return
+                return None
             row_key, _ = pkg_table.coordinate_to_cell_key((cursor_row, 0))
             if not row_key or not row_key.value:
                 self.app.notify("Select a package first", severity="warning")
-                return
+                return None
             idx = int(row_key.value)
             if idx < 0 or idx >= len(self._pkg_rows):
                 self.app.notify("Select a package first", severity="warning")
-                return
-            pkg_name = self._pkg_rows[idx].get("name", "")
+                return None
+            return self._pkg_rows[idx].get("name", "")
         except Exception:
             self.app.notify("Select a package first", severity="warning")
+            return None
+
+    def _handle_pkg_action(self, button_id: str) -> None:
+        """Handle package approve/deny/install/remove for selected row."""
+        pkg_name = self._get_selected_pkg_name()
+        if not pkg_name:
             return
 
         action_map = {
@@ -1205,6 +1282,16 @@ class SystemSettingsModal(ModalScreen):
             self.app.push_screen(PackageInstallModal(pkg_name=pkg_name), callback=self._on_install_modal_close)
             return
 
+        if action == "remove":
+            self.app.push_screen(
+                PackageRemoveConfirmModal(pkg_name),
+                callback=lambda confirmed: self._on_pkg_remove_confirmed(confirmed, pkg_name),
+            )
+            return
+
+        self._execute_pkg_action(action, pkg_name)
+
+    def _execute_pkg_action(self, action: str, pkg_name: str, *, success_msg: str | None = None) -> None:
         def _run():
             try:
                 cmd = ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "pkg", action, pkg_name]
@@ -1213,9 +1300,8 @@ class SystemSettingsModal(ModalScreen):
                 try:
                     resp = json.loads(result.stdout)
                     if resp.get("success"):
-                        self.app.call_from_thread(
-                            self.app.notify, f"Package '{pkg_name}': {action} succeeded", title="Packages"
-                        )
+                        msg = success_msg or f"Package '{pkg_name}': {action} succeeded"
+                        self.app.call_from_thread(self.app.notify, msg, title="Packages")
                     else:
                         self.app.call_from_thread(
                             self.app.notify, resp.get("error", "Unknown error"), title="Error", severity="error"
@@ -1232,6 +1318,15 @@ class SystemSettingsModal(ModalScreen):
                 self.app.call_from_thread(self._refresh_packages)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _on_pkg_remove_confirmed(self, confirmed: bool, pkg_name: str) -> None:
+        if not confirmed:
+            return
+        self._execute_pkg_action(
+            "remove",
+            pkg_name,
+            success_msg=f"Package '{pkg_name}' removed from registry",
+        )
 
     def _refresh_packages(self) -> None:
         """Reload package data, clear and repopulate the DataTable."""

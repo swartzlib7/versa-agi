@@ -411,6 +411,12 @@ SystemSettingsModal {
     padding: 1 2;
     background: $surface;
     border: thick $accent;
+    layout: vertical;
+}
+
+#settings-scroll {
+    height: 1fr;
+    min-height: 0;
 }
 
 #settings-dialog-header {
@@ -430,9 +436,59 @@ SystemSettingsModal {
     height: auto;
 }
 
+.settings-section-box {
+    height: auto;
+    padding: 0 1;
+    margin-top: 0;
+    border: solid $primary;
+}
+
+.settings-inline-row {
+    height: auto;
+    width: 100%;
+    align: left middle;
+}
+
+.settings-inline-row Checkbox {
+    width: auto;
+    margin-right: 1;
+}
+
+.settings-inline-row Static {
+    width: 1fr;
+    height: auto;
+}
+
+.settings-split-row {
+    height: auto;
+    width: 100%;
+}
+
+.settings-split-col {
+    width: 1fr;
+    height: auto;
+}
+
+.settings-split-actions {
+    align: center middle;
+}
+
+.settings-divider {
+    height: 1;
+    margin-top: 1;
+    margin-bottom: 1;
+    border-top: solid $accent;
+}
+
+#settings-dialog-footer {
+    height: auto;
+    dock: bottom;
+}
+
 #settings-dialog-actions {
     height: auto;
-    margin-top: 1;
+    min-height: 3;
+    margin-top: 0;
     align: center middle;
 }
 
@@ -1075,11 +1131,24 @@ DeleteMemoryConfirmModal {
 }
 
 #skills-registry-table {
-    height: 16;
+    height: 8;
     border: solid $primary;
 }
 
 #packages-table {
     height: 8;
     border: solid $primary;
+}
+
+#packages-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#packages-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
 }

@@ -172,7 +172,7 @@ After installation, the system spans five isolation boundaries:
 | Layer | Path | Purpose |
 |---|---|---|
 | Primary User Home | `~/.versa-agi/` | Persistent repo clone + `setup.ini` symlink |
-| Monitoring Layer | `/home/watchdog/core-infra/` | Lifeline, Sentinel, agictl, agitop |
+| Monitoring Layer | `/home/watchdog/core-infra/` | Lifeline, File Monitor, agictl, agitop |
 | Agent Workspace | `/home/coa/coa-env/` | COA agent environment |
 | Centralized Data | `/var/lib/versa-agi/` | SQLite databases, model config |
 | Security Config | `/etc/versa-agi/` | setup.ini (deployed copy), poise, vault, credentials |
@@ -523,10 +523,10 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 ### Implemented ✅
 
 #### 🧠 Agent Engine
-- **LangGraph Agent Harness** — Custom Python-native LangGraph orchestration engine. 12 typed Pydantic tool schemas, `stream()` execution model, and structured telemetry output.
+- **LangGraph Agent Harness** — Custom Python-native LangGraph orchestration engine. 15 typed Pydantic tool schemas, `stream()` execution model, and structured telemetry output.
 - **System Prompt Hierarchy** — Priority-ordered prompt assembly (WHO→WHY→WHAT→OPERATIONAL→MEMORY→HISTORY). Identity and purpose are placed first for primacy, conversation history last for recency. Prevents identity drift by grounding agents in who they are before behavioral rules.
 - **Cross-Cycle Checkpointing** — SQLite-backed `SqliteSaver` enables automatic state persistence across cycles. Thread-scoped identification (`{agent_id}-{project_id}`) with checkpoint repair for hard-terminated cycles. Per-agent resume control (`resume_enabled`, `resume_max_messages`) — defaults to fresh-start mode (`resume_enabled=0`) to prevent identity erosion from checkpoint baggage.
-- **Task Triage Node** — Lightweight pre-agent classification with a 10-signal decision matrix. Routes work to the correct project thread, selects relevant skills from the dynamic DB-driven catalog, and emits intent-based **behavioral directives** (execution order per classification + signal-specific guidance) that guide agent behavior without prescribing specific CLI commands.
+- **Task Triage Stage** — Lightweight pre-graph classification (single-shot LLM call before the agent graph is constructed) with a 10-signal decision matrix. Routes work to the correct project thread, selects relevant skills from the dynamic DB-driven catalog, and emits intent-based **behavioral directives** (execution order per classification + signal-specific guidance) that guide agent behavior without prescribing specific CLI commands.
 - **Hybrid Skill Injection** — Three configurable modes (`hybrid`/`full`/`lazy`) per-agent via `skill_injection_mode` in `agents.db`. **Hybrid** (default): core skills always injected (CLI reference, memory management, communication basic ~2 KB), triage-driven skills listed as a compact manifest for on-demand loading via `agictl execute bash "cat <path>"`. **Full**: all triage-selected skills injected inline (legacy). **Lazy**: manifest only. Reduces startup tokens by ~10KB/cycle while ensuring agents have essential rules.
 - **Context Window Management** — `pre_model_hook` with `trim_messages` enforces a rolling context window (~32k tokens). Full history preserved in checkpoint; only the LLM input is trimmed. Conversation injection depth configurable per-agent (`conversation_depth`, default: 10 messages per contact).
 - **Budget Warnings** — Step budget warnings injected as genuine `HumanMessage` objects at 80%/95% thresholds, with hard termination at 100%.
@@ -540,7 +540,7 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 - **Skill Lifecycle Management** — DB-driven skill registry in `agents.db` (`agictl skill new/list/status/override`). Skills have a `scope` attribute (`all` | `coa_only`) controlling deployment audience. COA creates and maintains skills; Lifeline auto-distributes to all sub-agents on each tick via status-based polling (`draft` → `ready` → `synced` → `updated`). Dynamic `skills_catalog.md` generated from the DB replaces hardcoded triage lists. Sub-agent triage catalogs exclude `coa_only` skills.
 - **Skill Overrides** — `agictl skill override <name>` creates a `{name}_override.md` pre-populated from the shipped version. Overrides propagate to all agents via `rsync --delete` and take precedence during harness injection. Withdrawing an override reverts agents to the shipped version on the next sync.
 - **Skill Asset Directories** — Co-located asset directories (templates, scripts, reference data) deployed alongside skill `.md` files via `rsync --delete` mirrored deployment. Includes the **Solution Architect** skill with a standardized install script template for guiding PU through native environment setup on Ubuntu 24.04.
-- **Sentinel** — Reactive `inotifywait` daemon (parked). Designed for mid-minute event triggers — retained for future emergency escalation. Skill distribution handled by Lifeline via status-based polling.
+- **File Monitor** — Reactive `inotifywait` daemon (parked; formerly "Sentinel" — that name is now reserved for future remote-Agent and physical-device security roles). Designed for mid-minute event triggers — retained for future event-driven security work, including spawning Watchdog from system events. Skill distribution handled by Lifeline via status-based polling.
 - **Spawn Prompt Task Injection** — Active tasks pre-loaded into each agent's spawn prompt (priority-ordered, per-agent scoped). COA receives a sub-agent task overview for orchestration.
 - **Poise Framework** — Deterministic behavioral templates deployed as flat copies to `/etc/versa-agi/poise/`. Per-agent anchor style (`compact`/`full`) controls philosophical preamble injection.
 
