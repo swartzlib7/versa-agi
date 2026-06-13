@@ -7,8 +7,10 @@ from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.widgets import DataTable, Static, Button, Select, Input, TextArea
+from rich.markup import escape
 
 from agitop.data import TasksReader
+from agitop.widgets import PaginatedDataTable
 
 _TZ = time.strftime("%Z")
 
@@ -42,6 +44,217 @@ TASK_STATUSES = [
     ("done", "done"),
 ]
 
+_PROGRESS_PRUNE_DEFAULT = "Wake cycle review:%"
+
+
+class ProgressRemoveConfirmModal(ModalScreen[bool]):
+    """PU-only confirmation for deleting a single progress journal entry."""
+
+    CSS = """
+    ProgressRemoveConfirmModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #progress-remove-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $warning;
+        background: $surface;
+    }
+    #progress-remove-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #progress-remove-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(self, entry_id: int, note_preview: str, **kwargs):
+        super().__init__(**kwargs)
+        self.entry_id = entry_id
+        self.note_preview = note_preview
+
+    def compose(self) -> ComposeResult:
+        preview = escape(self.note_preview)
+        if len(preview) > 200:
+            preview = preview[:197] + "..."
+        with Vertical(id="progress-remove-dialog"):
+            yield Static(f"[bold yellow]Remove progress entry #{self.entry_id}[/]\n")
+            yield Static(f"[dim]{preview}[/]\n")
+            yield Static("[bold]This cannot be undone.[/]")
+            with Horizontal(id="progress-remove-actions"):
+                yield Button("Remove", variant="error", id="btn-progress-remove-confirm")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-progress-remove-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "btn-progress-remove-confirm")
+
+
+class ProgressEditModal(ModalScreen[Optional[str]]):
+    """PU-only editor for a single progress journal entry."""
+
+    CSS = """
+    ProgressEditModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #progress-edit-dialog {
+        width: 70;
+        height: auto;
+        max-height: 80%;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $surface;
+    }
+    #progress-edit-note {
+        height: 12;
+        margin: 1 0;
+    }
+    #progress-edit-error {
+        height: auto;
+        margin-bottom: 1;
+    }
+    #progress-edit-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #progress-edit-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(
+        self,
+        entry_id: int,
+        agent_name: str,
+        created_at: str,
+        note: str,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.entry_id = entry_id
+        self.agent_name = agent_name
+        self.created_at = created_at
+        self.note = note
+
+    def compose(self) -> ComposeResult:
+        ts = _utc_to_local(self.created_at)[:16] if self.created_at else "?"
+        with Vertical(id="progress-edit-dialog"):
+            yield Static(
+                f"[bold]Edit progress entry #{self.entry_id}[/]\n"
+                f"[dim]{ts} · {escape(self.agent_name or '?')}[/]"
+            )
+            yield TextArea(self.note, id="progress-edit-note")
+            yield Static("", id="progress-edit-error")
+            with Horizontal(id="progress-edit-actions"):
+                yield Button("Save", variant="success", id="btn-progress-edit-save")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-progress-edit-cancel")
+
+    def _save(self) -> None:
+        note = self.query_one("#progress-edit-note", TextArea).text.strip()
+        error_label = self.query_one("#progress-edit-error", Static)
+        if not note:
+            error_label.update("[bold red]Note cannot be empty[/]")
+            return
+        self.dismiss(note)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "btn-progress-edit-save":
+            self._save()
+        else:
+            self.dismiss(None)
+
+
+class ProgressPruneModal(ModalScreen[Optional[str]]):
+    """PU-only confirmation for pruning progress entries by SQL LIKE pattern."""
+
+    CSS = """
+    ProgressPruneModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #progress-prune-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $error;
+        background: $surface;
+    }
+    #progress-prune-pattern {
+        margin: 1 0;
+    }
+    #progress-prune-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #progress-prune-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(
+        self,
+        task_id: int,
+        tasks_reader: TasksReader,
+        default_pattern: str = _PROGRESS_PRUNE_DEFAULT,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.task_id = task_id
+        self.tasks_reader = tasks_reader
+        self.default_pattern = default_pattern
+
+    def compose(self) -> ComposeResult:
+        match_count = self.tasks_reader.count_task_progress_matching(
+            self.task_id, self.default_pattern
+        )
+        prune_count = max(0, match_count - 1)
+        with Vertical(id="progress-prune-dialog"):
+            yield Static(
+                f"[bold red]Prune progress journal — task #{self.task_id}[/]\n\n"
+                "Remove older entries matching a SQL LIKE pattern.\n"
+                "The [bold]most recent[/] match is always kept.\n"
+                f"Default: [bold]{match_count}[/] match(es), [bold]{prune_count}[/] to remove.\n\n"
+                "[bold]This cannot be undone.[/]"
+            )
+            yield Static("[b]LIKE pattern[/b]  [dim](Enter to confirm)[/]")
+            yield Input(value=self.default_pattern, id="progress-prune-pattern")
+            with Horizontal(id="progress-prune-actions"):
+                yield Button("Prune older matches", variant="error", id="btn-progress-prune-confirm")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-progress-prune-cancel")
+
+    def _confirm_prune(self) -> None:
+        pattern = self.query_one("#progress-prune-pattern", Input).value.strip()
+        self.dismiss(pattern or None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "progress-prune-pattern":
+            event.stop()
+            self._confirm_prune()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "btn-progress-prune-confirm":
+            self._confirm_prune()
+        else:
+            self.dismiss(None)
+
 
 class TaskEditModal(ModalScreen):
     """Modal dialog to view task details and edit status/due_date/project/assignee."""
@@ -50,6 +263,10 @@ class TaskEditModal(ModalScreen):
         super().__init__(**kwargs)
         self._task_record = task
         self._tasks_reader = tasks_reader
+        self._progress_page = 0
+        self._progress_page_size = 8
+        self._progress_total = 0
+        self._progress_entry_notes: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         task = self._task_record
@@ -125,44 +342,191 @@ class TaskEditModal(ModalScreen):
                         id="task-edit-due",
                     )
 
-            # ── Progress Journal (read-only) ──
-            # Agent-authored breadcrumbs via 'agictl task progress <id> "..."' —
-            # the cross-cycle continuity carrier, surfaced here for the PU.
-            progress = []
-            if self._tasks_reader and isinstance(task.get("id"), int):
-                progress = self._tasks_reader.get_task_progress(task["id"])
+            # ── Progress Journal (read-only, paginated) ──
             yield Static("")
+            yield Static("[b]Progress Journal[/b]", id="task-progress-header")
+            yield PaginatedDataTable(self._handle_progress_key, id="task-progress-table")
+            with Horizontal(classes="task-progress-actions"):
+                yield Button("Edit selected", variant="primary", id="task-progress-edit")
+                yield Button("Remove selected", variant="warning", id="task-progress-remove")
+                yield Button("Prune matching…", variant="error", id="task-progress-prune")
             yield Static(
-                f"[b]Progress Journal[/b] [dim]({len(progress)} "
-                f"entr{'y' if len(progress) == 1 else 'ies'} — newest first)[/]"
+                "[dim]PgUp/PgDn to navigate · agents journal via agictl task progress · "
+                "PU: edit/remove/prune entries here[/]",
+                id="task-progress-hint",
             )
-            with VerticalScroll(id="task-progress-scroll"):
-                if progress:
-                    from rich.markup import escape
-                    for entry in reversed(progress):
-                        ts = _utc_to_local(str(entry.get("created_at") or ""))[:16]
-                        author = entry.get("agent_name") or "?"
-                        note = escape(str(entry.get("note") or ""))
-                        yield Static(
-                            f"[cyan]{ts}[/] [yellow]{author}[/] — {note}",
-                            classes="task-progress-entry",
-                        )
-                else:
-                    yield Static(
-                        "[dim]No entries yet — agents journal progress with: "
-                        "agictl task progress <id> \"DONE: ... NEXT: ...\"[/]"
-                    )
 
             yield Static("", id="task-edit-error")
             with Horizontal(classes="task-dialog-buttons"):
                 yield Button("Save", variant="success", id="task-dialog-save")
-                yield Button("Cancel", variant="primary", id="task-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="task-dialog-close")
+
+    def on_mount(self) -> None:
+        try:
+            table = self.query_one("#task-progress-table", DataTable)
+            table.cursor_type = "row"
+            table.add_columns("When", "Agent", "Note")
+            if self._tasks_reader and isinstance(self._task_record.get("id"), int):
+                self._progress_total = self._tasks_reader.count_task_progress(self._task_record["id"])
+            self._update_progress_table()
+        except Exception:
+            pass
+
+    def _handle_progress_key(self, key: str) -> None:
+        if key == "pageup":
+            if self._progress_page > 0:
+                self._progress_page -= 1
+                self._update_progress_table()
+        elif key == "pagedown":
+            max_page = max(0, (self._progress_total - 1) // self._progress_page_size)
+            if self._progress_page < max_page:
+                self._progress_page += 1
+                self._update_progress_table()
+
+    def _update_progress_table(self) -> None:
+        try:
+            table = self.query_one("#task-progress-table", DataTable)
+            table.clear()
+            task_id = self._task_record.get("id")
+            if not self._tasks_reader or not isinstance(task_id, int):
+                return
+
+            self._progress_total = self._tasks_reader.count_task_progress(task_id)
+            self._progress_entry_notes = {}
+            if self._progress_total == 0:
+                table.border_title = "Progress Journal (0 entries)"
+                return
+
+            start = self._progress_page * self._progress_page_size
+            rows = self._tasks_reader.get_task_progress_page(
+                task_id, offset=start, limit=self._progress_page_size
+            )
+            for entry in rows:
+                entry_id = str(entry.get("id") or "")
+                raw_note = str(entry.get("note") or "")
+                if entry_id:
+                    self._progress_entry_notes[entry_id] = raw_note
+                ts = _utc_to_local(str(entry.get("created_at") or ""))[:16]
+                author = entry.get("agent_name") or "?"
+                note = escape(raw_note)
+                if len(note) > 120:
+                    note = note[:117] + "..."
+                table.add_row(ts, author, note, key=entry_id or None)
+
+            total_pages = max(1, (self._progress_total + self._progress_page_size - 1) // self._progress_page_size)
+            current_page = self._progress_page + 1
+            table.border_title = (
+                f"Progress Journal ({self._progress_total})  │  "
+                f"Page {current_page}/{total_pages}  │  PgUp/PgDn · newest first"
+            )
+        except Exception:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "task-dialog-close":
             self.app.pop_screen()
         elif event.button.id == "task-dialog-save":
             self._save()
+        elif event.button.id == "task-progress-edit":
+            self._edit_selected_progress()
+        elif event.button.id == "task-progress-remove":
+            self._remove_selected_progress()
+        elif event.button.id == "task-progress-prune":
+            self._prune_progress()
+
+    def _get_selected_progress_entry_id(self) -> Optional[str]:
+        table = self.query_one("#task-progress-table", DataTable)
+        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        entry_id_str = str(row_key.value) if row_key and row_key.value else ""
+        if not entry_id_str:
+            return None
+        return entry_id_str
+
+    def _edit_selected_progress(self) -> None:
+        task_id = self._task_record.get("id")
+        if not self._tasks_reader or not isinstance(task_id, int):
+            return
+        entry_id_str = self._get_selected_progress_entry_id()
+        if not entry_id_str:
+            self.app.notify("Select a journal entry first", severity="warning")
+            return
+
+        entry = self._tasks_reader.get_task_progress_entry(int(entry_id_str), task_id)
+        if not entry:
+            self.app.notify("Progress entry not found", severity="error")
+            return
+
+        def _on_save(new_note: Optional[str]) -> None:
+            if not new_note:
+                return
+            if self._tasks_reader.update_task_progress_entry(int(entry_id_str), task_id, new_note):
+                self._update_progress_table()
+                self.app.notify(f"Updated progress entry #{entry_id_str}", title="agitop")
+            else:
+                self.app.notify("Failed to update entry", severity="error")
+
+        self.app.push_screen(
+            ProgressEditModal(
+                int(entry_id_str),
+                str(entry.get("agent_name") or "?"),
+                str(entry.get("created_at") or ""),
+                str(entry.get("note") or ""),
+            ),
+            _on_save,
+        )
+
+    def _remove_selected_progress(self) -> None:
+        task_id = self._task_record.get("id")
+        if not self._tasks_reader or not isinstance(task_id, int):
+            return
+        entry_id_str = self._get_selected_progress_entry_id()
+        if not entry_id_str or entry_id_str not in self._progress_entry_notes:
+            self.app.notify("Select a journal entry first", severity="warning")
+            return
+        note_preview = self._progress_entry_notes[entry_id_str]
+
+        def _on_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            if self._tasks_reader.delete_task_progress_entry(int(entry_id_str), task_id):
+                self._progress_total = max(0, self._progress_total - 1)
+                max_page = max(0, (self._progress_total - 1) // self._progress_page_size)
+                if self._progress_page > max_page:
+                    self._progress_page = max_page
+                self._update_progress_table()
+                self.app.notify(f"Removed progress entry #{entry_id_str}", title="agitop")
+            else:
+                self.app.notify("Failed to remove entry", severity="error")
+
+        self.app.push_screen(
+            ProgressRemoveConfirmModal(int(entry_id_str), note_preview),
+            _on_confirm,
+        )
+
+    def _prune_progress(self) -> None:
+        task_id = self._task_record.get("id")
+        if not self._tasks_reader or not isinstance(task_id, int):
+            return
+
+        def _on_prune(pattern: Optional[str]) -> None:
+            if not pattern:
+                return
+            deleted = self._tasks_reader.prune_task_progress(task_id, pattern)
+            if deleted:
+                self._progress_page = 0
+                self._update_progress_table()
+                self.app.notify(
+                    f"Pruned {deleted} older entries (kept most recent match)",
+                    title="agitop",
+                )
+            else:
+                remaining = self._tasks_reader.count_task_progress_matching(task_id, pattern)
+                if remaining:
+                    self.app.notify("Only one matching entry — kept as most recent", severity="information")
+                else:
+                    self.app.notify("No matching entries to prune", severity="warning")
+
+        self.app.push_screen(ProgressPruneModal(task_id, self._tasks_reader), _on_prune)
 
     def _save(self) -> None:
         task_id = self._task_record.get("id")
@@ -239,7 +603,7 @@ class DeleteTaskModal(ModalScreen):
                 id="msg-dialog-header"
             )
             yield Button("Delete", variant="error", id="confirm-delete")
-            yield Button("Cancel", variant="primary", id="cancel-delete")
+            yield Button("Cancel", classes="dismiss-btn", variant="default", id="cancel-delete")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm-delete":

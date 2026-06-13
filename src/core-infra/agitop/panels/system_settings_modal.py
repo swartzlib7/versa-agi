@@ -11,6 +11,8 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll, Container
 from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, Collapsible, TextArea
 
+from agitop.widgets import PaginatedDataTable
+
 
 _SETUP_INI_PATHS = [
     "/etc/versa-agi/setup.ini",
@@ -80,19 +82,6 @@ def _sync_ini_copies(written_path: str) -> None:
                 shutil.copy2(written_path, target)
             except Exception:
                 pass  # Non-fatal
-
-
-class PaginatedDataTable(DataTable):
-    """DataTable subclass that intercepts PageUp/PageDown key events to trigger custom pagination callbacks."""
-    def __init__(self, key_callback, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.key_callback = key_callback
-
-    def on_key(self, event) -> None:
-        if event.key in ("pageup", "pagedown"):
-            event.prevent_default()
-            event.stop()
-            self.key_callback(event.key)
 
 
 def _update_paths_env_key(key: str, value: str) -> bool:
@@ -388,7 +377,7 @@ class SkillRemoveConfirmModal(ModalScreen):
             )
             with Horizontal(id="skill-remove-actions"):
                 yield Button("Remove Permanently", variant="error", id="btn-skill-remove-confirm")
-                yield Button("Cancel", variant="default", id="btn-skill-remove-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-skill-remove-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -437,7 +426,7 @@ class PackageRemoveConfirmModal(ModalScreen):
             )
             with Horizontal(id="pkg-remove-actions"):
                 yield Button("Remove Permanently", variant="error", id="btn-pkg-remove-confirm")
-                yield Button("Cancel", variant="default", id="btn-pkg-remove-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-pkg-remove-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -488,7 +477,7 @@ class SkillViewModal(ModalScreen):
                 yield Button("Edit", variant="warning", id="skill-edit")
                 yield Button("Save", variant="success", id="skill-save")
                 yield Button("Remove", variant="error", id="skill-remove")
-                yield Button("Close", variant="primary", id="skill-view-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="skill-view-close")
 
     def on_mount(self) -> None:
         self.query_one("#skill-content-editor", TextArea).display = False
@@ -599,7 +588,7 @@ class RouterModeConfirmModal(ModalScreen):
             with Horizontal(id="router-actions"):
                 yield Button(f"Switch to {target_label}", variant="warning", id="btn-router-confirm")
                 yield Button("Copy", variant="default", id="btn-router-copy")
-                yield Button("Cancel", variant="default", id="btn-router-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-router-cancel")
 
     def _set_status(self, text: str) -> None:
         self._last_status_text = re.sub(r'\[/?[^\]]*\]', '', text)
@@ -829,6 +818,7 @@ class SystemSettingsModal(ModalScreen):
         # Circuit Breaker
         cb_consecutive = _read_ini_value("agent", "circuit_breaker_consecutive", "5")
         cb_hourly = _read_ini_value("agent", "circuit_breaker_hourly", "20")
+        flood_guard_hours = _read_ini_value("agent", "flood_guard_timeout_hours", "3")
 
         # Web Search
         search_enabled = _read_ini_value("search", "enabled", "false").lower() == "true"
@@ -877,6 +867,10 @@ class SystemSettingsModal(ModalScreen):
                             with Vertical(classes="task-field-col"):
                                 yield Static("[cyan]Hourly Failure Threshold[/]")
                                 yield Input(value=cb_hourly, placeholder="e.g. 20", id="input-cb-hourly", type="integer")
+                            with Vertical(classes="task-field-col"):
+                                yield Static("[cyan]Flood Guard Timeout (hours)[/]")
+                                yield Input(value=flood_guard_hours, placeholder="e.g. 3", id="input-flood-guard-hours", type="integer")
+                        yield Static("[dim]Flood guard: PU messaging suppression auto-lifts after this many hours without a new outbound message.[/]")
 
                         # COA Autonomous Mode
                         with Vertical(classes="settings-section-box"):
@@ -954,7 +948,7 @@ class SystemSettingsModal(ModalScreen):
                 yield Static("", classes="settings-divider")
                 with Horizontal(id="settings-dialog-actions"):
                     yield Button("Save", variant="success", id="btn-save-settings")
-                    yield Button("Cancel", variant="default", id="btn-settings-close")
+                    yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-settings-close")
 
     def on_mount(self) -> None:
         """Populate the skills and packages DataTables after mount."""
@@ -1000,26 +994,28 @@ class SystemSettingsModal(ModalScreen):
             self.app.push_screen(RouterModeConfirmModal(current))
         elif event.button.id == "btn-save-settings":
             try:
-                # ── Circuit Breaker ──
+                # ── Circuit Breaker + Flood Guard ──
                 cb_consecutive = int(self.query_one("#input-cb-consecutive", Input).value)
                 cb_hourly = int(self.query_one("#input-cb-hourly", Input).value)
+                flood_guard_hours = int(self.query_one("#input-flood-guard-hours", Input).value)
 
-                if cb_consecutive < 1 or cb_hourly < 1:
+                if cb_consecutive < 1 or cb_hourly < 1 or flood_guard_hours < 1:
                     self.app.notify("Thresholds must be ≥ 1", severity="error")
                     return
 
                 ok1 = _write_ini_value("agent", "circuit_breaker_consecutive", str(cb_consecutive))
                 ok2 = _write_ini_value("agent", "circuit_breaker_hourly", str(cb_hourly))
+                ok3 = _write_ini_value("agent", "flood_guard_timeout_hours", str(flood_guard_hours))
 
                 # ── Web Search ──
                 search_enabled = self.query_one("#chk-search-enabled", Checkbox).value
                 searxng_url = self.query_one("#input-searxng-url", Input).value.strip()
-                ok3 = _write_ini_value("search", "enabled", "true" if search_enabled else "false")
-                ok4 = _write_ini_value("search", "searxng_url", searxng_url) if searxng_url else True
+                ok4 = _write_ini_value("search", "enabled", "true" if search_enabled else "false")
+                ok5 = _write_ini_value("search", "searxng_url", searxng_url) if searxng_url else True
 
                 # ── COA Autonomous ──
                 coa_autonomous = self.query_one("#chk-coa-autonomous", Checkbox).value
-                ok5 = _write_ini_value("coa", "autonomous", "true" if coa_autonomous else "false")
+                ok6 = _write_ini_value("coa", "autonomous", "true" if coa_autonomous else "false")
 
                 # Apply sudoers immediately (no setup.sh re-run needed)
                 sudoers_file = "/etc/sudoers.d/versa_agi_coa_autonomous"
@@ -1045,11 +1041,12 @@ class SystemSettingsModal(ModalScreen):
                 if browser_timeout < 5:
                     self.app.notify("Browser timeout must be ≥ 5 seconds", severity="error")
                     return
-                ok6 = _write_ini_value("browser", "timeout", str(browser_timeout))
+                ok7 = _write_ini_value("browser", "timeout", str(browser_timeout))
 
-                if all([ok1, ok2, ok3, ok4, ok5, ok6]):
+                if all([ok1, ok2, ok3, ok4, ok5, ok6, ok7]):
                     summary_parts = [
                         f"Circuit breaker: {cb_consecutive}/{cb_hourly}",
+                        f"Flood guard: {flood_guard_hours}h",
                         f"Search: {'on' if search_enabled else 'off'}",
                         f"Browser timeout: {browser_timeout}s",
                         f"Autonomous: {'on' if coa_autonomous else 'off'}",
@@ -1386,7 +1383,7 @@ class PackageRequestModal(ModalScreen):
             yield Static("", id="lbl-request-pkg-error")
             with Horizontal(id="request-pkg-actions"):
                 yield Button("Submit Request", variant="success", id="btn-request-confirm")
-                yield Button("Cancel", variant="default", id="btn-request-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-request-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-request-cancel":
@@ -1482,7 +1479,7 @@ class BrowserAutomationModal(ModalScreen):
             with Horizontal(id="browser-actions"):
                 confirm_variant = "success" if self.target_enabled else "error"
                 yield Button(f"Confirm {action}", variant=confirm_variant, id="btn-browser-confirm")
-                yield Button("Cancel", variant="default", id="btn-browser-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-browser-close")
 
     def on_mount(self) -> None:
         self.query_one("#browser-terminal").display = False
@@ -1704,7 +1701,7 @@ class PackageInstallModal(ModalScreen):
             yield Static(f"[bold yellow]📦 Installing Package: {self.pkg_name}[/]\n", id="install-title")
             yield VerticalScroll(Static(id="install-terminal-text"), id="install-terminal")
             with Horizontal(id="install-actions"):
-                yield Button("Cancel/Close", variant="default", id="btn-install-close")
+                yield Button("Cancel/Close", classes="dismiss-btn", variant="default", id="btn-install-close")
 
     def on_mount(self) -> None:
         self.query_one("#btn-install-close", Button).disabled = True

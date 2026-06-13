@@ -119,7 +119,7 @@ class ApiKeysModal(ModalScreen):
 
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("💾 Save Changes", variant="success", id="btn-api-save")
-                yield Button("Cancel", variant="default", id="msg-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
         """Load current key states and populate status indicators."""

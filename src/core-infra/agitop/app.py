@@ -59,11 +59,11 @@ class AgitopApp(App):
             yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
             yield FooterStatsPanel(self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel")
             with TabbedContent(initial="projects-tab", id="work-tabs"):
-                with TabPane("Projects", id="projects-tab"):
+                with TabPane("◆  Projects", id="projects-tab"):
                     yield ProjectsPanel(self.tasks_reader, id="projects-panel")
-                with TabPane("Tasks", id="tasks-tab"):
+                with TabPane("◎  Tasks", id="tasks-tab"):
                     yield TasksPanel(self.tasks_reader, message_reader=self.message_reader, id="tasks-panel")
-                with TabPane("Messages", id="messages-tab"):
+                with TabPane("✉  Messages", id="messages-tab"):
                     yield MessagesPanel(self.message_reader, config=self.config, agent_reader=self.agent_reader, id="messages-panel")
 
         yield Footer()

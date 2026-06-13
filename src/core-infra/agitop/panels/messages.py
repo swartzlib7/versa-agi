@@ -8,7 +8,7 @@ from typing import Optional
 from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
-from textual.containers import Vertical, Horizontal, VerticalScroll, VerticalScroll
+from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import DataTable, Static, Button, Checkbox, Select, TextArea, Markdown
 from textual.widget import Widget
 import subprocess
@@ -51,29 +51,38 @@ def strip_emotion_tags(text: str) -> str:
 class ComposeModal(ModalScreen):
     """Compose a local message to an agent."""
 
-    def __init__(self, agents: list, preselect_agent: str = None, **kwargs):
+    def __init__(self, agents: list, preselect_agent: str = None,
+                 lock_to_agent: str = None, **kwargs):
         super().__init__(**kwargs)
         self.agents = agents
         self.preselect_agent = preselect_agent
+        self.lock_to_agent = lock_to_agent
 
     def compose(self) -> ComposeResult:
-        options = [(a, a) for a in self.agents]
-        default = self.preselect_agent or (self.agents[0] if self.agents else None)
+        title = "[bold]↩ Reply[/]" if self.lock_to_agent else "[bold]✉ New Message[/]"
 
         with Vertical(id="compose-dialog"):
-            yield Static("[bold]✉ New Message[/]", id="compose-title")
+            yield Static(title, id="compose-title")
             yield Static("[cyan]To Agent:[/]")
-            yield Select(options, value=default, id="compose-agent", allow_blank=False)
+            if self.lock_to_agent:
+                yield Static(self.lock_to_agent, id="compose-agent-locked")
+            else:
+                options = [(a, a) for a in self.agents]
+                default = self.preselect_agent or (self.agents[0] if self.agents else None)
+                yield Select(options, value=default, id="compose-agent", allow_blank=False)
             yield Static("[cyan]Message:[/]")
             yield TextArea(id="compose-body")
             with Horizontal(id="compose-actions"):
                 yield Button("Send", variant="success", id="compose-send")
-                yield Button("Cancel", variant="default", id="compose-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="compose-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "compose-send":
-            select = self.query_one("#compose-agent", Select)
-            agent = select.value
+            if self.lock_to_agent:
+                agent = self.lock_to_agent
+            else:
+                select = self.query_one("#compose-agent", Select)
+                agent = select.value
             body = self.query_one("#compose-body", TextArea).text.strip()
             if not body:
                 self.app.notify("Message body is empty", severity="warning")
@@ -113,7 +122,7 @@ class MarkdownViewModal(ModalScreen):
                 yield Markdown(self.md_content, id="md-viewer-content")
             with Horizontal(id="md-viewer-actions"):
                 yield Button("📋 Copy", variant="default", id="md-copy")
-                yield Button("Close", variant="primary", id="md-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="md-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "md-close":
@@ -137,15 +146,21 @@ class MessageViewModal(ModalScreen):
 
     def __init__(self, msg: dict, agent_name: str = "Agent",
                  primary_name: str = None,
-                 recipient_name: str = None,
-                 primary_uid: str = None, **kwargs):
+                 primary_uid: str = None,
+                 reply_agent: str = None,
+                 from_display: str = None,
+                 to_display: str = None, **kwargs):
         super().__init__(**kwargs)
         self.msg = msg
         self.agent_name = agent_name
         self.primary_name = primary_name
-        self.recipient_name = recipient_name
         self.primary_uid = primary_uid
+        self.reply_agent = reply_agent
+        self.from_display = from_display or "Unknown"
+        self.to_display = to_display or "Unknown"
         self._confirm_delete = False
+        status = msg.get("status", "")
+        self._original_status = status if status else "processed"
 
     def compose(self) -> ComposeResult:
         from textual.widgets import Select
@@ -154,19 +169,10 @@ class MessageViewModal(ModalScreen):
         arrow = "→ SENT" if direction == "sent" else "← RECEIVED"
 
         # Resolve from/to names from actual message data (not direction)
-        # display_name column always stores the sender's name
-        from_name = msg.get("display_name") or msg.get("from_user_id") or "Unknown"
-        # Resolve recipient: check if to_user_id is PU, otherwise use as-is (agent name)
-        to_uid = msg.get("to_user_id", "")
-        if self.primary_uid and to_uid == self.primary_uid:
-            to_name = self.primary_name or "Primary User"
-        elif self.recipient_name:
-            to_name = self.recipient_name
-        else:
-            to_name = to_uid or "Unknown"
+        from_name = self.from_display
+        to_name = self.to_display
 
         mode = msg.get("mode", "typed")
-        status = msg.get("status", "")
         created = _utc_to_local(msg.get("created_at", ""))
         msg_id = msg.get("message_id", "")
         cycle = msg.get("cycle_id") or "--"
@@ -175,17 +181,8 @@ class MessageViewModal(ModalScreen):
         is_sent = direction == "sent"
         has_attach = "Yes" if (is_sent and msg.get("has_attachments")) else "No"
 
-        # Build header info block
-        header = (
-            f"[bold]{arrow}[/]  [dim]{created}[/]\n"
-            f"[cyan]From:[/] {from_name}\n"
-            f"[cyan]To:[/] {to_name}\n"
-            f"[cyan]Mode:[/] {mode}  [cyan]Status:[/] {status}\n"
-            f"[cyan]Message ID:[/] {msg_id}\n"
-            f"[cyan]Cycle:[/] {cycle}"
-        )
-        if is_sent:
-            header += f"\n[cyan]Attachments:[/] {has_attach}"
+        # Build header — direction line + 3-column metadata below
+        attach_display = has_attach if is_sent else "—"
 
         # Prefer original_text (with emotion tags) for dashboard display
         raw_text = msg.get("original_text") or msg.get("text") or ""
@@ -233,44 +230,80 @@ class MessageViewModal(ModalScreen):
             ("pending", "pending"),
             ("error", "error"),
         ]
-        # Find current status value for Select
-        current_status = status if status in dict(status_options) else "processed"
+        current_status = (
+            self._original_status
+            if self._original_status in dict(status_options)
+            else "processed"
+        )
 
         with Vertical(id="msg-dialog"):
+            with Vertical(id="msg-dialog-top"):
+                yield Static(f"[bold]{arrow}[/]  [dim]{created}[/]", id="msg-dialog-direction")
+                with Horizontal(classes="msg-dialog-meta"):
+                    yield Static(f"[cyan]From:[/]\n{from_name}", classes="msg-meta-col")
+                    yield Static(f"[cyan]To:[/]\n{to_name}", classes="msg-meta-col")
+                    yield Static(f"[cyan]Mode:[/]\n{mode}", classes="msg-meta-col")
+                with Horizontal(classes="msg-dialog-meta"):
+                    yield Static(f"[cyan]Message ID:[/]\n{msg_id}", classes="msg-meta-col")
+                    yield Static(f"[cyan]Cycle:[/]\n{cycle}", classes="msg-meta-col")
+                    yield Static(f"[cyan]Attachments:[/]\n{attach_display}", classes="msg-meta-col")
+                with Horizontal(id="msg-status-row"):
+                    yield Static("[cyan]Status:[/]")
+                    yield Select(
+                        status_options,
+                        value=current_status,
+                        id="select-msg-status",
+                        allow_blank=False,
+                    )
             with VerticalScroll(id="msg-dialog-scroll"):
-                yield Static(header, id="msg-dialog-header")
-                yield TextArea(raw_text, id="msg-dialog-body", read_only=True)
-                # Attachment details (parsed from raw_payload)
-                if attach_labels or self._md_attachments:
-                    with Vertical(id="msg-attachments"):
-                        if attach_labels:
-                            yield Static("[cyan]Attachments:[/]\n" + "\n".join(attach_labels))
-                        for idx, md_att in enumerate(self._md_attachments):
-                            yield Button(
-                                f"📄 View: {md_att['title']}",
-                                variant="warning",
-                                id=f"md-view-{idx}",
-                            )
-            yield Static("[cyan]Status[/] — change message processing status")
-            yield Select(
-                status_options,
-                value=current_status,
-                id="select-msg-status",
-                allow_blank=False,
-            )
-            with Horizontal(id="msg-dialog-actions"):
-                # Reply button — only for messages addressed TO the Primary User
-                to_uid = msg.get("to_user_id", "")
-                if self.primary_uid and to_uid == self.primary_uid:
-                    yield Button("💬 Reply", variant="warning", id="msg-reply")
-                yield Button("Save Status", variant="success", id="msg-save-status")
-                yield Button("📋 Copy Body", variant="default", id="msg-copy-body")
-                yield Button("Copy ID", variant="default", id="msg-dialog-copy-id")
-                yield Button("Delete", variant="error", id="msg-delete")
-                yield Button("Close", variant="primary", id="msg-dialog-close")
+                with Vertical(id="msg-body-pane"):
+                    yield TextArea(raw_text, id="msg-dialog-body", read_only=True)
+                    # Attachment details (parsed from raw_payload)
+                    if attach_labels or self._md_attachments:
+                        with Vertical(id="msg-attachments"):
+                            if attach_labels:
+                                yield Static("[cyan]Attachments:[/]\n" + "\n".join(attach_labels))
+                            for idx, md_att in enumerate(self._md_attachments):
+                                yield Button(
+                                    f"📄 View: {md_att['title']}",
+                                    variant="warning",
+                                    id=f"md-view-{idx}",
+                                )
+                if self.reply_agent:
+                    with Vertical(id="msg-reply-section"):
+                        yield Static(f"[cyan]Reply To:[/] {self.reply_agent}")
+                        yield Static("[cyan]Reply:[/]")
+                        yield TextArea("", id="msg-reply-body")
+                with Horizontal(id="msg-dialog-actions"):
+                    if self.reply_agent:
+                        yield Button("💬 Reply", variant="warning", id="msg-reply", disabled=True)
+                    yield Button("Save Status", variant="success", id="msg-save-status", disabled=True)
+                    yield Button("📋 Copy Body", variant="primary", id="msg-copy-body")
+                    yield Button("Copy ID", variant="primary", id="msg-dialog-copy-id")
+                    yield Button("Delete", variant="error", id="msg-delete")
+                    yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+
+    def _update_action_buttons(self) -> None:
+        status_select = self.query_one("#select-msg-status", Select)
+        save_btn = self.query_one("#msg-save-status", Button)
+        current_status = status_select.value
+        status_dirty = isinstance(current_status, str) and current_status != self._original_status
+        save_btn.disabled = not status_dirty
+
+        if self.reply_agent:
+            reply_text = self.query_one("#msg-reply-body", TextArea).text.strip()
+            self.query_one("#msg-reply", Button).disabled = not reply_text
+
+    @on(Select.Changed, "#select-msg-status")
+    def on_status_changed(self, event: Select.Changed) -> None:
+        self._update_action_buttons()
+
+    @on(TextArea.Changed, "#msg-reply-body")
+    def on_reply_changed(self, event: TextArea.Changed) -> None:
+        reply_text = self.query_one("#msg-reply-body", TextArea).text.strip()
+        self.query_one("#msg-reply", Button).disabled = not reply_text
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        from textual.widgets import Select
         msg_id = self.msg.get("message_id") or ""
 
         # Handle markdown viewer buttons (md-view-0, md-view-1, etc.)
@@ -289,20 +322,24 @@ class MessageViewModal(ModalScreen):
         if event.button.id == "msg-dialog-close":
             self.app.pop_screen()
         elif event.button.id == "msg-reply":
-            # Resolve the sender agent name for reply
-            from_uid = self.msg.get("from_user_id", "")
-            # Try to find the agent name from the UID via the messages panel
+            body = self.query_one("#msg-reply-body", TextArea).text.strip()
+            if not body:
+                self.app.notify("Reply is empty", severity="warning")
+                return
             try:
-                messages_panel = self.app.query_one(MessagesPanel)
-                agent_name = messages_panel._uid_to_agent.get(from_uid, from_uid)
-                agents = [a for a in messages_panel._uid_to_agent.values()
-                          if a not in ("watchdog",)]
-                if not agents:
-                    agents = [agent_name]
-                self.app.push_screen(ComposeModal(
-                    agents=sorted(set(agents)),
-                    preselect_agent=agent_name,
-                ))
+                result = subprocess.run(
+                    ["sudo", "agictl", "message", "internal", "--from-pu",
+                     str(self.reply_agent), body],
+                    capture_output=True, timeout=15, text=True
+                )
+                if result.returncode == 0:
+                    self.app.notify(f"Reply sent to {self.reply_agent}", title="Sent")
+                    self.query_one("#msg-reply-body", TextArea).text = ""
+                    self._update_action_buttons()
+                    self.app.query_one(MessagesPanel).refresh_data()
+                else:
+                    err = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                    self.app.notify(f"Failed: {err[:100]}", severity="error")
             except Exception as e:
                 self.app.notify(f"Reply failed: {e}", severity="error")
         elif event.button.id == "msg-copy-body":
@@ -332,13 +369,14 @@ class MessageViewModal(ModalScreen):
                     messages_panel = self.app.query_one(MessagesPanel)
                     ok = messages_panel.message_reader.update_message_status(msg_id, new_status)
                     if ok:
+                        self._original_status = new_status
+                        self._update_action_buttons()
                         self.app.notify(f"Status → {new_status}", title="Message Updated")
                         messages_panel.refresh_data()
                     else:
                         self.app.notify("Failed to update status", title="Error", severity="error")
             except Exception as e:
                 self.app.notify(f"Error: {e}", title="Error", severity="error")
-            self.app.pop_screen()
         elif event.button.id == "msg-delete":
             if not self._confirm_delete:
                 self._confirm_delete = True
@@ -491,7 +529,6 @@ class MessagesPanel(Widget):
 
         for idx, msg in enumerate(messages):
             direction = msg.get("direction", "sent")
-            db_name = msg.get("display_name") or ""
             from_uid = msg.get("from_user_id") or ""
             to_uid = msg.get("to_user_id") or ""
             channel = msg.get("channel", "vv")
@@ -503,59 +540,7 @@ class MessagesPanel(Widget):
                 agent_label = self._uid_to_agent.get(to_uid, "--")
             
             # Resolve From and To names
-            from_name = ""
-            to_name = ""
-            
-            if direction == "sent":
-                # From is the sender — check agents first, then fall back to DB display_name
-                from_name = self._uid_to_agent.get(from_uid) or db_name or from_uid[:8]
-                # To is the recipient
-                if to_uid:
-                    if to_uid in self._uid_to_agent:
-                        to_name = self._uid_to_agent[to_uid]  # Internal routing
-                    elif to_uid in recipient_cache:
-                        to_name = recipient_cache[to_uid]
-                    else:
-                        try:
-                            rows = self.message_reader._query(
-                                "SELECT display_name FROM messages WHERE (from_user_id=? OR to_user_id=?) "
-                                "AND display_name IS NOT NULL AND display_name != '' "
-                                "ORDER BY created_at DESC LIMIT 1",
-                                (to_uid, to_uid)
-                            )
-                            # Protect against message text mistakenly stored as display_name (> 50 chars)
-                            found_name = rows[0]["display_name"] if rows else None
-                            if found_name and len(found_name) < 50:
-                                to_name = found_name
-                            else:
-                                to_name = to_uid[:8]
-                            recipient_cache[to_uid] = to_name
-                        except Exception:
-                            recipient_cache[to_uid] = to_uid[:8]
-                            to_name = to_uid[:8]
-                else:
-                    to_name = "(unknown)"
-            else:
-                # Received message
-                # To — check if PU UID first, then agents, then fallback
-                pu_uid = self._get_primary_uid()
-                if pu_uid and to_uid == pu_uid:
-                    to_name = primary_name or "Primary User"
-                else:
-                    to_name = self._uid_to_agent.get(to_uid, agent_name)
-                # From is the sender
-                if channel == "internal" and from_uid and from_uid in self._uid_to_agent:
-                    from_name = self._uid_to_agent[from_uid]
-                elif channel == "internal" and db_name:
-                    # In INT messages, display_name might be corrupted with message text
-                    if len(db_name) < 50 and "!" not in db_name:
-                        from_name = db_name
-                    else:
-                        from_name = primary_name or "(primary)"
-                elif db_name and len(db_name) < 50:
-                    from_name = db_name
-                else:
-                    from_name = primary_name or "(unknown)"
+            from_name, to_name = self._resolve_from_to_names(msg, recipient_cache)
 
             # Prefer original_text (with emotion tags) for dashboard display
             clean_text = msg.get("original_text") or msg.get("text") or ""
@@ -600,33 +585,112 @@ class MessagesPanel(Widget):
                 key=row_key
             )
 
+    def _lookup_uid_display_name(self, uid: str, cache: dict[str, str]) -> str:
+        """Resolve a UID to a short display name via agent map or message history."""
+        if uid in self._uid_to_agent:
+            return self._uid_to_agent[uid]
+        if uid in cache:
+            return cache[uid]
+        try:
+            rows = self.message_reader._query(
+                "SELECT display_name FROM messages WHERE (from_user_id=? OR to_user_id=?) "
+                "AND display_name IS NOT NULL AND display_name != '' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (uid, uid)
+            )
+            found_name = rows[0]["display_name"] if rows else None
+            if found_name and len(found_name) < 50:
+                cache[uid] = found_name
+                return found_name
+        except Exception:
+            pass
+        short = uid[:8] if uid else "(unknown)"
+        cache[uid] = short
+        return short
+
+    def _resolve_from_to_names(self, msg: dict, recipient_cache: Optional[dict] = None) -> tuple[str, str]:
+        """Resolve sender/recipient display names for table and modal."""
+        recipient_cache = recipient_cache if recipient_cache is not None else {}
+        if not self._uid_to_agent and self.agent_reader:
+            self._uid_to_agent = self.agent_reader.build_uid_to_agent_map()
+
+        direction = msg.get("direction", "sent")
+        db_name = (msg.get("display_name") or "").strip()
+        from_uid = msg.get("from_user_id") or ""
+        to_uid = msg.get("to_user_id") or ""
+        primary_name = self._get_primary_name()
+        agent_name = self._get_agent_name()
+        pu_uid = self._get_primary_uid()
+
+        if direction == "sent":
+            from_name = (
+                self._uid_to_agent.get(from_uid)
+                or db_name
+                or (from_uid[:8] if from_uid else "(unknown)")
+            )
+            if to_uid:
+                if to_uid in self._uid_to_agent:
+                    to_name = self._uid_to_agent[to_uid]
+                elif pu_uid and to_uid == pu_uid:
+                    to_name = primary_name or "Primary User"
+                else:
+                    to_name = self._lookup_uid_display_name(to_uid, recipient_cache)
+            else:
+                to_name = "(unknown)"
+        else:
+            if pu_uid and to_uid == pu_uid:
+                to_name = primary_name or "Primary User"
+            else:
+                to_name = self._uid_to_agent.get(to_uid) or agent_name
+
+            if from_uid and from_uid in self._uid_to_agent:
+                from_name = self._uid_to_agent[from_uid]
+            elif pu_uid and from_uid == pu_uid:
+                from_name = primary_name or "Primary User"
+            elif db_name and len(db_name) < 50 and "!" not in db_name:
+                from_name = db_name
+            elif from_uid:
+                from_name = from_uid[:8]
+            else:
+                from_name = "(unknown)"
+
+        return from_name, to_name
+
+    def _resolve_reply_agent(self, msg: dict) -> Optional[str]:
+        """Return agent name to reply to for PU-addressed messages."""
+        primary_uid = self._get_primary_uid()
+        to_uid = msg.get("to_user_id", "")
+        if not primary_uid or to_uid != primary_uid:
+            return None
+        from_uid = msg.get("from_user_id", "")
+        agent_name = self._uid_to_agent.get(from_uid)
+        if not agent_name:
+            display = (msg.get("display_name") or "").strip()
+            if display and len(display) < 50:
+                agent_name = display
+            else:
+                agent_name = from_uid or None
+        if not agent_name or agent_name in ("watchdog",):
+            return None
+        return agent_name
+
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         """Launch message viewer modal on row selection."""
         row_key = event.row_key.value
         msg = self._msg_data.get(row_key, {})
         if msg:
-            # Resolve recipient name for sent messages
-            recip_name = None
-            if msg.get("direction") == "sent":
-                to_uid = msg.get("to_user_id", "")
-                if to_uid:
-                    try:
-                        rows = self.message_reader._query(
-                            "SELECT display_name FROM messages WHERE (from_user_id=? OR to_user_id=?) "
-                            "AND display_name IS NOT NULL AND display_name != '' "
-                            "ORDER BY created_at DESC LIMIT 1",
-                            (to_uid, to_uid)
-                        )
-                        recip_name = rows[0]["display_name"] if rows else to_uid[:8]
-                    except Exception:
-                        recip_name = to_uid[:8]
+            if not self._uid_to_agent and self.agent_reader:
+                self._uid_to_agent = self.agent_reader.build_uid_to_agent_map()
+            from_name, to_name = self._resolve_from_to_names(msg)
             self.app.push_screen(MessageViewModal(
                 msg,
                 agent_name=self._get_agent_name(),
                 primary_name=self._get_primary_name(),
-                recipient_name=recip_name,
-                primary_uid=self.config.get_config().get("primary_user", {}).get("uid") if self.config else None,
+                primary_uid=self._get_primary_uid(),
+                reply_agent=self._resolve_reply_agent(msg),
+                from_display=from_name,
+                to_display=to_name,
             ))
 
     def _is_vv_enabled(self) -> bool:

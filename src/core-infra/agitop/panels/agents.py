@@ -41,7 +41,7 @@ class PromptViewModal(ModalScreen):
             yield TextArea(self.prompt_content, id="prompt-view-body", read_only=True)
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("📋 Copy All", variant="default", id="prompt-copy-all")
-                yield Button("Close", variant="primary", id="msg-dialog-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         import subprocess
@@ -331,7 +331,7 @@ class AgentPromptMenu(ModalScreen):
                     yield Button("🗑 Request Removal", id="btn-request-remove", variant="error", classes="panel-btn")
                 else:
                     yield Button("🗑 Request Removal", id="btn-request-remove-disabled", variant="error", classes="panel-btn", disabled=True)
-                yield Button("Close", variant="default", id="msg-dialog-close", classes="panel-btn")
+                yield Button("Close", variant="default", id="msg-dialog-close", classes="panel-btn dismiss-btn")
                 yield Button("🧵 Manage Threads", id="btn-thread-manager", variant="primary", classes="panel-btn")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -521,7 +521,7 @@ class RemovalConfirmModal(ModalScreen):
             )
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("🗑 Request Removal", variant="error", id="btn-do-remove")
-                yield Button("Cancel", variant="default", id="msg-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-do-remove":
@@ -759,7 +759,7 @@ class TechnicalSetupModal(ModalScreen):
                 yield Static("[dim]Hybrid: core skills always injected, triage skills listed as a manifest for on-demand loading.[/]")
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="btn-save-setup")
-                yield Button("Cancel", variant="default", id="msg-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         from textual.widgets import Select
@@ -859,7 +859,7 @@ class SyclActivationModal(ModalScreen):
             with Horizontal(id="sycl-actions"):
                 yield Button("Activate Model", variant="success", id="btn-sycl-confirm", disabled=True)
                 yield Button("Copy", variant="default", id="btn-sycl-copy")
-                yield Button("Cancel", variant="default", id="btn-sycl-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-sycl-cancel")
 
     def on_mount(self) -> None:
         """Disable CRON when the modal opens, then run pre-flight check."""
@@ -1364,7 +1364,7 @@ class AgentEditModal(ModalScreen):
                 yield Button(f"{_ba_label} Browser Automation", variant=_ba_variant, id="btn-agent-browser-toggle")
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="btn-save-settings")
-                yield Button("Cancel", variant="default", id="msg-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         from textual.widgets import Select
@@ -1653,7 +1653,7 @@ class MemoryViewModal(ModalScreen):
             yield Static(f"[bold]🧠 Memory — {self.agent_name}[/]", id="msg-dialog-header")
             with VerticalScroll(id="msg-dialog-scroll"):
                 yield Static(content)
-            yield Button("Close", variant="primary", id="msg-dialog-close")
+            yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "msg-dialog-close":
@@ -1705,7 +1705,7 @@ class AgentBrowserToggleModal(ModalScreen):
             yield Static(f"[bold yellow]🌐 Browser Automation — {action} for {self.agent_name}[/]\n", id="browser-toggle-title")
             yield VerticalScroll(Static(id="browser-toggle-terminal-text"), id="browser-toggle-terminal")
             with Horizontal(id="browser-toggle-actions"):
-                yield Button("Cancel/Close", variant="default", id="btn-browser-toggle-close")
+                yield Button("Cancel/Close", classes="dismiss-btn", variant="default", id="btn-browser-toggle-close")
 
     def on_mount(self) -> None:
         self.query_one("#btn-browser-toggle-close", Button).disabled = True

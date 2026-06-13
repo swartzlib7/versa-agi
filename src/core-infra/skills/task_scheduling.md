@@ -83,7 +83,7 @@ planned → waiting → in_progress → done
 | `planned` | Scheduled for future | Wakes agent when `due_date` is reached |
 | `in_progress` | Actively being worked | Wakes agent every tick |
 | `blocked` | Waiting on external input / permission issue | Does NOT wake agent (use with `wake_after` or message trigger) |
-| `waiting` | Waiting for a dependency | Does NOT wake agent until due date |
+| `waiting` | Waiting for a dependency | Wakes when `due_date` arrives (and `wake_after` has elapsed). Snooze before cycle end to defer. |
 | `done` | Completed | Ignored by Lifeline |
 | `frozen` | Emergency-stopped by runaway monitor | Requires manual review and unfreeze |
 
@@ -104,9 +104,10 @@ Always report the specific blocker to the COA or Primary User. A blocked task do
 ### Snooze Protocol
 
 Use `agictl task snooze <id> <minutes>` to defer work:
-- **Minimum snooze: 2 minutes** (1-minute CRON tick + buffer)
-- **Maximum useful snooze: 1440 minutes** (24 hours — anything longer should use `--due-date` instead)
-- Snoozing sets `wake_after` — the Lifeline will wake you after that time
+- **Minimum snooze: 5 minutes**
+- **Maximum snooze: 10080 minutes** (7 days — use 60–1440 for external waits)
+- Snoozing sets `wake_after` and rolls `due_date` forward — Lifeline skips the task until then
+- **Mandatory before cycle end** when a `waiting` task has no new external input
 
 ---
 

@@ -21,7 +21,7 @@ class SystemMemoryEditorModal(ModalScreen):
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Delete Selected", variant="error", id="btn-delete-mem", disabled=True)
                 yield Button("Edit Selected", variant="primary", id="btn-edit-mem", disabled=True)
-                yield Button("Close", variant="default", id="msg-dialog-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
         self.table.add_column("Updated", width=20)
@@ -115,7 +115,7 @@ class EditMemoryRowModal(ModalScreen):
             yield Input(placeholder="Memory Value", id="input-mem-val")
             with Horizontal(id="edit-mem-actions"):
                 yield Button("Save Changes", variant="success", id="btn-save-mem")
-                yield Button("Cancel", variant="default", id="msg-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
                 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "msg-dialog-close":
@@ -160,7 +160,7 @@ class DeleteMemoryConfirmModal(ModalScreen):
             )
             with Horizontal(id="edit-mem-actions"):
                 yield Button("Delete", variant="error", id="btn-confirm-delete-mem")
-                yield Button("Cancel", variant="default", id="btn-cancel-delete-mem")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-cancel-delete-mem")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-confirm-delete-mem":

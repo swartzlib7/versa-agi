@@ -144,6 +144,14 @@ class TasksReader:
         rows = self._query("SELECT * FROM tasks WHERE id = ?", (task_id,))
         return rows[0] if rows else None
 
+    def count_task_progress(self, task_id: int) -> int:
+        """Return total progress journal entries for a task."""
+        rows = self._query(
+            "SELECT COUNT(*) as c FROM task_progress WHERE task_id = ?",
+            (task_id,),
+        )
+        return rows[0]["c"] if rows else 0
+
     def get_task_progress(self, task_id: int, limit: int = 20) -> list[dict]:
         """Get a task's progress journal entries, oldest first."""
         rows = self._query(
@@ -152,6 +160,96 @@ class TasksReader:
             (task_id, limit),
         )
         return list(reversed(rows))
+
+    def get_task_progress_page(self, task_id: int, offset: int = 0, limit: int = 10) -> list[dict]:
+        """Get a page of progress entries, newest first."""
+        rows = self._query(
+            "SELECT id, created_at, agent_name, note FROM task_progress "
+            "WHERE task_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (task_id, limit, offset),
+        )
+        return rows
+
+    def count_task_progress_matching(self, task_id: int, pattern: str) -> int:
+        """Count progress entries matching a SQL LIKE pattern."""
+        rows = self._query(
+            "SELECT COUNT(*) as c FROM task_progress WHERE task_id = ? AND note LIKE ?",
+            (task_id, pattern),
+        )
+        return rows[0]["c"] if rows else 0
+
+    def delete_task_progress_entry(self, entry_id: int, task_id: int) -> bool:
+        """Delete a single progress entry (PU dashboard only)."""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5)
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM task_progress WHERE id = ? AND task_id = ?",
+                (entry_id, task_id),
+            )
+            deleted = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+            return deleted
+        except Exception:
+            return False
+
+    def get_task_progress_entry(self, entry_id: int, task_id: int) -> Optional[dict]:
+        """Fetch a single progress entry (PU dashboard only)."""
+        rows = self._query(
+            "SELECT id, created_at, agent_name, note FROM task_progress "
+            "WHERE id = ? AND task_id = ?",
+            (entry_id, task_id),
+        )
+        return rows[0] if rows else None
+
+    def update_task_progress_entry(self, entry_id: int, task_id: int, note: str) -> bool:
+        """Update a progress entry's note text (PU dashboard only)."""
+        note = (note or "").strip()
+        if not note:
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE task_progress SET note = ? WHERE id = ? AND task_id = ?",
+                (note, entry_id, task_id),
+            )
+            updated = cur.rowcount > 0
+            if updated:
+                conn.execute(
+                    "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?",
+                    (task_id,),
+                )
+            conn.commit()
+            conn.close()
+            return updated
+        except Exception:
+            return False
+
+    def prune_task_progress(self, task_id: int, pattern: str) -> int:
+        """Delete matching progress entries except the most recent (PU dashboard only)."""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5)
+            cur = conn.cursor()
+            keep = cur.execute(
+                "SELECT id FROM task_progress WHERE task_id = ? AND note LIKE ? "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id, pattern),
+            ).fetchone()
+            if not keep:
+                conn.close()
+                return 0
+            cur.execute(
+                "DELETE FROM task_progress WHERE task_id = ? AND note LIKE ? AND id != ?",
+                (task_id, pattern, keep[0]),
+            )
+            deleted = cur.rowcount
+            conn.commit()
+            conn.close()
+            return deleted
+        except Exception:
+            return 0
 
     def add_task(self, title: str, assigned_to: str = 'coa', project_id: Optional[int] = None,
                  description: Optional[str] = None, priority: str = 'normal') -> bool:
@@ -225,9 +323,15 @@ class TasksReader:
         return rows[0]["c"] if rows else 0
 
     def snooze_task(self, task_id: int, minutes: int) -> bool:
+        """Defer a task by setting wake_after and due_date forward (status unchanged)."""
         return self._execute(
-            "UPDATE tasks SET status = 'blocked', due_date = datetime('now', '+' || ? || ' minutes'), updated_at = datetime('now') WHERE id = ?",
-            (str(minutes), task_id)
+            "UPDATE tasks SET "
+            "wake_after = datetime('now', '+' || ? || ' minutes'), "
+            "due_date = datetime('now', '+' || ? || ' minutes'), "
+            "wake_cycle_count = COALESCE(wake_cycle_count, 0) + 1, "
+            "updated_at = datetime('now') "
+            "WHERE id = ?",
+            (str(minutes), str(minutes), task_id)
         )
 
     def get_connections(self) -> list[dict]:
@@ -245,16 +349,19 @@ class TasksReader:
         return rows[0]["display_name"] if rows else uid
         
     def count_pending(self, agent: str) -> int:
-        """Count actionable tasks: in_progress always counts, planned/waiting/blocked
-        count if due_date has arrived. Safe from infinite waking because the Lifeline
-        auto-freezes overdue tasks after MAX_SPAWN_ATTEMPTS (3) failed cycles."""
+        """Count actionable tasks: in_progress always counts; planned/waiting/blocked
+        count only when due_date has arrived AND wake_after is unset or elapsed.
+
+        Note: Lifeline auto-freezes overdue *planned* and repeatedly-waking *waiting*
+        tasks after MAX_SPAWN_ATTEMPTS (3). Blocked tasks rely on snooze (wake_after)."""
         rows = self._query(
             "SELECT COUNT(*) as c FROM tasks "
             "WHERE ("
             "  status = 'in_progress' "
             "  OR (status IN ('planned', 'waiting', 'blocked') "
             "      AND due_date IS NOT NULL "
-            "      AND due_date <= datetime('now'))"
+            "      AND due_date <= datetime('now') "
+            "      AND (wake_after IS NULL OR wake_after <= datetime('now')))"
             ") "
             "AND (assigned_to = ? OR assigned_to IS NULL)",
             (agent,)

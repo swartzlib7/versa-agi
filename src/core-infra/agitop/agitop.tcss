@@ -33,6 +33,45 @@ SelectCurrent {
     color: $text;
 }
 
+Checkbox {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+    background: $surface-lighten-2;
+    height: auto;
+    padding: 0 1;
+}
+
+Checkbox:focus {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Checkbox > .toggle--label {
+    color: $text;
+}
+
+Checkbox > .toggle--button {
+    background: $surface-lighten-2;
+    color: $panel-darken-2;
+}
+
+Checkbox.-on > .toggle--button {
+    color: $text-success;
+    background: $surface-lighten-2;
+}
+
+/* Dismiss actions: Close, Cancel */
+.dismiss-btn {
+    background: $surface-lighten-2;
+    color: $text;
+    border: solid $surface-lighten-1;
+}
+
+.dismiss-btn:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
 #dashboard {
     height: auto;
     min-height: 1fr;
@@ -166,13 +205,67 @@ SelectCurrent {
 }
 
 /* ─── Tasks / Messages / Projects tabs ─────────── */
-/* Tab bar ~3 rows + 24-row content. Parent height must match (not 33) or a blank
+/* Tab bar ~4 rows + 24-row content. Parent height must match (not 33) or a blank
    strip appears below the tables. Panels fill TabPane via height: 100%. */
 
 #work-tabs {
     width: 100%;
-    height: 27;
+    height: 28;
     margin-top: 1;
+}
+
+#work-tabs Tabs {
+    height: 4;
+    padding: 0 1;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+#work-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#work-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+#work-tabs #--content-tab-projects-tab {
+    border-top: heavy $success;
+}
+
+#work-tabs #--content-tab-projects-tab.-active {
+    background: $success 25%;
+    border: heavy $success;
+    color: $text-success;
+    text-style: bold;
+}
+
+#work-tabs #--content-tab-tasks-tab {
+    border-top: heavy $warning;
+}
+
+#work-tabs #--content-tab-tasks-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#work-tabs #--content-tab-messages-tab {
+    border-top: heavy $primary;
+}
+
+#work-tabs #--content-tab-messages-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
 }
 
 #work-tabs ContentSwitcher {
@@ -351,19 +444,27 @@ TaskEditModal {
     height: auto;
 }
 
-#task-progress-scroll {
-    height: 14;
-    min-height: 5;
-    max-height: 18;
+#task-progress-table {
+    height: 12;
     margin-bottom: 1;
-    padding: 0 1;
     border: solid $accent;
 }
 
-.task-progress-entry {
+#task-progress-hint {
     height: auto;
-    margin-left: 2;
-    padding-bottom: 1;
+    margin-bottom: 1;
+}
+
+.task-progress-actions {
+    height: auto;
+    margin-bottom: 1;
+    align: center middle;
+}
+
+.task-progress-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
 }
 
 .task-dialog-buttons {
@@ -539,17 +640,66 @@ RouterModeConfirmModal {
 }
 
 #msg-dialog {
-    width: 70%;
-    height: 85%;
+    width: 60%;
+    height: 72%;
     padding: 1 2;
     background: $surface;
     border: thick $accent;
 }
 
-#msg-dialog-header {
+#msg-dialog-scroll {
+    height: 1fr;
+    min-height: 8;
+}
+
+#msg-dialog-top {
+    height: auto;
     margin-bottom: 1;
     border-bottom: solid $primary;
     padding-bottom: 1;
+}
+
+#msg-dialog-direction {
+    margin-bottom: 1;
+}
+
+.msg-dialog-meta {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.msg-meta-col {
+    width: 1fr;
+    height: auto;
+    padding-right: 1;
+}
+
+#msg-status-row {
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+#msg-status-row Static {
+    width: auto;
+    margin-right: 1;
+}
+
+#msg-status-row Select {
+    width: 1fr;
+}
+
+#msg-reply-section {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $surface-lighten-1;
+    padding-top: 1;
+}
+
+#msg-reply-body {
+    height: 12;
+    min-height: 8;
+    margin-top: 1;
 }
 
 #msg-dialog > Button {
@@ -558,35 +708,37 @@ RouterModeConfirmModal {
     margin-top: 1;
 }
 
-
-#msg-dialog-body {
+#msg-body-pane {
     height: auto;
+    min-height: 12;
     margin-bottom: 1;
 }
 
-#msg-dialog-scroll {
-    height: 1fr;
-    min-height: 5;
-    margin-bottom: 1;
+#msg-dialog-body {
+    height: auto;
+    min-height: 12;
+    margin-bottom: 0;
+}
+
+#msg-attachments {
+    height: auto;
+    max-height: 10;
+    margin-top: 1;
+    padding: 1;
+    border: dashed $accent;
 }
 
 #msg-dialog-actions {
     height: auto;
+    width: 100%;
     margin-top: 1;
     align: center middle;
 }
 
 #msg-dialog-actions Button {
     width: 1fr;
-    margin: 0 1;
-    min-width: 16;
+    margin: 0 2;
     height: 3;
-}
-
-#msg-attachments {
-    margin-top: 1;
-    padding: 1;
-    border: dashed $accent;
 }
 
 #md-attach-buttons {
@@ -660,9 +812,18 @@ ComposeModal {
     padding-bottom: 1;
 }
 
+#compose-agent-locked {
+    background: $surface-lighten-2;
+    color: $text;
+    border: solid $surface-lighten-1;
+    padding: 0 1;
+    height: 3;
+    margin-bottom: 1;
+}
+
 #compose-body {
-    height: 10;
-    min-height: 5;
+    height: 50;
+    min-height: 25;
     margin-bottom: 1;
 }
 
@@ -721,12 +882,17 @@ DeleteProjectModal {
 }
 
 #project-dialog {
-    width: 80%;
+    width: 60%;
     height: auto;
-    max-height: 85%;
+    max-height: 80%;
     padding: 1 2;
     background: $surface;
     border: thick $success;
+}
+
+ProjectMembersModal {
+    align: center middle;
+    background: $surface 80%;
 }
 
 #project-dialog-title {
@@ -740,6 +906,7 @@ DeleteProjectModal {
 .project-field-row {
     height: auto;
     width: 100%;
+    margin-bottom: 1;
 }
 
 .project-field-col {
@@ -748,10 +915,28 @@ DeleteProjectModal {
     margin-right: 1;
 }
 
+#project-coa-workspace {
+    height: auto;
+    margin-bottom: 1;
+}
+
 #members-table {
     height: auto;
     max-height: 12;
     border: solid $accent;
+    margin-bottom: 1;
+}
+
+.project-members-actions {
+    height: auto;
+    margin-bottom: 1;
+    align: center middle;
+}
+
+.project-members-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
 }
 
 /* ─── API Keys Modal ─────────────────────────── */

@@ -173,7 +173,7 @@ class DrainConfirmModal(ModalScreen):
             yield Static(msg)
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Drain", variant="error", id="btn-confirm-drain")
-                yield Button("Cancel", variant="default", id="msg-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-confirm-drain":
@@ -226,7 +226,7 @@ class ThreadManagerModal(ModalScreen):
             with Horizontal(id="msg-dialog-actions"):
                 if exists:
                     yield Button("🗑 Drain All", variant="error", id="btn-drain-all")
-                yield Button("Close", variant="default", id="msg-dialog-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
         self.refresh_table()

@@ -255,6 +255,10 @@ runaway_threshold=300
 circuit_breaker_consecutive=5
 circuit_breaker_hourly=20
 
+# Message flood guard: auto-lift PU messaging suppression after N hours without
+# a new outbound message. Override via VERSA_FLOOD_GUARD_TIMEOUT_HOURS env var.
+flood_guard_timeout_hours=3
+
 # COA VersaVoice identity (used by init_vv_identity.sh)
 first_name=Versa
 last_name=(COA)

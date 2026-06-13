@@ -4987,9 +4987,11 @@ def task_cancel(task_id):
 @click.argument("task_id", type=int)
 @click.argument("minutes", type=int, default=5)
 def task_snooze(task_id, minutes):
-    """Set wake_after to now + N min. Minimum 5 minutes (auto-adjusted)."""
+    """Set wake_after and due_date to now + N min. Minimum 5 minutes, max 10080 (7 days)."""
     if minutes < 5:
         minutes = 5
+    if minutes > 10080:
+        minutes = 10080
     if tasks_reader.snooze_task(task_id, minutes):
         json_response(True, task_id=task_id, snoozed_minutes=minutes)
     else:

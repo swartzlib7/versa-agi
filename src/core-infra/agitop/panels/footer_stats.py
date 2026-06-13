@@ -196,7 +196,7 @@ class SessionViewModal(ModalScreen):
             with VerticalScroll(id="msg-dialog-scroll"):
                 yield Static(safe_content)
             yield Static(f"[dim]File: {session_path}[/]")
-            yield Button("Close", variant="primary", id="msg-dialog-close")
+            yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "msg-dialog-close":
@@ -225,7 +225,7 @@ class ResetConfirmModal(ModalScreen):
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Reset Month", variant="error", id="btn-confirm-reset")
                 yield Button("Drain All", variant="warning", id="btn-drain-all")
-                yield Button("Cancel", variant="default", id="msg-dialog-close")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-confirm-reset":

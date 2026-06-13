@@ -164,7 +164,7 @@ class ModelManagerModal(ModalScreen):
             yield Static("", id="mm-feedback")
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("🔄 Sync now", id="mm-sync", variant="primary")
-                yield Button("Close", variant="default", id="mm-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="mm-close")
 
     def on_mount(self) -> None:
         mt = self.query_one("#mm-models-table", DataTable)
@@ -407,7 +407,7 @@ class CatalogFormModal(ModalScreen):
             yield Static("", id="f-error")
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="f-save")
-                yield Button("Cancel", variant="default", id="f-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="f-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "f-cancel":
@@ -492,7 +492,7 @@ class ProviderFormModal(ModalScreen):
             yield Static("", id="p-error")
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="p-save")
-                yield Button("Cancel", variant="default", id="p-cancel")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="p-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "p-cancel":

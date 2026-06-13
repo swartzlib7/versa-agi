@@ -446,8 +446,9 @@ def build_triage_context(result: TriageResult) -> str:
     elif cls == "follow_up":
         lines.append("### Execution Order")
         lines.append("1. **REVIEW CONTEXT** — This continues an existing thread. Review your current state (tasks, conversation history) before responding.")
-        lines.append("2. **COMMUNICATE** — Respond to the sender with an update or continuation.")
-        lines.append("3. **CONTINUE WORK** — Resume any in-progress tasks related to this thread.")
+        lines.append("2. **WAITING TASKS** — If a task is `waiting` or `blocked` on external input and nothing has changed since your last cycle, do NOT append redundant progress notes. Snooze it before ending: `agictl task snooze <id> <minutes>` (60–1440 for external waits).")
+        lines.append("3. **COMMUNICATE** — Respond only if there is genuinely new information. Do not re-message the PU for unchanged waiting states.")
+        lines.append("4. **CONTINUE WORK** — Resume any in-progress tasks related to this thread.")
 
     elif cls == "informational":
         lines.append("### Execution Order")

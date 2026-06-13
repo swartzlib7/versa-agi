@@ -227,6 +227,15 @@ if [ -f "${SETUP_INI}" ]; then
   [ -n "${_cb_h}" ] && CB_HOURLY="${_cb_h}"
 fi
 
+# ─── Message Flood Guard Timeout ──────────────────────
+# Suppression lifts when the latest outbound to the PU is older than this window,
+# so the agent can send a periodic check-in instead of staying silent indefinitely.
+FLOOD_GUARD_TIMEOUT_HOURS="${VERSA_FLOOD_GUARD_TIMEOUT_HOURS:-3}"
+if [ -f "${SETUP_INI}" ]; then
+  _fg_t=$(grep -Po '^\s*flood_guard_timeout_hours\s*=\s*\K[0-9]+' "${SETUP_INI}" 2>/dev/null || true)
+  [ -n "${_fg_t}" ] && FLOOD_GUARD_TIMEOUT_HOURS="${_fg_t}"
+fi
+
 # ─── Process Each Agent ──────────────────────────────
 # Normalized format: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode
 while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE; do
@@ -570,27 +579,39 @@ ${AGENT_REGISTRY_CONTENT}"
     fi
 
     # ─── Overdue Task Detection (per-tick, spawn_attempts gated) ─────
-    # Replaces the old daily overdue sweep. Overdue planned tasks are retried
-    # up to MAX_SPAWN_ATTEMPTS times. After that, tasks are auto-frozen and
-    # the Primary User is notified via VersaVoice.
+    # Replaces the old daily overdue sweep. Overdue planned tasks and repeatedly-
+    # waking waiting tasks are retried up to MAX_SPAWN_ATTEMPTS times. After that,
+    # tasks are auto-frozen and the Primary User is notified via VersaVoice.
     MAX_SPAWN_ATTEMPTS=3
+    OVERDUE_SPAWN_SQL="assigned_to='${AGENT_NAME}' AND ("
+    OVERDUE_SPAWN_SQL+="(status='planned' AND due_date IS NOT NULL AND due_date < datetime('now'))"
+    OVERDUE_SPAWN_SQL+=" OR (status='waiting' AND due_date IS NOT NULL AND due_date <= datetime('now')"
+    OVERDUE_SPAWN_SQL+=" AND (wake_after IS NULL OR wake_after <= datetime('now')))"
+    OVERDUE_SPAWN_SQL+=")"
 
     # Step 1: Auto-freeze tasks that have exhausted their retry budget
     EXHAUSTED_TASKS=$(sqlite3 "${TASKS_DB}" \
-      "SELECT id, title FROM tasks WHERE assigned_to='${AGENT_NAME}' AND status='planned' AND due_date IS NOT NULL AND due_date < datetime('now') AND spawn_attempts >= ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true)
+      "SELECT id, title, status FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts >= ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true)
 
     if [ -n "${EXHAUSTED_TASKS}" ]; then
-      while IFS='|' read -r TASK_ID TASK_TITLE; do
+      while IFS='|' read -r TASK_ID TASK_TITLE TASK_STATUS; do
         [ -z "${TASK_ID}" ] && continue
         sqlite3 "${TASKS_DB}" \
-          "UPDATE tasks SET status='frozen', pre_freeze_status='planned', updated_at=datetime('now') WHERE id=${TASK_ID};" 2>/dev/null || true
-        log "AUTOFREEZE: Task #${TASK_ID} '${TASK_TITLE}' — spawn_attempts exhausted (${MAX_SPAWN_ATTEMPTS}/${MAX_SPAWN_ATTEMPTS})"
+          "UPDATE tasks SET status='frozen', pre_freeze_status='${TASK_STATUS}', updated_at=datetime('now') WHERE id=${TASK_ID};" 2>/dev/null || true
+        log "AUTOFREEZE: Task #${TASK_ID} '${TASK_TITLE}' (${TASK_STATUS}) — spawn_attempts exhausted (${MAX_SPAWN_ATTEMPTS}/${MAX_SPAWN_ATTEMPTS})"
 
         # Send professional notification to Primary User via VersaVoice
         if [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${API_TOKEN}" ]; then
           SPONSOR_UID=$(jq -r '.primary_user.uid // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
           if [ -n "${SPONSOR_UID}" ]; then
-            FREEZE_MSG="⚠️ Automated Task Notice — Agent '${AGENT_NAME}' was unable to complete task #${TASK_ID}: \"${TASK_TITLE}\" after ${MAX_SPAWN_ATTEMPTS} consecutive attempts. The task has been automatically frozen to prevent resource waste. You can ask COA to unfreeze it, or manage it directly via agitop or: agictl task update ${TASK_ID} --status planned"
+            if [ "${TASK_STATUS}" = "waiting" ]; then
+              FREEZE_REASON="kept waking without snoozing or resolving"
+              RESTORE_STATUS="waiting"
+            else
+              FREEZE_REASON="was unable to complete"
+              RESTORE_STATUS="planned"
+            fi
+            FREEZE_MSG="⚠️ Automated Task Notice — Agent '${AGENT_NAME}' ${FREEZE_REASON} task #${TASK_ID}: \"${TASK_TITLE}\" after ${MAX_SPAWN_ATTEMPTS} consecutive wake cycles. The task has been automatically frozen to prevent resource waste. You can ask COA to unfreeze it, or manage it directly via agitop or: agictl task update ${TASK_ID} --status ${RESTORE_STATUS}"
             AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
               /usr/local/bin/agictl message send "${SPONSOR_UID}" "${FREEZE_MSG}" --mode typed 2>/dev/null \
               || log "WARN: Failed to send auto-freeze notification to Primary User"
@@ -602,23 +623,23 @@ ${AGENT_REGISTRY_CONTENT}"
 
     # Step 2: Detect retryable overdue tasks (spawn_attempts < MAX)
     OVERDUE_RETRYABLE=$(sqlite3 "${TASKS_DB}" \
-      "SELECT COUNT(*) FROM tasks WHERE assigned_to='${AGENT_NAME}' AND status='planned' AND due_date IS NOT NULL AND due_date < datetime('now') AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || echo "0")
+      "SELECT COUNT(*) FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || echo "0")
 
     if [ "${OVERDUE_RETRYABLE:-0}" -gt 0 ]; then
       # Increment spawn_attempts for all retryable overdue tasks
       sqlite3 "${TASKS_DB}" \
-        "UPDATE tasks SET spawn_attempts = spawn_attempts + 1, updated_at = datetime('now') WHERE assigned_to='${AGENT_NAME}' AND status='planned' AND due_date IS NOT NULL AND due_date < datetime('now') AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true
+        "UPDATE tasks SET spawn_attempts = spawn_attempts + 1, updated_at = datetime('now') WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true
 
       # Collect overdue task details for prompt injection
       OVERDUE_DETAILS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
-        "SELECT id, title, due_date, spawn_attempts FROM tasks WHERE assigned_to='${AGENT_NAME}' AND status='planned' AND due_date IS NOT NULL AND due_date < datetime('now') AND spawn_attempts <= ${MAX_SPAWN_ATTEMPTS} ORDER BY due_date ASC LIMIT 10;" 2>/dev/null || true)
-      log "OVERDUE: ${AGENT_NAME} — ${OVERDUE_RETRYABLE} planned task(s) past due date (retrying)"
+        "SELECT id, title, due_date, spawn_attempts, status FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts <= ${MAX_SPAWN_ATTEMPTS} ORDER BY due_date ASC LIMIT 10;" 2>/dev/null || true)
+      log "OVERDUE: ${AGENT_NAME} — ${OVERDUE_RETRYABLE} overdue planned/waiting task(s) (retrying)"
 
       if [ "${SHOULD_WAKE}" = "false" ]; then
         SHOULD_WAKE="true"
-        WAKE_REASON="${OVERDUE_RETRYABLE} overdue planned task(s) require review"
+        WAKE_REASON="${OVERDUE_RETRYABLE} overdue planned/waiting task(s) require review"
       else
-        WAKE_REASON="${WAKE_REASON} + ${OVERDUE_RETRYABLE} overdue planned task(s)"
+        WAKE_REASON="${WAKE_REASON} + ${OVERDUE_RETRYABLE} overdue planned/waiting task(s)"
       fi
     fi
   else
@@ -1116,12 +1137,27 @@ ${AWARENESS_TABLE}${AW_HIDDEN_HINT}
       ) - 1
       AND direction='sent';" 2>/dev/null || echo "0")
 
+    FLOOD_GUARD_ACTIVE="false"
     if [ "${CONSEC_OUTBOUND:-0}" -ge 5 ]; then
+      LATEST_OUTBOUND_AGE_HOURS=$(sqlite3 "${MESSAGES_DB}" "
+        SELECT CAST((julianday('now') - julianday(MAX(created_at))) * 24 AS INTEGER)
+        FROM messages
+        WHERE from_user_id='${SUB_ACCOUNT_ID}' AND to_user_id='${sponsor_uid}'
+          AND direction='sent';" 2>/dev/null || echo "999")
+      if [ "${LATEST_OUTBOUND_AGE_HOURS:-999}" -le "${FLOOD_GUARD_TIMEOUT_HOURS}" ] 2>/dev/null; then
+        FLOOD_GUARD_ACTIVE="true"
+      else
+        log "FLOOD GUARD: ${AGENT_NAME} — streak=${CONSEC_OUTBOUND} but latest outbound ${LATEST_OUTBOUND_AGE_HOURS}h ago (timeout ${FLOOD_GUARD_TIMEOUT_HOURS}h) — guard lifted"
+      fi
+    fi
+
+    if [ "${FLOOD_GUARD_ACTIVE}" = "true" ]; then
       MSG_FLOOD_GUARD="
 ⚠ MESSAGE FLOOD GUARD ACTIVE: You have sent ${CONSEC_OUTBOUND} consecutive messages to your Primary User with NO reply received.
 DO NOT send any more messages to your Primary User this cycle.
 Focus exclusively on task work. Update task statuses via agictl but DO NOT message the Primary User.
 The only exception is a genuine emergency (system failure, security incident, or data loss risk).
+Guard auto-lifts after ${FLOOD_GUARD_TIMEOUT_HOURS} hours without a new outbound message.
 "
       log "FLOOD GUARD: ${AGENT_NAME} — ${CONSEC_OUTBOUND} consecutive outbound to PU, messaging suppressed"
     fi

@@ -45,7 +45,7 @@ class CycleLogModal(ModalScreen):
             yield RichLog(id="cycle-log-body", wrap=False, highlight=True, markup=True)
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("📋 Copy All", variant="default", id="cycle-log-copy")
-                yield Button("Close", variant="primary", id="msg-dialog-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
         self._resolve_log_file()

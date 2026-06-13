@@ -548,14 +548,14 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 - **Agent Circuit Breaker** — Failure-pattern gate that prevents repeated spawns. Monitors `cycles.db` for consecutive and hourly failure counts. Recovery via `agictl agent activate` or dashboard.
 - **Agent Halt** — Manual cycle control via `agictl agent kill <name>`. Terminates a running agent and prevents re-spawning. COA can halt sub-agents on Primary User request. Recovery via `agictl agent activate` or dashboard.
 - **Runaway Monitor** — Background process polls 3 triggers every 10s (line count, file size, session size). Configurable per-agent via dashboard.
-- **Message Flood Guard** — 3-layer defense: conversation-context streak warnings, skill-based rules, and Lifeline hard suppression (≥5 consecutive outbound with no reply).
-- **Overdue Task Auto-Freeze** — Tasks frozen after 3 consecutive spawn failures, with VersaVoice notification to Primary User.
+- **Message Flood Guard** — 3-layer defense: conversation-context streak warnings, skill-based rules, and Lifeline hard suppression (≥5 consecutive outbound to PU with no reply). Guard auto-lifts after 3 hours without a new outbound (`setup.ini` → `[agent]` `flood_guard_timeout_hours`).
+- **Overdue Task Auto-Freeze** — Overdue `planned` and repeatedly-waking `waiting` tasks frozen after 3 consecutive wake cycles without resolution or snooze, with VersaVoice notification to Primary User. `pre_freeze_status` preserves the original status for unfreeze.
 - **Privilege Escalation Guard** — Programmatic blocking of `sudo`, `su`, `pkexec`, and other escalation commands at the harness level.
 - **COA Model Protection** — Configurable allowlist prevents weak models from being assigned to the orchestrator.
 - **COA Autonomous Mode** — Optional `[coa] autonomous=true` in `setup.ini` grants COA full sudo access for dedicated/gifted hardware scenarios. Disabled by default. Toggled via agitop ⚙ Settings.
 
 #### 📊 Observability
-- **agitop** — `htop`-style Mission Control Dashboard with agent status, messages, tasks, and token usage panels.
+- **agitop** — `htop`-style Mission Control Dashboard with agent status, messages, tasks, and token usage panels. Task edit modal includes a paginated Progress Journal with PU-only remove/prune controls (not exposed to agents via `agictl`).
 - **Token Usage Tracking** — Per-cycle consumption tracked via `cycle_telemetry.json` and aggregated monthly in agitop.
 - **Thread Manager** — Visual inspection and management of cross-cycle checkpoint threads per agent.
 - **Live Cycle Log** — Tail-f experience for real-time agent output viewing in agitop.

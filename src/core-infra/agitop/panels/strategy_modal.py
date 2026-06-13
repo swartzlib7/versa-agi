@@ -129,7 +129,7 @@ class StrategyModal(ModalScreen):
 
             yield Static("")
             yield Button("Close", variant="default", id="btn-strategy-close",
-                         classes="modal-close-btn")
+                         classes="modal-close-btn dismiss-btn")
 
     def on_mount(self) -> None:
         # Setup Games table
@@ -512,7 +512,7 @@ class GameDetailModal(ModalScreen):
 
             yield Static("")
             yield Button("Close", variant="default", id="btn-game-detail-close",
-                         classes="modal-close-btn")
+                         classes="modal-close-btn dismiss-btn")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-game-detail-close":
@@ -576,7 +576,7 @@ class AwarenessDetailModal(ModalScreen):
 
             yield Static("")
             yield Button("Close", variant="default", id="btn-awareness-detail-close",
-                         classes="modal-close-btn")
+                         classes="modal-close-btn dismiss-btn")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-awareness-detail-close":
