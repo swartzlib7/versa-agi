@@ -68,6 +68,11 @@ def _read_anthropic_key() -> str:
     return _read_env_key("ANTHROPIC_API_KEY")
 
 
+def _read_openrouter_key() -> str:
+    """Read current OpenRouter API key from inference_endpoint.env."""
+    return _read_env_key("OPENROUTER_API_KEY")
+
+
 def _is_proxy_enabled() -> bool:
     """Check if cloud proxy is enabled in paths.env."""
     env_path = "/etc/versa-agi/paths.env"
@@ -114,6 +119,11 @@ class ApiKeysModal(ModalScreen):
             yield Input(placeholder="Enter Anthropic API Key...", password=True, id="input-anthropic-key")
             yield Static("", id="status-anthropic")
 
+            # OpenRouter API Key
+            yield Static("[b]OpenRouter API Key[/]  [dim](Multi-vendor aggregator)[/]")
+            yield Input(placeholder="Enter OpenRouter API Key...", password=True, id="input-openrouter-key")
+            yield Static("", id="status-openrouter")
+
             # Result feedback
             yield Static("", id="api-keys-feedback")
 
@@ -128,6 +138,7 @@ class ApiKeysModal(ModalScreen):
         xai_key = _read_xai_key()
         openai_key = _read_openai_key()
         anthropic_key = _read_anthropic_key()
+        openrouter_key = _read_openrouter_key()
         proxy_enabled = _is_proxy_enabled()
 
         # Status line
@@ -145,6 +156,7 @@ class ApiKeysModal(ModalScreen):
         self.query_one("#status-xai", Static).update(f"   {_provider_status(xai_key)}")
         self.query_one("#status-openai", Static).update(f"   {_provider_status(openai_key)}")
         self.query_one("#status-anthropic", Static).update(f"   {_provider_status(anthropic_key)}")
+        self.query_one("#status-openrouter", Static).update(f"   {_provider_status(openrouter_key)}")
         self.query_one("#api-keys-status", Static).update(
             "[dim]Enter a new value to update. Leave blank to keep current.[/]"
         )
@@ -156,6 +168,7 @@ class ApiKeysModal(ModalScreen):
             "xai": xai_key,
             "openai": openai_key,
             "anthropic": anthropic_key,
+            "openrouter": openrouter_key,
         }
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -171,6 +184,7 @@ class ApiKeysModal(ModalScreen):
         new_xai = self.query_one("#input-xai-key", Input).value.strip()
         new_openai = self.query_one("#input-openai-key", Input).value.strip()
         new_anthropic = self.query_one("#input-anthropic-key", Input).value.strip()
+        new_openrouter = self.query_one("#input-openrouter-key", Input).value.strip()
 
         changes = []
         if new_gemini and new_gemini != self._original.get("gemini", ""):
@@ -183,6 +197,8 @@ class ApiKeysModal(ModalScreen):
             changes.append(("openai", new_openai))
         if new_anthropic and new_anthropic != self._original.get("anthropic", ""):
             changes.append(("anthropic", new_anthropic))
+        if new_openrouter and new_openrouter != self._original.get("openrouter", ""):
+            changes.append(("openrouter", new_openrouter))
 
         if not changes:
             self.query_one("#api-keys-feedback", Static).update(

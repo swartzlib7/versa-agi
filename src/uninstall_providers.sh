@@ -61,9 +61,11 @@ fi
 
 # ─── Step 2: Remove API keys from inference_endpoint.env ──────
 if [ -f "${INFERENCE_ENV}" ]; then
-  # Remove all provider keys (XAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+  # Remove all provider keys (XAI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.)
   sed -i '/^XAI_API_KEY=/d' "${INFERENCE_ENV}"
-  # Future providers: add more sed lines here
+  sed -i '/^OPENAI_API_KEY=/d' "${INFERENCE_ENV}"
+  sed -i '/^ANTHROPIC_API_KEY=/d' "${INFERENCE_ENV}"
+  sed -i '/^OPENROUTER_API_KEY=/d' "${INFERENCE_ENV}"
   ok "Provider API keys removed from ${INFERENCE_ENV}"
 fi
 
@@ -121,7 +123,10 @@ if [ -f "${AGENTS_DB}" ]; then
     SET status='invalid_config',
         status_message='Cloud proxy was disabled. Change model to a cloud or local variant.',
         updated_at=datetime('now')
-    WHERE model IN ('grok-4-1-fast-reasoning', 'grok-4.20-reasoning')
+    WHERE model IN ('grok-4-1-fast-reasoning', 'grok-4.20-reasoning',
+                    'moonshotai/kimi-k2.7-code', 'deepseek/deepseek-v4-flash')
+      OR model LIKE 'gpt-%'
+      OR model LIKE 'claude-%'
       AND status != 'invalid_config';
   " 2>/dev/null || true
   ok "Proxy-assigned agents marked as invalid_config"
@@ -138,10 +143,15 @@ if [ -f "/etc/versa-agi/setup.ini" ] && [ "/etc/versa-agi/setup.ini" != "${SCRIP
 fi
 
 for SETUP_INI in "${_INI_FILES[@]}"; do
-  sed -i '/^\[third_party\]/,/^\[/{s/^enabled=.*/enabled=false/}' "${SETUP_INI}"
   sed -i '/^\[third_party\]/,/^\[/{s/^xai_enabled=.*/xai_enabled=false/}' "${SETUP_INI}"
-  # Clear API key from setup.ini for security
+  sed -i '/^\[third_party\]/,/^\[/{s/^openai_enabled=.*/openai_enabled=false/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^anthropic_enabled=.*/anthropic_enabled=false/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^openrouter_enabled=.*/openrouter_enabled=false/}' "${SETUP_INI}"
+  # Clear API keys from setup.ini for security
   sed -i '/^\[third_party\]/,/^\[/{s/^xai_api_key=.*/xai_api_key=/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^openai_api_key=.*/openai_api_key=/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^anthropic_api_key=.*/anthropic_api_key=/}' "${SETUP_INI}"
+  sed -i '/^\[third_party\]/,/^\[/{s/^openrouter_api_key=.*/openrouter_api_key=/}' "${SETUP_INI}"
   ok "Updated: ${SETUP_INI}"
 done
 

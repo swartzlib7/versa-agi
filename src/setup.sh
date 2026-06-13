@@ -40,6 +40,14 @@ else
   error() { echo -e "\033[0;31m[ERROR]\033[0m $*"; exit 1; }
 fi
 
+VERSION="3.2.0"
+INSTALL_ACCEPTANCE_LIB="${SCRIPT_DIR_EARLY}/core-infra/install_acceptance.sh"
+if [ -f "${INSTALL_ACCEPTANCE_LIB}" ]; then
+  # shellcheck source=core-infra/install_acceptance.sh
+  source "${INSTALL_ACCEPTANCE_LIB}"
+fi
+export INSTALL_ACCEPTANCE_VERSION="${VERSION}"
+
 # ─── Root Check ─────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
   error "This script must be run as root (sudo ./setup.sh)"
@@ -77,33 +85,6 @@ while [ $# -gt 0 ]; do
 done
 
 dry() { echo -e "${BOLD:-\033[1m}[DRY-RUN]${NC:-\033[0m} $*"; }
-
-# ─── Early CRON Pause (--update only) ───────────────
-# Immediately disable the lifeline CRON before any config
-# loading to prevent agent spawns during the update window.
-# Uses 'watchdog' directly — WATCHDOG_USER is not yet resolved.
-if [ "${UPDATE_MODE}" = true ]; then
-  _EARLY_CRON=$(crontab -u watchdog -l 2>/dev/null || true)
-  CRON_WAS_ACTIVE="${CRON_WAS_ACTIVE:-false}"
-
-  if echo "${_EARLY_CRON}" | grep -qi "^[^#].*lifeline"; then
-    CRON_WAS_ACTIVE=true
-    if [ "${DRY_RUN}" = true ]; then
-      dry "Would comment out lifeline CRON entries"
-    else
-      echo "${_EARLY_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
-        crontab -u watchdog -
-      ok "CRON paused (commented out)"
-    fi
-  else
-    if echo "${_EARLY_CRON}" | grep -qi "^#.*lifeline"; then
-      if [ "${CRON_WAS_ACTIVE}" != true ]; then
-        CRON_WAS_ACTIVE=true
-      fi
-    fi
-  fi
-  export CRON_WAS_ACTIVE
-fi
 
 # ─── Platform Check ─────────────────────────────────
 detect_os 2>/dev/null || true
@@ -307,6 +288,15 @@ searxng_url=http://localhost:8888
 enabled=false
 # Page load timeout in seconds (default: 30). Editable via agitop System Settings.
 timeout=30
+
+[registration]
+# Install/update acceptance telemetry
+acceptance_file=/etc/versa-agi/install-acceptance.json
+registration_submitted=false
+registration_submitted_at=
+registration_endpoint=
+registration_last_error=
+registration_attempt_count=0
 TEMPLATE
   chmod 600 "${INI_FILE}"
   echo ""
@@ -401,10 +391,10 @@ DEPLOYED_COA_ENV="${COA_HOME}/coa-env"
 TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 
 if [ "${UPDATE_MODE}" = true ]; then
-  banner "update" "3.0"
+  banner "update" "${VERSION}"
   echo -e "  ${DIM:-}Timestamp:  ${TIMESTAMP}${RESET:-}"
 else
-  banner "setup" "3.0"
+  banner "setup" "${VERSION}"
 fi
 echo -e "  ${DIM:-}Source:   ${SCRIPT_DIR}${RESET:-}"
 echo -e "  ${DIM:-}Deploy:${RESET:-}"
@@ -416,9 +406,46 @@ if [ "${DRY_RUN}" = true ]; then
 fi
 echo ""
 
+# ─── Install / Update Acceptance Gate ───────────────
+if [ "${UPDATE_MODE}" = true ]; then
+  if declare -F install_acceptance_update_prompt >/dev/null 2>&1; then
+    install_acceptance_update_prompt
+  fi
+else
+  if declare -F install_acceptance_welcome >/dev/null 2>&1; then
+    install_acceptance_welcome
+  fi
+fi
+
+# ─── CRON Pause (--update only, after acceptance gate) ─
+# Disable lifeline CRON before deploy. Runs after setup.ini check and the
+# update prompt so a missing install aborts without pausing CRON.
+if [ "${UPDATE_MODE}" = true ]; then
+  _EARLY_CRON=$(crontab -u watchdog -l 2>/dev/null || true)
+  CRON_WAS_ACTIVE="${CRON_WAS_ACTIVE:-false}"
+
+  if echo "${_EARLY_CRON}" | grep -qi "^[^#].*lifeline"; then
+    CRON_WAS_ACTIVE=true
+    if [ "${DRY_RUN}" = true ]; then
+      dry "Would comment out lifeline CRON entries"
+    else
+      echo "${_EARLY_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
+        crontab -u watchdog -
+      ok "CRON paused (commented out)"
+    fi
+  else
+    if echo "${_EARLY_CRON}" | grep -qi "^#.*lifeline"; then
+      if [ "${CRON_WAS_ACTIVE}" != true ]; then
+        CRON_WAS_ACTIVE=true
+      fi
+    fi
+  fi
+  export CRON_WAS_ACTIVE
+fi
+
 # ═══════════════════════════════════════════════════════
 # UPDATE MODE PREAMBLE (--update only)
-# CRON is already paused (early block near line 81).
+# CRON is paused in the block above (after acceptance gate).
 # Steps: Git pull, drain agents, backup, deploy.
 # ═══════════════════════════════════════════════════════
 if [ "${UPDATE_MODE}" = true ]; then
@@ -744,6 +771,11 @@ if [ "${UPDATE_MODE}" = false ]; then
       echo "  │                                                │"
       echo "  └────────────────────────────────────────────────┘"
       echo ""
+      if declare -F install_acceptance_record_full >/dev/null 2>&1; then
+        section "Install Registration"
+        install_acceptance_record_full "false"
+        echo ""
+      fi
       exit 0
     else
       error "setup_local.sh not found at ${SETUP_LOCAL_SCRIPT}"
@@ -968,38 +1000,53 @@ echo ""
 
 # ─── Step 4: VersaVoice Configuration ───────────────
 if [ "${UPDATE_MODE}" = false ]; then
-section "Step 4 — VersaVoice AI"
+echo ""
+echo -e "  ${BCYAN}─── ${BOLD}Step 4 — $(_install_acceptance_brand)${RESET}${BCYAN} ${DGRAY}$(printf '─%.0s' $(seq 1 24))${RESET}"
+echo ""
 
 echo ""
-echo "VersaVoice enables cloud messaging between you and your agents via the"
-echo "VersaVoice mobile/web app. This is optional — agents can communicate"
+echo -e "$(_install_acceptance_brand) enables cloud messaging between you, your agents and your connections"
+echo -e "via the $(_install_acceptance_brand) mobile/web app. This is optional — agents can communicate"
 echo "locally via the agitop dashboard without a VersaVoice account."
 echo ""
 
 # Determine default based on INI state
 if [ "${INI_VV_ENABLED}" = "false" ]; then
-  read -p "Enable VersaVoice? [y/N] " -n 1 -r
+  echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] "
+  read -n 1 -r
   echo ""
   ENABLE_VV=$([[ $REPLY =~ ^[Yy]$ ]] && echo "true" || echo "false")
 else
-  read -p "Enable VersaVoice? [Y/n] " -n 1 -r
+  echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] "
+  read -n 1 -r
   echo ""
   ENABLE_VV=$([[ $REPLY =~ ^[Nn]$ ]] && echo "false" || echo "true")
 fi
 
 if [ "${ENABLE_VV}" = "true" ]; then
-  echo "All agents share the Primary User's (sponsor's) VersaVoice AI API token."
-  echo "Get yours from: VersaVoice AI App → Settings → System (tap label 5 times) → Generate API Token"
+  if declare -F install_acceptance_vv_disclaimer >/dev/null 2>&1; then
+    if ! install_acceptance_vv_disclaimer; then
+      ENABLE_VV="false"
+      echo -e "  ${CYAN}${GLYPH_STEP}${NC} $(_install_acceptance_brand) disabled — agents will use local messaging only"
+    fi
+  fi
+fi
+
+if [ "${ENABLE_VV}" = "true" ]; then
+  echo -e "All agents share the Primary User's (sponsor's) $(_install_acceptance_brand) API token."
+  echo -e "Get yours from: $(_install_acceptance_brand) App → Settings → System (tap label 5 times) → Generate API Token"
   echo ""
 
   if [ -n "${INI_VV_TOKEN}" ]; then
     VV_TOKEN="${INI_VV_TOKEN}"
     ok "VersaVoice token loaded from setup.ini"
   else
-    read -p "Enter your VersaVoice API Token (sponsor token): " VV_TOKEN
+    echo -e -n "  Enter your $(_install_acceptance_brand) API Token (sponsor token): "
+    read -r VV_TOKEN
     while [ -z "${VV_TOKEN}" ]; do
       echo -e "${RED}A VersaVoice API token is required when VV is enabled.${NC}"
-      read -p "Enter your VersaVoice API Token (sponsor token): " VV_TOKEN
+      echo -e -n "  Enter your $(_install_acceptance_brand) API Token (sponsor token): "
+      read -r VV_TOKEN
     done
     ok "VersaVoice token captured"
   fi
@@ -2172,9 +2219,10 @@ if [ -d "${PROVIDERS_DIR}" ]; then
     _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
   }
 
-  _provider_prompt "xai"       "xAI (Grok)"          "enabled"            "${PROVIDERS_DIR}/xai.sh"
-  _provider_prompt "openai"    "OpenAI (GPT)"         "openai_enabled"     "${PROVIDERS_DIR}/openai.sh"
-  _provider_prompt "anthropic" "Anthropic (Claude)"   "anthropic_enabled"  "${PROVIDERS_DIR}/anthropic.sh"
+  _provider_prompt "xai"        "xAI (Grok)"           "xai_enabled"        "${PROVIDERS_DIR}/xai.sh"
+  _provider_prompt "openai"     "OpenAI (GPT)"          "openai_enabled"     "${PROVIDERS_DIR}/openai.sh"
+  _provider_prompt "anthropic"  "Anthropic (Claude)"    "anthropic_enabled"  "${PROVIDERS_DIR}/anthropic.sh"
+  _provider_prompt "openrouter" "OpenRouter"            "openrouter_enabled" "${PROVIDERS_DIR}/openrouter.sh"
 
   # SearXNG — gated by [search] enabled=true
   if [ -f "${PROVIDERS_DIR}/searxng.sh" ]; then
@@ -2257,10 +2305,7 @@ echo "  ${CRON_SCHEDULE}"
 echo "  (weekly) ${LOG_ROTATION}"
 echo ""
 
-read -p "Install CRON entries for user '${WATCHDOG_USER}'? [y/N] " -n 1 -r
-echo
-
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+if confirm_accent "Install CRON entries for user '${WATCHDOG_USER}'?"; then
   # Build crontab: preserve existing non-lifeline entries, add TZ + schedule + rotation
   (crontab -u "${WATCHDOG_USER}" -l 2>/dev/null | grep -v "lifeline.sh" | grep -v "^TZ=" | grep -v "versa-agi-archive" || true; echo "${CRON_TZ_LINE}"; echo "${CRON_SCHEDULE}"; echo "${LOG_ROTATION}") | \
     crontab -u "${WATCHDOG_USER}" -
@@ -2728,6 +2773,18 @@ if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
   echo ""
 fi
 
+# ─── Install Acceptance — Record & Submit ─────────
+if declare -F install_acceptance_record_full >/dev/null 2>&1 \
+   && declare -F install_acceptance_record_update >/dev/null 2>&1; then
+  section "Install Registration"
+  if [ "${UPDATE_MODE}" = true ]; then
+    install_acceptance_record_update
+  else
+    install_acceptance_record_full "${ENABLE_VV:-false}"
+  fi
+  echo ""
+fi
+
 # ─── Step 11: Sentinel Service (reactive file watcher) ──
 section "Step 11 — Sentinel Service"
 
@@ -3018,10 +3075,7 @@ if [ "${UPDATE_MODE}" = true ]; then
   if [ "${DRY_RUN}" = true ]; then
     dry "Would prompt to sync system templates to active agents"
   else
-    echo ""
-    read -p "  Do you want to sync updated system templates (poise & skills) to active agents? [y/N]: " -n 1 -r sync_ans
-    echo ""
-    if [[ $sync_ans =~ ^[Yy]$ ]]; then
+    if confirm_accent "Do you want to sync updated system templates (poise & skills) to active agents?"; then
       step_arrow "Running: python3 ${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py"
       python3 "${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py" || warn "sync_templates encountered an issue."
     fi
@@ -3036,7 +3090,7 @@ if [ "${UPDATE_MODE}" = true ]; then
   if [ "${DRY_RUN}" = true ]; then
     dry "Would prompt to resume CRON"
   elif [ "${CRON_WAS_ACTIVE:-false}" = true ]; then
-    if confirm "Resume CRON (lifeline scheduler)?"; then
+    if confirm_accent "Resume CRON (lifeline scheduler)?"; then
       CURRENT_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
       echo "${CURRENT_CRON}" | sed '/[Ll]ifeline/s|^#||' | \
         crontab -u "${WATCHDOG_USER}" -
@@ -3258,7 +3312,7 @@ echo ""
 
 # Offer to auto-launch agitop
 if [ -x /usr/local/bin/agitop ]; then
-  if confirm "Launch agitop now?"; then
+  if confirm_accent "Launch agitop now?"; then
     echo ""
     step_info "Starting agitop..."
     echo -e "  ${DIM:-}(Press 'q' to quit, '?' for help)${RESET:-}"

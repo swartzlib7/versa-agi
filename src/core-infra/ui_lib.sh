@@ -218,6 +218,46 @@ summary_card() {
   echo ""
 }
 
+# ─── Text Box (multi-line agreement / notice) ───────
+# Usage: text_box "Title" "line 1" "" "line 3" ...
+# Empty string lines render as blank rows inside the box.
+
+text_box() {
+  local title="$1"
+  shift
+  local width=56
+  local i rule
+
+  : "${BCYAN:=}"
+  : "${BOLD:=}"
+  : "${WHITE:=}"
+  : "${RESET:=}"
+
+  _tb_rule() {
+    local left="$1" mid="$2" right="$3"
+    rule=""
+    for ((i=0; i<width; i++)); do rule+="${mid}"; done
+    echo -e "  ${BCYAN}${left}${rule}${right}${RESET}"
+  }
+
+  _tb_line() {
+    local content="$1"
+    echo -e "  ${BCYAN}│${RESET}  ${content}"
+  }
+
+  echo ""
+  _tb_rule "╭" "─" "╮"
+  if [ -n "${title}" ]; then
+    echo -e "  ${BCYAN}│${RESET}  ${BOLD}${WHITE}${title}${RESET}"
+    _tb_rule "├" "─" "┤"
+  fi
+  for line in "$@"; do
+    _tb_line "${line}"
+  done
+  _tb_rule "╰" "─" "╯"
+  echo ""
+}
+
 # ─── Confirmation Prompt ────────────────────────────
 
 confirm() {
@@ -229,6 +269,29 @@ confirm() {
 
   echo ""
   read -p "  ${prompt} ${hint} " -n 1 -r
+  echo
+
+  if [ "${default}" = "y" ]; then
+    [[ ! $REPLY =~ ^[Nn]$ ]]
+  else
+    [[ $REPLY =~ ^[Yy]$ ]]
+  fi
+}
+
+# Highlighted confirmation (brand cyan) — CRON and agitop launch gates
+confirm_accent() {
+  local prompt="${1:-Continue?}"
+  local default="${2:-n}"  # "y" or "n"
+
+  : "${BCYAN:=}"
+  : "${RESET:=}"
+
+  local hint="[y/N]"
+  [ "${default}" = "y" ] && hint="[Y/n]"
+
+  echo ""
+  echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} "
+  read -n 1 -r
   echo
 
   if [ "${default}" = "y" ]; then

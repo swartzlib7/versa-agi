@@ -1,7 +1,8 @@
 """
-Config reader — reads system_config.json.
+Config reader — reads system_config.json and setup.ini registration state.
 """
 
+import configparser
 import json
 from pathlib import Path
 
@@ -9,8 +10,11 @@ from pathlib import Path
 class ConfigReader:
     """Reads system_config.json for mode, spawn state, identity."""
 
-    def __init__(self, config_path: str):
+    SETUP_INI_PATH = Path("/etc/versa-agi/setup.ini")
+
+    def __init__(self, config_path: str, setup_ini_path: str = ""):
         self.config_path = Path(config_path)
+        self.setup_ini_path = Path(setup_ini_path) if setup_ini_path else self.SETUP_INI_PATH
 
     def get_config(self) -> dict:
         """Read the full system config."""
@@ -32,3 +36,22 @@ class ConfigReader:
     def get_agent_name(self) -> str:
         """Get the agent name from config."""
         return self.get_config().get("agent", "coa")
+
+    def get_registration_state(self) -> dict[str, str]:
+        """Read [registration] keys from setup.ini."""
+        cfg = configparser.ConfigParser(delimiters=("=",))
+        if not self.setup_ini_path.is_file():
+            return {}
+        try:
+            cfg.read(self.setup_ini_path)
+            if not cfg.has_section("registration"):
+                return {}
+            return {k: v for k, v in cfg.items("registration")}
+        except Exception:
+            return {}
+
+    def is_registration_submitted(self) -> bool:
+        """True when install acceptance telemetry was successfully submitted."""
+        return self.get_registration_state().get(
+            "registration_submitted", "false"
+        ).lower() == "true"

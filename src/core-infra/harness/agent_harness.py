@@ -677,6 +677,7 @@ def get_llm(model_name: str, num_ctx: int = 0):
       gpt-*     → ChatOpenAI (direct API — api.openai.com)
       claude-*  → ChatAnthropic (direct API — api.anthropic.com)
       grok-*    → ChatOpenAI (direct API — api.x.ai/v1, OpenAI-compatible)
+      vendor/model (contains /) → ChatOpenAI (direct API — openrouter.ai/api/v1)
       *         → Local AI (ChatOllama or ChatOpenAI with local endpoint)
     
     Args:
@@ -712,6 +713,25 @@ def get_llm(model_name: str, num_ctx: int = 0):
         if not api_key:
             raise ValueError("XAI_API_KEY is required for xAI models. Set via: sudo agictl system set-key xai <key>")
         return ChatOpenAI(base_url="https://api.x.ai/v1", model=model_name, temperature=0.2, api_key=api_key)
+
+    # ── OpenRouter (namespaced vendor/model IDs) — direct API ──
+    if "/" in model_name:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is required for OpenRouter models. "
+                "Set via: sudo agictl system set-key openrouter <key>"
+            )
+        return ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            model=model_name,
+            temperature=0.2,
+            api_key=api_key,
+            default_headers={
+                "HTTP-Referer": "https://versavoice.ai",
+                "X-Title": "Versa AGi",
+            },
+        )
 
     # ── Local AI (Ollama / Intel SYCL) ──
     gpu_backend = "standard"

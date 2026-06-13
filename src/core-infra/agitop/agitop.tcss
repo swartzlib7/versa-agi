@@ -822,8 +822,9 @@ ComposeModal {
 }
 
 #compose-body {
-    height: 50;
-    min-height: 25;
+    height: 12;
+    min-height: 8;
+    max-height: 16;
     margin-bottom: 1;
 }
 

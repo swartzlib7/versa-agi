@@ -69,8 +69,22 @@ class AgitopApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Start periodic refresh timer (configurable via SystemPanel)."""
+        """Start periodic refresh timer and background install registration tripwire."""
+        self._run_registration_tripwire()
         self._start_refresh_timer()
+
+    def _run_registration_tripwire(self) -> None:
+        """Retry deferred install acceptance submission once per launch (silent)."""
+        try:
+            import sys
+            core_infra = Path(__file__).resolve().parents[2]
+            if str(core_infra) not in sys.path:
+                sys.path.insert(0, str(core_infra))
+            from install_acceptance import tripwire_submit
+            tripwire_submit()
+        except Exception as exc:
+            import sys
+            print(f"[agitop] install registration tripwire: {exc}", file=sys.stderr)
 
     def _start_refresh_timer(self) -> None:
         """Create data refresh timer based on SystemPanel's interval setting."""

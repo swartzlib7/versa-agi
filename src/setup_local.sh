@@ -42,6 +42,84 @@ else
   error() { echo -e "\033[0;31m[ERROR]\033[0m $*"; exit 1; }
 fi
 
+# ─── Brand accent helpers ───────────────────────────
+_local_ai_accent() {
+  : "${BCYAN:=}"
+  : "${RESET:=}"
+  printf '%b%s%b' "${BCYAN}" "$1" "${RESET}"
+}
+
+_local_ai_dim() {
+  : "${DIM:=}"
+  : "${RESET:=}"
+  printf '%b%s%b' "${DIM}" "$1" "${RESET}"
+}
+
+_local_ai_product() {
+  _local_ai_accent "Versa AGi"
+}
+
+_local_ai_show_banner() {
+  local hdr_line intro_line cloud_line
+  local std_line nv_line amd_line intel_hdr intel_a intel_docker intel_ubuntu warn_line resp_line
+
+  hdr_line="$(_local_ai_product) — Local AI Setup ($(_local_ai_dim "Experimental"))"
+  intro_line="Install local inference so sub-agents run on your hardware"
+  cloud_line="instead of cloud-only execution."
+  std_line="1. $(_local_ai_accent "Standard Ollama")"
+  nv_line="   • $(_local_ai_accent "NVIDIA") ($(_local_ai_dim "CUDA"))"
+  amd_line="   • $(_local_ai_accent "AMD") ($(_local_ai_dim "ROCm"))"
+  intel_hdr="2. $(_local_ai_accent "Intel ARC") — $(_local_ai_dim "Docker SYCL")"
+  intel_a="   • ARC A-series, B-series (Battlemage, Alchemist)"
+  intel_docker="   • Requires Docker (auto-install)"
+  intel_ubuntu="   • Requires Ubuntu 24.04"
+  : "${YELLOW:=}"
+  warn_line="${YELLOW}${GLYPH_WARN:-!}${RESET} Configure hardware & drivers BEFORE"
+  resp_line="The user is responsible for ensuring hardware meets model requirements."
+
+  if declare -F text_box >/dev/null 2>&1; then
+    text_box "LOCAL AI SETUP" \
+      "${hdr_line}" \
+      "" \
+      "${intro_line}" \
+      "${cloud_line}" \
+      "" \
+      "Supported GPU backends:" \
+      "${std_line}" \
+      "${nv_line}" \
+      "${amd_line}" \
+      "" \
+      "${intel_hdr}" \
+      "${intel_a}" \
+      "${intel_docker}" \
+      "${intel_ubuntu}" \
+      "" \
+      "${warn_line}" \
+      "running this installer." \
+      "" \
+      "${resp_line}"
+  else
+    echo ""
+    echo -e "${hdr_line}"
+    echo ""
+    echo -e "${intro_line} ${cloud_line}"
+    echo ""
+    echo "  Supported GPU backends:"
+    echo -e "  ${std_line}"
+    echo -e "  ${nv_line}"
+    echo -e "  ${amd_line}"
+    echo ""
+    echo -e "  ${intel_hdr}"
+    echo -e "  ${intel_a}"
+    echo -e "  ${intel_docker}"
+    echo -e "  ${intel_ubuntu}"
+    echo ""
+    echo -e "  ${warn_line} running this installer."
+    echo ""
+    echo -e "  ${resp_line}"
+    echo ""
+  fi
+}
 
 
 # ─── Root Check ─────────────────────────────────────
@@ -202,33 +280,7 @@ if [ -n "${_LOCAL_INI}" ]; then
 fi
 
 # ─── Banner ─────────────────────────────────────────
-echo ""
-echo "═══════════════════════════════════════════════"
-echo "  Versa AGi — Local AI Setup (Experimental)"
-echo "═══════════════════════════════════════════════"
-echo ""
-echo "  This will install local AI capability, allowing sub-agents"
-echo "  to run on your hardware instead of Google Cloud."
-echo ""
-echo "  ┌─────────────────────────────────────────┐"
-echo "  │  SUPPORTED GPU BACKENDS                 │"
-echo "  │                                         │"
-echo "  │  1. Standard Ollama                     │"
-echo "  │     • NVIDIA (CUDA)                     │"
-echo "  │     • AMD (ROCm)                        │"
-echo "  │                                         │"
-echo "  │  2. Intel ARC — Docker SYCL             │"
-echo "  │     • ARC A-series, B-series            │"
-echo "  │     • Requires Docker (auto-install)    │"
-echo "  │     • Requires Ubuntu 24.04             │"
-echo "  │                                         │"
-echo "  │  ⚠ Configure hardware & drivers BEFORE  │"
-echo "  │    running this installer.              │"
-echo "  └─────────────────────────────────────────┘"
-echo ""
-echo "  The user is responsible for ensuring their hardware"
-echo "  meets the requirements for the selected model."
-echo ""
+_local_ai_show_banner
 
 # When called from setup.sh, skip the confirmation prompt
 if [ -z "${VERSA_SETUP_PARENT:-}" ]; then
@@ -645,10 +697,14 @@ CLIENTEOF
 fi
 
 # ─── GPU Backend Selection ──────────────────────────
-echo ""
-echo "  GPU Backend:"
-echo "    1) Standard Ollama — NVIDIA / AMD (Default)"
-echo "    2) Intel ARC — Docker SYCL (Battlemage, Alchemist)"
+if declare -F section >/dev/null 2>&1; then
+  section "GPU Backend"
+else
+  echo ""
+  echo "  GPU Backend:"
+fi
+echo -e "    1) $(_local_ai_accent "Standard Ollama") — $(_local_ai_accent "NVIDIA") / $(_local_ai_accent "AMD") ($(_local_ai_dim "Default"))"
+echo -e "    2) $(_local_ai_accent "Intel ARC") — $(_local_ai_dim "Docker SYCL") (Battlemage, Alchemist)"
 echo ""
 
 if [ "${GPU_BACKEND}" = "intel" ]; then
@@ -670,7 +726,14 @@ case "${GPU_CHOICE}" in
 esac
 
 echo ""
-ok "GPU Backend: ${GPU_BACKEND}"
+case "${GPU_BACKEND}" in
+  intel)
+    ok "GPU Backend: $(_local_ai_accent "Intel ARC") ($(_local_ai_dim "Docker SYCL"))"
+    ;;
+  *)
+    ok "GPU Backend: $(_local_ai_accent "NVIDIA") / $(_local_ai_accent "AMD") ($(_local_ai_dim "Standard Ollama"))"
+    ;;
+esac
 echo ""
 
 # ─── Previous Backend Cleanup ───────────────────────

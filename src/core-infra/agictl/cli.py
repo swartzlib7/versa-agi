@@ -184,7 +184,7 @@ def system_config_set_ini(section, key, value):
         sys.exit(1)
 
 @system.command("set-key", hidden=True)
-@click.argument("key_type", type=click.Choice(["gemini", "versavoice", "xai", "openai", "anthropic"]))
+@click.argument("key_type", type=click.Choice(["gemini", "versavoice", "xai", "openai", "anthropic", "openrouter"]))
 @click.argument("value")
 def system_set_key(key_type, value):
     """Update an API key/token and propagate to all locations. Requires root.
@@ -195,6 +195,7 @@ def system_set_key(key_type, value):
       xai        - xAI API Key → inference_endpoint.env, setup.ini
       openai     - OpenAI API Key → inference_endpoint.env, setup.ini
       anthropic  - Anthropic API Key → inference_endpoint.env, setup.ini
+      openrouter - OpenRouter API Key → inference_endpoint.env, setup.ini
     """
     import glob
     import re
@@ -396,6 +397,50 @@ def system_set_key(key_type, value):
 
         # setup.ini
         _ini_set("third_party", "anthropic_api_key", value)
+
+    # ════════════════════════════════════════════════
+    # OPENROUTER API KEY
+    # ════════════════════════════════════════════════
+    elif key_type == "openrouter":
+        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
+        env_var = "OPENROUTER_API_KEY"
+        if os.path.isfile(inference_endpoint_env):
+            if _sed_replace(inference_endpoint_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(inference_endpoint_env)
+            else:
+                try:
+                    with open(inference_endpoint_env, "a") as f:
+                        f.write(f"\n{env_var}={value}\n")
+                    updated_files.append(inference_endpoint_env)
+                except Exception as e:
+                    errors.append(f"{inference_endpoint_env}: {e}")
+        else:
+            try:
+                with open(inference_endpoint_env, "w") as f:
+                    f.write(f"{env_var}={value}\n")
+                    f.write("OR_SITE_URL=https://versavoice.ai\n")
+                    f.write("OR_APP_NAME=Versa AGi\n")
+                os.chmod(inference_endpoint_env, 0o600)
+                import subprocess as _sp
+                _sp.run(["chown", "root:root", inference_endpoint_env], check=False)
+                updated_files.append(inference_endpoint_env)
+            except Exception as e:
+                errors.append(f"{inference_endpoint_env}: {e}")
+
+        if os.path.isfile(inference_endpoint_env):
+            for attr_kv in (
+                ("OR_SITE_URL", "https://versavoice.ai"),
+                ("OR_APP_NAME", "Versa AGi"),
+            ):
+                attr, attr_val = attr_kv
+                if not _sed_replace(inference_endpoint_env, rf"^{attr}=.*$", f"{attr}={attr_val}"):
+                    try:
+                        with open(inference_endpoint_env, "a") as f:
+                            f.write(f"{attr}={attr_val}\n")
+                    except Exception as e:
+                        errors.append(f"{inference_endpoint_env}: {e}")
+
+        _ini_set("third_party", "openrouter_api_key", value)
 
     # ── Report result ──
     if errors:
@@ -1811,6 +1856,27 @@ def _regenerate_inference_endpoint_config():
                         lines.append(f"      model: {provider}/{model}\n")
                         lines.append(f"      api_key: os.environ/{provider_upper}_API_KEY\n")
 
+    # OpenRouter attribution headers for LiteLLM (when provider is enabled)
+    openrouter_enabled = cfg.get("third_party", "openrouter_enabled", fallback="false")
+    if proxy_enabled == "true" and openrouter_enabled == "true":
+        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
+        _env_lines = []
+        if os.path.isfile(inference_endpoint_env):
+            with open(inference_endpoint_env, "r") as f:
+                _env_lines = f.readlines()
+        for attr, val in (("OR_SITE_URL", "https://versavoice.ai"),
+                          ("OR_APP_NAME", "Versa AGi")):
+            found = False
+            for i, l in enumerate(_env_lines):
+                if l.startswith(f"{attr}="):
+                    _env_lines[i] = f"{attr}={val}\n"
+                    found = True
+                    break
+            if not found:
+                _env_lines.append(f"{attr}={val}\n")
+        with open(inference_endpoint_env, "w") as f:
+            f.writelines(_env_lines)
+
     # Write config
     os.makedirs(os.path.dirname(INFERENCE_CONFIG_FILE), exist_ok=True)
     with open(INFERENCE_CONFIG_FILE, "w") as f:
@@ -2824,9 +2890,9 @@ def _build_migration_rows(target):
         ("google", "true|Google Gemini|ChatGoogleGenerativeAI"),
     ]
     cls_map = {"xai": "ChatOpenAI", "openai": "ChatOpenAI",
-               "anthropic": "ChatAnthropic"}
+               "anthropic": "ChatAnthropic", "openrouter": "ChatOpenAI"}
     label_map = {"xai": "xAI (Grok)", "openai": "OpenAI (GPT)",
-                 "anthropic": "Anthropic (Claude)"}
+                 "anthropic": "Anthropic (Claude)", "openrouter": "OpenRouter"}
     for slug in tp_providers:
         raw_enabled = _read_ini_value("third_party", f"{slug}_enabled", "false")
         p_enabled = "true" if raw_enabled.strip().lower() == "true" else "false"

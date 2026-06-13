@@ -28,7 +28,7 @@
 > | **Edition 1** | Was built exclusively around `@google/gemini-cli`. Intelligence frameworks, context injection, and file behaviors are hardcoded to native Gemini CLI constraints. See the [Gemini CLI Repository](https://github.com/google-gemini/gemini-cli). |
 > | **2026.04** | **Local AI & Third-Party Cloud Providers.** Introduced hybrid execution — agents can run on local hardware via Ollama (NVIDIA/AMD) with native LangChain integrations for unified model routing. |
 > | **2026.05** | **Intel ARC & Distributed Topology.** Native Docker SYCL backend for Intel ARC GPUs (Battlemage, Alchemist). New **Server** installation mode enables developers to host inference on a dedicated GPU machine while running the agent system on their laptop. |
-> | **Edition 2** | **LangGraph Agent Harness.** Replaced `gemini-cli` with a custom Python-native LangGraph orchestration engine. Decommissioned Inference Server in favor of direct LangChain native model integrations (Google Gemini, Ollama, SYCL, and third-party Cloud models — xAI Grok, OpenAI GPT, Anthropic Claude). |
+> | **Edition 2** | **LangGraph Agent Harness.** Replaced `gemini-cli` with a custom Python-native LangGraph orchestration engine. Decommissioned Inference Server in favor of direct LangChain native model integrations (Google Gemini, Ollama, SYCL, and third-party Cloud models — xAI Grok, OpenAI GPT, Anthropic Claude, OpenRouter). |
 
 > [!CAUTION]
 > **Cost Optimization & Caching:** The Gemini API offers massive pricing benefits through implicit and explicit Context Caching — ideal for agents constantly re-reading large conversation histories. API Keys or Service Accounts are required to unlock these features. The LangGraph harness tracks token usage natively per cycle and reports monthly aggregates in the agitop dashboard.
@@ -666,10 +666,11 @@ rm -rf /tmp/versa-agi-fix
 
 ## Privacy & Terms of Service
 
-**We do not collect your data.** Versa AGi is a completely decentralized, self-hosted infrastructure running entirely on your local hardware. 
+**Your data stays on your machine.** Versa AGi is decentralized, self-hosted infrastructure running entirely on your local hardware.
 
-- **Zero Telemetry:** All agent memory, execution states, system configurations, and SQLite database payloads remain strictly on your machine. We do not track, monitor, or aggregate your usage.
-- **Direct Backend Connections:** You communicate directly with the [VersaVoice AI](https://versavoice.ai) platform for messaging. Inference requests are routed directly to your configured providers — Google Gemini API for cloud models, your local Ollama/SYCL backend for local models, or third-party providers (xAI, OpenAI, Anthropic, etc.) through native LangChain integrations — each subject to their respective Terms of Service.
+- **Agent data stays local:** Agent memory, execution states, system configurations, and SQLite database payloads remain on your machine. We do not track, monitor, or aggregate your agent activity.
+- **Optional install registration:** During setup (or update), you may accept the BSL-1.1 license and optionally provide an email for release notes. A minimal install event (version, platform, acceptance timestamp, optional email) may be sent to VersaVoice AI if you accept and a registration endpoint is configured. No agent names, task data, or message content are included. If the endpoint is unavailable, the event is stored locally and retried silently when you open Mission Control (`agitop`). Email is optional — press Enter to skip.
+- **Direct backend connections:** You communicate directly with the [VersaVoice AI](https://versavoice.ai) platform for messaging when enabled. Inference requests are routed directly to your configured providers — Google Gemini API for cloud models, your local Ollama/SYCL backend for local models, or third-party providers (xAI, OpenAI, Anthropic, [OpenRouter](https://openrouter.ai), etc.) through native LangChain integrations — each subject to their respective Terms of Service. OpenRouter uses a single API key and prepaid credit billing per token.
 
 *By utilizing this open-source infrastructure, you assume full responsibility for your agent's autonomy and security boundaries as outlined in the underlying License.*
 

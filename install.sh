@@ -22,7 +22,7 @@ set -euo pipefail
 REPO_URL="https://github.com/swartzlib7/versa-agi.git"
 REPO_BRANCH="main"
 INSTALL_DIR="/tmp/versa-agi-install-$$"
-VERSION="3.0"
+VERSION="3.2.0"
 TEST_MODE=false
 
 # ─── Parse Arguments ────────────────────────────────
@@ -260,6 +260,8 @@ else
   chmod +x "${SETUP_SCRIPT}"
   info "Launching setup..."
   echo ""
+  # Install acceptance (welcome, optional email, registration telemetry) runs inside setup.sh
+  # via core-infra/install_acceptance.sh — shared for install and --update paths.
 
   # Hand off to setup.sh — redirect stdin from /dev/tty so interactive
   # prompts work even when install.sh is piped via curl
