@@ -71,7 +71,7 @@ class ComposeModal(ModalScreen):
                 default = self.preselect_agent or (self.agents[0] if self.agents else None)
                 yield Select(options, value=default, id="compose-agent", allow_blank=False)
             yield Static("[cyan]Message:[/]")
-            yield TextArea(id="compose-body")
+            yield TextArea(id="compose-body", classes="msg-input-paper")
             with Horizontal(id="compose-actions"):
                 yield Button("Send", variant="success", id="compose-send")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="compose-cancel")
@@ -273,7 +273,7 @@ class MessageViewModal(ModalScreen):
                     with Vertical(id="msg-reply-section"):
                         yield Static(f"[cyan]Reply To:[/] {self.reply_agent}")
                         yield Static("[cyan]Reply:[/]")
-                        yield TextArea("", id="msg-reply-body")
+                        yield TextArea("", id="msg-reply-body", classes="msg-input-paper")
                 with Horizontal(id="msg-dialog-actions"):
                     if self.reply_agent:
                         yield Button("💬 Reply", variant="warning", id="msg-reply", disabled=True)

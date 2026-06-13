@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS agents (
   session_retention_max_age TEXT DEFAULT '14d',
   session_retention_max_count INTEGER DEFAULT 45,
   num_ctx           INTEGER DEFAULT 0,
+  temperature       REAL,
+  reasoning_effort  TEXT,
+  reasoning_max_tokens INTEGER,
+  model_params_extra TEXT,
   conversation_depth INTEGER DEFAULT 10,
   resume_enabled    BOOLEAN DEFAULT 0,
   resume_max_messages INTEGER DEFAULT 0,
@@ -55,7 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
 
 -- Active agents (used by Lifeline for spawning)
 CREATE VIEW IF NOT EXISTS v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
 FROM agents
 WHERE inactive = 0
 ORDER BY name ASC;
@@ -65,7 +69,8 @@ CREATE VIEW IF NOT EXISTS v_agent_registry AS
 SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_size_threshold, inactive, protected, can_message_connections, model, triage_model, role,
        context_injection_mode, token_budget, max_session_turns, tool_output_token_budget,
        session_retention_enabled, session_retention_max_age, session_retention_max_count,
-       anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages,
+       anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra,
+       conversation_depth, resume_enabled, resume_max_messages,
        skill_injection_mode, browser_enabled,
        status, status_message,
        requested_by, requested_by_name, created_at
@@ -139,6 +144,12 @@ sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN browser_enabled BOOLEAN DEFA
 # ─── Schema Migration: skill_injection_mode column ───
 sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN skill_injection_mode TEXT DEFAULT 'hybrid';" 2>/dev/null || true
 
+# ─── Schema Migration: abstracted model parameters (Iteration 22) ───
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN temperature REAL;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN reasoning_effort TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN reasoning_max_tokens INTEGER;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN model_params_extra TEXT;" 2>/dev/null || true
+
 # ─── Schema Migration: resume_enabled default change (1 → 0) ───
 # REMOVED (Iteration 23): the unconditional `UPDATE agents SET resume_enabled=0
 # WHERE resume_enabled=1` ran on EVERY setup --update, silently resetting any
@@ -151,7 +162,7 @@ sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN skill_injection_mode TEXT DE
 sqlite3 "${DB_PATH}" <<'VIEWS'
 DROP VIEW IF EXISTS v_active_agents;
 CREATE VIEW v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
 FROM agents
 WHERE inactive = 0
 ORDER BY name ASC;
@@ -161,7 +172,8 @@ CREATE VIEW v_agent_registry AS
 SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_size_threshold, inactive, protected, can_message_connections, model, triage_model, role,
        context_injection_mode, token_budget, max_session_turns, tool_output_token_budget,
        session_retention_enabled, session_retention_max_age, session_retention_max_count,
-       anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages,
+       anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra,
+       conversation_depth, resume_enabled, resume_max_messages,
        skill_injection_mode, browser_enabled,
        status, status_message,
        requested_by, requested_by_name, created_at

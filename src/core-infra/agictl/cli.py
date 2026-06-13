@@ -813,7 +813,7 @@ def _reconcile_models_ini(template, deployed):
     """Regenerate the deployed models.ini from the template, preserving user content.
 
     Preserved across regeneration:
-      - [catalog_custom] / [providers_custom] bodies verbatim (the user layer)
+      - [catalog_custom] / [providers_custom] / [model_params_custom] bodies verbatim (the user layer)
       - deployed-only keys in the shared local sections (registry-added models)
     Everything else (header comments, [catalog]/[providers] stock, shipped local
     rows) comes fresh from the template; `model migrate` rebuilds the baseline
@@ -821,7 +821,7 @@ def _reconcile_models_ini(template, deployed):
     """
     custom_bodies = {
         sec: _ini_section_body_lines(deployed, sec)
-        for sec in ("catalog_custom", "providers_custom")
+        for sec in ("catalog_custom", "providers_custom", "model_params_custom")
     }
     tmpl_pairs = _parse_ini_pairs(template)
     dep_pairs = _parse_ini_pairs(deployed)
@@ -857,7 +857,7 @@ def system_reconcile_config(setup_template, models_template):
     --update alike). The template is authority for structure, comments, stock
     model lists, and new/removed keys; user-provided content is preserved:
     setup.ini user-owned values (keys, tokens, mode, hardware, ...), and
-    models.ini [catalog_custom]/[providers_custom] plus registry-added rows in
+    models.ini [catalog_custom]/[providers_custom]/[model_params_custom] plus registry-added rows in
     [local_models]/[context_windows]/[sycl_models]. Follow with
     'agictl model migrate' + 'agictl model sync'.
     """
@@ -1757,6 +1757,8 @@ def _regenerate_inference_endpoint_config():
     Python port of the bash logic in setup.sh lines 1948-1994.
     """
     import configparser
+    from harness.model_params import resolve_model_params, detect_provider_family, to_litellm_endpoint_extras
+
     ini_path = SETUP_INI_CANONICAL
     if not os.path.isfile(ini_path):
         ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
@@ -1855,6 +1857,9 @@ def _regenerate_inference_endpoint_config():
                         lines.append("    inference_endpoint_params:\n")
                         lines.append(f"      model: {provider}/{model}\n")
                         lines.append(f"      api_key: os.environ/{provider_upper}_API_KEY\n")
+                        resolved = resolve_model_params(model)
+                        family = detect_provider_family(model, provider_slug=provider)
+                        lines.extend(to_litellm_endpoint_extras(family, model, resolved))
 
     # OpenRouter attribution headers for LiteLLM (when provider is enabled)
     openrouter_enabled = cfg.get("third_party", "openrouter_enabled", fallback="false")
@@ -2984,6 +2989,7 @@ def model_migrate(force):
             if force:
                 _clear_ini_section(path, "providers_custom")
                 _clear_ini_section(path, "catalog_custom")
+                _clear_ini_section(path, "model_params_custom")
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
@@ -3200,6 +3206,7 @@ def catalog_remove(key, no_sync):
             else:
                 _remove_ini_entry(path, "catalog_custom", key)
                 _remove_ini_entry(path, "local_models", key)
+            _remove_ini_entry(path, "model_params_custom", f"model:{key}")
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
@@ -3211,6 +3218,154 @@ def catalog_remove(key, no_sync):
         msg = f"Removed custom model '{key}' from catalog."
     _auto_sync_and_respond({"model": key, "disabled_only": baseline_backed,
                             "message": msg}, do_sync=not no_sync)
+
+
+# ─── Model Params Subcommand Group ─────────────────────
+# CRUD over [model_params_custom] — layered generation defaults.
+
+def _validate_params_scope(scope: str) -> str:
+    if scope == "default":
+        return scope
+    if scope.startswith("provider:"):
+        raise click.BadParameter(
+            "Provider scopes are no longer supported — use 'model:<id>' or per-agent overrides."
+        )
+    if scope.startswith("model:") and len(scope) > len("model:"):
+        return scope
+    raise click.BadParameter(
+        "Scope must be 'default' or 'model:<id>'"
+    )
+
+
+def _build_params_json(temperature, reasoning_effort, reasoning_max_tokens, extra, base=None):
+    data = dict(base or {})
+    if temperature is not None:
+        data["temperature"] = temperature
+    if reasoning_effort is not None:
+        data["reasoning_effort"] = reasoning_effort
+    if reasoning_max_tokens is not None:
+        data["reasoning_max_tokens"] = reasoning_max_tokens
+    if extra is not None:
+        try:
+            parsed = json.loads(extra)
+            if not isinstance(parsed, dict):
+                raise ValueError("extra must be a JSON object")
+            data["extra"] = parsed
+        except (json.JSONDecodeError, ValueError) as e:
+            raise click.BadParameter(f"Invalid --extra JSON: {e}")
+    return data
+
+
+@model.group()
+def params():
+    """Manage layered model generation parameters (temperature, reasoning, extra)."""
+    pass
+
+
+@params.command("list")
+@click.option("--table", "as_table", is_flag=True, help="Human-readable table instead of JSON")
+def params_list(as_table):
+    """List all configured parameter layers (default, model:*)."""
+    from harness.model_params import list_model_params, resolve_model_params
+    layers = list_model_params()
+    rows = []
+    for scope, raw in sorted(layers.items()):
+        resolved_hint = None
+        if scope.startswith("model:"):
+            model_id = scope.split(":", 1)[1]
+            resolved_hint = resolve_model_params(model_id)
+        rows.append({"scope": scope, "params": raw, "resolved_for_model": resolved_hint})
+    if as_table:
+        if not rows:
+            click.echo("No model parameter layers configured.")
+            return
+        click.echo(f"{'SCOPE':<40} PARAMS")
+        for r in rows:
+            click.echo(f"{r['scope']:<40} {json.dumps(r['params'], separators=(',', ':'))}")
+        return
+    json_response(True, count=len(rows), layers=rows)
+
+
+@params.command("get")
+@click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
+def params_get(scope):
+    """Get params for a scope, including effective resolution for model:* scopes."""
+    from harness.model_params import list_model_params, resolve_model_params
+    layers = list_model_params()
+    payload = {"scope": scope, "params": layers.get(scope, {})}
+    if scope.startswith("model:"):
+        model_id = scope.split(":", 1)[1]
+        payload["resolved"] = resolve_model_params(model_id)
+    json_response(True, **payload)
+
+
+@params.command("set")
+@click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
+@click.option("--temperature", type=float, default=None, help="Sampling temperature (0.0–2.0)")
+@click.option("--reasoning-effort",
+              type=click.Choice(["none", "minimal", "low", "medium", "high", "max"]),
+              default=None, help="Reasoning effort level")
+@click.option("--reasoning-max-tokens", type=int, default=None, help="Reasoning token budget")
+@click.option("--extra", default=None, help="JSON object merged into the passthrough bag")
+@click.option("--no-sync", is_flag=True, help="Skip regenerating inference endpoint config")
+def params_set(scope, temperature, reasoning_effort, reasoning_max_tokens, extra, no_sync):
+    """Set or update params for a scope (writes [model_params_custom])."""
+    from harness.model_params import list_model_params
+    if not any(v is not None for v in (temperature, reasoning_effort, reasoning_max_tokens, extra)):
+        json_response(False, error="Provide at least one of --temperature, --reasoning-effort, "
+                      "--reasoning-max-tokens, --extra")
+        sys.exit(1)
+    layers = list_model_params()
+    merged = _build_params_json(
+        temperature, reasoning_effort, reasoning_max_tokens, extra,
+        base=layers.get(scope, {}),
+    )
+    value = json.dumps(merged, separators=(",", ":"))
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "model_params_custom", scope, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    payload = {"scope": scope, "params": merged, "message": f"Set params for '{scope}'."}
+    if not no_sync:
+        ok, msg = _regenerate_inference_endpoint_config()
+        payload["inference_config_regenerated"] = ok
+        if msg:
+            payload["inference_message"] = msg
+    json_response(True, **payload)
+
+
+@params.command("clear")
+@click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
+@click.option("--no-sync", is_flag=True)
+def params_clear(scope, no_sync):
+    """Remove a custom params override (reverts to lower layers)."""
+    if scope == "default":
+        json_response(False, error="Cannot clear the system default — edit the baseline [model_params] template instead.")
+        sys.exit(1)
+    removed_any = False
+    try:
+        for path in _models_ini_write_targets():
+            if _remove_ini_entry(path, "model_params_custom", scope):
+                removed_any = True
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    if not removed_any:
+        json_response(False, error=f"No custom params found for scope '{scope}'")
+        sys.exit(1)
+    payload = {"scope": scope, "message": f"Cleared custom params for '{scope}'."}
+    if not no_sync:
+        ok, msg = _regenerate_inference_endpoint_config()
+        payload["inference_config_regenerated"] = ok
+        if msg:
+            payload["inference_message"] = msg
+    json_response(True, **payload)
 
 
 # ─── Provider Command Group ─────────────────────────────
@@ -4720,6 +4875,91 @@ def agent_set_timeout(name, minutes):
     except Exception as e:
         json_response(False, error=str(e))
 
+
+@agent.command("set-model")
+@click.argument("name")
+@click.argument("model")
+@click.option("--clear", "clear_model", is_flag=True, help="Clear model assignment (use system default)")
+def agent_set_model(name, model, clear_model):
+    """Assign an AI model to an agent (same effect as agitop Agent Settings → Model).
+
+    Restricted to COA or the Primary User (sub-agents cannot reassign models).
+    """
+    name = name.lower()
+    new_model = None if clear_model else model
+    if not clear_model and not new_model:
+        json_response(False, error="Model argument required (or pass --clear)")
+        sys.exit(1)
+
+    # Guard: only COA or the Primary User (empty AGICTL_AGENT_USER => sudo/root/agitop).
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        json_response(False, error=f"Permission denied: only COA or the Primary User can assign agent models (caller: {caller})")
+        sys.exit(1)
+
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name, protected FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found")
+            sys.exit(1)
+
+        if new_model and name == "coa":
+            import configparser
+            cat = _load_catalog()
+            coa_allowed = set()
+            try:
+                cfg = configparser.ConfigParser()
+                for p in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+                    if os.path.isfile(p):
+                        cfg.read(p)
+                        break
+                raw = cfg.get("gemini", "coa_approved_models", fallback="")
+                coa_allowed = {m.strip() for m in raw.split(",") if m.strip()}
+            except Exception:
+                pass
+            for key, m in cat.items():
+                if m.get("coa"):
+                    coa_allowed.add(key)
+            if coa_allowed and new_model not in coa_allowed:
+                conn.close()
+                json_response(False, error=f"Model '{new_model}' is not COA-approved. Allowed: {', '.join(sorted(coa_allowed))}")
+                sys.exit(1)
+
+        if new_model:
+            cat = _load_catalog()
+            known = set(cat.keys())
+            if new_model not in known:
+                conn.close()
+                json_response(False, error=f"Model '{new_model}' not in catalog. Add via 'agictl model catalog add'.")
+                sys.exit(1)
+
+        conn.execute(
+            """UPDATE agents SET model = ?, updated_at = datetime('now'),
+               status = CASE WHEN status = 'invalid_config' THEN 'idle' ELSE status END,
+               status_message = CASE WHEN status = 'invalid_config' THEN NULL ELSE status_message END
+               WHERE name = ?""",
+            (new_model, name),
+        )
+        if new_model:
+            try:
+                from harness.model_context import get_model_context
+                recommended, _ = get_model_context(new_model)
+                if recommended:
+                    conn.execute(
+                        "UPDATE agents SET num_ctx = ?, updated_at = datetime('now') WHERE name = ?",
+                        (recommended, name),
+                    )
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        json_response(True, agent=name, model=new_model or "", message=f"Model assigned to '{name}'.")
+    except Exception as e:
+        json_response(False, error=str(e))
+
 @agent.command("toggle-comms")
 @click.argument("name")
 def agent_toggle_comms(name):
@@ -4835,7 +5075,7 @@ def agent_ensure_protected():
 
 @agent.command("get-active")
 def agent_get_active():
-    """Return active agents in pipe format for Lifeline: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode"""
+    """Return active agents in pipe format for Lifeline: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode|temperature|reasoning_effort|reasoning_max_tokens|model_params_extra"""
     agents = agent_reader.get_active_agents()
     for a in agents:
         model = a.get("model") or ""
@@ -4853,7 +5093,13 @@ def agent_get_active():
         resume_enabled = a.get("resume_enabled", 0)
         resume_max_msgs = a.get("resume_max_messages", 0)
         skill_mode = a.get("skill_injection_mode") or "hybrid"
-        print(f"{a['name']}|{a['os_user']}|{a['workspace']}|{model}|{timeout}|{runaway}|{runaway_size}|{injection_mode}|{token_budget}|{max_turns}|{tool_budget}|{triage_model}|{anchor_style}|{num_ctx}|{convo_depth}|{resume_enabled}|{resume_max_msgs}|{skill_mode}")
+        temperature = a.get("temperature")
+        temperature_str = "" if temperature is None else str(temperature)
+        reasoning_effort = a.get("reasoning_effort") or ""
+        reasoning_max_tokens = a.get("reasoning_max_tokens")
+        reasoning_max_str = "" if reasoning_max_tokens is None else str(reasoning_max_tokens)
+        model_params_extra = a.get("model_params_extra") or ""
+        print(f"{a['name']}|{a['os_user']}|{a['workspace']}|{model}|{timeout}|{runaway}|{runaway_size}|{injection_mode}|{token_budget}|{max_turns}|{tool_budget}|{triage_model}|{anchor_style}|{num_ctx}|{convo_depth}|{resume_enabled}|{resume_max_msgs}|{skill_mode}|{temperature_str}|{reasoning_effort}|{reasoning_max_str}|{model_params_extra}")
 
 
 

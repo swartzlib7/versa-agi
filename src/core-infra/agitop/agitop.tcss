@@ -828,6 +828,17 @@ ComposeModal {
     margin-bottom: 1;
 }
 
+/* Paper-toned background for message compose / reply inputs */
+TextArea.msg-input-paper {
+    background: #cdc0aa;
+    color: #1f1a12;
+    border: solid #a89880;
+}
+
+TextArea.msg-input-paper:focus {
+    border: solid #968a72;
+}
+
 #compose-actions {
     height: auto;
     margin-top: 1;
@@ -1031,6 +1042,21 @@ ModelManagerModal {
 #mm-feedback {
     margin-top: 1;
     padding: 0 1;
+}
+
+.setup-form-row {
+    height: auto;
+    margin-top: 1;
+}
+
+.setup-form-col {
+    width: 1fr;
+    height: auto;
+    margin: 0 1;
+}
+
+#msg-dialog-header {
+    margin-bottom: 1;
 }
 
 .mm-form-row {

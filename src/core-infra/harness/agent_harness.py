@@ -669,7 +669,7 @@ def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, comp
 # LLM Provider Resolution
 # ═══════════════════════════════════════════════════════
 
-def get_llm(model_name: str, num_ctx: int = 0):
+def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = None):
     """Instantiate the correct LLM provider based on the model name.
     
     Provider routing (by model prefix):
@@ -683,36 +683,59 @@ def get_llm(model_name: str, num_ctx: int = 0):
     Args:
         model_name: The model identifier (e.g. 'gemini-2.5-flash', 'gpt-5.5-2026-04-23')
         num_ctx: Context window size in tokens for Ollama models. 0 = Ollama default.
+        agent_overrides: Optional per-agent param overrides (temperature, reasoning, extra).
     """
+    from harness.model_params import (
+        resolve_model_params,
+        detect_provider_family,
+        to_native_kwargs,
+    )
+
+    resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
+    family = detect_provider_family(model_name)
+    native = to_native_kwargs(family, model_name, resolved)
+
+    def _openai_compat(**base):
+        merged = {**base, **{k: v for k, v in native.items() if k not in base}}
+        return ChatOpenAI(**merged)
 
     # ── Gemini (Google) — direct API ──
     if model_name.startswith("gemini"):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for Gemini models.")
-        return ChatGoogleGenerativeAI(model=model_name, temperature=0.2, google_api_key=api_key)
+        gkwargs = {"model": model_name, "google_api_key": api_key}
+        if "temperature" in native:
+            gkwargs["temperature"] = native["temperature"]
+        if native.get("model_kwargs"):
+            gkwargs.update(native["model_kwargs"])
+        return ChatGoogleGenerativeAI(**gkwargs)
 
     # ── OpenAI (GPT) — direct API ──
     if model_name.startswith("gpt"):
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY is required for OpenAI models. Set via: sudo agictl system set-key openai <key>")
-        return ChatOpenAI(model=model_name, temperature=0.2, api_key=api_key)
+        return _openai_compat(model=model_name, api_key=api_key)
 
     # ── Anthropic (Claude) — direct API ──
     if model_name.startswith("claude"):
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is required for Anthropic models. Set via: sudo agictl system set-key anthropic <key>")
-        # NOTE: temperature/top_p/top_k are deprecated for Claude Opus 4.7+ — omit to avoid 400 errors.
-        return ChatAnthropic(model=model_name, api_key=api_key)
+        akwargs = {"model": model_name, "api_key": api_key}
+        if native.get("model_kwargs"):
+            akwargs.update(native["model_kwargs"])
+        elif "temperature" in native:
+            akwargs["temperature"] = native["temperature"]
+        return ChatAnthropic(**akwargs)
 
     # ── xAI (Grok) — direct API via OpenAI-compatible endpoint ──
     if model_name.startswith("grok"):
         api_key = os.getenv("XAI_API_KEY")
         if not api_key:
             raise ValueError("XAI_API_KEY is required for xAI models. Set via: sudo agictl system set-key xai <key>")
-        return ChatOpenAI(base_url="https://api.x.ai/v1", model=model_name, temperature=0.2, api_key=api_key)
+        return _openai_compat(base_url="https://api.x.ai/v1", model=model_name, api_key=api_key)
 
     # ── OpenRouter (namespaced vendor/model IDs) — direct API ──
     if "/" in model_name:
@@ -722,10 +745,9 @@ def get_llm(model_name: str, num_ctx: int = 0):
                 "OPENROUTER_API_KEY is required for OpenRouter models. "
                 "Set via: sudo agictl system set-key openrouter <key>"
             )
-        return ChatOpenAI(
+        return _openai_compat(
             base_url="https://openrouter.ai/api/v1",
             model=model_name,
-            temperature=0.2,
             api_key=api_key,
             default_headers={
                 "HTTP-Referer": "https://versavoice.ai",
@@ -773,9 +795,14 @@ def get_llm(model_name: str, num_ctx: int = 0):
                         resolved_name = gguf_file.replace(".gguf", "")
         except Exception:
             pass  # Fall through with original name
-        return ChatOpenAI(base_url=base_url, api_key="sk-local", model=resolved_name, temperature=0.2)
+        return _openai_compat(base_url=base_url, api_key="sk-local", model=resolved_name)
     else:
-        kwargs = {"base_url": inference_url, "model": model_name, "temperature": 0.2}
+        kwargs = {"base_url": inference_url, "model": model_name}
+        if "temperature" in native:
+            kwargs["temperature"] = native["temperature"]
+        for k, v in native.items():
+            if k not in ("temperature", "extra_body", "model_kwargs", "reasoning_effort"):
+                kwargs[k] = v
         if num_ctx and num_ctx > 0:
             kwargs["num_ctx"] = num_ctx
         return ChatOllama(**kwargs)
@@ -799,6 +826,10 @@ def main():
     parser.add_argument("--skills-dir", default=None, help="Path to agent skills directory for dynamic injection")
     parser.add_argument("--triage-model", default=None, help="Model for triage node (falls back to --model if not set)")
     parser.add_argument("--num-ctx", type=int, default=0, help="Context window size in tokens for Ollama (0 = model default)")
+    parser.add_argument("--temperature", type=float, default=None, help="Per-agent temperature override (omit = inherit)")
+    parser.add_argument("--reasoning-effort", default=None, help="Per-agent reasoning effort override (omit = inherit)")
+    parser.add_argument("--reasoning-max-tokens", type=int, default=None, help="Per-agent reasoning token budget (omit = inherit)")
+    parser.add_argument("--model-params-extra", default=None, help="Per-agent extra params JSON passthrough (omit = inherit)")
     parser.add_argument("--tasks-file", default=None, help="Path to pre-computed active tasks context for triage")
     parser.add_argument("--convo-file", default=None, help="Path to pre-computed conversation history for triage")
     parser.add_argument("--resume-max-messages", type=int, default=0, help="Trim checkpoint to last N messages on resume (0 = unlimited)")
@@ -889,7 +920,15 @@ def main():
     session_type = "NEW"
     thread_label = args.thread_id or "none"
 
-    llm = get_llm(args.model, num_ctx=args.num_ctx)
+    from harness.model_params import agent_overrides_from_values
+    agent_param_overrides = agent_overrides_from_values(
+        temperature=args.temperature,
+        reasoning_effort=args.reasoning_effort,
+        reasoning_max_tokens=args.reasoning_max_tokens,
+        model_params_extra=args.model_params_extra,
+    )
+
+    llm = get_llm(args.model, num_ctx=args.num_ctx, agent_overrides=agent_param_overrides)
 
     # ── Checkpointer Setup ──
     checkpointer = None
@@ -915,7 +954,7 @@ def main():
     from harness.triage import run_triage, inject_skills, build_triage_context
 
     triage_model_name = getattr(args, 'triage_model', None) or args.model
-    triage_llm = get_llm(triage_model_name) if triage_model_name != args.model else llm
+    triage_llm = get_llm(triage_model_name, agent_overrides=agent_param_overrides) if triage_model_name != args.model else llm
 
     tlog(f"TRIAGE MODEL: {triage_model_name}")
     if skills_dir:

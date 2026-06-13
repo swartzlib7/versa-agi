@@ -237,8 +237,8 @@ if [ -f "${SETUP_INI}" ]; then
 fi
 
 # ─── Process Each Agent ──────────────────────────────
-# Normalized format: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode
-while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE; do
+# Normalized format: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode|temperature|reasoning_effort|reasoning_max_tokens|model_params_extra
+while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE AGENT_TEMPERATURE AGENT_REASONING_EFFORT AGENT_REASONING_MAX_TOKENS AGENT_MODEL_PARAMS_EXTRA; do
   [ -z "${AGENT_NAME}" ] && continue
   [ "${AGENT_NAME}" = "${WATCHDOG_USER}" ] && continue
   # Use default model if no per-agent override
@@ -1534,6 +1534,20 @@ Wake reason: ${WAKE_REASON}."
     TRIAGE_ARGS="${TRIAGE_ARGS} --triage-model '${AGENT_TRIAGE_MODEL}'"
   fi
 
+  MODEL_PARAM_ARGS=""
+  if [ -n "${AGENT_TEMPERATURE}" ]; then
+    MODEL_PARAM_ARGS="${MODEL_PARAM_ARGS} --temperature '${AGENT_TEMPERATURE}'"
+  fi
+  if [ -n "${AGENT_REASONING_EFFORT}" ]; then
+    MODEL_PARAM_ARGS="${MODEL_PARAM_ARGS} --reasoning-effort '${AGENT_REASONING_EFFORT}'"
+  fi
+  if [ -n "${AGENT_REASONING_MAX_TOKENS}" ]; then
+    MODEL_PARAM_ARGS="${MODEL_PARAM_ARGS} --reasoning-max-tokens '${AGENT_REASONING_MAX_TOKENS}'"
+  fi
+  if [ -n "${AGENT_MODEL_PARAMS_EXTRA}" ]; then
+    MODEL_PARAM_ARGS="${MODEL_PARAM_ARGS} --model-params-extra '${AGENT_MODEL_PARAMS_EXTRA}'"
+  fi
+
   # ── Resolve num_ctx ──
   # If num_ctx is 0 (auto), resolve the recommended default from the model context map.
   # Cloud models return 0 (context managed server-side — no num_ctx needed).
@@ -1558,7 +1572,7 @@ Wake reason: ${WAKE_REASON}."
   set +e
   sudo -u "${AGENT_USER}" \
     timeout "${TIMEOUT_DURATION}" \
-      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} > '${RESULT_FILE}' 2>&1"
+      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} > '${RESULT_FILE}' 2>&1"
   EXIT_CODE=$?
   # NOTE: Do NOT re-enable set -e here. The subshell runs with set +e
   # (line 631) intentionally — post-spawn commands like kill/wait may fail

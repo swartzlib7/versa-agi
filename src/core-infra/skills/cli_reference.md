@@ -54,6 +54,7 @@ agictl system vacuum                                  # Compact all system datab
 sudo agictl system set-key gemini <key>               # Update Gemini API key → coa.env, *.env, .bashrc, setup.ini
 sudo agictl system set-key versavoice <token>         # Update VersaVoice API token → all *_config.json, setup.ini
 sudo agictl system set-key xai <key>                  # Update xAI API key → inference_endpoint.env, setup.ini → restarts Inference Server
+sudo agictl system set-key openrouter <key>           # Update OpenRouter API key → inference_endpoint.env, setup.ini → restarts Inference Server
 ```
 
 > **Alternative**: The `agitop` dashboard provides a **🔑 API KEYS** button (purple, in System Controls) for GUI-based credential management. Re-running `setup.sh` after editing `setup.ini` is also a valid workaround.
@@ -74,6 +75,8 @@ agictl agent request-remove <name> [--reason TEXT]    # Flag for removal (sets r
 agictl agent cancel-remove <name>                     # Cancel pending removal (reactivates agent)
 agictl agent remove <name>                            # Context-aware: non-root → request-remove, root → confirm-remove
 agictl agent set-timeout <name> <minutes>             # Set max execution timeout
+sudo agictl agent set-model <name> <model>            # Assign catalog model to agent (COA or Primary User only)
+sudo agictl agent set-model <name> --clear            # Clear assignment → inherit system default
 agictl agent status show                              # Read your current status from DB
 agictl agent status set <state> ["summary"]           # Write status + message to DB
 agictl agent count [--active]                         # Count agents (default: all)
@@ -83,8 +86,23 @@ agictl agent toggle-comms <name>                      # Toggle external comms ga
 agictl agent deploy-skills <name>                     # Re-deploy system skills to sub-agent (root)
 agictl agent share-skill <skill.md> [--agent NAME]    # Share custom skill to sub-agents (root)
 agictl agent set-duties <name> <file>                 # Copy COA-authored duties to sub-agent (root)
-agictl agent get-active                               # Pipe format for Lifeline: name|os_user|workspace|model|timeout
+agictl agent get-active                               # Pipe format for Lifeline (22 fields — see below)
 ```
+
+**`agent set-model`**: Same effect as agitop **Technical Setup → Model**. Validates against the merged catalog; COA assignments must be `coa_approved`. Clears `invalid_config` and resets `num_ctx` to the model's recommended context. **Restricted to COA or the Primary User** — sub-agents cannot reassign models (`AGICTL_AGENT_USER` must be empty or `coa`).
+
+**Model ID lookup** (catalog **key**, not display label):
+
+```bash
+sudo agictl model catalog list --table                # All models — use the key column (e.g. deepseek/deepseek-v4-flash)
+sudo agictl model catalog list --class third_party --table
+```
+
+**`agent get-active` pipe fields** (Lifeline internal — `|` delimited):
+
+`name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode|temperature|reasoning_effort|reasoning_max_tokens|model_params_extra`
+
+Empty temperature/reasoning fields mean inherit from model/provider/system layers.
 
 **Sub-agent provisioning** (see poise → Sub-Agent Onboarding):
 1. `agictl agent list --all` → pre-flight: check for existing/pending agents
@@ -400,6 +418,20 @@ agictl model catalog remove <key>                     # Custom model → deleted
 
 > Third-party models require their **provider** to exist, be enabled, and be keyed before they route at runtime. Additions/edits land in `[catalog_custom]`. A `setup.ini` **baseline** model can't be deleted here (migrate would re-add it) — it is *disabled* via an override; to drop it entirely, remove it from `setup.ini`. Mutating commands auto-run `sync` unless `--no-sync`.
 
+### model params — generation defaults (temperature, reasoning, extra)
+
+Layered defaults in `[model_params]` / `[model_params_custom]` (JSON per scope). Resolution order: **agent override → model → provider → system default**. Per-agent overrides are nullable `agents.db` columns — set via agitop **Technical Setup** (⚙) or leave empty to inherit.
+
+```bash
+agictl model params list [--table]
+agictl model params get <default|model:id>
+agictl model params set <scope> [--temperature F] [--reasoning-effort none|minimal|low|medium|high] \
+    [--reasoning-max-tokens N] [--extra '{"top_p":0.9}']
+agictl model params clear <scope>                     # Remove custom override (reverts to lower layers)
+```
+
+**Scopes:** `default` (system baseline), `model:deepseek/deepseek-v4-flash`. Per-agent overrides are nullable `agents.db` columns — set via agitop **Technical Setup** (⚙) or leave empty to inherit. The `extra` JSON bag passes provider-specific keys verbatim (e.g. `top_p`, `frequency_penalty`).
+
 ### provider — model providers (CRUD)
 
 ```bash
@@ -411,7 +443,7 @@ agictl provider disable <slug>                        # Removes its models from 
 agictl provider remove <slug>                         # Custom provider → deleted; baseline provider → disabled via override
 ```
 
-> `--class` is the LangChain chat class: `ChatGoogleGenerativeAI`, `ChatOpenAI`, `ChatAnthropic`, `ChatOllama`. The provider's **API key** is set separately: `sudo agictl system set-key <slug> <key>` (supported: `gemini`, `versavoice`, `xai`, `openai`, `anthropic`). Edits land in `[providers_custom]`; baseline providers are disabled via override, not deleted.
+> `--class` is the LangChain chat class: `ChatGoogleGenerativeAI`, `ChatOpenAI`, `ChatAnthropic`, `ChatOllama`. The provider's **API key** is set separately: `sudo agictl system set-key <slug> <key>` (supported: `gemini`, `versavoice`, `xai`, `openai`, `anthropic`, `openrouter`). Edits land in `[providers_custom]`; baseline providers are disabled via override, not deleted.
 
 ### model registry — SYCL / GGUF download registry
 

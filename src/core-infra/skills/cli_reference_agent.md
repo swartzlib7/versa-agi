@@ -258,9 +258,12 @@ Scripts execute as **your agent user** (not root/watchdog) with a 120-second tim
 ```bash
 agictl model list                                     # List registered models with status
 agictl model list --table                             # Display as formatted table
+sudo agictl model catalog list --table                # Catalog keys (use key column as model ID)
+sudo agictl agent set-model <name> <catalog-key>      # Assign model (COA or PU only)
+sudo agictl agent set-model <name> --clear            # Clear → inherit default
 ```
 
-> **Access**: `model list` is available to COA and system scripts only. Sub-agents see their assigned model via `system whoami`.
+> **Access**: Sub-agents see their assigned model via `system whoami` only. **COA** can assign models with `agent set-model` (must be `coa_approved` when assigning to COA). Full catalog/params/provider CRUD is in the **`cli_reference`** skill (always available to COA).
 
 ## 15. pkg — System Package Registry
 

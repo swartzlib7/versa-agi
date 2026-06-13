@@ -1,5 +1,6 @@
 """Agents panel — agent status table with prompt viewer modals."""
 
+import json
 import os
 import time
 from typing import Optional
@@ -137,6 +138,8 @@ class AgentsPanel(DataTable):
                 provider_display = "[white]☁ OpenAI[/]"
             elif agent_model.startswith("claude"):
                 provider_display = "[yellow]☁ Anthropic[/]"
+            elif "/" in agent_model:
+                provider_display = "[cyan]☁ Open Router[/]"
             elif agent_model in cloud_models or not agent_model:
                 provider_display = "☁ [#4285F4]G[/][#EA4335]o[/][#FBBC05]o[/][#4285F4]g[/][#34A853]l[/][#EA4335]e[/]"
             elif agent_model in third_party_models:
@@ -625,7 +628,8 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
     if proxy_enabled and proxy_set:
         for label, key in proxy_entries:
             if key in proxy_set:
-                filtered.append((f"☁ {label}", key))
+                prefix = "☁ Open Router" if "/" in key else "☁"
+                filtered.append((f"{prefix} {label}" if prefix != "☁" else f"☁ {label}", key))
 
     # Local models: only if local_ai enabled — use labels from models.ini
     # VERSA_LOCAL_MODELS now contains ALL downloaded models on the server
@@ -655,7 +659,7 @@ class TechnicalSetupModal(ModalScreen):
         self.agent_name = agent_name
 
     def compose(self) -> ComposeResult:
-        from textual.containers import Horizontal
+        from textual.containers import Horizontal, Vertical
         from textual.widgets import Select
         agents_panel = self.app.query_one(AgentsPanel)
         agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
@@ -695,42 +699,126 @@ class TechnicalSetupModal(ModalScreen):
             server_ceiling = None
             ctx_options = [("32K", 32768)]
 
+        reasoning_opts = [
+            ("Inherit", ""),
+            ("none", "none"),
+            ("minimal", "minimal"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("max", "max"),
+        ]
+        current_reasoning = agent.get("reasoning_effort") or ""
+        temp_val = agent.get("temperature")
+        rmt_val = agent.get("reasoning_max_tokens")
+
         with VerticalScroll(id="msg-dialog"):
             yield Static(f"[bold]⚙ Technical Setup — {self.agent_name}[/]", id="msg-dialog-header")
+            yield Static("")
             with VerticalScroll(id="msg-dialog-scroll"):
-                yield Static("[cyan]Max Graph Steps (Recursion Limit)[/] — max LangGraph tool iterations")
-                yield Input(value=current_turns, placeholder="e.g. 50", id="input-max-turns", type="integer")
-                yield Static("[cyan]Tool Output Limit (Characters)[/] — truncate run_shell_command output")
-                yield Input(value=current_tool_budget, placeholder="e.g. 6000", id="input-tool-budget", type="integer")
                 yield Static("[cyan]Triage Model[/] — lightweight model for message classification (blank = use agent model)")
-                yield Select(
-                    triage_model_options,
-                    **triage_kwargs,
-                )
+                yield Select(triage_model_options, **triage_kwargs)
+                yield Static("")
+
+                with Horizontal(classes="setup-form-row"):
+                    with Vertical(classes="setup-form-col"):
+                        yield Static("[cyan]Max Graph Steps (Recursion Limit)[/] — max LangGraph tool iterations")
+                        yield Input(value=current_turns, placeholder="e.g. 50", id="input-max-turns", type="integer")
+                    with Vertical(classes="setup-form-col"):
+                        yield Static("[cyan]Tool Output Limit (Characters)[/] — truncate run_shell_command output")
+                        yield Input(value=current_tool_budget, placeholder="e.g. 6000", id="input-tool-budget", type="integer")
+
+                yield Static("")
+                yield Static("[bold cyan]─── Model Generation Parameters ───[/]")
+                yield Static("")
+
+                with Horizontal(classes="setup-form-row"):
+                    with Vertical(classes="setup-form-col"):
+                        yield Static("[cyan]Temperature[/] — blank = inherit")
+                        yield Input(
+                            value="" if temp_val is None else str(temp_val),
+                            placeholder="Inherit",
+                            id="input-temperature",
+                        )
+                    with Vertical(classes="setup-form-col"):
+                        yield Static("[cyan]Reasoning Effort[/] — blank = inherit")
+                        yield Select(
+                            reasoning_opts,
+                            value=current_reasoning if current_reasoning in [v for _, v in reasoning_opts] else "",
+                            id="select-reasoning-effort",
+                            allow_blank=True,
+                            prompt="Inherit",
+                        )
+
+                with Horizontal(classes="setup-form-row"):
+                    with Vertical(classes="setup-form-col"):
+                        yield Static("[cyan]Reasoning Max Tokens[/] — blank = inherit")
+                        yield Input(
+                            value="" if rmt_val is None else str(rmt_val),
+                            placeholder="Inherit",
+                            id="input-reasoning-max-tokens",
+                            type="integer",
+                        )
+                    with Vertical(classes="setup-form-col"):
+                        yield Static("[cyan]Extra Params (JSON)[/] — passthrough; blank = inherit")
+                        yield Input(
+                            value=agent.get("model_params_extra") or "",
+                            placeholder='e.g. {"top_p":0.9}',
+                            id="input-model-params-extra",
+                        )
+
                 if not is_cloud and ctx_options:
                     ctx_label = "[cyan]Context Window (num_ctx)[/]"
                     if server_ceiling:
                         ctx_label += f" — capped to server ctx-size: {server_ceiling:,}"
                     else:
                         ctx_label += " — Ollama context window size in tokens"
-                    yield Static(ctx_label)
-                    num_ctx_select_options = [("Auto (model default)", 0)] + [(label, value) for label, value in ctx_options]
-                    yield Select(
-                        num_ctx_select_options,
-                        value=current_num_ctx if current_num_ctx in [v for _, v in num_ctx_select_options] else 0,
-                        id="select-num-ctx",
-                        allow_blank=False,
-                    )
-                yield Static("[cyan]Token Budget (monthly)[/] — max tokens per month (0 = unlimited)")
-                yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
-                yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
-                yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
-                yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
-                yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
-                yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
-                yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
+                    with Horizontal(classes="setup-form-row"):
+                        with Vertical(classes="setup-form-col"):
+                            yield Static(ctx_label)
+                            num_ctx_select_options = [("Auto (model default)", 0)] + [(label, value) for label, value in ctx_options]
+                            yield Select(
+                                num_ctx_select_options,
+                                value=current_num_ctx if current_num_ctx in [v for _, v in num_ctx_select_options] else 0,
+                                id="select-num-ctx",
+                                allow_blank=False,
+                            )
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Token Budget (monthly)[/] — 0 = unlimited")
+                            yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
+                else:
+                    with Horizontal(classes="setup-form-row"):
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Token Budget (monthly)[/] — max tokens per month (0 = unlimited)")
+                            yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
+                            yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
+
+                if not is_cloud and ctx_options:
+                    with Horizontal(classes="setup-form-row"):
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
+                            yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
+                            yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
+                    with Horizontal(classes="setup-form-row"):
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
+                            yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
+                else:
+                    with Horizontal(classes="setup-form-row"):
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
+                            yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
+                        with Vertical(classes="setup-form-col"):
+                            yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
+                            yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
+
                 yield Static("")
                 yield Static("[bold cyan]─── Rolling Chat History (LangGraph Resume) ───[/]")
+                yield Static("")
                 yield Static(
                     "[cyan]Resume Enabled[/] — carry previous cycles' conversation into new cycles (per project thread).\n"
                     "[dim]OFF (default): each cycle starts fresh — durable state lives in tasks, memory, and awareness,\n"
@@ -747,6 +835,7 @@ class TechnicalSetupModal(ModalScreen):
                 yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
                 yield Static("")
                 yield Static("[bold cyan]─── Skill Injection ───[/]")
+                yield Static("")
                 yield Static("[cyan]Skill Injection Mode[/] — how triage-driven skills are loaded at spawn")
                 yield Select(
                     [("Hybrid (core injected + lazy manifest)", "hybrid"),
@@ -760,6 +849,41 @@ class TechnicalSetupModal(ModalScreen):
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="btn-save-setup")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+
+    def on_mount(self) -> None:
+        """Show inherited param hints from the agent's assigned model (model → system layers)."""
+        from textual.widgets import Select
+        try:
+            from harness.model_params import resolve_model_params, SYSTEM_DEFAULTS
+            agents_panel = self.app.query_one(AgentsPanel)
+            agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
+            agent = next((a for a in agents if a.get("name") == self.agent_name), {})
+            model = agent.get("model") or ""
+            resolved = resolve_model_params(model) if model else dict(SYSTEM_DEFAULTS)
+
+            if agent.get("temperature") is None and resolved.get("temperature") is not None:
+                self.query_one("#input-temperature", Input).placeholder = (
+                    f"Inherit ({resolved['temperature']})"
+                )
+            if not agent.get("reasoning_effort") and resolved.get("reasoning_effort"):
+                self.query_one("#select-reasoning-effort", Select).prompt = (
+                    f"Inherit ({resolved['reasoning_effort']})"
+                )
+            if agent.get("reasoning_max_tokens") is None and resolved.get("reasoning_max_tokens") is not None:
+                self.query_one("#input-reasoning-max-tokens", Input).placeholder = (
+                    f"Inherit ({resolved['reasoning_max_tokens']})"
+                )
+            if not agent.get("model_params_extra") and resolved.get("extra"):
+                extra = resolved["extra"]
+                if extra:
+                    hint = json.dumps(extra, separators=(",", ":"))
+                    if len(hint) > 48:
+                        hint = hint[:45] + "..."
+                    self.query_one("#input-model-params-extra", Input).placeholder = (
+                        f"Inherit ({hint})"
+                    )
+        except Exception:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         from textual.widgets import Select
@@ -777,6 +901,37 @@ class TechnicalSetupModal(ModalScreen):
                     triage_select = self.query_one("#select-triage-model", Select)
                     triage_model = triage_select.value if isinstance(triage_select.value, str) and triage_select.value else None
 
+                    def _nullable_float(wid):
+                        raw = self.query_one(wid, Input).value.strip()
+                        if not raw:
+                            return None
+                        return float(raw)
+
+                    def _nullable_int(wid):
+                        raw = self.query_one(wid, Input).value.strip()
+                        if not raw:
+                            return None
+                        return int(raw)
+
+                    temp_override = _nullable_float("#input-temperature")
+                    reasoning_select = self.query_one("#select-reasoning-effort", Select)
+                    reasoning_override = reasoning_select.value if isinstance(reasoning_select.value, str) and reasoning_select.value else None
+                    reasoning_max_override = _nullable_int("#input-reasoning-max-tokens")
+                    extra_raw = self.query_one("#input-model-params-extra", Input).value.strip()
+                    extra_override = None
+                    if extra_raw:
+                        try:
+                            parsed = json.loads(extra_raw)
+                            if not isinstance(parsed, dict):
+                                raise ValueError("must be object")
+                            extra_override = json.dumps(parsed, separators=(",", ":"))
+                        except (json.JSONDecodeError, ValueError):
+                            self.app.notify(
+                                "Extra params must be a valid JSON object",
+                                title="Error",
+                                severity="error",
+                            )
+                            return
 
                     ok = all([
                         reader.update_agent_field(self.agent_name, "max_session_turns", turns),
@@ -786,6 +941,10 @@ class TechnicalSetupModal(ModalScreen):
                         reader.update_agent_field(self.agent_name, "timeout_minutes", timeout_val),
                         reader.update_agent_field(self.agent_name, "runaway_threshold", threshold_val),
                         reader.update_agent_field(self.agent_name, "runaway_size_threshold", size_threshold_val),
+                        reader.update_agent_field(self.agent_name, "temperature", temp_override),
+                        reader.update_agent_field(self.agent_name, "reasoning_effort", reasoning_override),
+                        reader.update_agent_field(self.agent_name, "reasoning_max_tokens", reasoning_max_override),
+                        reader.update_agent_field(self.agent_name, "model_params_extra", extra_override),
                     ])
                     # Update num_ctx if the Select exists (non-cloud models)
                     try:

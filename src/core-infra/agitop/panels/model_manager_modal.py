@@ -36,6 +36,7 @@ _COMMON_LC_CLASSES = [
     ("ChatGoogleGenerativeAI", "ChatGoogleGenerativeAI"),
     ("ChatOllama", "ChatOllama"),
 ]
+_REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "max")
 
 
 def _run_agictl(args, timeout=25):
@@ -306,6 +307,16 @@ class ModelManagerModal(ModalScreen):
     def _on_model_form(self, result) -> None:
         if not result:
             return
+        param_args = []
+        if "temperature" in result:
+            param_args += ["--temperature", str(result["temperature"])]
+        if result.get("reasoning_effort"):
+            param_args += ["--reasoning-effort", result["reasoning_effort"]]
+        if "reasoning_max_tokens" in result:
+            param_args += ["--reasoning-max-tokens", str(result["reasoning_max_tokens"])]
+        if result.get("extra_json"):
+            param_args += ["--extra", result["extra_json"]]
+
         if result.get("_mode") == "add":
             args = ["model", "catalog", "add", result["key"],
                     "--class", result["class"], "--provider", result["provider"],
@@ -328,6 +339,12 @@ class ModelManagerModal(ModalScreen):
                     "--coa-approve" if result["coa"] else "--coa-revoke",
                     "--enable" if result["enabled"] else "--disable"]
             self._apply(args, f"Updated '{result['key']}'")
+        if param_args:
+            self._apply(["model", "params", "set", f"model:{result['key']}"] + param_args,
+                        f"Set default params for '{result['key']}'")
+        elif result.get("_clear_params"):
+            self._apply(["model", "params", "clear", f"model:{result['key']}"],
+                        f"Cleared default params for '{result['key']}'")
 
     def _on_provider_form(self, result) -> None:
         if not result:
@@ -360,6 +377,7 @@ class CatalogFormModal(ModalScreen):
         self._providers = providers or []
         self._existing = existing
         self._edit = existing is not None
+        self._had_custom_params = False
 
     def compose(self) -> ComposeResult:
         e = self._existing or {}
@@ -397,6 +415,26 @@ class CatalogFormModal(ModalScreen):
                 yield Checkbox("Enabled", value=e.get("enabled", True), id="f-enabled")
                 yield Checkbox("COA approved", value=e.get("coa", False), id="f-coa")
 
+            yield Static("[bold cyan]Default Generation Params[/]  [dim](optional — writes model:<key> layer)[/]")
+            with Horizontal(classes="mm-form-row"):
+                with Vertical(classes="mm-form-col"):
+                    yield Static("[b]Temperature[/]")
+                    yield Input(placeholder="inherit", id="f-temperature")
+                with Vertical(classes="mm-form-col"):
+                    yield Static("[b]Reasoning effort[/]")
+                    yield Select(
+                        [("inherit", ""), ("none", "none"), ("minimal", "minimal"),
+                         ("low", "low"), ("medium", "medium"), ("high", "high"), ("max", "max")],
+                        value="", allow_blank=True, id="f-reasoning-effort", prompt="inherit",
+                    )
+            with Horizontal(classes="mm-form-row"):
+                with Vertical(classes="mm-form-col"):
+                    yield Static("[b]Reasoning max tokens[/]")
+                    yield Input(placeholder="inherit", type="integer", id="f-reasoning-max")
+                with Vertical(classes="mm-form-col"):
+                    yield Static("[b]Extra JSON[/]")
+                    yield Input(placeholder='{"top_p":0.9}', id="f-extra")
+
             if not self._edit:
                 yield Static(
                     "[dim]Local only — optional SYCL GGUF (also registers [sycl_models]):[/]")
@@ -408,6 +446,38 @@ class CatalogFormModal(ModalScreen):
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="f-save")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="f-cancel")
+
+    def on_mount(self) -> None:
+        if self._edit and self._existing:
+            key = self._existing.get("key", "")
+            ok, data, _err = _run_agictl(["model", "params", "get", f"model:{key}"])
+            if not ok:
+                return
+            try:
+                scope_params = data.get("params") or {}
+                resolved = data.get("resolved") or scope_params
+                self._had_custom_params = bool(scope_params)
+                if scope_params.get("temperature") is not None:
+                    self.query_one("#f-temperature", Input).value = str(scope_params["temperature"])
+                elif resolved.get("temperature") is not None:
+                    self.query_one("#f-temperature", Input).placeholder = f"inherit ({resolved['temperature']})"
+                effort = scope_params.get("reasoning_effort")
+                sel = self.query_one("#f-reasoning-effort", Select)
+                if effort and effort in _REASONING_EFFORT_VALUES:
+                    sel.value = effort
+                elif resolved.get("reasoning_effort"):
+                    sel.prompt = f"inherit ({resolved['reasoning_effort']})"
+                if scope_params.get("reasoning_max_tokens") is not None:
+                    self.query_one("#f-reasoning-max", Input).value = str(scope_params["reasoning_max_tokens"])
+                elif resolved.get("reasoning_max_tokens") is not None:
+                    self.query_one("#f-reasoning-max", Input).placeholder = (
+                        f"inherit ({resolved['reasoning_max_tokens']})"
+                    )
+                extra = scope_params.get("extra")
+                if extra:
+                    self.query_one("#f-extra", Input).value = json.dumps(extra, separators=(",", ":"))
+            except Exception:
+                pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "f-cancel":
@@ -447,6 +517,43 @@ class CatalogFormModal(ModalScreen):
             "enabled": self.query_one("#f-enabled", Checkbox).value,
             "coa": self.query_one("#f-coa", Checkbox).value,
         }
+        temp_raw = self.query_one("#f-temperature", Input).value.strip()
+        has_temp = False
+        if temp_raw:
+            try:
+                result["temperature"] = float(temp_raw)
+                has_temp = True
+            except ValueError:
+                self.query_one("#f-error", Static).update("[red]Temperature must be a number.[/]")
+                return
+        reasoning_val = self.query_one("#f-reasoning-effort", Select).value
+        has_reasoning = False
+        if isinstance(reasoning_val, str) and reasoning_val:
+            result["reasoning_effort"] = reasoning_val
+            has_reasoning = True
+        rmax_raw = self.query_one("#f-reasoning-max", Input).value.strip()
+        has_rmax = False
+        if rmax_raw:
+            try:
+                result["reasoning_max_tokens"] = int(rmax_raw)
+                has_rmax = True
+            except ValueError:
+                self.query_one("#f-error", Static).update("[red]Reasoning max tokens must be an integer.[/]")
+                return
+        extra_raw = self.query_one("#f-extra", Input).value.strip()
+        has_extra = False
+        if extra_raw:
+            try:
+                parsed = json.loads(extra_raw)
+                if not isinstance(parsed, dict):
+                    raise ValueError("must be object")
+                result["extra_json"] = json.dumps(parsed, separators=(",", ":"))
+                has_extra = True
+            except (json.JSONDecodeError, ValueError):
+                self.query_one("#f-error", Static).update("[red]Extra params must be valid JSON object.[/]")
+                return
+        if self._edit and self._had_custom_params and not any((has_temp, has_reasoning, has_rmax, has_extra)):
+            result["_clear_params"] = True
         if not self._edit:
             result["gguf_repo"] = self.query_one("#f-gguf-repo", Input).value.strip()
             result["gguf_file"] = self.query_one("#f-gguf-file", Input).value.strip()

@@ -684,6 +684,9 @@ if [ "${UPDATE_MODE}" = false ]; then
         cp "${SOURCE_CORE_INFRA}/harness/model_context.py" "${DEPLOYED_CORE_INFRA}/harness/"
         touch "${DEPLOYED_CORE_INFRA}/harness/__init__.py"
       fi
+      if [ -f "${SOURCE_CORE_INFRA}/harness/model_params.py" ]; then
+        cp "${SOURCE_CORE_INFRA}/harness/model_params.py" "${DEPLOYED_CORE_INFRA}/harness/"
+      fi
 
       chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}"
       ok "core-infra deployed to ${DEPLOYED_CORE_INFRA} (server subset)"
@@ -2363,18 +2366,32 @@ if [ "${UPDATE_MODE}" = true ]; then
     sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN browser_enabled BOOLEAN DEFAULT 0;" 2>/dev/null && \
       ok "Added browser_enabled column to agents table" || \
       info "browser_enabled column already exists"
+    # v0.22.2: abstracted model parameters (temperature, reasoning, extra passthrough)
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN temperature REAL;" 2>/dev/null && \
+      ok "Added temperature column to agents table" || \
+      info "temperature column already exists"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN reasoning_effort TEXT;" 2>/dev/null && \
+      ok "Added reasoning_effort column to agents table" || \
+      info "reasoning_effort column already exists"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN reasoning_max_tokens INTEGER;" 2>/dev/null && \
+      ok "Added reasoning_max_tokens column to agents table" || \
+      info "reasoning_max_tokens column already exists"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN model_params_extra TEXT;" 2>/dev/null && \
+      ok "Added model_params_extra column to agents table" || \
+      info "model_params_extra column already exists"
     # Recreate views to include new columns
     sqlite3 "${AGENTS_DB}" "DROP VIEW IF EXISTS v_active_agents; DROP VIEW IF EXISTS v_agent_registry;" 2>/dev/null || true
     sqlite3 "${AGENTS_DB}" "
 CREATE VIEW IF NOT EXISTS v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages, browser_enabled
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
 FROM agents WHERE inactive = 0 ORDER BY name ASC;
 CREATE VIEW IF NOT EXISTS v_agent_registry AS
 SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_size_threshold, inactive, protected, can_message_connections, model, triage_model, role,
        context_injection_mode, token_budget, max_session_turns, tool_output_token_budget,
        session_retention_enabled, session_retention_max_age, session_retention_max_count,
-       anchor_style, num_ctx, conversation_depth, resume_enabled, resume_max_messages,
-       browser_enabled,
+       anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra,
+       conversation_depth, resume_enabled, resume_max_messages,
+       skill_injection_mode, browser_enabled,
        status, status_message, requested_by, requested_by_name, created_at
 FROM agents ORDER BY protected DESC, name ASC;
 " 2>/dev/null && ok "Views recreated with new columns" || warn "View recreation failed"

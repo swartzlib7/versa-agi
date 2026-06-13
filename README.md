@@ -444,6 +444,22 @@ sudo ./manage_registry.sh --list   # Display registry only
 > [!NOTE]
 > After registering a new model, use `sudo agictl model add <name>` to download the GGUF file, and `sudo agictl model activate <name>` to load it into the inference server.
 
+**Model generation parameters** (temperature, reasoning effort/budget) are configurable per system default, provider, model, or agent. Manage defaults via agitop **Model Manager** or CLI:
+
+```bash
+# List catalog keys (use the key column as the model ID everywhere)
+sudo agictl model catalog list --table
+
+# Per-model defaults
+sudo agictl model params set model:deepseek/deepseek-v4-flash --reasoning-effort high
+
+# Per-agent model assignment (COA or Primary User only)
+sudo agictl agent set-model charlie deepseek/deepseek-v4-flash
+sudo agictl agent set-model charlie --clear   # inherit system default
+```
+
+Per-agent generation overrides live in **Technical Setup** (⚙). Provider-specific keys (e.g. `top_p`) can be passed via the `extra` JSON passthrough bag.
+
 ---
 
 ## Agent Security Model

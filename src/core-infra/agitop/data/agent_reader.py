@@ -119,7 +119,8 @@ class AgentReader:
                    "max_session_turns", "tool_output_token_budget",
                    "session_retention_enabled", "session_retention_max_age",
                    "session_retention_max_count", "anchor_style", "triage_model",
-                   "num_ctx", "conversation_depth", "resume_enabled",
+                   "num_ctx", "temperature", "reasoning_effort", "reasoning_max_tokens",
+                   "model_params_extra", "conversation_depth", "resume_enabled",
                    "resume_max_messages", "skill_injection_mode"}
         if field not in allowed:
             return False
