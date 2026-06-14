@@ -92,9 +92,22 @@ require_linux() {
 
 # ─── Banner ─────────────────────────────────────────
 
+_banner_product_version() {
+  # Canonical app version — read from core-infra/VERSION next to this library.
+  local vf product_version="${1:-}"
+  vf="$(dirname "${BASH_SOURCE[0]}")/VERSION"
+  if [ -f "${vf}" ]; then
+    product_version="$(tr -d '[:space:]' < "${vf}")"
+  elif [ -z "${product_version}" ] && [ -n "${VERSION:-}" ]; then
+    product_version="${VERSION}"
+  fi
+  printf '%s' "${product_version}"
+}
+
 banner() {
   local mode="${1:-}"      # "setup", "update", "uninstall", "install", "backup"
-  local version="${2:-}"   # optional version string
+  local product_version
+  product_version="$(_banner_product_version "${2:-}")"
 
   # Detect OS if not already done
   [ -z "${VERSA_OS:-}" ] && detect_os
@@ -116,7 +129,11 @@ banner() {
     echo "       V E R S A  A G i"
   fi
   echo -e "${RESET}"
-  echo -e "         ${BOLD}${WHITE}V E R S A   A G i${RESET}"
+  if [ -n "${product_version}" ]; then
+    echo -e "         ${BCYAN}${BOLD}V E R S A   A G i${RESET}  ${BCYAN}v${product_version}${RESET}"
+  else
+    echo -e "         ${BCYAN}${BOLD}V E R S A   A G i${RESET}"
+  fi
   echo -e "         ${DIM}Agentic General infrastructure${RESET}"
   echo ""
 
@@ -129,20 +146,11 @@ banner() {
     *)         echo -e "  ${DGRAY}────────────────────────────────────────${RESET}" ;;
   esac
 
-  # Version + OS info line
-  local info_parts=""
-  [ -n "${version}" ] && info_parts="v${version}"
+  # Platform line (OS — separate from product version above)
   if [ -n "${VERSA_DISTRO}" ] && [ "${VERSA_DISTRO}" != "unsupported" ]; then
     local os_label="${VERSA_DISTRO}"
     [ -n "${VERSA_OS_VERSION}" ] && [ "${VERSA_OS_VERSION}" != "unknown" ] && os_label="${os_label} ${VERSA_OS_VERSION}"
-    if [ -n "${info_parts}" ]; then
-      info_parts="${info_parts}  ·  ${os_label}"
-    else
-      info_parts="${os_label}"
-    fi
-  fi
-  if [ -n "${info_parts}" ]; then
-    echo -e "  ${DGRAY}${info_parts}${RESET}"
+    echo -e "  ${DGRAY}Platform: ${os_label}${RESET}"
   fi
   echo ""
 }

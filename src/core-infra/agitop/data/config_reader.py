@@ -38,7 +38,7 @@ class ConfigReader:
         return self.get_config().get("agent", "coa")
 
     def get_registration_state(self) -> dict[str, str]:
-        """Read [registration] keys from setup.ini."""
+        """Read [registration] runtime keys from setup.ini."""
         cfg = configparser.ConfigParser(delimiters=("=",))
         if not self.setup_ini_path.is_file():
             return {}
@@ -47,6 +47,16 @@ class ConfigReader:
             if not cfg.has_section("registration"):
                 return {}
             return {k: v for k, v in cfg.items("registration")}
+        except Exception:
+            return {}
+
+    def get_registration_status(self) -> dict:
+        """Read cached registration status written by install_acceptance.py."""
+        status_path = Path("/var/lib/versa-agi/registration-status.json")
+        if not status_path.is_file():
+            return {}
+        try:
+            return json.loads(status_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
 

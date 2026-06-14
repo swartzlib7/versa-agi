@@ -21,7 +21,9 @@ from agitop.panels.tasks import TasksPanel
 from agitop.panels.messages import MessagesPanel
 from agitop.panels.projects import ProjectsPanel
 from agitop.panels.footer_stats import FooterStatsPanel
-VERSION = "3.2.0"
+from agitop.version import read_product_version
+
+VERSION = read_product_version()
 
 class AgitopApp(App):
     """Versa AGi Mission Control Dashboard."""
@@ -33,6 +35,7 @@ class AgitopApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("r", "refresh_all", "Refresh", show=True),
+        Binding("g", "show_registration", "Registration", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
     ]
 
@@ -70,21 +73,63 @@ class AgitopApp(App):
 
     def on_mount(self) -> None:
         """Start periodic refresh timer and background install registration tripwire."""
-        self._run_registration_tripwire()
+        status = self._run_registration_tripwire()
+        if self._should_prompt_registration(status):
+            display_status = self._fetch_registration_status() or status
+            self.call_after_refresh(
+                lambda: self._open_registration_modal(display_status)
+            )
         self._start_refresh_timer()
 
-    def _run_registration_tripwire(self) -> None:
-        """Retry deferred install acceptance submission once per launch (silent)."""
+    def _should_prompt_registration(self, status: dict) -> bool:
+        if not status:
+            return False
+        if status.get("registration_submitted", "false").lower() != "true":
+            return True
+        if status.get("update_available"):
+            return True
+        if status.get("below_min_supported"):
+            return True
+        return False
+
+    def _open_registration_modal(self, status: dict) -> None:
+        from agitop.panels.registration_modal import RegistrationModal
+
+        self.push_screen(RegistrationModal(status))
+
+    def _fetch_registration_status(self) -> dict:
+        """Refresh registration display data for the modal."""
+        try:
+            import sys
+
+            core_infra = Path(__file__).resolve().parents[2]
+            if str(core_infra) not in sys.path:
+                sys.path.insert(0, str(core_infra))
+            from install_acceptance import refresh_for_display
+
+            return refresh_for_display() or {}
+        except Exception:
+            return {}
+
+    def _run_registration_tripwire(self) -> dict:
+        """Retry deferred install acceptance submission once per launch."""
         try:
             import sys
             core_infra = Path(__file__).resolve().parents[2]
             if str(core_infra) not in sys.path:
                 sys.path.insert(0, str(core_infra))
             from install_acceptance import tripwire_submit
-            tripwire_submit()
+            return tripwire_submit() or {}
         except Exception as exc:
             import sys
             print(f"[agitop] install registration tripwire: {exc}", file=sys.stderr)
+            return {}
+
+    def action_show_registration(self) -> None:
+        """Open registration status modal from footer binding."""
+        from agitop.panels.registration_modal import RegistrationModal
+
+        self.push_screen(RegistrationModal(self._fetch_registration_status()))
 
     def _start_refresh_timer(self) -> None:
         """Create data refresh timer based on SystemPanel's interval setting."""
@@ -121,7 +166,7 @@ class AgitopApp(App):
         """Show help overlay with keybindings and links."""
         self.notify(
             f"agitop v{VERSION} — Versa AGi Mission Control\n\n"
-            "\\[q] Quit  \\[r] Refresh  \\[?] Help\n\n"
+            "\\[q] Quit  \\[r] Refresh  \\[g] Registration  \\[?] Help\n\n"
             "VersaVoice AI: https://versavoice.ai\n"
             "VersaVoice App: https://versavoice.app",
             title="agitop — Help",

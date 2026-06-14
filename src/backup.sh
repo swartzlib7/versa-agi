@@ -58,7 +58,7 @@ else
   warn()  { echo -e "  ${YELLOW}!${NC} $*"; }
   error() { echo -e "  ${RED}✗${NC} $*"; exit 1; }
   section() { echo -e "\n  ${BOLD}═══ $* ═══${RESET}\n"; }
-  banner()  { echo -e "\n  ${BCYAN}${BOLD}V E R S A   A G i${RESET}\n  ${DIM}Agentic General infrastructure${RESET}\n\n  ${DIM}─── ${BCYAN}${1:-Backup}${DIM} ──────────────────────────────────${RESET}\n  ${DIM}v${2:-1.0}${RESET}\n"; }
+  banner()  { echo -e "\n  ${BCYAN}${BOLD}V E R S A   A G i${RESET}  ${BCYAN}v${2:-1.0}${RESET}\n  ${DIM}Agentic General infrastructure${RESET}\n\n  ${DIM}─── ${BCYAN}${1:-Backup}${DIM} ──────────────────────────────────${RESET}\n"; }
 fi
 
 # ─── Root Check ─────────────────────────────────────

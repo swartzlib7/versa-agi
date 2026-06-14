@@ -197,6 +197,25 @@ SPAWNED_COUNT=0
 # ─── Setup INI Path ───────────────────────────────────
 SETUP_INI="/etc/versa-agi/setup.ini"
 
+# ─── Host Platform & Product Version (cycle prompt injection) ─
+VERSA_AGI_VERSION="unknown"
+if [ -f "${SCRIPT_DIR}/VERSION" ]; then
+  VERSA_AGI_VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION")"
+fi
+UI_LIB="${SCRIPT_DIR}/ui_lib.sh"
+if [ -f "${UI_LIB}" ]; then
+  # shellcheck source=ui_lib.sh
+  source "${UI_LIB}"
+  detect_os
+fi
+VERSA_HOST_PLATFORM="unknown"
+if [ -n "${VERSA_DISTRO:-}" ] && [ "${VERSA_DISTRO}" != "unsupported" ]; then
+  VERSA_HOST_PLATFORM="${VERSA_DISTRO}"
+  if [ -n "${VERSA_OS_VERSION:-}" ] && [ "${VERSA_OS_VERSION}" != "unknown" ]; then
+    VERSA_HOST_PLATFORM="${VERSA_HOST_PLATFORM} ${VERSA_OS_VERSION}"
+  fi
+fi
+
 # ─── Protected Identity Resolution (setup.ini [users]) ───
 # COA and watchdog usernames are INI-driven — never hardcode them in
 # identity comparisons. Note: /var/lib/versa-agi/coa/ and coa_config.json
@@ -207,6 +226,34 @@ COA_USER="${COA_USER:-coa}"
 WATCHDOG_USER=$(sed -n '/^\[users\]/,/^\[/{s/^watchdog=//p}' "${SETUP_INI}" 2>/dev/null | head -1)
 WATCHDOG_USER="${WATCHDOG_USER:-watchdog}"
 COA_CONFIG="/etc/versa-agi/coa_config.json"
+
+# ─── Install Registration Heartbeat (weekly) ────────
+# Signals active use to Firebase — separate from install/update submissionCount.
+INSTALL_ACCEPTANCE_PY="${VERSA_CORE_INFRA:-${SCRIPT_DIR}}/install_acceptance.py"
+if [ -f "${INSTALL_ACCEPTANCE_PY}" ] && [ -f "${SETUP_INI}" ]; then
+  REG_SUBMITTED=$(sed -n '/^\[registration\]/,/^\[/{s/^registration_submitted=//p}' "${SETUP_INI}" 2>/dev/null | head -1)
+  LAST_HEARTBEAT=$(sed -n '/^\[registration\]/,/^\[/{s/^registration_last_heartbeat_at=//p}' "${SETUP_INI}" 2>/dev/null | head -1)
+  HEARTBEAT_NEEDED=false
+  if [ "${REG_SUBMITTED}" = "true" ]; then
+    if [ -z "${LAST_HEARTBEAT}" ]; then
+      HEARTBEAT_NEEDED=true
+    else
+      HB_EPOCH=$(date -d "${LAST_HEARTBEAT}" +%s 2>/dev/null || echo 0)
+      STALE_EPOCH=$(date -d '7 days ago' +%s)
+      if [ "${HB_EPOCH}" -lt "${STALE_EPOCH}" ]; then
+        HEARTBEAT_NEEDED=true
+      fi
+    fi
+  fi
+  if [ "${HEARTBEAT_NEEDED}" = true ]; then
+    log "Registration heartbeat due (>7 days) — sending..."
+    if python3 "${INSTALL_ACCEPTANCE_PY}" heartbeat 2>/dev/null; then
+      log "Registration heartbeat sent"
+    else
+      log "WARN: registration heartbeat failed (non-fatal)"
+    fi
+  fi
+fi
 
 # ─── Local AI Concurrency Cap ─────────────────────────
 # Limits how many local-model agents can be spawned per tick.
@@ -332,6 +379,8 @@ $(cat "${TASK_PROTOCOL}")"
     [ -z "${AGENT_HOME}" ] && AGENT_HOME="${AGENT_PATH}"
     CYCLE_PARAMS_CONTENT="## ── CYCLE PARAMETERS ──
 
+- **Host platform**: ${VERSA_HOST_PLATFORM} — OS of this Versa AGi installation.
+- **Versa AGi version**: ${VERSA_AGI_VERSION} — installed product release on this host.
 - **YOUR HOME DIRECTORY**: \`${AGENT_HOME}\` — this is your OS user home. All your work happens here or in subdirectories. NEVER create or modify files outside this path.
 - **YOUR ENVIRONMENT ROOT**: \`${AGENT_PATH}\` — your working directory (CWD at cycle start). Agent data is at \`${AGENT_PATH}/.agent/\`.
 - **YOUR WORKSPACE**: \`${AGENT_PATH}/workspace/\` — ALL project work goes here (project clones, scratch dirs). Never work in the environment root itself.

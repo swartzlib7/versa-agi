@@ -41,7 +41,12 @@ else
 fi
 
 VERSION="3.2.0"
+_VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
+if [ -f "${_VERSION_FILE}" ]; then
+  VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
+fi
 INSTALL_ACCEPTANCE_LIB="${SCRIPT_DIR_EARLY}/core-infra/install_acceptance.sh"
+REGISTRATION_CONF_SRC="${SCRIPT_DIR_EARLY}/core-infra/registration.conf"
 if [ -f "${INSTALL_ACCEPTANCE_LIB}" ]; then
   # shellcheck source=core-infra/install_acceptance.sh
   source "${INSTALL_ACCEPTANCE_LIB}"
@@ -290,11 +295,11 @@ enabled=false
 timeout=30
 
 [registration]
-# Install/update acceptance telemetry
+# Runtime submission state (endpoint + key: core-infra/registration.conf)
 acceptance_file=/etc/versa-agi/install-acceptance.json
 registration_submitted=false
 registration_submitted_at=
-registration_endpoint=
+registration_last_heartbeat_at=
 registration_last_error=
 registration_attempt_count=0
 TEMPLATE
@@ -414,6 +419,11 @@ if [ "${UPDATE_MODE}" = true ]; then
 else
   if declare -F install_acceptance_welcome >/dev/null 2>&1; then
     install_acceptance_welcome
+  fi
+  if declare -F install_acceptance_version_gate >/dev/null 2>&1; then
+    section "Install Registration"
+    install_acceptance_version_gate
+    echo ""
   fi
 fi
 
@@ -728,6 +738,13 @@ if [ "${UPDATE_MODE}" = false ]; then
         ok "setup.ini deployed to /etc/versa-agi/"
       fi
 
+      if [ -f "${REGISTRATION_CONF_SRC}" ]; then
+        cp "${REGISTRATION_CONF_SRC}" "/etc/versa-agi/registration.conf"
+        chown root:"${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
+        chmod 640 "/etc/versa-agi/registration.conf"
+        ok "registration.conf deployed to /etc/versa-agi/"
+      fi
+
       # ── Python dependencies for agictl ──
       # Server path skips Step 2 Prerequisites, so install what we need directly.
       # Ubuntu 24.04 (PEP 668): pip for library imports, pipx for CLI tools.
@@ -775,7 +792,7 @@ if [ "${UPDATE_MODE}" = false ]; then
       echo "  └────────────────────────────────────────────────┘"
       echo ""
       if declare -F install_acceptance_record_full >/dev/null 2>&1; then
-        section "Install Registration"
+        section "Registration Submit"
         install_acceptance_record_full "false"
         echo ""
       fi
@@ -1007,32 +1024,11 @@ echo ""
 echo -e "  ${BCYAN}─── ${BOLD}Step 4 — $(_install_acceptance_brand)${RESET}${BCYAN} ${DGRAY}$(printf '─%.0s' $(seq 1 24))${RESET}"
 echo ""
 
-echo ""
-echo -e "$(_install_acceptance_brand) enables cloud messaging between you, your agents and your connections"
-echo -e "via the $(_install_acceptance_brand) mobile/web app. This is optional — agents can communicate"
-echo "locally via the agitop dashboard without a VersaVoice account."
-echo ""
-
-# Determine default based on INI state
-if [ "${INI_VV_ENABLED}" = "false" ]; then
-  echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] "
-  read -n 1 -r
-  echo ""
-  ENABLE_VV=$([[ $REPLY =~ ^[Yy]$ ]] && echo "true" || echo "false")
+if declare -F install_acceptance_vv_prompt >/dev/null 2>&1; then
+  install_acceptance_vv_prompt "${INI_VV_ENABLED}"
+  ENABLE_VV="${ENABLE_VV:-false}"
 else
-  echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] "
-  read -n 1 -r
-  echo ""
-  ENABLE_VV=$([[ $REPLY =~ ^[Nn]$ ]] && echo "false" || echo "true")
-fi
-
-if [ "${ENABLE_VV}" = "true" ]; then
-  if declare -F install_acceptance_vv_disclaimer >/dev/null 2>&1; then
-    if ! install_acceptance_vv_disclaimer; then
-      ENABLE_VV="false"
-      echo -e "  ${CYAN}${GLYPH_STEP}${NC} $(_install_acceptance_brand) disabled — agents will use local messaging only"
-    fi
-  fi
+  ENABLE_VV="${INI_VV_ENABLED}"
 fi
 
 if [ "${ENABLE_VV}" = "true" ]; then
@@ -1054,8 +1050,6 @@ if [ "${ENABLE_VV}" = "true" ]; then
     ok "VersaVoice token captured"
   fi
 else
-  info "VersaVoice disabled — agents will use local messaging only"
-  info "You can enable VV later via the agitop dashboard toggle"
   VV_TOKEN=""
 fi
 
@@ -2790,18 +2784,6 @@ if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
   echo ""
 fi
 
-# ─── Install Acceptance — Record & Submit ─────────
-if declare -F install_acceptance_record_full >/dev/null 2>&1 \
-   && declare -F install_acceptance_record_update >/dev/null 2>&1; then
-  section "Install Registration"
-  if [ "${UPDATE_MODE}" = true ]; then
-    install_acceptance_record_update
-  else
-    install_acceptance_record_full "${ENABLE_VV:-false}"
-  fi
-  echo ""
-fi
-
 # ─── Step 11: Sentinel Service (reactive file watcher) ──
 section "Step 11 — Sentinel Service"
 
@@ -3245,6 +3227,26 @@ MINSEED
   fi
 fi
 
+# ─── Install Acceptance — Record & Submit ─────────
+# Runs after Step 13 so registration state is not clobbered by source→deployed copy.
+if declare -F install_acceptance_record_full >/dev/null 2>&1 \
+   && declare -F install_acceptance_record_update >/dev/null 2>&1; then
+  section "Registration Submit"
+  if [ "${UPDATE_MODE}" = true ]; then
+    install_acceptance_record_update
+  else
+    install_acceptance_record_full "${ENABLE_VV:-false}"
+  fi
+  if declare -F _install_acceptance_sync_source_ini >/dev/null 2>&1; then
+    _install_acceptance_sync_source_ini
+  elif [ -f "${SCRIPT_DIR}/setup.ini" ] && [ "$(realpath "${INI_FILE}" 2>/dev/null)" != "$(realpath "${SCRIPT_DIR}/setup.ini" 2>/dev/null)" ]; then
+    cp "${INI_FILE}" "${SCRIPT_DIR}/setup.ini"
+    chmod 600 "${SCRIPT_DIR}/setup.ini"
+    ok "Source setup.ini synced at ${SCRIPT_DIR}/setup.ini"
+  fi
+  echo ""
+fi
+
 # Create ~/.versa-agi/ user home for the Primary User
 if [ -n "${SUDO_USER:-}" ]; then
   PU_HOME=$(eval echo "~${SUDO_USER}")
@@ -3264,6 +3266,13 @@ if [ "${UPDATE_MODE}" != true ] && [ -f "${SCRIPT_DIR}/setup.ini" ] && [ "${SCRI
   chmod 640 "${INI_FILE}"
   chown "${WATCHDOG_USER}:agi_agents" "${INI_FILE}"
   ok "Synced setup.ini: source → deployed"
+fi
+
+if [ -f "${REGISTRATION_CONF_SRC}" ]; then
+  cp -f "${REGISTRATION_CONF_SRC}" "/etc/versa-agi/registration.conf"
+  chown root:"${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
+  chmod 640 "/etc/versa-agi/registration.conf"
+  ok "registration.conf deployed to /etc/versa-agi/"
 fi
 
 echo ""

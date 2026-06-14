@@ -8,6 +8,7 @@ src/core-infra/agitop/__pycache__
 src/core-infra/agitop/data/__pycache__
 src/core-infra/agitop/panels/__pycache__
 src/core-infra/agictl/__pycache__
+__pycache__
 
 # Runtime databases (created during setup)
 *.db

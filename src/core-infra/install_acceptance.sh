@@ -12,6 +12,10 @@
 
 INSTALL_ACCEPTANCE_JSON="${INSTALL_ACCEPTANCE_JSON:-/etc/versa-agi/install-acceptance.json}"
 INSTALL_ACCEPTANCE_SETUP_INI="${INSTALL_ACCEPTANCE_SETUP_INI:-/etc/versa-agi/setup.ini}"
+INSTALL_ACCEPTANCE_REG_CONF="${INSTALL_ACCEPTANCE_REG_CONF:-/etc/versa-agi/registration.conf}"
+INSTALL_ACCEPTANCE_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install_acceptance.py"
+INSTALL_ACCEPTANCE_SOURCE_INI="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/setup.ini"
+INSTALL_ACCEPTANCE_STRICT_BLOCK="${INSTALL_ACCEPTANCE_STRICT_BLOCK:-false}"
 INSTALL_ACCEPTANCE_TERMS_URL="${INSTALL_ACCEPTANCE_TERMS_URL:-https://versavoice.ai/terms.html}"
 INSTALL_ACCEPTANCE_PRIVACY_URL="${INSTALL_ACCEPTANCE_PRIVACY_URL:-https://versavoice.ai/privacy.html}"
 INSTALL_ACCEPTANCE_MAX_ATTEMPTS=10
@@ -81,47 +85,80 @@ _install_acceptance_input_line() {
   fi
 }
 
+# ─── Email format check (user@domain.tld) ───────────
+_install_acceptance_valid_email() {
+  local candidate="$1"
+  [ -n "${candidate}" ] || return 1
+  python3 -c 'import re, sys; sys.exit(0 if re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", sys.argv[1]) else 1)' \
+    "${candidate}" 2>/dev/null
+}
+
 # ─── Optional email prompt (install + update) ───────
 install_acceptance_email_prompt() {
-  local existing reply
+  local existing reply done=false shown=false
   existing="$(_install_acceptance_load_existing_email)"
 
-  if declare -F text_box >/dev/null 2>&1; then
-    if [ -n "${existing}" ]; then
-      text_box "OPTIONAL CONTACT" \
-        "Enter your email for release notes and community updates." \
-        "" \
-        "Press Enter to keep current address:" \
-        "${existing}" \
-        "Type - to remove, or enter a new address."
-    else
-      text_box "OPTIONAL CONTACT" \
-        "Enter your email for release notes and community updates." \
-        "Press Enter to skip."
+  while [ "${done}" = false ]; do
+    if [ "${shown}" = false ]; then
+      if declare -F text_box >/dev/null 2>&1; then
+        if [ -n "${existing}" ]; then
+          text_box "OPTIONAL CONTACT" \
+            "Enter your email for release notes and community updates." \
+            "" \
+            "Press Enter to keep the address on file." \
+            "Type - to clear it, or enter a new address."
+        else
+          text_box "OPTIONAL CONTACT" \
+            "Enter your email for release notes and community updates." \
+            "Press Enter to skip."
+        fi
+      else
+        echo ""
+        echo "Optional: Enter your email for release notes and community updates"
+        if [ -n "${existing}" ]; then
+          echo "(press Enter to keep on file, type - to clear, or enter a new address)"
+        else
+          echo "(press Enter to skip)"
+        fi
+      fi
+      shown=true
     fi
-  else
-    echo ""
-    echo "Optional: Enter your email for release notes and community updates"
-    if [ -n "${existing}" ]; then
-      echo "(press Enter to keep current, type - to remove, or enter a new address)"
-      echo "${existing}"
-    else
-      echo "(press Enter to skip)"
-    fi
-  fi
 
-  if [ -n "${existing}" ]; then
-    _install_acceptance_input_line "Email" "${existing}"
-    read -r reply
-    case "${reply}" in
-      "") INSTALL_ACCEPTANCE_EMAIL="${existing}" ;;
-      "-") INSTALL_ACCEPTANCE_EMAIL="" ;;
-      *) INSTALL_ACCEPTANCE_EMAIL="${reply}" ;;
-    esac
-  else
-    _install_acceptance_input_line "Email"
-    read -r INSTALL_ACCEPTANCE_EMAIL
-  fi
+    if [ -n "${existing}" ]; then
+      _install_acceptance_input_line "Email" "${existing}"
+      read -r reply
+      case "${reply}" in
+        "") INSTALL_ACCEPTANCE_EMAIL="${existing}"; done=true ;;
+        "-") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
+        *)
+          if _install_acceptance_valid_email "${reply}"; then
+            INSTALL_ACCEPTANCE_EMAIL="${reply}"
+            done=true
+          else
+            warn "Invalid email. Use user@domain.tld, Enter to keep current, or - to clear."
+          fi
+          ;;
+      esac
+    else
+      _install_acceptance_input_line "Email"
+      read -r reply
+      case "${reply}" in
+        "") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
+        "-")
+          warn "No email on file to clear. Enter a valid address or press Enter to skip."
+          ;;
+        *)
+          if _install_acceptance_valid_email "${reply}"; then
+            INSTALL_ACCEPTANCE_EMAIL="${reply}"
+            done=true
+          else
+            warn "Invalid email. Use user@domain.tld or press Enter to skip."
+          fi
+          ;;
+      esac
+    fi
+  done
+
   export INSTALL_ACCEPTANCE_EMAIL
   echo ""
 }
@@ -206,6 +243,55 @@ install_acceptance_welcome() {
   install_acceptance_email_prompt
 }
 
+# ─── Below-min version block messaging ──────────────
+_install_acceptance_emit_version_block() {
+  local result="$1"
+  local line first=true
+  : "${GLYPH_FAIL:=✗}"
+  : "${RED:=\033[0;31m}"
+  : "${NC:=\033[0m}"
+  while IFS= read -r line; do
+    if [ "${first}" = true ]; then
+      echo -e "  ${RED}${GLYPH_FAIL} ERROR:${NC} ${line}" >&2
+      first=false
+    else
+      echo -e "         ${line}" >&2
+    fi
+  done < <(python3 "${INSTALL_ACCEPTANCE_PY}" format-block "${result}" 2>/dev/null)
+  exit 1
+}
+
+# ─── Pre-install version gate (full install only) ───
+install_acceptance_version_gate() {
+  local rc=0 result
+
+  if [ "${DRY_RUN:-false}" = true ]; then
+    info "[DRY-RUN] Would check install version policy"
+    return 0
+  fi
+
+  if [ ! -f "${INSTALL_ACCEPTANCE_PY}" ]; then
+    warn "Install registration module not found — skipping version gate"
+    return 0
+  fi
+
+  set +e
+  result="$(python3 "${INSTALL_ACCEPTANCE_PY}" gate --json 2>/dev/null)"
+  rc=$?
+  set -e
+
+  if [ -z "${result}" ]; then
+    warn "Version policy check skipped (offline — will retry after install)"
+    return 0
+  fi
+
+  if [ "${rc}" -eq 2 ]; then
+    _install_acceptance_emit_version_block "${result}"
+  fi
+
+  ok "Version policy check passed"
+}
+
 # ─── Update acknowledgment (--update only) ──────────
 install_acceptance_update_prompt() {
   local update_line
@@ -237,21 +323,25 @@ install_acceptance_update_prompt() {
   install_acceptance_email_prompt
 }
 
-# ─── VersaVoice AI cloud disclaimer (Step 4) ────────
-install_acceptance_vv_disclaimer() {
-  local enable_line api_line policy_line link_terms link_privacy
+# ─── VersaVoice AI enable prompt (Step 4 — single ask) ─
+install_acceptance_vv_prompt() {
+  local default_enabled="${1:-true}"
+  local intro_line1 intro_line2 intro_line3
+  local policy_line usage_line link_terms link_privacy
 
-  enable_line="Enabling $(_install_acceptance_brand) connects your agents to the"
-  api_line="$(_install_acceptance_brand) cloud API."
-  policy_line="  • $(_install_acceptance_brand) Terms of Service and Privacy Policy apply:"
+  intro_line1="$(_install_acceptance_brand) enables cloud messaging between you, your agents and your connections"
+  intro_line2="via the $(_install_acceptance_brand) mobile/web app. This is optional — agents can communicate"
+  intro_line3="locally via the agitop dashboard without a VersaVoice account."
   usage_line="  • Messaging uses your $(_install_acceptance_brand) usage minutes"
+  policy_line="  • $(_install_acceptance_brand) Terms of Service and Privacy Policy apply:"
   link_terms="    $(_install_acceptance_link "${INSTALL_ACCEPTANCE_TERMS_URL}")"
   link_privacy="    $(_install_acceptance_link "${INSTALL_ACCEPTANCE_PRIVACY_URL}")"
 
   if declare -F text_box >/dev/null 2>&1; then
     text_box "VERSAVOICE AI CLOUD" \
-      "${enable_line}" \
-      "${api_line}" \
+      "${intro_line1}" \
+      "${intro_line2}" \
+      "${intro_line3}" \
       "" \
       "  • Messages may leave this machine" \
       "  • Agents share the sponsor API token you provide" \
@@ -261,24 +351,43 @@ install_acceptance_vv_disclaimer() {
       "${link_privacy}"
   else
     echo ""
-    echo -e "Enabling $(_install_acceptance_brand) connects your agents to the $(_install_acceptance_brand) cloud API."
+    echo -e "${intro_line1}"
+    echo -e "${intro_line2}"
+    echo "${intro_line3}"
     echo ""
     echo "  • Messages may leave this machine"
     echo "  • Agents share the sponsor API token you provide"
-    echo -e "  • Messaging uses your $(_install_acceptance_brand) usage minutes"
-    echo -e "  • $(_install_acceptance_brand) Terms of Service and Privacy Policy apply:"
-    echo -e "    $(_install_acceptance_link "${INSTALL_ACCEPTANCE_TERMS_URL}")"
-    echo -e "    $(_install_acceptance_link "${INSTALL_ACCEPTANCE_PRIVACY_URL}")"
+    echo -e "${usage_line}"
+    echo -e "${policy_line}"
+    echo -e "${link_terms}"
+    echo -e "${link_privacy}"
     echo ""
   fi
 
-  echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] "
-  read -n 1 -r
-  echo ""
-  if [[ $REPLY =~ ^[Yy]$ ]]; then
-    return 0
+  if [ "${default_enabled}" = "false" ]; then
+    echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] "
+    read -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+      export ENABLE_VV="true"
+    else
+      export ENABLE_VV="false"
+    fi
+  else
+    echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] "
+    read -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+      export ENABLE_VV="false"
+    else
+      export ENABLE_VV="true"
+    fi
   fi
-  return 1
+
+  if [ "${ENABLE_VV}" = "false" ]; then
+    info "$(_install_acceptance_brand) disabled — agents will use local messaging only"
+    info "You can enable VV later via the agitop dashboard toggle"
+  fi
 }
 
 # ─── INI helpers ([registration] section) ───────────
@@ -291,15 +400,28 @@ _install_acceptance_ini_ensure() {
     cat >> "${ini}" <<'REGSECTION'
 
 [registration]
-# Install/update acceptance telemetry
+# Runtime submission state (endpoint + key live in registration.conf)
 acceptance_file=/etc/versa-agi/install-acceptance.json
 registration_submitted=false
 registration_submitted_at=
-registration_endpoint=
+registration_last_heartbeat_at=
 registration_last_error=
 registration_attempt_count=0
 REGSECTION
   fi
+}
+
+_install_acceptance_sync_source_ini() {
+  local deployed="${INSTALL_ACCEPTANCE_SETUP_INI}"
+  local source="${INSTALL_ACCEPTANCE_SOURCE_INI}"
+  if [ ! -f "${deployed}" ] || [ ! -f "${source}" ]; then
+    return 0
+  fi
+  if [ "$(realpath "${source}" 2>/dev/null)" = "$(realpath "${deployed}" 2>/dev/null)" ]; then
+    return 0
+  fi
+  cp "${deployed}" "${source}" 2>/dev/null || true
+  chmod 600 "${source}" 2>/dev/null || true
 }
 
 _install_acceptance_ini_set() {
@@ -312,6 +434,7 @@ _install_acceptance_ini_set() {
   else
     sed -i "/^\[registration\]/a ${key}=${value}" "${ini}"
   fi
+  _install_acceptance_sync_source_ini
 }
 
 _install_acceptance_ini_get() {
@@ -410,65 +533,53 @@ PY
   chmod 640 "${INSTALL_ACCEPTANCE_JSON}"
 }
 
-# ─── POST submission ────────────────────────────────
+# ─── POST submission (delegates to install_acceptance.py) ─
 install_acceptance_submit() {
-  local endpoint attempt_count
+  local strict_flag="" rc=0 result msg
 
   if [ "${DRY_RUN:-false}" = true ]; then
     info "[DRY-RUN] Would submit install acceptance telemetry"
     return 0
   fi
 
-  endpoint="$(_install_acceptance_ini_get registration_endpoint '')"
-  if [ -z "${endpoint}" ]; then
+  if [ ! -f "${INSTALL_ACCEPTANCE_PY}" ]; then
+    warn "Install registration module not found"
     return 0
   fi
 
-  if [ ! -f "${INSTALL_ACCEPTANCE_JSON}" ]; then
+  if [ "${INSTALL_ACCEPTANCE_STRICT_BLOCK}" = true ]; then
+    strict_flag="--strict-block"
+  fi
+
+  set +e
+  result="$(python3 "${INSTALL_ACCEPTANCE_PY}" submit ${strict_flag} --json 2>/dev/null)"
+  rc=$?
+  set -e
+
+  if [ -z "${result}" ]; then
+    warn "Install registration deferred (will retry via agitop)"
     return 0
   fi
 
-  attempt_count="$(_install_acceptance_ini_get registration_attempt_count 0)"
-  if [ "${attempt_count}" -ge "${INSTALL_ACCEPTANCE_MAX_ATTEMPTS}" ] 2>/dev/null; then
-    return 0
+  if [ "${rc}" -eq 2 ]; then
+    _install_acceptance_emit_version_block "${result}"
   fi
 
-  attempt_count=$((attempt_count + 1))
-  _install_acceptance_ini_set registration_attempt_count "${attempt_count}"
-
-  if ! command -v curl >/dev/null 2>&1; then
-    _install_acceptance_ini_set registration_last_error "curl not available"
-    return 0
-  fi
-
-  local http_code body tmp_err
-  tmp_err="$(mktemp)"
-  http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
-    -X POST \
-    -H 'Content-Type: application/json' \
-    --max-time 5 \
-    --data-binary "@${INSTALL_ACCEPTANCE_JSON}" \
-    "${endpoint}" 2>"${tmp_err}" || echo "000")"
-
-  if [ "${http_code}" -ge 200 ] 2>/dev/null && [ "${http_code}" -lt 300 ] 2>/dev/null; then
-    _install_acceptance_ini_set registration_submitted "true"
-    _install_acceptance_ini_set registration_submitted_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    _install_acceptance_ini_set registration_last_error ""
+  if python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("registration_submitted","false").lower()=="true" else 1)' "${result}" 2>/dev/null; then
     ok "Install registration submitted"
+    _install_acceptance_sync_source_ini
+    return 0
+  fi
+
+  msg="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("message",""))' "${result}" 2>/dev/null || true)"
+  if [ -n "${msg}" ]; then
+    warn "Install registration deferred: ${msg} (will retry via agitop)"
   else
-    local err_msg
-    err_msg="$(head -c 200 "${tmp_err}" 2>/dev/null | tr '\n' ' ')"
-    if [ -z "${err_msg}" ]; then
-      err_msg="HTTP ${http_code}"
-    fi
-    _install_acceptance_ini_set registration_submitted "false"
-    _install_acceptance_ini_set registration_last_error "${err_msg}"
     warn "Install registration deferred (will retry via agitop)"
   fi
-  rm -f "${tmp_err}"
 }
 
-# ─── Record full install event (after Step 4) ───────
+# ─── Record full install event (after install completes) ─
 install_acceptance_record_full() {
   local versavoice_enabled="${1:-false}"
   local accepted_at="${INSTALL_ACCEPTANCE_AT_UTC:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
@@ -485,7 +596,9 @@ install_acceptance_record_full() {
   _install_acceptance_ini_set acceptance_file "${INSTALL_ACCEPTANCE_JSON}"
   _install_acceptance_ini_set registration_submitted "false"
 
+  INSTALL_ACCEPTANCE_STRICT_BLOCK=true
   install_acceptance_submit
+  INSTALL_ACCEPTANCE_STRICT_BLOCK=false
 }
 
 # ─── Record update event ────────────────────────────
