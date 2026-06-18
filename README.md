@@ -137,6 +137,8 @@ graph TD
 
 Versa AGi uses a layered architecture: a **Watchdog** monitoring layer (CRON + reactive triggers), a **Data Gateway** (`agictl`) for all database operations, and **OS-isolated agent workspaces** — all coordinated through the VersaVoice communication backbone. Patent pending.
 
+Agents invoke `agictl` through typed LangGraph harness tools (`agictl_task`, `agictl_cycle`, …), not raw shell. Operator docs show shell form (`agictl task list`) for readability; see `src/core-infra/skills/cli_reference_agent.md` (*Harness tool invocation*) for the agent mapping.
+
 ## Quick Start
 
 The infrastructure is provisioned strictly through a hardened orchestration wrapper natively connecting your operating system architecture to your chosen communication backbone (VersaVoice cloud API or local SQLite messaging):
@@ -391,6 +393,9 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 | `gemma4:31b` | ✓ | ✓ | Gemma 4 31B — ~18GB VRAM, highest quality |
 | `qwen3.6:35b` | ✓ | ✓ | Qwen 3.6 35B MoE — ~21GB VRAM, multilingual |
 
+> [!NOTE]
+> **Local multimodal (image / video / audio) — deferred.** Shipped local backends (Ollama, Docker SYCL / llama.cpp) provision **text-only** GGUF weights today. `agictl_view_image` and mid-cycle vision work on **cloud** models that declare `image` in the catalog (e.g. Gemini). Local vision requires a separate Hugging Face **mmproj** projector file and llama-server `--mmproj` wiring — not automated yet. See **TD-LOCAL-MMProj-001** in [Versa AGi - Production Plan.md](design/Versa%20AGi%20-%20Production%20Plan.md) §2.5 and System Design §4.5.3. Until then, local catalog rows use `input_modalities=text` only (format ≠ capability).
+
 > [!TIP]
 > **Intel ARC Users:** Two model loading strategies are available, configurable via the agitop ⚙ Settings modal:
 > - **Router Mode** (default) — Multiple models loaded on demand from the GGUF directory. Each agent can use a different local model. The server evicts least-recently-used models when `sycl_models_max` is exceeded.
@@ -410,7 +415,7 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 
 ### Model Registry Management
 
-All SYCL model metadata (HuggingFace repo, GGUF filename, size) is centralized in `models.ini [sycl_models]`. This registry drives the setup menu, model downloads, concurrency calculations, and dashboard context picklists.
+All SYCL model metadata (HuggingFace repo, GGUF filename, size) is centralized in `models.ini [sycl_models]`. This registry drives the setup menu, model downloads, concurrency calculations, and dashboard context picklists. **Vision projector (`mmproj`) files are not downloaded or wired yet** — future enhancement TD-LOCAL-MMProj-001.
 
 **CLI Commands** (`agictl model registry`):
 

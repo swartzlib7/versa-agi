@@ -274,6 +274,15 @@ if [ -f "${SETUP_INI}" ]; then
   [ -n "${_cb_h}" ] && CB_HOURLY="${_cb_h}"
 fi
 
+# ─── Task Management — Overdue Task Retry Budget ───────
+# Max lifeline wake cycles for overdue planned/waiting tasks before auto-freeze.
+# Configurable via agitop ⚙ System Settings modal.
+TASK_MAX_SPAWN_ATTEMPTS="${VERSA_TASK_MAX_SPAWN_ATTEMPTS:-3}"
+if [ -f "${SETUP_INI}" ]; then
+  _tsa=$(grep -Po '^\s*task_max_spawn_attempts\s*=\s*\K[0-9]+' "${SETUP_INI}" 2>/dev/null || true)
+  [ -n "${_tsa}" ] && TASK_MAX_SPAWN_ATTEMPTS="${_tsa}"
+fi
+
 # ─── Message Flood Guard Timeout ──────────────────────
 # Suppression lifts when the latest outbound to the PU is older than this window,
 # so the agent can send a periodic check-in instead of staying silent indefinitely.
@@ -285,7 +294,7 @@ fi
 
 # ─── Process Each Agent ──────────────────────────────
 # Normalized format: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode|temperature|reasoning_effort|reasoning_max_tokens|model_params_extra
-while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE AGENT_TEMPERATURE AGENT_REASONING_EFFORT AGENT_REASONING_MAX_TOKENS AGENT_MODEL_PARAMS_EXTRA; do
+while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE AGENT_TEMPERATURE AGENT_REASONING_EFFORT AGENT_REASONING_MAX_TOKENS AGENT_MODEL_PARAMS_EXTRA AGENT_MODEL_ROUTING_ENABLED; do
   [ -z "${AGENT_NAME}" ] && continue
   [ "${AGENT_NAME}" = "${WATCHDOG_USER}" ] && continue
   # Use default model if no per-agent override
@@ -512,6 +521,7 @@ ${AGENT_REGISTRY_CONTENT}"
   MESSAGES_DB="/var/lib/versa-agi/messages.db"
   TASKS_DB="/var/lib/versa-agi/coa/tasks.db"
   CYCLES_DB="/var/lib/versa-agi/coa/cycles.db"
+  STEP_RESUME_SENTINEL="/tmp/versa-agi-step-resume/${AGENT_NAME}"
 
   # ─── Deterministic Mailbox Operations ──────────────
   # ALWAYS run inbox fetch first, even during cooldown, so new messages are detected immediately.
@@ -575,6 +585,7 @@ ${AGENT_REGISTRY_CONTENT}"
   # ─── Work Detection ────────────────────────────────
   SHOULD_WAKE="false"
   WAKE_REASON=""
+  OVERDUE_RETRYABLE=0
 
   # Check for work — unprocessed messages (VV + internal)
   # Internal messages use agent name as to_user_id, VV messages use sub_account_id
@@ -589,6 +600,12 @@ ${AGENT_REGISTRY_CONTENT}"
   if [ "${UNPROCESSED:-0}" -gt 0 ]; then
     SHOULD_WAKE="true"
     WAKE_REASON="${UNPROCESSED} unprocessed message(s)"
+  fi
+
+  # Harness step-budget stop (exit 53) queues a one-shot continuation wake.
+  if [ "${SHOULD_WAKE}" = "false" ] && [ -f "${STEP_RESUME_SENTINEL}" ]; then
+    SHOULD_WAKE="true"
+    WAKE_REASON="continuing after step budget (checkpoint preserved)"
   fi
 
   # Also check for pending tasks in SQLite
@@ -629,11 +646,11 @@ ${AGENT_REGISTRY_CONTENT}"
 
     # ─── Overdue Task Detection (per-tick, spawn_attempts gated) ─────
     # Replaces the old daily overdue sweep. Overdue planned tasks and repeatedly-
-    # waking waiting tasks are retried up to MAX_SPAWN_ATTEMPTS times. After that,
+    # waking waiting tasks are retried up to TASK_MAX_SPAWN_ATTEMPTS times. After that,
     # tasks are auto-frozen and the Primary User is notified via VersaVoice.
-    MAX_SPAWN_ATTEMPTS=3
+    MAX_SPAWN_ATTEMPTS="${TASK_MAX_SPAWN_ATTEMPTS}"
     OVERDUE_SPAWN_SQL="assigned_to='${AGENT_NAME}' AND ("
-    OVERDUE_SPAWN_SQL+="(status='planned' AND due_date IS NOT NULL AND due_date < datetime('now'))"
+    OVERDUE_SPAWN_SQL+="(status='planned' AND due_date IS NOT NULL AND due_date <= datetime('now'))"
     OVERDUE_SPAWN_SQL+=" OR (status='waiting' AND due_date IS NOT NULL AND due_date <= datetime('now')"
     OVERDUE_SPAWN_SQL+=" AND (wake_after IS NULL OR wake_after <= datetime('now')))"
     OVERDUE_SPAWN_SQL+=")"
@@ -660,7 +677,19 @@ ${AGENT_REGISTRY_CONTENT}"
               FREEZE_REASON="was unable to complete"
               RESTORE_STATUS="planned"
             fi
-            FREEZE_MSG="⚠️ Automated Task Notice — Agent '${AGENT_NAME}' ${FREEZE_REASON} task #${TASK_ID}: \"${TASK_TITLE}\" after ${MAX_SPAWN_ATTEMPTS} consecutive wake cycles. The task has been automatically frozen to prevent resource waste. You can ask COA to unfreeze it, or manage it directly via agitop or: agictl task update ${TASK_ID} --status ${RESTORE_STATUS}"
+            FREEZE_MSG="⚠️ Task auto-frozen
+
+Agent: ${AGENT_NAME}
+Task #${TASK_ID}: \"${TASK_TITLE}\"
+Reason: ${FREEZE_REASON} after ${MAX_SPAWN_ATTEMPTS} lifeline wake cycles without resolving or snoozing.
+
+The task is paused (status=frozen) — Lifeline will not schedule it until you unfreeze it. You can still message ${AGENT_NAME} directly; new messages will wake them.
+
+To resume:
+• Message ${AGENT_NAME}: \"Please unfreeze task #${TASK_ID}\" — they can run: agictl task unfreeze ${TASK_ID}
+• agitop → ${AGENT_NAME} → Unfreeze Tasks
+• CLI: agictl task unfreeze ${TASK_ID}  or  agictl task unfreeze-all ${AGENT_NAME}
+• Manual: agictl task update ${TASK_ID} --status ${RESTORE_STATUS}"
             AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
               /usr/local/bin/agictl message send "${SPONSOR_UID}" "${FREEZE_MSG}" --mode typed 2>/dev/null \
               || log "WARN: Failed to send auto-freeze notification to Primary User"
@@ -675,13 +704,9 @@ ${AGENT_REGISTRY_CONTENT}"
       "SELECT COUNT(*) FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || echo "0")
 
     if [ "${OVERDUE_RETRYABLE:-0}" -gt 0 ]; then
-      # Increment spawn_attempts for all retryable overdue tasks
-      sqlite3 "${TASKS_DB}" \
-        "UPDATE tasks SET spawn_attempts = spawn_attempts + 1, updated_at = datetime('now') WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true
-
-      # Collect overdue task details for prompt injection
+      # Collect overdue task details for prompt injection (spawn_attempts incremented on spawn commit only)
       OVERDUE_DETAILS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
-        "SELECT id, title, due_date, spawn_attempts, status FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts <= ${MAX_SPAWN_ATTEMPTS} ORDER BY due_date ASC LIMIT 10;" 2>/dev/null || true)
+        "SELECT id, title, due_date, spawn_attempts, status FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS} ORDER BY due_date ASC LIMIT 10;" 2>/dev/null || true)
       log "OVERDUE: ${AGENT_NAME} — ${OVERDUE_RETRYABLE} overdue planned/waiting task(s) (retrying)"
 
       if [ "${SHOULD_WAKE}" = "false" ]; then
@@ -768,6 +793,7 @@ ${AGENT_REGISTRY_CONTENT}"
   # ─── Concurrency Cap Check ────────────────────────
   if [ "${SPAWNED_COUNT}" -ge "${MAX_SPAWN_PER_TICK}" ]; then
     log "QUEUED: ${AGENT_NAME} (${SPAWNED_COUNT}/${MAX_SPAWN_PER_TICK} agents already spawned this tick — will run next tick)"
+    flock -u 200
     continue
   fi
 
@@ -845,7 +871,6 @@ ${AGENT_REGISTRY_CONTENT}"
   RESULT_FILE="${CYCLES_DIR}/result_$(date +%s).json"
   RUNAWAY_SENTINEL="/tmp/versa-agi-runaway-${AGENT_NAME}"
 
-
   log "SPAWN: ${AGENT_NAME} as user ${AGENT_USER} (reason: ${WAKE_REASON}, timeout: ${TIMEOUT_DURATION}, runaway limit: ${RUNAWAY_LIMIT} lines / ${RUNAWAY_SIZE_LIMIT}KB)"
 
   # Increment spawn counter in main thread before forking
@@ -859,9 +884,14 @@ ${AGENT_REGISTRY_CONTENT}"
   sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='active', status_message='Initializing cycle...', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
 
   (
-    # Disable errexit for the entire spawn block — harness may
-    # fail and we MUST capture errors, not let set -e kill the Lifeline
-    set +e
+    # Disable errexit AND nounset for the entire spawn block — the harness may
+    # fail (we MUST capture errors, not let set -e kill the Lifeline), and this
+    # block references many optional, env-derived variables. set +e alone does
+    # NOT relax nounset: under the top-level `set -u`, a single unset variable
+    # here aborts the whole spawn subshell BEFORE the harness runs — a silent,
+    # system-wide spawn failure that is very hard to diagnose. set +u prevents
+    # any future stray reference from recreating that outage.
+    set +eu
 
   # NOTE: COOLDOWN_FILE is only written by the rate-limit handler (429 backoff)
 
@@ -1456,8 +1486,13 @@ Wake reason: ${WAKE_REASON}."
     [ -f "${ENV_FILE}" ] && sed 's/^/export /' "${ENV_FILE}"
 
     # Source third-party provider keys (OpenAI, Anthropic, xAI)
-    INFERENCE_ENV="/etc/versa-agi/inference_endpoint.env"
-    [ -f "${INFERENCE_ENV}" ] && sed 's/^/export /' "${INFERENCE_ENV}"
+    PROVIDER_ENV="/etc/versa-agi/provider_keys.env"
+    [ -f "${PROVIDER_ENV}" ] && sed 's/^/export /' "${PROVIDER_ENV}"
+    # Legacy path (migrated on setup.sh --update)
+    LEGACY_PROVIDER_ENV="/etc/versa-agi/inference_endpoint.env"
+    if [ ! -f "${PROVIDER_ENV}" ] && [ -f "${LEGACY_PROVIDER_ENV}" ]; then
+      sed 's/^/export /' "${LEGACY_PROVIDER_ENV}"
+    fi
 
     # ─── Backend Resolution ─────────────────
     # Model-driven: check agent model against cloud/local/proxy registries
@@ -1564,6 +1599,21 @@ Wake reason: ${WAKE_REASON}."
   # Token stats are extracted post-hoc from a separate JSON stats run.
   RESULT_LOG="${CYCLES_DIR}/result_$(date +%s).log"
 
+  # ─── Runaway Session-Delta Baseline ───────────────
+  # SESSION_DIR/BASELINE_SESSION_SIZE feed monitor_runaway Check 3 (session
+  # growth this cycle). They MUST be initialised: the spawn subshell runs with
+  # set +e but inherits set -u (nounset) from the top-level `set -euo pipefail`,
+  # and set +e does NOT disable nounset — referencing an unset variable here
+  # aborts the subshell before the harness ever runs (silent spawn failures).
+  SESSION_DIR="${CYCLES_DIR}"
+  BASELINE_SESSION_SIZE=0
+  if [ -d "${SESSION_DIR}" ]; then
+    _baseline_session=$(ls -t "${SESSION_DIR}"/session-*.jsonl "${SESSION_DIR}"/session-*.json 2>/dev/null | head -1)
+    if [ -n "${_baseline_session}" ]; then
+      BASELINE_SESSION_SIZE=$(stat -c%s "${_baseline_session}" 2>/dev/null || echo 0)
+    fi
+  fi
+
   # Start runaway monitor BEFORE agent runs (with baseline for delta check)
   monitor_runaway "${RESULT_FILE}" "${AGENT_USER}" "${AGENT_NAME}" "${RUNAWAY_LIMIT}" "${RUNAWAY_SIZE_LIMIT}" "${SESSION_DIR}" "${BASELINE_SESSION_SIZE}" &
   MONITOR_PID=$!
@@ -1597,6 +1647,50 @@ Wake reason: ${WAKE_REASON}."
     MODEL_PARAM_ARGS="${MODEL_PARAM_ARGS} --model-params-extra '${AGENT_MODEL_PARAMS_EXTRA}'"
   fi
 
+  # Ephemeral routing context — written by watchdog, read by the agent harness.
+  # Use the /tmp pattern (like SYSTEM_FILE/WAKE_FILE): the agent's cycles dir is
+  # agent-owned and not writable by the watchdog that runs Lifeline.
+  ROUTING_FILE="/tmp/versa_agi_${AGENT_NAME}_routing.json"
+  ROUTING_ATTACHMENTS_FILE="/tmp/versa_agi_${AGENT_NAME}_routing_attachments.txt"
+  ROUTING_ARGS=""
+  if [ "${AGENT_MODEL_ROUTING_ENABLED:-0}" = "1" ]; then
+    # Collect attachment paths from unprocessed inbound messages (metadata for pool
+    # input_modality filtering — native multimodal payloads are Phase E).
+    rm -f "${ROUTING_ATTACHMENTS_FILE}" 2>/dev/null || true
+    if [ -f "${MESSAGES_DB}" ]; then
+      _routing_to="${SUB_ACCOUNT_ID:-${AGENT_NAME}}"
+      sqlite3 "${MESSAGES_DB}" \
+        "SELECT attachment_path FROM messages
+         WHERE status='unprocessed' AND has_attachments=1
+           AND attachment_path IS NOT NULL AND attachment_path != ''
+           AND (to_user_id='${_routing_to}' OR to_user_id='${AGENT_NAME}')
+         ORDER BY created_at ASC LIMIT 10;" \
+        > "${ROUTING_ATTACHMENTS_FILE}" 2>/dev/null || true
+    fi
+    if [ -s "${ROUTING_ATTACHMENTS_FILE}" ]; then
+      ROUTING_JSON=$(PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.model_routing \
+        --agent "${AGENT_NAME}" \
+        --assigned-model "${AGENT_MODEL}" \
+        --routing-enabled 1 \
+        --attachments-file "${ROUTING_ATTACHMENTS_FILE}" 2>/dev/null || true)
+    else
+      ROUTING_JSON=$(PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.model_routing \
+        --agent "${AGENT_NAME}" \
+        --assigned-model "${AGENT_MODEL}" \
+        --routing-enabled 1 2>/dev/null || true)
+    fi
+    if [ -n "${ROUTING_JSON}" ]; then
+      echo "${ROUTING_JSON}" > "${ROUTING_FILE}"
+      chmod 644 "${ROUTING_FILE}" 2>/dev/null || true
+      ROUTING_ARGS="--routing-file '${ROUTING_FILE}'"
+      log "ROUTING: ${AGENT_NAME} pool/preferred context written"
+    else
+      log "ROUTING: ${AGENT_NAME} enabled but no eligible candidates (check router_eligible + providers)"
+    fi
+  else
+    log "ROUTING: ${AGENT_NAME} disabled (model_routing_enabled=${AGENT_MODEL_ROUTING_ENABLED:-0})"
+  fi
+
   # ── Resolve num_ctx ──
   # If num_ctx is 0 (auto), resolve the recommended default from the model context map.
   # Cloud models return 0 (context managed server-side — no num_ctx needed).
@@ -1619,9 +1713,17 @@ Wake reason: ${WAKE_REASON}."
   fi
 
   set +e
+  # Count overdue retry only after spawn prep succeeded (harness is about to run).
+  # Incrementing in the parent thread before the subshell caused false auto-freezes
+  # when spawn prep aborted early (unset vars, import errors, etc.).
+  if [ -f "${TASKS_DB}" ] && [ "${OVERDUE_RETRYABLE:-0}" -gt 0 ]; then
+    sqlite3 "${TASKS_DB}" \
+      "UPDATE tasks SET spawn_attempts = spawn_attempts + 1, updated_at = datetime('now') WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true
+  fi
+  rm -f "${STEP_RESUME_SENTINEL}" 2>/dev/null || true
   sudo -u "${AGENT_USER}" \
     timeout "${TIMEOUT_DURATION}" \
-      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} > '${RESULT_FILE}' 2>&1"
+      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} ${ROUTING_ARGS} > '${RESULT_FILE}' 2>&1"
   EXIT_CODE=$?
   # NOTE: Do NOT re-enable set -e here. The subshell runs with set +e
   # (line 631) intentionally — post-spawn commands like kill/wait may fail
@@ -1631,7 +1733,7 @@ Wake reason: ${WAKE_REASON}."
   kill "${MONITOR_PID}" 2>/dev/null || true
   wait "${MONITOR_PID}" 2>/dev/null || true
 
-  rm -f "${ENV_SCRIPT}" "${TASKS_FILE}" "${CONVO_FILE}"
+  rm -f "${ENV_SCRIPT}" "${TASKS_FILE}" "${CONVO_FILE}" "${ROUTING_FILE}" "${ROUTING_ATTACHMENTS_FILE}"
   # Keep a readable log copy alongside the result file
   cp "${RESULT_FILE}" "${RESULT_LOG}" 2>/dev/null || true
 
@@ -1683,6 +1785,12 @@ Wake reason: ${WAKE_REASON}."
     53)  log "LIMIT: ${AGENT_NAME} turn limit exceeded (exit code 53)" ;;
     *)   log "UNKNOWN: ${AGENT_NAME} exited with code ${EXIT_CODE}" ;;
   esac
+
+  if [ "${EXIT_CODE}" -eq 53 ]; then
+    mkdir -p "/tmp/versa-agi-step-resume"
+    touch "${STEP_RESUME_SENTINEL}"
+    log "RESUME: ${AGENT_NAME} step budget reached — continuation queued for next tick"
+  fi
 
   # NOTE: Dirty checkpoint sentinel removed — the harness now always validates
   # checkpoint integrity on RESUME, making the sentinel mechanism unnecessary.

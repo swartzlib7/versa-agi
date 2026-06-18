@@ -152,6 +152,12 @@ def save_status(data: dict) -> None:
     STATUS_JSON.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     try:
         STATUS_JSON.chmod(0o640)
+        import subprocess
+        subprocess.run(
+            ["chown", "watchdog:watchdog", str(STATUS_JSON)],
+            check=False,
+            capture_output=True,
+        )
     except OSError:
         pass
 
@@ -569,6 +575,10 @@ def enrich_status(data: dict | None = None) -> dict:
     merged["registration_last_error"] = runtime.get(
         "registration_last_error",
         merged.get("registration_last_error", ""),
+    )
+    merged["registration_attempt_count"] = runtime.get(
+        "registration_attempt_count",
+        merged.get("registration_attempt_count", "0"),
     )
     return merged
 

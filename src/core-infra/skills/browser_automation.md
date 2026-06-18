@@ -2,6 +2,8 @@
 
 > **Trigger**: Use this skill when you need to navigate web pages, extract content from URLs, fill forms, click elements, or capture screenshots. All operations use a sandboxed headless Chromium browser running as your agent user.
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## Prerequisites
 
 - System-wide: `setup.ini [browser] enabled=true`

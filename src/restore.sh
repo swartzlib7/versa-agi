@@ -329,7 +329,7 @@ else
   info "Rebuilding agitop venv..."
   mkdir -p /opt/versa-agi
   python3 -m venv /opt/versa-agi/venv
-  /opt/versa-agi/venv/bin/pip install --quiet click rich textual psutil 2>/dev/null
+  /opt/versa-agi/venv/bin/pip install --quiet click rich textual psutil Pillow 2>/dev/null
   ok "agitop venv rebuilt (/opt/versa-agi/venv/)"
 fi
 
@@ -436,13 +436,16 @@ else
       fi
     done
 
-    # Fix archive/ and config/ dirs (may be s7-owned from restore)
+    # Fix archive/ dir (may be s7-owned from restore)
     if [ -d "/var/lib/versa-agi/archive" ]; then
       chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi/archive
       chmod 755 /var/lib/versa-agi/archive
       find /var/lib/versa-agi/archive -type f -exec chmod 644 {} + 2>/dev/null || true
     fi
-    [ -d "/var/lib/versa-agi/config" ]  && chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi/config && chmod 755 /var/lib/versa-agi/config
+    [ -f "/var/lib/versa-agi/registration-status.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi/registration-status.json && chmod 640 /var/lib/versa-agi/registration-status.json
+    [ -f "/etc/versa-agi/provider_keys.env" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/provider_keys.env && chmod 600 /etc/versa-agi/provider_keys.env
+    [ -f "/etc/versa-agi/install-acceptance.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/install-acceptance.json && chmod 640 /etc/versa-agi/install-acceptance.json
+    [ -f "/etc/versa-agi/registration.conf" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/registration.conf && chmod 640 /etc/versa-agi/registration.conf
 
     ok "Database permissions set (/var/lib/versa-agi/)"
   fi

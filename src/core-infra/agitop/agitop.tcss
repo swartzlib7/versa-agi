@@ -131,6 +131,7 @@ Checkbox.-on > .toggle--button {
 
 #system-panel {
     height: auto;
+    min-height: 15;
     border: solid $primary;
     border-title-color: $text;
     padding: 1;
@@ -140,6 +141,86 @@ Checkbox.-on > .toggle--button {
 #system-columns {
     height: auto;
     width: 100%;
+    align: left top;
+}
+
+.sys-left-stack {
+    layout: vertical;
+    width: 3fr;
+    height: auto;
+}
+
+.sys-metrics-row {
+    height: auto;
+    width: 100%;
+}
+
+#sys-atrium,
+.sys-atrium-panel {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+.sys-atrium-box {
+    height: 10;
+    min-height: 10;
+    width: 100%;
+    border: solid $surface-lighten-2;
+    background: $surface;
+    padding: 0 1;
+    overflow: hidden;
+    layout: vertical;
+    align: left top;
+}
+
+.sys-atrium-box.sys-atrium-idle {
+    align: center middle;
+}
+
+#sys-atrium-rain {
+    width: 100%;
+    height: 7;
+    min-height: 7;
+    overflow: hidden;
+}
+
+#sys-atrium-ticker {
+    width: 100%;
+    height: 1;
+    min-height: 1;
+    overflow: hidden;
+    content-align: left middle;
+    /* pinned as line 8 inside the 10-line .sys-atrium-box */
+}
+
+#atrium-start-link {
+    width: auto;
+    height: auto;
+    color: $primary-lighten-2;
+    text-align: center;
+    content-align: center middle;
+}
+
+.atrium-center-link {
+    width: auto;
+    height: auto;
+    color: $primary-lighten-2;
+    text-align: center;
+    content-align: center middle;
+}
+
+.atrium-center-link:hover {
+    color: $accent;
+    text-style: underline;
+}
+
+.atrium-stop-link {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    text-align: center;
+    content-align: center middle;
 }
 
 .sys-col {
@@ -172,17 +253,62 @@ Checkbox.-on > .toggle--button {
 .controls-col {
     width: 2fr;
     min-width: 40;
+    height: auto;
 }
 
 .btn-grid-row {
     height: auto;
     width: 100%;
+    margin-bottom: 1;
 }
 
 .btn-grid-row > .panel-btn {
     width: 1fr;
     margin: 0 1;
     height: 3;
+}
+
+/* Dashboard controls — custom palette (Kill / Refresh / Routing use default variants) */
+.ctrl-lifeline {
+    background: cyan;
+    color: black;
+    text-style: bold;
+}
+
+.ctrl-lifeline:hover {
+    background: #00e5e5;
+    color: black;
+}
+
+.ctrl-system-settings {
+    background: #8B0000;
+    color: white;
+    text-style: bold;
+}
+
+.ctrl-system-settings:hover {
+    background: #A40000;
+    color: white;
+}
+
+.ctrl-log-toggle {
+    background: #F5F5DC;
+    color: #333333;
+}
+
+.ctrl-log-toggle:hover {
+    background: #EFEFD0;
+    color: #222222;
+}
+
+.ctrl-vacuum {
+    background: #C0C0C0;
+    color: #333333;
+}
+
+.ctrl-vacuum:hover {
+    background: #B0B0B0;
+    color: #222222;
 }
 
 .panel-btn-sm {
@@ -406,11 +532,11 @@ TaskEditModal {
 
 #task-dialog {
     width: 60%;
-    height: auto;
-    max-height: 80%;
+    height: 66%;
     padding: 1 2;
     background: $surface;
     border: thick $primary;
+    layout: vertical;
 }
 
 #task-dialog-title {
@@ -422,6 +548,88 @@ TaskEditModal {
 #task-edit-desc {
     height: 10;
     margin-bottom: 1;
+    border: solid $accent;
+}
+
+.modal-form-label {
+    height: auto;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.modal-form-label-spaced {
+    margin-top: 1;
+}
+
+.task-field-col .modal-form-label,
+.project-field-col .modal-form-label {
+    margin-top: 0;
+}
+
+.task-due-time-row {
+    height: auto;
+    width: 100%;
+    margin-top: 0;
+    align: center middle;
+    content-align: center middle;
+}
+
+.task-time-field {
+    width: auto;
+    min-width: 10;
+    height: auto;
+}
+
+.task-time-label {
+    width: 100%;
+    height: auto;
+    margin: 0 0 0 0;
+    content-align: center middle;
+    text-align: center;
+}
+
+.task-time-input {
+    width: 10;
+    min-width: 10;
+    max-width: 10;
+    height: 3;
+    min-height: 3;
+    color: $text;
+    content-align: center middle;
+    text-align: center;
+}
+
+#task-edit-due-hour,
+#task-edit-due-minute,
+#task-edit-wake-hour,
+#task-edit-wake-minute {
+    width: 10;
+    min-width: 10;
+    max-width: 10;
+    color: $text;
+    content-align: center middle;
+    text-align: center;
+}
+
+#task-edit-due-hour:focus,
+#task-edit-due-minute:focus,
+#task-edit-wake-hour:focus,
+#task-edit-wake-minute:focus {
+    color: $text;
+}
+
+.task-due-sep {
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 0 1;
+    content-align: center middle;
+}
+
+.task-due-today-btn {
+    width: 100%;
+    height: 3;
+    margin-top: 0;
 }
 
 .task-field-row {
@@ -440,14 +648,100 @@ TaskEditModal {
     margin-right: 0;
 }
 
+.task-schedule-grid {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    align: left top;
+}
+
+.task-schedule-meta-col {
+    content-align: left top;
+    height: auto;
+    width: 2fr;
+}
+
+.task-schedule-datetime-col {
+    content-align: left top;
+    height: auto;
+    width: 1.5fr;
+    min-width: 28;
+}
+
+.task-schedule-datetime-col > .modal-form-label {
+    width: 100%;
+    height: auto;
+    margin-bottom: 0;
+    content-align: center middle;
+    text-align: center;
+}
+
+.task-schedule-datetime-box {
+    border: solid $surface-lighten-1;
+    background: $surface-darken-1;
+    padding: 0 1;
+    height: auto;
+    content-align: center middle;
+    width: 100%;
+}
+
+.task-schedule-datetime-inner {
+    width: 100%;
+    height: auto;
+    content-align: center middle;
+}
+
+#task-edit-due-date,
+#task-edit-wake-date {
+    width: 100%;
+    height: 3;
+    content-align: left middle;
+}
+
+.task-schedule-datetime-inner .task-due-time-row {
+    height: auto;
+    min-height: 5;
+    align: center middle;
+    content-align: center middle;
+}
+
+.task-schedule-datetime-inner .task-due-today-btn {
+    width: 100%;
+    height: 3;
+    min-height: 3;
+    margin-top: 0;
+    content-align: center middle;
+}
+
 #task-edit-error {
     height: auto;
 }
 
 #task-progress-table {
-    height: 12;
-    margin-bottom: 1;
+    height: 1fr;
+    min-height: 0;
+    width: 100%;
     border: solid $accent;
+}
+
+#task-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#task-general-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#task-general-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#task-journal-pane {
+    height: 100%;
+    layout: vertical;
 }
 
 #task-progress-hint {
@@ -457,7 +751,7 @@ TaskEditModal {
 
 .task-progress-actions {
     height: auto;
-    margin-bottom: 1;
+    margin-top: 1;
     align: center middle;
 }
 
@@ -538,11 +832,322 @@ SystemSettingsModal {
 }
 
 #settings-dialog {
-    width: 85%;
-    height: 90%;
+    width: 68%;
+    height: 72%;
     padding: 1 2;
     background: $surface;
     border: thick $accent;
+    layout: vertical;
+}
+
+#settings-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#settings-tabs Tabs,
+#strategy-tabs Tabs,
+#model-manager-tabs Tabs,
+#model-routing-tabs Tabs,
+#project-tabs Tabs,
+#task-tabs Tabs,
+#agent-tabs Tabs {
+    height: 4;
+    padding: 0 1;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+#settings-tabs Tab,
+#strategy-tabs Tab,
+#model-manager-tabs Tab,
+#model-routing-tabs Tab,
+#project-tabs Tab,
+#task-tabs Tab,
+#agent-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#settings-tabs Tab:hover,
+#strategy-tabs Tab:hover,
+#model-manager-tabs Tab:hover,
+#model-routing-tabs Tab:hover,
+#project-tabs Tab:hover,
+#task-tabs Tab:hover,
+#agent-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+#settings-tabs ContentSwitcher,
+#strategy-tabs ContentSwitcher,
+#model-manager-tabs ContentSwitcher,
+#model-routing-tabs ContentSwitcher,
+#project-tabs ContentSwitcher,
+#task-tabs ContentSwitcher,
+#agent-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#settings-tabs TabPane,
+#strategy-tabs TabPane,
+#model-manager-tabs TabPane,
+#model-routing-tabs TabPane,
+#project-tabs TabPane,
+#task-tabs TabPane,
+#agent-tabs TabPane {
+    height: 100%;
+    padding: 0;
+}
+
+#settings-tabs #--content-tab-settings-general-tab {
+    border-top: heavy $accent;
+}
+
+#settings-tabs #--content-tab-settings-general-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-skills-tab {
+    border-top: heavy #7c3aed;
+}
+
+#settings-tabs #--content-tab-settings-skills-tab.-active {
+    background: #7c3aed 25%;
+    color: #e9d5ff;
+    border: heavy #7c3aed;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-packages-tab {
+    border-top: heavy $error;
+}
+
+#settings-tabs #--content-tab-settings-packages-tab.-active {
+    background: $error 25%;
+    color: $error;
+    border: heavy $error;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-system-memory-tab {
+    border-top: heavy $success;
+}
+
+#settings-tabs #--content-tab-settings-system-memory-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-image-processing-tab {
+    border-top: heavy #d97706;
+}
+
+#settings-tabs #--content-tab-settings-image-processing-tab.-active {
+    background: #d97706 25%;
+    color: #fbbf24;
+    border: heavy #d97706;
+    text-style: bold;
+}
+
+#settings-image-processing-scroll {
+    height: 100%;
+}
+
+#strategy-tabs #--content-tab-strategy-games-tab {
+    border-top: heavy $warning;
+}
+
+#strategy-tabs #--content-tab-strategy-games-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#strategy-tabs #--content-tab-strategy-awareness-tab {
+    border-top: heavy $accent;
+}
+
+#strategy-tabs #--content-tab-strategy-awareness-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#project-tabs #--content-tab-project-general-tab {
+    border-top: heavy $accent;
+}
+
+#project-tabs #--content-tab-project-general-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#project-tabs #--content-tab-project-members-tab {
+    border-top: heavy $success;
+}
+
+#project-tabs #--content-tab-project-members-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#project-tabs #--content-tab-project-memory-tab {
+    border-top: heavy $primary;
+}
+
+#project-tabs #--content-tab-project-memory-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#model-manager-tabs #--content-tab-mm-models-tab {
+    border-top: heavy #1a73e8;
+}
+
+#model-manager-tabs #--content-tab-mm-models-tab.-active {
+    background: #1a73e8 25%;
+    color: #8ab4f8;
+    border: heavy #1a73e8;
+    text-style: bold;
+}
+
+#model-manager-tabs #--content-tab-mm-providers-tab {
+    border-top: heavy $accent;
+}
+
+#model-manager-tabs #--content-tab-mm-providers-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#model-routing-tabs #--content-tab-routing-general-tab {
+    border-top: heavy $success;
+}
+
+#model-routing-tabs #--content-tab-routing-general-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#model-routing-tabs #--content-tab-routing-work-tab {
+    border-top: heavy $warning;
+}
+
+#model-routing-tabs #--content-tab-routing-work-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#model-routing-tabs #--content-tab-routing-output-tab {
+    border-top: heavy $primary;
+}
+
+#model-routing-tabs #--content-tab-routing-output-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#settings-flood-task-row {
+    height: auto;
+    width: 100%;
+    align: left top;
+    margin-bottom: 1;
+}
+
+.settings-aligned-field-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+    layout: vertical;
+}
+
+.settings-field-spacer {
+    height: 1fr;
+    min-height: 0;
+}
+
+.settings-aligned-field-col:last-child {
+    margin-right: 0;
+}
+
+#settings-general-pane,
+#settings-image-processing-pane,
+#settings-skills-pane,
+#settings-packages-pane,
+#settings-system-memory-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#settings-general-scroll,
+#settings-image-processing-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+.settings-general-cols {
+    height: auto;
+    width: 100%;
+    align: left top;
+}
+
+.settings-general-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.settings-general-col:last-child {
+    margin-right: 0;
+}
+
+.settings-web-search-row {
+    height: auto;
+    width: 100%;
+    align: left top;
+}
+
+.settings-web-search-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.settings-web-search-col:last-child {
+    margin-right: 0;
+}
+
+#mm-models-pane,
+#mm-providers-pane {
+    height: 100%;
     layout: vertical;
 }
 
@@ -571,7 +1176,7 @@ SystemSettingsModal {
 .settings-section-box {
     height: auto;
     padding: 0 1;
-    margin-top: 0;
+    margin-top: 1;
     border: solid $primary;
 }
 
@@ -605,29 +1210,70 @@ SystemSettingsModal {
     align: center middle;
 }
 
-.settings-divider {
-    height: 1;
-    margin-top: 1;
-    margin-bottom: 1;
-    border-top: solid $accent;
+.settings-operations-cols {
+    height: auto;
+    width: 100%;
+    align: left top;
 }
 
-#settings-dialog-footer {
+.settings-operations-col {
+    width: 1fr;
     height: auto;
-    dock: bottom;
+    margin-right: 1;
 }
 
-#settings-dialog-actions {
+.settings-operations-col:last-child {
+    margin-right: 0;
+}
+
+.settings-browser-grid {
+    layout: grid;
+    grid-size: 2 2;
+    grid-gutter: 1 2;
     height: auto;
-    min-height: 3;
-    margin-top: 0;
+    width: 100%;
+}
+
+.settings-browser-info {
+    height: auto;
+}
+
+.settings-browser-toggle-cell {
+    height: auto;
     align: center middle;
 }
 
-#settings-dialog-actions Button {
+.settings-browser-toggle-cell Button {
+    width: 100%;
+    height: 3;
+}
+
+.settings-browser-timeout-cell {
+    height: auto;
+}
+
+#settings-browser-timeout-cell {
+    column-span: 2;
+}
+
+.settings-tab-actions {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    align: center middle;
+}
+
+.settings-tab-actions Button {
     width: 1fr;
+    min-width: 0;
     margin: 0 1;
     height: 3;
+}
+
+#settings-skills-hint {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 0;
 }
 
 /* ── Router Mode Confirm Modal ─────────────── */
@@ -676,11 +1322,12 @@ RouterModeConfirmModal {
     padding: 1 2;
     background: $surface;
     border: thick $accent;
+    layout: vertical;
 }
 
 #msg-dialog-scroll {
     height: 1fr;
-    min-height: 8;
+    min-height: 0;
 }
 
 #msg-dialog-top {
@@ -759,14 +1406,16 @@ RouterModeConfirmModal {
     border: dashed $accent;
 }
 
-#msg-dialog-actions {
+#msg-dialog-actions,
+#msg-dialog-footer {
     height: auto;
     width: 100%;
     margin-top: 1;
     align: center middle;
 }
 
-#msg-dialog-actions Button {
+#msg-dialog-actions Button,
+#msg-dialog-footer Button {
     width: 1fr;
     margin: 0 2;
     height: 3;
@@ -926,11 +1575,12 @@ DeleteProjectModal {
 
 #project-dialog {
     width: 60%;
-    height: auto;
+    height: 66%;
     max-height: 80%;
     padding: 1 2;
     background: $surface;
     border: thick $success;
+    layout: vertical;
 }
 
 ProjectMembersModal {
@@ -942,6 +1592,51 @@ ProjectMembersModal {
     margin-bottom: 1;
     border-bottom: solid $success;
     padding-bottom: 1;
+}
+
+#project-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-general-pane,
+#project-members-pane,
+#project-memory-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#project-general-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-members-scroll,
+#project-memory-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $accent;
+    scrollbar-gutter: stable;
+}
+
+.modal-tab-spacer {
+    height: 1;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.agent-tab-actions-bar {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+.agent-tab-actions-bar Button {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0 1;
 }
 
 /* project-dialog-close styling handled by .task-dialog-buttons Button */
@@ -965,9 +1660,10 @@ ProjectMembersModal {
 
 #members-table {
     height: auto;
-    max-height: 12;
-    border: solid $accent;
-    margin-bottom: 1;
+    min-height: 0;
+    width: 100%;
+    border: none;
+    margin-bottom: 0;
 }
 
 .project-members-actions {
@@ -999,19 +1695,31 @@ ApiKeysModal {
 }
 
 #api-keys-dialog {
-    width: 65%;
+    width: 52%;
     height: auto;
-    max-height: 85%;
+    max-height: 68%;
     padding: 1 2;
     background: $surface;
     border: thick #7c3aed;
+    layout: vertical;
+}
+
+#api-keys-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+}
+
+.api-keys-col {
+    height: auto;
 }
 
 #api-keys-dialog Input {
     margin-bottom: 0;
 }
 
-#api-keys-dialog > Static {
+#api-keys-dialog .api-keys-col > Static {
     margin-top: 1;
 }
 
@@ -1036,12 +1744,139 @@ ModelManagerModal {
     background: $surface 80%;
 }
 
+/* ── Model Routing Modal ───────────────────── */
+
+ModelRoutingModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#model-routing-dialog {
+    width: 59%;
+    height: 74%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#model-routing-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#routing-help {
+    margin-bottom: 1;
+}
+
+#routing-general-scroll,
+#routing-work-scroll,
+#routing-output-scroll {
+    height: 100%;
+    border: solid $primary;
+    padding: 1;
+}
+
+#routing-general-columns,
+#routing-work-columns,
+#routing-output-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+}
+
+.routing-col {
+    height: auto;
+}
+
+#routing-general-columns .routing-col Select {
+    width: 100%;
+}
+
+.routing-checkbox-box {
+    width: 100%;
+    height: 3;
+    border: solid $surface-lighten-2;
+    padding: 0 1;
+    content-align: left middle;
+}
+
+.routing-checkbox-box Checkbox {
+    width: 100%;
+    height: auto;
+    border: none;
+    background: transparent;
+    padding: 0;
+}
+
+#model-routing-header {
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+}
+
+#model-routing-actions {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#model-routing-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
+}
+
 #model-manager-dialog {
-    width: 92%;
-    height: 92%;
+    width: 59%;
+    height: 74%;
     padding: 1 2;
     background: $surface;
     border: thick #1a73e8;
+}
+
+ModelManagerModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#model-manager-shell {
+    width: 59%;
+    height: 74%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #1a73e8;
+    layout: vertical;
+}
+
+#model-manager-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#model-manager-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#model-manager-footer {
+    height: auto;
+    margin-top: 1;
+    border-top: solid #1a73e8;
+    padding-top: 1;
+    align: center middle;
+}
+
+#model-manager-footer Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
 }
 
 #mm-help {
@@ -1052,18 +1887,27 @@ ModelManagerModal {
     margin-top: 1;
 }
 
-#model-manager-dialog DataTable {
-    height: auto;
-    max-height: 16;
-    margin: 1 0;
+#mm-models-table {
+    height: 1fr;
+    min-height: 26;
+    border: solid $primary;
 }
 
-.mm-actions {
+#mm-providers-table {
+    height: 1fr;
+    min-height: 13;
+    border: solid $primary;
+}
+
+#mm-models-actions,
+#mm-providers-actions {
     height: auto;
+    margin-top: 1;
     align: center middle;
 }
 
-.mm-actions Button {
+#mm-models-actions Button,
+#mm-providers-actions Button {
     width: 1fr;
     margin: 0 1;
     min-width: 12;
@@ -1101,13 +1945,378 @@ ModelManagerModal {
     margin: 0 1;
 }
 
+.mm-form-textarea {
+    height: 5;
+    min-height: 5;
+    max-height: 8;
+}
+
+.mm-form-hint {
+    height: auto;
+    margin-top: 0;
+    color: $text-muted;
+    text-style: italic;
+}
+
+.mm-section-heading {
+    margin-top: 2;
+    margin-bottom: 1;
+    padding-top: 1;
+    padding-bottom: 1;
+    border-top: solid $accent;
+}
+
+.mm-check-row {
+    align: center middle;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+.mm-check-row Checkbox {
+    width: 1fr;
+    margin: 0 2;
+    content-align: center middle;
+}
+
+/* Model Feedback modal */
+ModelFeedbackModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#model-feedback-dialog {
+    width: 43%;
+    height: auto;
+    max-height: 88%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#model-feedback-header {
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+}
+
+#mf-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+.mf-col {
+    height: auto;
+}
+
+#mf-records-panel {
+    height: auto;
+    min-height: 10;
+    max-height: 22;
+    margin-top: 1;
+    margin-bottom: 1;
+    padding: 1;
+    border: solid $accent;
+    background: $panel;
+}
+
+#mf-records-panel DataTable {
+    height: auto;
+    max-height: 14;
+    margin-top: 1;
+}
+
+#model-feedback-actions {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#model-feedback-actions Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
+#openrouter-pick-dialog,
+#provider-pick-dialog {
+    width: 64%;
+    height: auto;
+    max-height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#provider-pick-dialog.provider-brand-google {
+    border: thick #4285F4;
+    background: #4285F4 12%;
+}
+
+#provider-pick-dialog.provider-brand-openai {
+    border: thick #10A37F;
+    background: #10A37F 10%;
+}
+
+#provider-pick-dialog.provider-brand-anthropic {
+    border: thick #C15F3C;
+    background: #C15F3C 12%;
+}
+
+#provider-pick-dialog.provider-brand-xai {
+    border: thick #FFFFFF;
+    background: #1A1A1A 70%;
+}
+
+#provider-pick-dialog.provider-brand-openrouter {
+    border: thick #94A3B8;
+    background: #94A3B8 10%;
+}
+
+#or-pick-header,
+#provider-pick-header,
+.provider-pick-titlebar {
+    height: auto;
+    min-height: 3;
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding: 1 0;
+    align: center middle;
+    content-align: center middle;
+}
+
+.provider-brand-google.provider-pick-titlebar {
+    border: solid #4285F4;
+    background: #4285F4 28%;
+}
+
+.provider-brand-google .provider-pick-title {
+    color: #E8F0FE;
+}
+
+.provider-brand-openai.provider-pick-titlebar {
+    border: solid #10A37F;
+    background: #10A37F 25%;
+}
+
+.provider-brand-openai .provider-pick-title {
+    color: #E6FFF6;
+}
+
+.provider-brand-anthropic.provider-pick-titlebar {
+    border: solid #C15F3C;
+    background: #C15F3C 30%;
+}
+
+.provider-brand-anthropic .provider-pick-title {
+    color: #FFF4EF;
+}
+
+.provider-brand-xai.provider-pick-titlebar {
+    border: solid #FFFFFF;
+    background: #1A1A1A 88%;
+}
+
+.provider-brand-xai .provider-pick-title {
+    color: #F5F5F5;
+}
+
+.provider-brand-openrouter.provider-pick-titlebar {
+    border: solid #94A3B8;
+    background: #94A3B8 22%;
+}
+
+.provider-brand-openrouter .provider-pick-title {
+    color: #F1F5F9;
+}
+
+.provider-pick-title,
+#provider-pick-title {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    padding: 1 0;
+    text-style: bold underline;
+    text-align: center;
+    content-align: center middle;
+}
+
+/* ─── Provider import buttons (Add Model form) ─── */
+
+#catalog-form-header {
+    width: 100%;
+    height: auto;
+    min-height: 1;
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+    align: center middle;
+    content-align: center middle;
+}
+
+#catalog-form-header Button {
+    width: 1fr;
+    min-width: 14;
+    height: 3;
+    margin: 0 1;
+    padding: 0 1;
+    text-style: bold;
+    text-align: center;
+    content-align: center middle;
+}
+
+#catalog-form-header Button.provider-brand-google {
+    border: block #4285F4;
+    background: #4285F4 28%;
+    color: #E8F0FE;
+}
+
+#catalog-form-header Button.provider-brand-openai {
+    border: block #10A37F;
+    background: #10A37F 25%;
+    color: #E6FFF6;
+}
+
+#catalog-form-header Button.provider-brand-anthropic {
+    border: block #C15F3C;
+    background: #C15F3C 30%;
+    color: #FFF4EF;
+}
+
+#catalog-form-header Button.provider-brand-xai {
+    border: block #FFFFFF;
+    background: #1A1A1A 88%;
+    color: #F5F5F5;
+}
+
+#catalog-form-header Button.provider-brand-openrouter {
+    border: block #94A3B8;
+    background: #94A3B8 22%;
+    color: #F1F5F9;
+}
+
+#catalog-form-header Button.provider-brand-google:hover {
+    background: #4285F4 50%;
+    border: block #4285F4;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-openai:hover {
+    background: #10A37F 50%;
+    border: block #10A37F;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-anthropic:hover {
+    background: #C15F3C 55%;
+    border: block #C15F3C;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-xai:hover {
+    background: #333333 90%;
+    border: block #FFFFFF;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-openrouter:hover {
+    background: #94A3B8 45%;
+    border: block #94A3B8;
+    color: #0F172A;
+}
+
+#catalog-form-import-label {
+    width: 100%;
+    text-align: center;
+}
+
+#or-pick-scroll,
+#provider-pick-scroll {
+    height: auto;
+    min-height: 12;
+    max-height: 32;
+    margin: 1 0;
+}
+
+#or-pick-scroll DataTable,
+#provider-pick-scroll DataTable {
+    height: auto;
+    max-height: 28;
+}
+
+#or-pick-actions,
+#provider-pick-actions {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#or-pick-actions Button,
+#provider-pick-actions Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
 /* Model Manager sub-modals (Add/Edit forms) — centered like other modals. */
+#catalog-form-shell {
+    width: 72%;
+    height: auto;
+    max-height: 88%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#catalog-form-scroll {
+    height: auto;
+    min-height: 12;
+    max-height: 50;
+    margin-top: 1;
+}
+
+#catalog-form-title {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    padding: 1 0;
+    text-style: bold underline;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#catalog-form-footer {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#catalog-form-footer Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
 CatalogFormModal {
     align: center middle;
     background: $surface 80%;
 }
 
 ProviderFormModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ProviderPickModal {
     align: center middle;
     background: $surface 80%;
 }
@@ -1211,33 +2420,91 @@ StrategyModal {
 }
 
 #strategy-dialog {
-    width: 85%;
-    height: 90%;
+    width: 68%;
+    height: 72%;
     padding: 1 2;
     background: $surface;
     border: thick #d97706;
+    layout: vertical;
+}
+
+#strategy-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#strategy-games-pane,
+#strategy-awareness-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#strategy-dialog-footer {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#strategy-dialog-footer Button {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0 1;
 }
 
 #strategy-dialog-title {
+    height: auto;
     margin-bottom: 1;
     border-bottom: solid #d97706;
     padding-bottom: 1;
 }
 
-.strat-section-header {
-    margin-top: 2;
+#awareness-section-header,
+#games-section-header {
+    height: auto;
+    margin-bottom: 1;
 }
 
-#games-table {
+#games-strat-hint,
+#awareness-strat-hint {
     height: auto;
-    max-height: 8;
+    margin-bottom: 1;
+}
+
+#strategy-games-scroll,
+#strategy-awareness-scroll {
+    height: 1fr;
+    min-height: 0;
+    scrollbar-gutter: stable;
+}
+
+#strategy-games-scroll {
     border: solid $warning;
 }
 
+#strategy-awareness-scroll {
+    border: solid $accent;
+}
+
+#games-table,
 #awareness-table {
     height: auto;
-    max-height: 18;
-    border: solid $accent;
+    min-height: 0;
+    width: 100%;
+}
+
+.strategy-tab-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+.strategy-tab-actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0 1;
+    height: 3;
 }
 
 .awareness-filter-row {
@@ -1251,10 +2518,482 @@ StrategyModal {
     margin-right: 1;
 }
 
-#sys-memory-strat-table {
+#settings-sys-memory-table {
+    height: 1fr;
+    min-height: 0;
+    border: solid $success;
+}
+
+/* Agent Memory Modal (per-agent connection memory) */
+AgentMemoryViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#agent-memory-dialog {
+    width: 68%;
+    height: 72%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+    layout: vertical;
+}
+
+#agent-memory-title {
     height: auto;
-    max-height: 18;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#agent-memory-connection-pane {
+    height: 1fr;
+    min-height: 0;
+    layout: vertical;
+}
+
+#agent-memory-connection-header,
+#agent-memory-connection-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#agent-memory-connection-scroll {
+    height: 1fr;
+    min-height: 0;
+    max-height: 28;
     border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#agent-memory-connection-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+#agent-memory-dialog-footer {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+/* Project viewer modal */
+ProjectMembersModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#project-dialog {
+    width: 60%;
+    height: 66%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+    layout: vertical;
+}
+
+#project-dialog-title {
+    height: auto;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#project-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-general-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-members-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#project-members-header,
+#project-members-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#project-members-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $accent;
+    scrollbar-gutter: stable;
+}
+
+#members-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+.project-members-actions {
+    height: auto;
+    margin-top: 1;
+}
+
+#project-memory-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#project-memory-header,
+#project-memory-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#project-memory-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#project-memory-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+#agent-prompt-dialog-footer {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#agent-memory-dialog-footer Button {
+    min-width: 16;
+    height: 3;
+}
+
+/* Agent detail modal (tabbed) */
+AgentPromptMenu {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#agent-dialog {
+    width: 59%;
+    height: 79%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+    layout: vertical;
+}
+
+#agent-dialog-title {
+    height: auto;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#agent-dialog-info {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#agent-status-actions {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+#agent-status-actions Button {
+    margin: 0 1;
+    height: 3;
+}
+
+#agent-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#agent-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#agent-tabs TabPane {
+    height: 100%;
+    padding: 0;
+}
+
+#agent-general-pane,
+#agent-tech-pane,
+#agent-overrides-pane,
+#agent-memory-pane,
+#agent-poise-pane,
+#agent-prompt-pane,
+#agent-cycle-pane,
+#agent-threads-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#agent-general-scroll .setup-form-row {
+    margin-top: 1;
+}
+
+.agent-browser-toggle-col {
+    align: left top;
+}
+
+.agent-browser-toggle-col Button {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+}
+
+#model-routing-hint {
+    height: auto;
+    margin-top: 0;
+}
+
+#agent-general-scroll,
+#agent-tech-scroll,
+#agent-overrides-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#input-model-params-extra {
+    height: 3;
+    min-height: 3;
+    max-height: 3;
+}
+
+.agent-dialog-header-row {
+    height: auto;
+    width: 100%;
+    align: left top;
+    margin-bottom: 1;
+}
+
+#agent-dialog-info {
+    width: 2fr;
+    height: auto;
+}
+
+.agent-header-action-col {
+    width: 1fr;
+    height: auto;
+    align: center top;
+    padding-top: 0;
+}
+
+.agent-header-action-col Button {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+}
+
+#agent-status-actions {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#agent-status-actions Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
+#agent-memory-scroll,
+#agent-threads-scroll,
+#agent-poise-scroll,
+#agent-prompt-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#agent-tab-mem-table,
+#agent-thread-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+#agent-cycle-log-body {
+    height: 1fr;
+    min-height: 10;
+    width: 100%;
+    border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#agent-poise-body,
+#agent-last-prompt-body {
+    height: 100%;
+    min-height: 10;
+    width: 100%;
+}
+
+#agent-cycle-log-header {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#agent-cycle-log-select {
+    margin-bottom: 1;
+}
+
+#agent-step-nav-bar {
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+    display: none;
+}
+
+#agent-step-indicator {
+    width: 1fr;
+    text-align: center;
+    text-style: bold;
+    color: $accent;
+}
+
+#agent-step-nav-bar Button {
+    width: auto;
+    min-width: 12;
+    margin: 0 1;
+    height: 3;
+}
+
+#agent-tab-mem-hint,
+#agent-thread-summary {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.agent-tab-actions,
+.agent-settings-actions,
+.agent-cycle-actions,
+.agent-thread-actions {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    align: center middle;
+}
+
+.agent-tab-actions Button,
+.agent-thread-actions Button,
+.agent-cycle-actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0 1;
+    height: 3;
+}
+
+#task-tabs #--content-tab-task-general-tab {
+    border-top: heavy $accent;
+}
+
+#task-tabs #--content-tab-task-general-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#task-tabs #--content-tab-task-journal-tab {
+    border-top: heavy $primary;
+}
+
+#task-tabs #--content-tab-task-journal-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-general-tab {
+    border-top: heavy $warning;
+}
+
+#agent-tabs #--content-tab-agent-general-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-tech-tab {
+    border-top: heavy #1a73e8;
+}
+
+#agent-tabs #--content-tab-agent-tech-tab.-active {
+    background: #1a73e8 25%;
+    color: #ffffff;
+    border: heavy #1a73e8;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-overrides-tab {
+    border-top: heavy $error;
+}
+
+#agent-tabs #--content-tab-agent-overrides-tab.-active {
+    background: $error 25%;
+    color: $text;
+    border: heavy $error;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-memory-tab {
+    border-top: heavy $primary;
+}
+
+#agent-tabs #--content-tab-agent-memory-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-poise-tab,
+#agent-tabs #--content-tab-agent-last-prompt-tab {
+    border-top: heavy $success;
+}
+
+#agent-tabs #--content-tab-agent-poise-tab.-active,
+#agent-tabs #--content-tab-agent-last-prompt-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-cycle-tab {
+    border-top: heavy #d97706;
+}
+
+#agent-tabs #--content-tab-agent-cycle-tab.-active {
+    background: #d97706 25%;
+    color: #fbbf24;
+    border: heavy #d97706;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-threads-tab {
+    border-top: heavy $error;
+}
+
+#agent-tabs #--content-tab-agent-threads-tab.-active {
+    background: $error 25%;
+    color: $text;
+    border: heavy $error;
+    text-style: bold;
 }
 
 /* Game Detail Sub-Modal */
@@ -1374,13 +3113,15 @@ DeleteMemoryConfirmModal {
 }
 
 #skills-registry-table {
-    height: 8;
+    height: 1fr;
+    min-height: 0;
     border: solid $primary;
 }
 
 #packages-table {
-    height: 8;
-    border: solid $primary;
+    height: 1fr;
+    min-height: 0;
+    border: solid $error;
 }
 
 #packages-actions {

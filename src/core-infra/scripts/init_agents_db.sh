@@ -59,7 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
 
 -- Active agents (used by Lifeline for spawning)
 CREATE VIEW IF NOT EXISTS v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, tool_output_token_budget, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled, model_routing_enabled
 FROM agents
 WHERE inactive = 0
 ORDER BY name ASC;
@@ -157,12 +157,34 @@ sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN model_params_extra TEXT;" 2>
 # The Iteration 19 legacy-default migration has long since been applied; new
 # agents get 0 via the schema default.
 
+# ─── Schema Migration: model routing (modality routing plan) ───
+sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN model_routing_enabled INTEGER DEFAULT 0;" 2>/dev/null || true
+
+# Drop deprecated multimodal_inline_enabled (gate is execution model catalog only)
+sqlite3 "${DB_PATH}" "ALTER TABLE agents DROP COLUMN multimodal_inline_enabled;" 2>/dev/null || true
+
+sqlite3 "${DB_PATH}" <<'FEEDBACK'
+CREATE TABLE IF NOT EXISTS model_feedback (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  catalog_key     TEXT NOT NULL,
+  work_modality   TEXT,
+  task_hint       TEXT,
+  preference      TEXT NOT NULL CHECK(preference IN ('prefer','avoid')),
+  note            TEXT,
+  active          INTEGER DEFAULT 1,
+  created_by      TEXT NOT NULL,
+  created_at      DATETIME DEFAULT (datetime('now')),
+  updated_at      DATETIME DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_model_feedback_active ON model_feedback(active, catalog_key);
+DELETE FROM model_feedback WHERE active=0;
+FEEDBACK
+
 # ─── View Migration: drop and recreate views to include new columns ───
-# Views are cheap to recreate and must reflect the current column set.
 sqlite3 "${DB_PATH}" <<'VIEWS'
 DROP VIEW IF EXISTS v_active_agents;
 CREATE VIEW v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
+SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, tool_output_token_budget, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled, model_routing_enabled
 FROM agents
 WHERE inactive = 0
 ORDER BY name ASC;
@@ -174,7 +196,7 @@ SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_siz
        session_retention_enabled, session_retention_max_age, session_retention_max_count,
        anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra,
        conversation_depth, resume_enabled, resume_max_messages,
-       skill_injection_mode, browser_enabled,
+       skill_injection_mode, browser_enabled, model_routing_enabled,
        status, status_message,
        requested_by, requested_by_name, created_at
 FROM agents
@@ -182,4 +204,4 @@ ORDER BY protected DESC, name ASC;
 VIEWS
 
 echo "Registry database initialized: ${DB_PATH}"
-echo "Tables: agents, skills, system_packages"
+echo "Tables: agents, skills, system_packages, model_feedback"

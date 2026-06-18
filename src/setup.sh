@@ -241,6 +241,13 @@ runaway_threshold=300
 circuit_breaker_consecutive=5
 circuit_breaker_hourly=20
 
+# Task Management — overdue task auto-freeze (Lifeline spawn_attempts budget).
+# Overdue planned and repeatedly-waking waiting tasks retry this many lifeline
+# wake cycles before auto-freeze and Primary User notification. Counter resets
+# only when the task transitions to done or cancelled.
+# Configurable via agitop ⚙ System Settings modal.
+task_max_spawn_attempts=3
+
 # Message flood guard: auto-lift PU messaging suppression after N hours without
 # a new outbound message. Override via VERSA_FLOOD_GUARD_TIMEOUT_HOURS env var.
 flood_guard_timeout_hours=3
@@ -740,7 +747,7 @@ if [ "${UPDATE_MODE}" = false ]; then
 
       if [ -f "${REGISTRATION_CONF_SRC}" ]; then
         cp "${REGISTRATION_CONF_SRC}" "/etc/versa-agi/registration.conf"
-        chown root:"${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
+        chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
         chmod 640 "/etc/versa-agi/registration.conf"
         ok "registration.conf deployed to /etc/versa-agi/"
       fi
@@ -1311,6 +1318,23 @@ chown -R root:root "${LIB_DIR}/harness"
 find "${LIB_DIR}/harness" -type d -exec chmod 755 {} +
 find "${LIB_DIR}/harness" -type f -exec chmod 644 {} +
 
+# Shared modules the harness imports as top-level (one level above harness/).
+# model_catalog.py lives in the core-infra root and is required by
+# harness/model_routing.py — deploy it next to harness/ so `from model_catalog
+# import ...` resolves under PYTHONPATH=${LIB_DIR} (the harness runtime layout).
+if [ -f "${DEPLOYED_CORE_INFRA}/model_catalog.py" ]; then
+  cp "${DEPLOYED_CORE_INFRA}/model_catalog.py" "${LIB_DIR}/model_catalog.py"
+  chown root:root "${LIB_DIR}/model_catalog.py"
+  chmod 644 "${LIB_DIR}/model_catalog.py"
+fi
+if [ -d "${DEPLOYED_CORE_INFRA}/model_drivers" ]; then
+  rm -rf "${LIB_DIR}/model_drivers"
+  cp -r "${DEPLOYED_CORE_INFRA}/model_drivers" "${LIB_DIR}/"
+  chown -R root:root "${LIB_DIR}/model_drivers"
+  find "${LIB_DIR}/model_drivers" -type d -exec chmod 755 {} +
+  find "${LIB_DIR}/model_drivers" -type f -exec chmod 644 {} +
+fi
+
 ok "Python harness environment deployed globally"
 
 # agictl is installed globally in Step 8d (Security Hardening)
@@ -1497,7 +1521,7 @@ ok "Administrative tooling → /usr/local/bin/ (uninstall, rekey, backup, update
 # Install agitop — Mission Control Dashboard (Python Textual)
 AGITOP_SCRIPT="${DEPLOYED_CORE_INFRA}/bin/agitop"
 AGITOP_VENV="/opt/versa-agi/venv"
-REQUIRED_PKGS="click rich textual psutil"
+REQUIRED_PKGS="click rich textual psutil Pillow"
 if [ -f "${AGITOP_SCRIPT}" ]; then
   # Create Python venv if it doesn't exist
   if [ ! -d "${AGITOP_VENV}" ] || [ ! -x "${AGITOP_VENV}/bin/python3" ]; then
@@ -1525,7 +1549,9 @@ if [ -f "${AGITOP_SCRIPT}" ]; then
   # on minimal WSL/Ubuntu images missing python3-pip or python3-venv).
   PKGS_MISSING=false
   for _pkg in ${REQUIRED_PKGS}; do
-    if ! "${AGITOP_VENV}/bin/python3" -c "import ${_pkg}" 2>/dev/null; then
+    _import="${_pkg}"
+    [ "${_pkg}" = "Pillow" ] && _import="PIL"
+    if ! "${AGITOP_VENV}/bin/python3" -c "import ${_import}" 2>/dev/null; then
       PKGS_MISSING=true
       break
     fi
@@ -1543,10 +1569,11 @@ if [ -f "${AGITOP_SCRIPT}" ]; then
   fi
 
   # Final validation
-  if "${AGITOP_VENV}/bin/python3" -c "import textual, click" 2>/dev/null; then
+  if "${AGITOP_VENV}/bin/python3" -c "import textual, click, PIL" 2>/dev/null; then
     ok "Python venv ready: ${AGITOP_VENV} (${REQUIRED_PKGS})"
   else
     warn "Python venv at ${AGITOP_VENV} is incomplete — agitop/agictl may fail"
+    warn "Expected imports: textual, click, PIL (Pillow)"
   fi
   # Install launcher to PATH
   cp "${AGITOP_SCRIPT}" /usr/local/bin/agitop
@@ -1830,15 +1857,21 @@ AGICTL_PATH="${DEPLOYED_CORE_INFRA}/bin/agictl"
 if [ -f "${AGICTL_PATH}" ]; then
   # Inject AGi-Tools project via agictl (auto-handles DB insert and workspace scaffolding)
   sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "AGi-Tools" --desc "Shared local repository for all agent tools and scripts" >/dev/null 2>&1 || true
+  AGI_TOOLS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='AGi-Tools' LIMIT 1;" 2>/dev/null || true)
   # Assign COA explicitly to map their workspace symlink
-  sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "AGi-Tools" --agent "${COA_USER}" >/dev/null 2>&1 || true
+  if [ -n "${AGI_TOOLS_ID}" ]; then
+    sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${AGI_TOOLS_ID}" --agent "${COA_USER}" >/dev/null 2>&1 || true
+  fi
   ok "AGi-Tools shared repository seeded"
 
   # AGi-Knowledgebase — collaborative PU/agent documentation workspace.
   # Content source for the LAN-accessible Grav CMS documentation site
   # (provisioned separately via the knowledgebase skill + Vagrant).
   sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "AGi-Knowledgebase" --desc "Shared collaborative documentation produced by the Primary User and agents — content source for the LAN Grav CMS site" >/dev/null 2>&1 || true
-  sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "AGi-Knowledgebase" --agent "${COA_USER}" >/dev/null 2>&1 || true
+  AGI_KB_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='AGi-Knowledgebase' LIMIT 1;" 2>/dev/null || true)
+  if [ -n "${AGI_KB_ID}" ]; then
+    sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${AGI_KB_ID}" --agent "${COA_USER}" >/dev/null 2>&1 || true
+  fi
   ok "AGi-Knowledgebase shared repository seeded"
 
   # Backfill: assign shared system projects to all existing sub-agents.
@@ -1854,8 +1887,9 @@ if [ -f "${AGICTL_PATH}" ]; then
     if [ -n "${EXISTING_SUB_AGENTS}" ]; then
       while IFS= read -r SUB_AGENT; do
         [ -z "${SUB_AGENT}" ] && continue
-        for SHARED_PROJECT in "AGi-Tools" "AGi-Knowledgebase"; do
-          "${AGICTL_PATH}" project assign "${SHARED_PROJECT}" --agent "${SUB_AGENT}" >/dev/null 2>&1 || true
+        for SHARED_ID in "${AGI_TOOLS_ID}" "${AGI_KB_ID}"; do
+          [ -z "${SHARED_ID}" ] && continue
+          "${AGICTL_PATH}" project assign "${SHARED_ID}" --agent "${SUB_AGENT}" >/dev/null 2>&1 || true
         done
       done <<< "${EXISTING_SUB_AGENTS}"
       ok "Shared system projects backfilled to existing sub-agents"
@@ -2373,22 +2407,21 @@ if [ "${UPDATE_MODE}" = true ]; then
     sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN model_params_extra TEXT;" 2>/dev/null && \
       ok "Added model_params_extra column to agents table" || \
       info "model_params_extra column already exists"
-    # Recreate views to include new columns
-    sqlite3 "${AGENTS_DB}" "DROP VIEW IF EXISTS v_active_agents; DROP VIEW IF EXISTS v_agent_registry;" 2>/dev/null || true
-    sqlite3 "${AGENTS_DB}" "
-CREATE VIEW IF NOT EXISTS v_active_agents AS
-SELECT name, os_user, workspace, model, triage_model, role, timeout_minutes, runaway_threshold, runaway_size_threshold, context_injection_mode, token_budget, max_session_turns, session_retention_enabled, anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra, conversation_depth, resume_enabled, resume_max_messages, skill_injection_mode, browser_enabled
-FROM agents WHERE inactive = 0 ORDER BY name ASC;
-CREATE VIEW IF NOT EXISTS v_agent_registry AS
-SELECT name, os_user, workspace, timeout_minutes, runaway_threshold, runaway_size_threshold, inactive, protected, can_message_connections, model, triage_model, role,
-       context_injection_mode, token_budget, max_session_turns, tool_output_token_budget,
-       session_retention_enabled, session_retention_max_age, session_retention_max_count,
-       anchor_style, num_ctx, temperature, reasoning_effort, reasoning_max_tokens, model_params_extra,
-       conversation_depth, resume_enabled, resume_max_messages,
-       skill_injection_mode, browser_enabled,
-       status, status_message, requested_by, requested_by_name, created_at
-FROM agents ORDER BY protected DESC, name ASC;
-" 2>/dev/null && ok "Views recreated with new columns" || warn "View recreation failed"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN model_routing_enabled INTEGER DEFAULT 0;" 2>/dev/null && \
+      ok "Added model_routing_enabled column to agents table" || \
+      info "model_routing_enabled column already exists"
+    # Recreate views via init script — keeps v_active_agents / v_agent_registry in sync
+    # with init_agents_db.sh (includes tool_output_token_budget, model_routing_enabled, etc.)
+    if [ -f "${AGENTS_INIT}" ]; then
+      bash "${AGENTS_INIT}" "${AGENTS_DB}" >/dev/null 2>&1 && \
+        ok "agents.db views refreshed (init_agents_db.sh)" || \
+        warn "agents.db view refresh failed"
+    fi
+  fi
+  if [ -f "${CYCLES_INIT}" ] && [ -f "${CYCLES_DB}" ]; then
+    bash "${CYCLES_INIT}" "${CYCLES_DB}" >/dev/null 2>&1 && \
+      ok "cycles.db schema refreshed (cost columns, routing audit)" || \
+      warn "cycles.db schema refresh failed"
   fi
   echo ""
 
@@ -2760,8 +2793,15 @@ fi  # end UPDATE_MODE post-deploy steps
 #     registries from the MERGED catalog.
 # All idempotent and non-fatal. apply_system_permissions (below) re-asserts
 # ownership/modes on the files they touch.
-if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
+  if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
   section "Model Catalog — Reconcile, Baseline & Sync"
+  if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+    if agictl model openrouter patch-template --models-ini "${SCRIPT_DIR}/models.ini" >/dev/null 2>&1; then
+      ok "OpenRouter catalog metadata refreshed in shipped models.ini"
+    else
+      warn "OpenRouter template patch skipped (non-fatal — API may be unreachable)"
+    fi
+  fi
   if [ -f "${SCRIPT_DIR}/setup.ini" ] && [ -f "${SCRIPT_DIR}/models.ini" ]; then
     if agictl system reconcile-config \
         --setup-template "${SCRIPT_DIR}/setup.ini" \
@@ -2775,6 +2815,13 @@ if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
     ok "Model catalog baseline regenerated from setup.ini (custom layer preserved)"
   else
     warn "Model catalog migrate skipped (non-fatal)"
+  fi
+  if [ -f "/etc/versa-agi/models.ini" ]; then
+    if agictl model openrouter patch-template --models-ini "/etc/versa-agi/models.ini" >/dev/null 2>&1; then
+      ok "OpenRouter metadata + pricing refreshed on deployed models.ini"
+    else
+      warn "Deployed models.ini OpenRouter patch skipped (non-fatal)"
+    fi
   fi
   if agictl model sync >/dev/null 2>&1; then
     ok "Model catalog synced (derived sections + paths.env)"
@@ -2816,8 +2863,23 @@ fi
 # ─── System Permissions Restabilization ───────────────
 # This is the AUTHORITATIVE, FINAL pass. It enforces the System Design §IX
 # exactly. No blanket chown -R — every path is set individually.
+migrate_legacy_infra_files() {
+  local old_env="/etc/versa-agi/inference_endpoint.env"
+  local new_env="/etc/versa-agi/provider_keys.env"
+  if [ -f "${old_env}" ] && [ ! -f "${new_env}" ]; then
+    mv "${old_env}" "${new_env}"
+    ok "Migrated inference_endpoint.env → provider_keys.env"
+  fi
+  if [ -f "${new_env}" ]; then
+    sed -i '/^GEMINI_PASSTHROUGH_KEY=/d' "${new_env}" 2>/dev/null || true
+  fi
+  rm -f "/etc/versa-agi/inference_endpoint_config.yaml" 2>/dev/null || true
+  rm -f "/etc/versa-agi/litellm.env" 2>/dev/null || true
+}
+
 apply_system_permissions() {
   info "Applying System Design §IX permissions (final restabilization)..."
+  migrate_legacy_infra_files
   
   # ──────────────────────────────────────────────────────
   # §1. /etc/versa-agi/ — Configuration & Security
@@ -2826,12 +2888,17 @@ apply_system_permissions() {
   [ -f "/etc/versa-agi/coa_config.json" ] && chown "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/coa_config.json && chmod 640 /etc/versa-agi/coa_config.json
   [ -f "/etc/versa-agi/setup.ini" ]       && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/setup.ini && chmod 640 /etc/versa-agi/setup.ini
   [ -f "/etc/versa-agi/models.ini" ]      && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/models.ini && chmod 640 /etc/versa-agi/models.ini
+  [ -f "/etc/versa-agi/install-acceptance.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/install-acceptance.json && chmod 640 /etc/versa-agi/install-acceptance.json
+  [ -f "/etc/versa-agi/registration.conf" ]     && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/registration.conf && chmod 640 /etc/versa-agi/registration.conf
+  [ -f "/etc/versa-agi/provider_keys.env" ]       && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/provider_keys.env && chmod 600 /etc/versa-agi/provider_keys.env
   # paths.env: watchdog:coa 644 (readable by all — sourced by lifeline, agitop, sentinel)
   [ -f "/etc/versa-agi/paths.env" ]       && chown "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/paths.env && chmod 644 /etc/versa-agi/paths.env
-  # Other .env files: watchdog:coa 640 (skip paths.env — already set above)
+  # Agent .env files: watchdog:coa 640 (skip paths.env and provider_keys.env)
   for env_file in /etc/versa-agi/*.env; do
     [ -f "${env_file}" ] || continue
-    [ "$(basename "${env_file}")" = "paths.env" ] && continue
+    case "$(basename "${env_file}")" in
+      paths.env|provider_keys.env|inference_endpoint.env) continue ;;
+    esac
     chown "${WATCHDOG_USER}:${COA_USER}" "${env_file}" && chmod 640 "${env_file}"
   done
   # Sub-agent configs: watchdog:{os_user} 640
@@ -2870,6 +2937,8 @@ apply_system_permissions() {
   [ -f "/var/lib/versa-agi/coa/tasks.db" ]      && chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/coa/tasks.db && chmod 660 /var/lib/versa-agi/coa/tasks.db
   [ -f "/var/lib/versa-agi/coa/cycles.db" ]     && chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/coa/cycles.db && chmod 660 /var/lib/versa-agi/coa/cycles.db
   [ -d "/var/lib/versa-agi/coa/cycles" ]        && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/cycles && chmod 755 /var/lib/versa-agi/coa/cycles
+  mkdir -p "/var/lib/versa-agi/coa/view-cache"
+  chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/view-cache && chmod 770 /var/lib/versa-agi/coa/view-cache
   [ -f "/var/lib/versa-agi/coa/agent_memory.db" ] && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/agent_memory.db && chmod 660 /var/lib/versa-agi/coa/agent_memory.db
   
   # ──────────────────────────────────────────────────────
@@ -3009,7 +3078,7 @@ apply_system_permissions() {
     for agent_row in ${sub_agents}; do
       local agent="${agent_row%%|*}"
       local os_user="${agent_row##*|}"
-      local ahome="/home/agi-${agent}"
+      local ahome="/home/${os_user}"
       [ -d "${ahome}" ] || continue
       chown "${os_user}:agi_agents" "${ahome}" && chmod 770 "${ahome}"
       [ -d "${ahome}/.agent" ]        && chown "${os_user}:agi_agents" "${ahome}/.agent" && chmod 770 "${ahome}/.agent"
@@ -3022,12 +3091,14 @@ apply_system_permissions() {
       done
       [ -d "${ahome}/workspace" ]     && chown "${os_user}:agi_agents" "${ahome}/workspace" && chmod 2770 "${ahome}/workspace"
       # §IX.2 /var/lib/versa-agi/{name}/ — agent data directory
-      # Parent dir: watchdog-traversable. cycles/: agent-writable (lifeline spawns as agent).
-      # poise + duties: watchdog-readable (lifeline cat's poise for system.md)
+      # Parent dir: watchdog-traversable. cycles/ + view-cache/: agent-writable.
+      # poise + duties: watchdog-readable (lifeline cat's poise for system.md).
       local vdata="/var/lib/versa-agi/${agent}"
+      mkdir -p "${vdata}/cycles" "${vdata}/view-cache"
       if [ -d "${vdata}" ]; then
         chown "${WATCHDOG_USER}:${os_user}" "${vdata}" && chmod 750 "${vdata}"
-        [ -d "${vdata}/cycles" ]        && chown -R "${os_user}:${os_user}" "${vdata}/cycles" && chmod 755 "${vdata}/cycles"
+        chown -R "${os_user}:${os_user}" "${vdata}/cycles" && chmod 755 "${vdata}/cycles"
+        chown -R "${os_user}:${os_user}" "${vdata}/view-cache" && chmod 770 "${vdata}/view-cache"
         [ -f "${vdata}/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/last_prompt.txt" && chmod 640 "${vdata}/last_prompt.txt"
       fi
       [ -f "${vdata}/poise.md" ]  && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/poise.md"  && chmod 640 "${vdata}/poise.md"
@@ -3051,20 +3122,31 @@ apply_system_permissions() {
   # §IX.2 /var/lib/versa-agi/coa/ — runtime state files
   [ -f "/var/lib/versa-agi/coa/status.json" ]     && chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa/status.json"     && chmod 640 "/var/lib/versa-agi/coa/status.json"
   [ -f "/var/lib/versa-agi/coa/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa/last_prompt.txt" && chmod 640 "/var/lib/versa-agi/coa/last_prompt.txt"
+  [ -f "/var/lib/versa-agi/registration-status.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/var/lib/versa-agi/registration-status.json" && chmod 640 "/var/lib/versa-agi/registration-status.json"
   
-  # §IX.2 /var/lib/versa-agi/ — fix orphan dirs (archive, config)
+  # §IX.2 /var/lib/versa-agi/ — fix orphan dirs (archive)
   if [ -d "/var/lib/versa-agi/archive" ]; then
     chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi/archive
     chmod 755 /var/lib/versa-agi/archive
     find /var/lib/versa-agi/archive -type f -exec chmod 644 {} + 2>/dev/null || true
   fi
-  [ -d "/var/lib/versa-agi/config" ]  && chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi/config && chmod 755 /var/lib/versa-agi/config
   
 
   ok "System Design §IX permissions applied"
 }
 
 apply_system_permissions
+
+# ═══════════════════════════════════════════════════════
+# U4a: Skills DB reconcile (--update only, always)
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = true ]; then
+  RECONCILE_SKILLS="${DEPLOYED_CORE_INFRA}/scripts/reconcile_skills_db.py"
+  if [ -f "${RECONCILE_SKILLS}" ]; then
+    step_arrow "Reconciling skills registry in agents.db"
+    python3 "${RECONCILE_SKILLS}" || warn "skills DB reconcile encountered an issue."
+  fi
+fi
 
 # ═══════════════════════════════════════════════════════
 # U4b: Sync Templates (--update only, with prompt)
@@ -3077,6 +3159,7 @@ if [ "${UPDATE_MODE}" = true ]; then
     if confirm_accent "Do you want to sync updated system templates (poise & skills) to active agents?"; then
       step_arrow "Running: python3 ${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py"
       python3 "${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py" || warn "sync_templates encountered an issue."
+      apply_system_permissions
     fi
   fi
 fi
@@ -3270,7 +3353,7 @@ fi
 
 if [ -f "${REGISTRATION_CONF_SRC}" ]; then
   cp -f "${REGISTRATION_CONF_SRC}" "/etc/versa-agi/registration.conf"
-  chown root:"${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
   chmod 640 "/etc/versa-agi/registration.conf"
   ok "registration.conf deployed to /etc/versa-agi/"
 fi

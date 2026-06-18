@@ -21,6 +21,24 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from agitop.data import AgentReader, MessageReader, TasksReader
 from identity import provision_identity
 from comms import fetch_inbox, send_message, mark_message_processed, build_attachments
+from model_catalog import (
+    WORK_MODALITIES,
+    OUTPUT_DELIVERY_MODALITIES,
+    catalog_row_to_value,
+    load_catalog as _mc_load_catalog,
+    parse_catalog_row,
+    validate_model_routing_prefs,
+    validate_preferred_model_key,
+    validate_preferred_output_key,
+)
+from openrouter_catalog import (
+    enrich_catalog_dict,
+    fetch_openrouter_index_with_fallback,
+    list_addable_models,
+    openrouter_configured,
+    or_model_summary,
+)
+import provider_catalog as _pc
 
 # ─── Configuration ────────────────────────────────────
 def get_config():
@@ -175,6 +193,25 @@ def system_config_set_ini(section, key, value):
         json_response(False, error="setup.ini not found")
         sys.exit(1)
 
+    section_l = (section or "").strip().lower()
+    key_l = (key or "").strip().lower()
+    value_s = str(value).strip()
+
+    if section_l == "agent" and key_l == "model_routing_mode":
+        if value_s.lower() not in ("pool", "preferred"):
+            json_response(False, error="model_routing_mode must be 'pool' or 'preferred'")
+            sys.exit(1)
+    elif section_l == "model_routing" and key_l in WORK_MODALITIES and value_s:
+        ok, err = validate_preferred_model_key(value_s, key_l)
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
+    elif section_l == "output_routing" and key_l in OUTPUT_DELIVERY_MODALITIES and value_s:
+        ok, err = validate_preferred_output_key(value_s, key_l)
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
+
     try:
         _update_ini_key(ini_path, section, key, value)
         _sync_ini_to_source(ini_path)
@@ -192,10 +229,10 @@ def system_set_key(key_type, value):
     Key types:
       gemini     - Gemini API Key → coa.env, *.env, .bashrc, setup.ini
       versavoice - VersaVoice API Token → coa_config.json, *_config.json, setup.ini
-      xai        - xAI API Key → inference_endpoint.env, setup.ini
-      openai     - OpenAI API Key → inference_endpoint.env, setup.ini
-      anthropic  - Anthropic API Key → inference_endpoint.env, setup.ini
-      openrouter - OpenRouter API Key → inference_endpoint.env, setup.ini
+      xai        - xAI API Key → provider_keys.env, setup.ini
+      openai     - OpenAI API Key → provider_keys.env, setup.ini
+      anthropic  - Anthropic API Key → provider_keys.env, setup.ini
+      openrouter - OpenRouter API Key → provider_keys.env, setup.ini
     """
     import glob
     import re
@@ -272,7 +309,7 @@ def system_set_key(key_type, value):
             if env_file == coa_env:
                 continue  # Already handled
             basename = os.path.basename(env_file)
-            if basename in ("inference_endpoint.env", "paths.env"):
+            if basename in ("provider_keys.env", "inference_endpoint.env", "paths.env"):
                 continue  # Not agent env files
             if _sed_replace(env_file, r"^GEMINI_API_KEY=.*$", f"GEMINI_API_KEY={value}"):
                 updated_files.append(env_file)
@@ -310,135 +347,121 @@ def system_set_key(key_type, value):
     # XAI API KEY
     # ════════════════════════════════════════════════
     elif key_type == "xai":
-        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
-        if os.path.isfile(inference_endpoint_env):
-            if _sed_replace(inference_endpoint_env, r"^XAI_API_KEY=.*$", f"XAI_API_KEY={value}"):
-                updated_files.append(inference_endpoint_env)
+        provider_keys_env = _provider_keys_env_path()
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, r"^XAI_API_KEY=.*$", f"XAI_API_KEY={value}"):
+                updated_files.append(provider_keys_env)
             else:
-                # Key line doesn't exist yet — append it
                 try:
-                    with open(inference_endpoint_env, "a") as f:
+                    with open(provider_keys_env, "a") as f:
                         f.write(f"\nXAI_API_KEY={value}\n")
-                    updated_files.append(inference_endpoint_env)
+                    updated_files.append(provider_keys_env)
                 except Exception as e:
-                    errors.append(f"{inference_endpoint_env}: {e}")
+                    errors.append(f"{provider_keys_env}: {e}")
         else:
-            # Create inference_endpoint.env
             try:
-                with open(inference_endpoint_env, "w") as f:
+                with open(provider_keys_env, "w") as f:
                     f.write(f"XAI_API_KEY={value}\n")
-                os.chmod(inference_endpoint_env, 0o600)
-                import subprocess as _sp
-                _sp.run(["chown", "root:root", inference_endpoint_env], check=False)
-                updated_files.append(inference_endpoint_env)
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
             except Exception as e:
-                errors.append(f"{inference_endpoint_env}: {e}")
+                errors.append(f"{provider_keys_env}: {e}")
 
-        # setup.ini
         _ini_set("third_party", "xai_api_key", value)
 
     # ════════════════════════════════════════════════
     # OPENAI API KEY
     # ════════════════════════════════════════════════
     elif key_type == "openai":
-        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
+        provider_keys_env = _provider_keys_env_path()
         env_var = "OPENAI_API_KEY"
-        if os.path.isfile(inference_endpoint_env):
-            if _sed_replace(inference_endpoint_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
-                updated_files.append(inference_endpoint_env)
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(provider_keys_env)
             else:
-                # Key line doesn't exist yet — append it
                 try:
-                    with open(inference_endpoint_env, "a") as f:
+                    with open(provider_keys_env, "a") as f:
                         f.write(f"\n{env_var}={value}\n")
-                    updated_files.append(inference_endpoint_env)
+                    updated_files.append(provider_keys_env)
                 except Exception as e:
-                    errors.append(f"{inference_endpoint_env}: {e}")
+                    errors.append(f"{provider_keys_env}: {e}")
         else:
             try:
-                with open(inference_endpoint_env, "w") as f:
+                with open(provider_keys_env, "w") as f:
                     f.write(f"{env_var}={value}\n")
-                os.chmod(inference_endpoint_env, 0o600)
-                import subprocess as _sp
-                _sp.run(["chown", "root:root", inference_endpoint_env], check=False)
-                updated_files.append(inference_endpoint_env)
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
             except Exception as e:
-                errors.append(f"{inference_endpoint_env}: {e}")
+                errors.append(f"{provider_keys_env}: {e}")
 
-        # setup.ini
         _ini_set("third_party", "openai_api_key", value)
 
     # ════════════════════════════════════════════════
     # ANTHROPIC API KEY
     # ════════════════════════════════════════════════
     elif key_type == "anthropic":
-        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
+        provider_keys_env = _provider_keys_env_path()
         env_var = "ANTHROPIC_API_KEY"
-        if os.path.isfile(inference_endpoint_env):
-            if _sed_replace(inference_endpoint_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
-                updated_files.append(inference_endpoint_env)
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(provider_keys_env)
             else:
                 try:
-                    with open(inference_endpoint_env, "a") as f:
+                    with open(provider_keys_env, "a") as f:
                         f.write(f"\n{env_var}={value}\n")
-                    updated_files.append(inference_endpoint_env)
+                    updated_files.append(provider_keys_env)
                 except Exception as e:
-                    errors.append(f"{inference_endpoint_env}: {e}")
+                    errors.append(f"{provider_keys_env}: {e}")
         else:
             try:
-                with open(inference_endpoint_env, "w") as f:
+                with open(provider_keys_env, "w") as f:
                     f.write(f"{env_var}={value}\n")
-                os.chmod(inference_endpoint_env, 0o600)
-                import subprocess as _sp
-                _sp.run(["chown", "root:root", inference_endpoint_env], check=False)
-                updated_files.append(inference_endpoint_env)
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
             except Exception as e:
-                errors.append(f"{inference_endpoint_env}: {e}")
+                errors.append(f"{provider_keys_env}: {e}")
 
-        # setup.ini
         _ini_set("third_party", "anthropic_api_key", value)
 
     # ════════════════════════════════════════════════
     # OPENROUTER API KEY
     # ════════════════════════════════════════════════
     elif key_type == "openrouter":
-        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
+        provider_keys_env = _provider_keys_env_path()
         env_var = "OPENROUTER_API_KEY"
-        if os.path.isfile(inference_endpoint_env):
-            if _sed_replace(inference_endpoint_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
-                updated_files.append(inference_endpoint_env)
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(provider_keys_env)
             else:
                 try:
-                    with open(inference_endpoint_env, "a") as f:
+                    with open(provider_keys_env, "a") as f:
                         f.write(f"\n{env_var}={value}\n")
-                    updated_files.append(inference_endpoint_env)
+                    updated_files.append(provider_keys_env)
                 except Exception as e:
-                    errors.append(f"{inference_endpoint_env}: {e}")
+                    errors.append(f"{provider_keys_env}: {e}")
         else:
             try:
-                with open(inference_endpoint_env, "w") as f:
+                with open(provider_keys_env, "w") as f:
                     f.write(f"{env_var}={value}\n")
                     f.write("OR_SITE_URL=https://versavoice.ai\n")
                     f.write("OR_APP_NAME=Versa AGi\n")
-                os.chmod(inference_endpoint_env, 0o600)
-                import subprocess as _sp
-                _sp.run(["chown", "root:root", inference_endpoint_env], check=False)
-                updated_files.append(inference_endpoint_env)
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
             except Exception as e:
-                errors.append(f"{inference_endpoint_env}: {e}")
+                errors.append(f"{provider_keys_env}: {e}")
 
-        if os.path.isfile(inference_endpoint_env):
+        if os.path.isfile(provider_keys_env):
             for attr_kv in (
                 ("OR_SITE_URL", "https://versavoice.ai"),
                 ("OR_APP_NAME", "Versa AGi"),
             ):
                 attr, attr_val = attr_kv
-                if not _sed_replace(inference_endpoint_env, rf"^{attr}=.*$", f"{attr}={attr_val}"):
+                if not _sed_replace(provider_keys_env, rf"^{attr}=.*$", f"{attr}={attr_val}"):
                     try:
-                        with open(inference_endpoint_env, "a") as f:
+                        with open(provider_keys_env, "a") as f:
                             f.write(f"{attr}={attr_val}\n")
                     except Exception as e:
-                        errors.append(f"{inference_endpoint_env}: {e}")
+                        errors.append(f"{provider_keys_env}: {e}")
 
         _ini_set("third_party", "openrouter_api_key", value)
 
@@ -902,10 +925,28 @@ def system_reconcile_config(setup_template, models_template):
 # ─── Shared Helpers ──────────────────────────────────
 
 PATHS_ENV_FILE = "/etc/versa-agi/paths.env"
-INFERENCE_CONFIG_FILE = "/etc/versa-agi/inference_endpoint_config.yaml"
+PROVIDER_KEYS_ENV = "/etc/versa-agi/provider_keys.env"
+PROVIDER_KEYS_ENV_LEGACY = "/etc/versa-agi/inference_endpoint.env"
 SETUP_INI_CANONICAL = "/etc/versa-agi/setup.ini"
 SYCL_MODEL_DIR = "/opt/versa-agi/sycl-models"
 SYCL_CONTAINER = "versa-agi-sycl"
+
+def _provider_keys_env_path() -> str:
+    """Resolve provider key store (migrated from inference_endpoint.env)."""
+    if os.path.isfile(PROVIDER_KEYS_ENV):
+        return PROVIDER_KEYS_ENV
+    if os.path.isfile(PROVIDER_KEYS_ENV_LEGACY):
+        return PROVIDER_KEYS_ENV_LEGACY
+    return PROVIDER_KEYS_ENV
+
+
+def _ensure_provider_keys_env_permissions(path: str) -> None:
+    try:
+        os.chmod(path, 0o600)
+        subprocess.run(["chown", "watchdog:watchdog", path], check=False, capture_output=True)
+    except OSError:
+        pass
+
 
 # ─── Intel SYCL Model Registry (dynamic) ──────────────────
 # Loaded from models.ini [sycl_models] section.
@@ -920,6 +961,14 @@ _MODELS_INI_PATHS = [
 ]
 
 
+def _models_ini_parser():
+    """ConfigParser for models.ini — tolerant of duplicate sections (last wins)."""
+    import configparser
+    cfg = configparser.ConfigParser(delimiters=("=",), strict=False)
+    cfg.optionxform = str
+    return cfg
+
+
 def _load_sycl_registry():
     """Load SYCL model registry from models.ini [sycl_models] section.
 
@@ -927,7 +976,7 @@ def _load_sycl_registry():
     Falls back to empty dict if models.ini is unavailable.
     """
     import configparser
-    ini = configparser.ConfigParser(delimiters=('=',))
+    ini = _models_ini_parser()
     for path in _MODELS_INI_PATHS:
         if os.path.exists(path):
             ini.read(path)
@@ -974,8 +1023,7 @@ def _read_raw_section(path, section):
     they round-trip with _upsert_models_ini_entry / _remove_ini_entry.
     """
     import configparser
-    ini = configparser.ConfigParser(delimiters=('=',))
-    ini.optionxform = str
+    ini = _models_ini_parser()
     if path and os.path.exists(path):
         try:
             ini.read(path)
@@ -1025,45 +1073,8 @@ def _load_providers():
 
 
 def _load_catalog():
-    """Load the merged model catalog (baseline [catalog] + [catalog_custom]).
-
-    Returns dict keyed by model name:
-      {"class": str, "provider": str, "enabled": bool, "coa": bool,
-       "ctx_recommended": int, "ctx_max": int, "label": str,
-       "origin": "baseline"|"custom"|"override"}
-    Format per row:
-      key = class|provider|enabled|coa_approved|ctx_recommended|ctx_max|Display Label
-    """
-    path = _resolve_models_ini_path()
-    base = _read_raw_section(path, "catalog")
-    custom = _read_raw_section(path, "catalog_custom")
-    out = {}
-
-    def _parse(key, raw, origin):
-        parts = raw.split("|")
-        if len(parts) < 7:
-            return
-        try:
-            ctx_rec = int(parts[4].strip() or "0")
-            ctx_max = int(parts[5].strip() or "0")
-        except ValueError:
-            ctx_rec, ctx_max = 0, 0
-        out[key] = {
-            "class": parts[0].strip(),
-            "provider": parts[1].strip(),
-            "enabled": parts[2].strip().lower() == "true",
-            "coa": parts[3].strip().lower() == "true",
-            "ctx_recommended": ctx_rec,
-            "ctx_max": ctx_max,
-            "label": "|".join(parts[6:]).strip(),
-            "origin": origin,
-        }
-
-    for key, raw in base.items():
-        _parse(key, raw, "baseline")
-    for key, raw in custom.items():
-        _parse(key, raw, "override" if key in base else "custom")
-    return out
+    """Load the merged model catalog (baseline [catalog] + [catalog_custom])."""
+    return _mc_load_catalog(_resolve_models_ini_path())
 
 
 def _replace_ini_section_body(path, section, body_lines):
@@ -1751,153 +1762,6 @@ def _query_ollama_models():
         return {}
 
 
-def _regenerate_inference_endpoint_config():
-    """Regenerate inference_endpoint_config.yaml from setup.ini and restart the proxy.
-
-    Python port of the bash logic in setup.sh lines 1948-1994.
-    """
-    import configparser
-    from harness.model_params import resolve_model_params, detect_provider_family, to_litellm_endpoint_extras
-
-    ini_path = SETUP_INI_CANONICAL
-    if not os.path.isfile(ini_path):
-        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
-    if not os.path.isfile(ini_path):
-        return False, "setup.ini not found"
-
-    cfg = configparser.ConfigParser()
-    cfg.read(ini_path)
-
-    local_enabled = cfg.get("local_ai", "enabled", fallback="false")
-    local_models_raw = cfg.get("local_ai", "local_models", fallback="")
-    ollama_host = cfg.get("local_ai", "ollama_host", fallback="http://localhost:11434")
-    proxy_enabled = cfg.get("third_party", "enabled", fallback="false")
-
-    lines = ["model_list:\n"]
-
-    # Gemini passthrough (if cloud proxy enabled)
-    if proxy_enabled == "true":
-        gemini_key = ""
-        coa_env = "/etc/versa-agi/coa.env"
-        if os.path.isfile(coa_env):
-            with open(coa_env, "r") as f:
-                for l in f:
-                    if l.startswith("GEMINI_API_KEY="):
-                        gemini_key = l.strip().split("=", 1)[1]
-                        break
-        if gemini_key:
-            inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
-            # Update GEMINI_PASSTHROUGH_KEY in inference_endpoint.env
-            _env_lines = []
-            found_key = False
-            if os.path.isfile(inference_endpoint_env):
-                with open(inference_endpoint_env, "r") as f:
-                    _env_lines = f.readlines()
-                for i, l in enumerate(_env_lines):
-                    if l.startswith("GEMINI_PASSTHROUGH_KEY="):
-                        _env_lines[i] = f"GEMINI_PASSTHROUGH_KEY={gemini_key}\n"
-                        found_key = True
-                        break
-            if not found_key:
-                _env_lines.append(f"GEMINI_PASSTHROUGH_KEY={gemini_key}\n")
-            with open(inference_endpoint_env, "w") as f:
-                f.writelines(_env_lines)
-
-        lines.append('  # ── Google Gemini passthrough ──\n')
-        lines.append('  - model_name: "gemini-*"\n')
-        lines.append('    inference_endpoint_params:\n')
-        lines.append('      model: "gemini/gemini-*"\n')
-        lines.append('      api_key: os.environ/GEMINI_PASSTHROUGH_KEY\n')
-
-    # Local models
-    if local_enabled == "true" and local_models_raw:
-        gpu_backend = cfg.get("local_ai", "gpu_backend", fallback="standard")
-        if gpu_backend == "intel":
-            # Intel SYCL: Docker llama-server (OpenAI-compatible)
-            sycl_port = cfg.get("local_ai", "sycl_port", fallback="8080")
-            strategy = cfg.get("local_ai", "model_loading_strategy", fallback="single")
-            if strategy == "router":
-                # Router: register ALL downloaded local models — server loads on demand
-                for model in [m.strip() for m in local_models_raw.split(",") if m.strip()]:
-                    gguf = _resolve_gguf_for_model(model)
-                    lines.append(f"  - model_name: {model}\n")
-                    lines.append("    inference_endpoint_params:\n")
-                    lines.append(f"      model: openai/{gguf}\n")
-                    lines.append(f"      api_base: http://localhost:{sycl_port}/v1\n")
-                    lines.append("      api_key: none\n")
-            else:
-                # Single: only the active model (existing behavior)
-                active_model = cfg.get("local_ai", "sycl_active_model", fallback="")
-                if active_model:
-                    gguf = _resolve_gguf_for_model(active_model)
-                    lines.append(f"  - model_name: {active_model}\n")
-                    lines.append("    inference_endpoint_params:\n")
-                    lines.append(f"      model: openai/{gguf}\n")
-                    lines.append(f"      api_base: http://localhost:{sycl_port}/v1\n")
-                    lines.append("      api_key: none\n")
-        else:
-            # Standard: all models via Ollama
-            for model in [m.strip() for m in local_models_raw.split(",") if m.strip()]:
-                lines.append(f"  - model_name: {model}\n")
-                lines.append("    inference_endpoint_params:\n")
-                lines.append(f"      model: ollama/{model}\n")
-                lines.append(f"      api_base: {ollama_host}\n")
-
-    # Cloud proxy providers
-    if proxy_enabled == "true":
-        providers_raw = cfg.get("third_party", "providers", fallback="")
-        if providers_raw:
-            for provider in [p.strip() for p in providers_raw.split(",") if p.strip()]:
-                p_enabled = cfg.get("third_party", f"{provider}_enabled", fallback="false")
-                p_models = cfg.get("third_party", f"{provider}_models", fallback="")
-                if p_enabled == "true" and p_models:
-                    provider_upper = provider.upper()
-                    for model in [m.strip() for m in p_models.split(",") if m.strip()]:
-                        lines.append(f"  - model_name: {model}\n")
-                        lines.append("    inference_endpoint_params:\n")
-                        lines.append(f"      model: {provider}/{model}\n")
-                        lines.append(f"      api_key: os.environ/{provider_upper}_API_KEY\n")
-                        resolved = resolve_model_params(model)
-                        family = detect_provider_family(model, provider_slug=provider)
-                        lines.extend(to_litellm_endpoint_extras(family, model, resolved))
-
-    # OpenRouter attribution headers for LiteLLM (when provider is enabled)
-    openrouter_enabled = cfg.get("third_party", "openrouter_enabled", fallback="false")
-    if proxy_enabled == "true" and openrouter_enabled == "true":
-        inference_endpoint_env = "/etc/versa-agi/inference_endpoint.env"
-        _env_lines = []
-        if os.path.isfile(inference_endpoint_env):
-            with open(inference_endpoint_env, "r") as f:
-                _env_lines = f.readlines()
-        for attr, val in (("OR_SITE_URL", "https://versavoice.ai"),
-                          ("OR_APP_NAME", "Versa AGi")):
-            found = False
-            for i, l in enumerate(_env_lines):
-                if l.startswith(f"{attr}="):
-                    _env_lines[i] = f"{attr}={val}\n"
-                    found = True
-                    break
-            if not found:
-                _env_lines.append(f"{attr}={val}\n")
-        with open(inference_endpoint_env, "w") as f:
-            f.writelines(_env_lines)
-
-    # Write config
-    os.makedirs(os.path.dirname(INFERENCE_CONFIG_FILE), exist_ok=True)
-    with open(INFERENCE_CONFIG_FILE, "w") as f:
-        f.writelines(lines)
-    # Fix ownership
-    subprocess.run(["chown", "watchdog:watchdog", INFERENCE_CONFIG_FILE], check=False, capture_output=True)
-    subprocess.run(["chmod", "644", INFERENCE_CONFIG_FILE], check=False, capture_output=True)
-
-    # Restart Inference Server if running
-    result = subprocess.run(["systemctl", "is-active", "--quiet", "versa-agi-inference_endpoint"], capture_output=True)
-    if result.returncode == 0:
-        subprocess.run(["systemctl", "restart", "versa-agi-inference_endpoint"], check=False, capture_output=True)
-        return True, "inference_endpoint_config.yaml regenerated, Inference Server restarted"
-    return True, "inference_endpoint_config.yaml regenerated (Inference Server not running)"
-
-
 # ─── Model Command Group ────────────────────────────
 
 @cli.group()
@@ -2094,8 +1958,7 @@ def model_add(name, no_pull):
 
     Standard: Pulls the model via Ollama.
     Intel: Downloads GGUF via HuggingFace CLI.
-    Both: registers in setup.ini, updates paths.env, regenerates
-    inference_endpoint_config.yaml, and restarts the Inference Endpoint. Requires root (sudo).
+    Both: registers in setup.ini and updates paths.env. Requires root (sudo).
     """
     if os.geteuid() != 0:
         json_response(False, error="model add requires root. Use: sudo agictl model add ...")
@@ -2122,14 +1985,10 @@ def model_add(name, no_pull):
             else:
                 os.makedirs(SYCL_MODEL_DIR, exist_ok=True)
                 print(f"Downloading: {gguf_file} ...")
-                # Use 'hf' (v1.14+) with 'huggingface-cli' fallback, then common pip paths, then Inference Server venv
-                _inference_endpoint_venv_hf = "/opt/versa-agi/inference_endpoint/bin/hf"
-                # Under sudo, PATH may be stripped — check explicit pip install locations
                 _pip_search_paths = [
                     "/usr/local/bin/hf", "/usr/local/bin/huggingface-cli",
                     os.path.expanduser("~/.local/bin/hf"), os.path.expanduser("~/.local/bin/huggingface-cli"),
                 ]
-                # Also check invoking user's home (SUDO_USER)
                 _sudo_user = os.environ.get("SUDO_USER", "")
                 if _sudo_user:
                     _pip_search_paths.extend([
@@ -2140,7 +1999,6 @@ def model_add(name, no_pull):
                     shutil.which("hf")
                     or shutil.which("huggingface-cli")
                     or next((p for p in _pip_search_paths if os.path.isfile(p) and os.access(p, os.X_OK)), None)
-                    or (_inference_endpoint_venv_hf if os.path.isfile(_inference_endpoint_venv_hf) else None)
                 )
                 if not hf_cmd:
                     json_response(False, error="HuggingFace CLI not found. Install: sudo pipx install huggingface_hub[cli]")
@@ -2211,13 +2069,6 @@ def model_add(name, no_pull):
     else:
         errors.append("Failed to update paths.env")
 
-    # ── 4. Regenerate inference_endpoint_config.yaml + restart ──
-    ok, msg = _regenerate_inference_endpoint_config()
-    if ok:
-        steps.append(msg)
-    else:
-        errors.append(msg)
-
     if errors:
         json_response(False, model=name, steps=steps, errors=errors)
         sys.exit(1)
@@ -2234,8 +2085,7 @@ def model_add(name, no_pull):
 def model_remove(name, delete):
     """Unregister a local model.
 
-    Removes the model from setup.ini, updates paths.env,
-    regenerates inference_endpoint_config.yaml, and restarts the Inference Endpoint.
+    Removes the model from setup.ini and updates paths.env.
     Standard: optionally deletes model weights with --delete (ollama rm).
     Intel: optionally deletes GGUF file with --delete. Requires root (sudo).
     """
@@ -2271,13 +2121,6 @@ def model_remove(name, delete):
         steps.append("paths.env updated")
     else:
         errors.append("Failed to update paths.env")
-
-    # ── 3. Regenerate inference_endpoint_config.yaml + restart ──
-    ok, msg = _regenerate_inference_endpoint_config()
-    if ok:
-        steps.append(msg)
-    else:
-        errors.append(msg)
 
     # ── 4. Optionally delete model weights ──
     if delete:
@@ -2453,9 +2296,8 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
 def model_activate(name, ctx_override, parallel_override):
     """Switch the active/default model on the Intel SYCL backend.
 
-    Updates setup.ini, regenerates inference_endpoint_config.yaml, and
-    (in single mode) syncs all local sub-agents. Docker is only restarted
-    when infrastructure parameters (--ctx, --parallel) change.
+    Updates setup.ini and paths.env. In single mode, syncs all local sub-agents.
+    Docker is only restarted when infrastructure parameters (--ctx, --parallel) change.
 
     Only available when gpu_backend=intel. Requires root (sudo).
 
@@ -2580,14 +2422,7 @@ def model_activate(name, ctx_override, parallel_override):
     else:
         errors.append("setup.ini not found")
 
-    # ── 5. Regenerate inference_endpoint_config.yaml + restart ──
-    ok, msg = _regenerate_inference_endpoint_config()
-    if ok:
-        steps.append(msg)
-    else:
-        errors.append(msg)
-
-    # ── 6. Update paths.env — all models always available (router architecture) ──
+    # ── 5. Update paths.env — all models always available (router architecture) ──
     all_local, _ = _read_ini_csv("local_ai", "local_models")
     all_local_str = ",".join(all_local) if all_local else name
     if _update_paths_env_key("VERSA_LOCAL_MODELS", all_local_str):
@@ -2816,27 +2651,373 @@ def model_sync():
     json_response(True, **payload)
 
 
-def _catalog_baseline_meta(ini):
-    """Parse the [catalog] BASELINE rows into {key: (label, ctx_recommended, ctx_max)}.
+@model.group("openrouter")
+def openrouter_cmd():
+    """Browse OpenRouter and add models to the Versa catalog."""
+    pass
 
-    This is the single stock-metadata source for cloud/third-party models: the
-    shipped template's [catalog] (re-read from the file being migrated). `migrate`
-    re-selects *membership* from setup.ini but carries label + context windows from
-    here, so there is one canonical metadata shape (no parallel legacy sections).
-    """
+
+@openrouter_cmd.command("status")
+def openrouter_status_cmd():
+    """Report whether OpenRouter is enabled and keyed."""
+    ok, reason = openrouter_configured()
+    json_response(True, configured=ok, reason=reason if not ok else "")
+
+
+@openrouter_cmd.command("list")
+@click.option("--addable-only/--all", "addable_only", default=True,
+              help="Default: chat-capable models not already in catalog")
+@click.option("--table", "as_table", is_flag=True)
+def openrouter_list_cmd(addable_only, as_table):
+    """List models from the OpenRouter API (public listing; no API key required)."""
+    try:
+        index = fetch_openrouter_index_with_fallback()
+    except Exception as e:
+        json_response(False, error=f"OpenRouter API unavailable: {e}")
+        sys.exit(1)
+    cat = _load_catalog()
+    if addable_only:
+        models = list_addable_models(cat.keys(), index)
+    else:
+        from openrouter_catalog import is_chat_capable
+        models = [
+            or_model_summary(m)
+            for m in sorted(index.values(), key=lambda x: x.get("id", ""))
+            if is_chat_capable(m)
+        ]
+    if as_table:
+        if not models:
+            click.echo("No OpenRouter models.")
+            return
+        click.echo(f"{'ID':<36} {'CTX':<8} {'IN→OUT':<18} {'$/M in':<8} {'$/M out':<8} WORK")
+        for r in models:
+            io = f"{r['input_modalities']}→{r['output_modalities']}"
+            pr = r.get("pricing") or {}
+            pin = pr.get("prompt_per_m", 0)
+            pout = pr.get("completion_per_m", 0)
+            click.echo(
+                f"{r['id']:<36} {r.get('context_length') or 0:<8} {io:<18} "
+                f"{pin:<8.4g} {pout:<8.4g} {r['work_modality']}"
+            )
+        return
+    json_response(True, count=len(models), models=models)
+
+
+_OPENROUTER_DEFAULT_MODEL_PARAMS = json.dumps({
+    "reasoning_effort": "none",
+    "allowed_reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh"],
+}, separators=(",", ":"))
+
+
+@openrouter_cmd.command("add")
+@click.argument("model_id")
+@click.option("--coa-approved/--no-coa-approved", default=None,
+              help="Default: true when model is in setup.ini coa_approved_models")
+@click.option("--router-eligible/--no-router-eligible", default=True)
+@click.option("--no-sync", is_flag=True)
+def openrouter_add_cmd(model_id, coa_approved, router_eligible, no_sync):
+    """Add an OpenRouter model to [catalog_custom] using live API metadata."""
+    cat = _load_catalog()
+    if model_id in cat:
+        json_response(False, error=f"Model '{model_id}' already in catalog")
+        sys.exit(1)
+    try:
+        index = fetch_openrouter_index_with_fallback()
+    except Exception as e:
+        json_response(False, error=f"OpenRouter API unavailable: {e}")
+        sys.exit(1)
+    or_model = index.get(model_id)
+    if not or_model:
+        json_response(False, error=f"Model '{model_id}' not found on OpenRouter")
+        sys.exit(1)
+    from openrouter_catalog import is_chat_capable
+    if not is_chat_capable(or_model):
+        json_response(False, error=f"Model '{model_id}' is not chat-capable (no text output)")
+        sys.exit(1)
+    coa_set = set(_read_ini_csv("gemini", "coa_approved_models")[0])
+    if coa_approved is None:
+        coa_approved = model_id in coa_set
+    ctx = or_model.get("context_length") or 131072
+    summary = or_model_summary(or_model)
+    row = {
+        "class": "third_party",
+        "provider": "openrouter",
+        "enabled": True,
+        "coa": coa_approved,
+        "ctx_recommended": 0,
+        "ctx_max": int(ctx) if ctx else 131072,
+        "work_modality": summary["work_modality"],
+        "input_modalities": summary["input_modalities"],
+        "output_modalities": summary["output_modalities"],
+        "router_eligible": router_eligible,
+        "label": summary["label"],
+    }
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    value = catalog_row_to_value(row)
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
+            _upsert_models_ini_entry(
+                path, "model_params_custom", f"model:{model_id}", _OPENROUTER_DEFAULT_MODEL_PARAMS,
+            )
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    try:
+        from openrouter_catalog import patch_models_ini_openrouter_pricing
+        for path in targets:
+            patch_models_ini_openrouter_pricing(path, keys=[model_id])
+    except Exception:
+        pass
+    # Append to setup.ini openrouter_models so migrate retains membership
+    for ini in (SETUP_INI_CANONICAL, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "setup.ini",
+    )):
+        if not os.path.isfile(ini):
+            continue
+        existing = _read_ini_csv("third_party", "openrouter_models")[0]
+        if model_id not in existing:
+            existing.append(model_id)
+            try:
+                _update_ini_key(ini, "third_party", "openrouter_models", ",".join(existing))
+            except Exception:
+                pass
+    payload = {"action": "openrouter_add", "key": model_id, "label": summary["label"]}
+    _auto_sync_and_respond(payload, not no_sync)
+
+
+@openrouter_cmd.command("patch-template")
+@click.option("--models-ini", "models_ini", default=None, help="Path to models.ini template")
+def openrouter_patch_template_cmd(models_ini):
+    """Refresh OpenRouter metadata on [catalog] OR rows and [catalog_pricing] for all catalog keys."""
+    from openrouter_catalog import patch_models_ini_openrouter_rows, patch_models_ini_openrouter_pricing
+    if not models_ini:
+        models_ini = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "models.ini",
+        )
+    try:
+        updated = patch_models_ini_openrouter_rows(models_ini)
+        priced = patch_models_ini_openrouter_pricing(models_ini, keys=None)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    json_response(True, action="openrouter_patch_template", updated=updated, count=len(updated),
+                  pricing_updated=priced, pricing_count=len(priced), path=models_ini)
+
+
+# ─── Provider-agnostic catalog source (xAI / OpenAI / Anthropic / Google) ─────
+# Same "import from provider" pattern as the OpenRouter group, generalized to
+# each direct-API provider via provider_catalog.
+
+_PROVIDER_DEFAULT_MODEL_PARAMS = json.dumps({
+    "reasoning_effort": "none",
+    "allowed_reasoning_efforts": ["none", "minimal", "low", "medium", "high"],
+}, separators=(",", ":"))
+
+
+def _append_setup_csv(section, key, value):
+    """Append ``value`` to a comma-separated setup.ini key (every live copy)."""
+    for ini in (SETUP_INI_CANONICAL, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "setup.ini",
+    )):
+        if not os.path.isfile(ini):
+            continue
+        existing = _read_ini_csv(section, key)[0]
+        if value not in existing:
+            existing.append(value)
+            try:
+                _update_ini_key(ini, section, key, ",".join(existing))
+            except Exception:
+                pass
+
+
+@model.group("source")
+def source_cmd():
+    """Import models from a configured provider's Models API into the catalog."""
+    pass
+
+
+@source_cmd.command("providers")
+def source_providers_cmd():
+    """List providers that are registered, enabled, and keyed (UI button gating)."""
+    rows = []
+    for slug in _pc.supported_providers():
+        ok, reason = _pc.provider_configured(slug)
+        rows.append({
+            "slug": slug,
+            "label": _pc.PROVIDER_LABEL.get(slug, slug),
+            "configured": ok,
+            "reason": reason,
+        })
+    json_response(True, providers=rows,
+                  configured=[r["slug"] for r in rows if r["configured"]])
+
+
+@source_cmd.command("status")
+@click.argument("provider")
+def source_status_cmd(provider):
+    """Report whether a provider is enabled and keyed."""
+    ok, reason = _pc.provider_configured(provider)
+    json_response(True, provider=provider, configured=ok, reason=reason if not ok else "")
+
+
+@source_cmd.command("list")
+@click.argument("provider")
+@click.option("--addable-only/--all", "addable_only", default=True,
+              help="Default: chat-capable models not already in catalog")
+@click.option("--table", "as_table", is_flag=True)
+def source_list_cmd(provider, addable_only, as_table):
+    """List models from a provider's Models API."""
+    ok, reason = _pc.provider_configured(provider)
+    if not ok:
+        json_response(False, error=reason)
+        sys.exit(1)
+    try:
+        index = _pc.fetch_index(provider)
+    except Exception as e:
+        json_response(False, error=f"{_pc.PROVIDER_LABEL.get(provider, provider)} API unavailable: {e}")
+        sys.exit(1)
+    cat = _load_catalog()
+    if addable_only:
+        models = _pc.list_addable_models(provider, cat.keys(), index)
+    else:
+        models = [
+            _pc.model_summary(provider, m)
+            for m in sorted(index.values(), key=lambda x: str(x.get("id") or x.get("name") or ""))
+            if _pc.is_chat_capable(provider, m)
+        ]
+    if as_table:
+        if not models:
+            click.echo("No models.")
+            return
+        click.echo(f"{'ID':<40} {'CTX':<10} {'IN→OUT':<18} WORK")
+        for r in models:
+            io = f"{r['input_modalities']}→{r['output_modalities']}"
+            click.echo(f"{r['id']:<40} {str(r.get('context_length') or '—'):<10} {io:<18} {r['work_modality']}")
+        return
+    json_response(True, provider=provider, count=len(models), models=models)
+
+
+@source_cmd.command("add")
+@click.argument("provider")
+@click.argument("model_id")
+@click.option("--coa-approved/--no-coa-approved", default=None,
+              help="Default: true when model is in setup.ini coa_approved_models")
+@click.option("--router-eligible/--no-router-eligible", default=True)
+@click.option("--no-sync", is_flag=True)
+def source_add_cmd(provider, model_id, coa_approved, router_eligible, no_sync):
+    """Add a provider model to [catalog_custom] using live API metadata."""
+    if provider == "openrouter":
+        json_response(False, error="Use `agictl model openrouter add` for OpenRouter")
+        sys.exit(1)
+    ok, reason = _pc.provider_configured(provider)
+    if not ok:
+        json_response(False, error=reason)
+        sys.exit(1)
+    cat = _load_catalog()
+    if model_id in cat:
+        json_response(False, error=f"Model '{model_id}' already in catalog")
+        sys.exit(1)
+    try:
+        index = _pc.fetch_index(provider)
+    except Exception as e:
+        json_response(False, error=f"{_pc.PROVIDER_LABEL.get(provider, provider)} API unavailable: {e}")
+        sys.exit(1)
+    raw = index.get(model_id)
+    if not raw:
+        json_response(False, error=f"Model '{model_id}' not found on {_pc.PROVIDER_LABEL.get(provider, provider)}")
+        sys.exit(1)
+    if not _pc.is_chat_capable(provider, raw):
+        json_response(False, error=f"Model '{model_id}' is not chat-capable (no text output)")
+        sys.exit(1)
+    summary = _pc.model_summary(provider, raw)
+    coa_set = set(_read_ini_csv("gemini", "coa_approved_models")[0])
+    if coa_approved is None:
+        coa_approved = model_id in coa_set
+    ctx = summary.get("context_length") or 131072
+    model_class = "cloud" if provider == "google" else "third_party"
+    row = {
+        "class": model_class,
+        "provider": provider,
+        "enabled": True,
+        "coa": coa_approved,
+        "ctx_recommended": 0,
+        "ctx_max": int(ctx),
+        "work_modality": summary["work_modality"],
+        "input_modalities": summary["input_modalities"],
+        "output_modalities": summary["output_modalities"],
+        "router_eligible": router_eligible,
+        "label": summary["label"],
+    }
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    value = catalog_row_to_value(row)
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
+            _upsert_models_ini_entry(
+                path, "model_params_custom", f"model:{model_id}", _PROVIDER_DEFAULT_MODEL_PARAMS,
+            )
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    # Best-effort pricing via OpenRouter (native list rates not exposed uniformly).
+    try:
+        from openrouter_catalog import patch_models_ini_openrouter_pricing
+        for path in targets:
+            patch_models_ini_openrouter_pricing(path, keys=[model_id])
+    except Exception:
+        pass
+    # Track membership in setup.ini {slug}_models (google → gemini.cloud_models).
+    if provider == "google":
+        _append_setup_csv("gemini", "cloud_models", model_id)
+    else:
+        _append_setup_csv("third_party", f"{provider}_models", model_id)
+    payload = {"action": "source_add", "provider": provider, "key": model_id, "label": summary["label"]}
+    _auto_sync_and_respond(payload, not no_sync)
+
+
+@source_cmd.command("refresh")
+@click.argument("provider")
+@click.option("--models-ini", "models_ini", default=None, help="Path to models.ini (default: all live copies)")
+def source_refresh_cmd(provider, models_ini):
+    """Refresh modalities + context on a provider's [catalog] rows from its live API."""
+    ok, reason = _pc.provider_configured(provider)
+    if not ok:
+        json_response(False, error=reason)
+        sys.exit(1)
+    paths = [models_ini] if models_ini else _models_ini_write_targets()
+    if not paths:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    updated: list[str] = []
+    try:
+        for path in paths:
+            updated = _pc.patch_models_ini_provider_rows(path, provider) or updated
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    json_response(True, action="source_refresh", provider=provider,
+                  updated=sorted(set(updated)), count=len(set(updated)))
+
+
+def _catalog_baseline_meta(ini):
+    """Parse [catalog] baseline into {key: full row dict for migrate merge}."""
     meta = {}
     if not ini.has_section("catalog"):
         return meta
     for key, raw in ini.items("catalog"):
-        parts = raw.split("|")
-        if len(parts) < 7:
-            continue
-        try:
-            rec = int(parts[4].strip() or "0")
-            mx = int(parts[5].strip() or "0")
-        except ValueError:
-            rec, mx = 0, 0
-        meta[key.strip()] = (parts[6].strip() or key.strip(), rec, mx)
+        parsed = parse_catalog_row(raw)
+        if parsed:
+            meta[key.strip()] = parsed
     return meta
 
 
@@ -2853,7 +3034,7 @@ def _build_migration_rows(target):
     [local_models]/[context_windows] sections (intentionally left untouched).
     """
     import configparser
-    mini = configparser.ConfigParser(delimiters=('=',))
+    mini = _models_ini_parser()
     if target and os.path.exists(target):
         mini.read(target)
 
@@ -2881,14 +3062,31 @@ def _build_migration_rows(target):
     local_models = _read_ini_csv("local_ai", "local_models")[0]
     tp_providers = _read_ini_csv("third_party", "providers")[0]
 
+    or_index: dict = {}
+    try:
+        or_index = fetch_openrouter_index_with_fallback()
+    except Exception:
+        or_index = {}
+
     catalog_rows = []
 
     # ── Cloud (metadata from the [catalog] template; default if unseen) ──
     for k in cloud_models:
-        lbl, rec, mx = cat_meta.get(k, (k, 0, 1000000))
-        mx = mx if mx > 0 else 1000000
+        m = cat_meta.get(k, {})
+        lbl = m.get("label", k)
+        rec = m.get("ctx_recommended", 0)
+        mx = m.get("ctx_max", 1000000) or 1000000
         coa = "true" if k in coa_approved else "false"
-        catalog_rows.append((k, f"cloud|google|true|{coa}|{rec}|{mx}|{lbl}"))
+        row = {
+            "class": "cloud", "provider": "google", "enabled": True, "coa": coa == "true",
+            "ctx_recommended": rec, "ctx_max": mx,
+            "work_modality": m.get("work_modality", "balanced"),
+            "input_modalities": m.get("input_modalities", "text"),
+            "output_modalities": m.get("output_modalities", "text"),
+            "router_eligible": m.get("router_eligible", False),
+            "label": lbl,
+        }
+        catalog_rows.append((k, catalog_row_to_value(row)))
 
     # ── Third-party (per provider; metadata from the [catalog] template) ──
     provider_rows = [
@@ -2905,19 +3103,53 @@ def _build_migration_rows(target):
         p_label = label_map.get(slug, slug)
         provider_rows.append((slug, f"{p_enabled}|{p_label}|{p_cls}"))
         for k in _read_ini_csv("third_party", f"{slug}_models")[0]:
-            lbl, rec, mx = cat_meta.get(k, (k, 0, 131072))
-            mx = mx if mx > 0 else 131072
+            m = cat_meta.get(k, {})
+            lbl = m.get("label", k)
+            rec = m.get("ctx_recommended", 0)
+            mx = m.get("ctx_max", 131072) or 131072
             coa = "true" if k in coa_approved else "false"
-            catalog_rows.append((k, f"third_party|{slug}|true|{coa}|{rec}|{mx}|{lbl}"))
-    provider_rows.append(("ollama", "true|Local (Ollama / SYCL)|ChatOllama"))
+            row = {
+                "class": "third_party", "provider": slug, "enabled": True, "coa": coa == "true",
+                "ctx_recommended": rec, "ctx_max": mx,
+                "work_modality": m.get("work_modality", "balanced"),
+                "input_modalities": m.get("input_modalities", "text"),
+                "output_modalities": m.get("output_modalities", "text"),
+                "router_eligible": m.get("router_eligible", False),
+                "label": lbl,
+            }
+            if slug == "openrouter" and k in or_index:
+                row = enrich_catalog_dict(row, or_index[k], preserve_label=True)
+            catalog_rows.append((k, catalog_row_to_value(row)))
+    from model_catalog import local_provider_for_backend
+    gpu_backend = _resolve_gpu_backend()
+    local_provider = local_provider_for_backend(gpu_backend)
+    is_llamacpp = local_provider == "llamacpp"
+    provider_rows.append((
+        "ollama",
+        f"{'false' if is_llamacpp else 'true'}|Local (Ollama)|ChatOllama",
+    ))
+    provider_rows.append((
+        "llamacpp",
+        f"{'true' if is_llamacpp else 'false'}|Local (llama.cpp / SYCL)|ChatOpenAI",
+    ))
 
     # ── Local (advisory; pipeline-owned [local_models]/[context_windows]) ──
     local_keys = local_models or (
         [k for k, _ in mini.items("local_models")] if mini.has_section("local_models") else [])
     for k in local_keys:
         rec, mx = _local_ctx(k, 4096)
-        lbl = _local_label(k, k)
-        catalog_rows.append((k, f"local|ollama|true|false|{rec}|{mx}|{lbl}"))
+        m = cat_meta.get(k, {})
+        lbl = m.get("label", _local_label(k, k))
+        row = {
+            "class": "local", "provider": local_provider, "enabled": True, "coa": False,
+            "ctx_recommended": rec, "ctx_max": mx,
+            "work_modality": m.get("work_modality", "local"),
+            "input_modalities": m.get("input_modalities", "text"),
+            "output_modalities": m.get("output_modalities", "text"),
+            "router_eligible": m.get("router_eligible", False),
+            "label": lbl,
+        }
+        catalog_rows.append((k, catalog_row_to_value(row)))
 
     return provider_rows, catalog_rows
 
@@ -2932,6 +3164,53 @@ _BASELINE_CATALOG_HEADER = (
     "`agictl model migrate`).\n"
     "# DO NOT hand-edit; add/override models via `agictl model catalog` "
     "(writes [catalog_custom]).")
+
+
+def _modality_token_set(raw: str) -> set[str]:
+    return {x.strip() for x in (raw or "text").split(",") if x.strip()}
+
+
+def _refresh_catalog_custom_io_from_baseline(path: str, catalog_rows: list) -> int:
+    """Promote stock I/O metadata from fresh baseline onto [catalog_custom] overrides.
+
+    Custom rows survive migrate by design (disable snapshots, dashboard edits).
+    When the shipped template adds modalities, stale overrides must not shadow
+    the new baseline. Refresh input/output when baseline is a strict superset;
+    always preserve ``enabled`` from the custom row.
+    """
+    baseline: dict[str, dict] = {}
+    for key, raw in catalog_rows:
+        parsed = parse_catalog_row(raw)
+        if parsed:
+            baseline[key.strip()] = parsed
+
+    custom = _read_raw_section(path, "catalog_custom")
+    if not custom:
+        return 0
+
+    updated = 0
+    for key, custom_raw in custom.items():
+        base = baseline.get(key)
+        if not base:
+            continue
+        cust = parse_catalog_row(custom_raw)
+        if not cust:
+            continue
+        changed = False
+        base_in = _modality_token_set(base.get("input_modalities", "text"))
+        cust_in = _modality_token_set(cust.get("input_modalities", "text"))
+        if base_in > cust_in:
+            cust["input_modalities"] = base.get("input_modalities", "text")
+            changed = True
+        base_out = _modality_token_set(base.get("output_modalities", "text"))
+        cust_out = _modality_token_set(cust.get("output_modalities", "text"))
+        if base_out > cust_out:
+            cust["output_modalities"] = base.get("output_modalities", "text")
+            changed = True
+        if changed:
+            _upsert_models_ini_entry(path, "catalog_custom", key, catalog_row_to_value(cust))
+            updated += 1
+    return updated
 
 
 def _clear_ini_section(path, section):
@@ -2980,12 +3259,15 @@ def model_migrate(force):
     provider_rows, catalog_rows = _build_migration_rows(target)
     write_targets = _models_ini_write_targets() or [target]
 
+    custom_io_refreshed = 0
     try:
         for path in write_targets:
             _write_full_ini_section(path, "providers", provider_rows,
                                     header_comment=_BASELINE_PROVIDERS_HEADER)
             _write_full_ini_section(path, "catalog", catalog_rows,
                                     header_comment=_BASELINE_CATALOG_HEADER)
+            if not force:
+                custom_io_refreshed += _refresh_catalog_custom_io_from_baseline(path, catalog_rows)
             if force:
                 _clear_ini_section(path, "providers_custom")
                 _clear_ini_section(path, "catalog_custom")
@@ -2997,6 +3279,7 @@ def model_migrate(force):
     json_response(True, changed=True,
                   mode="force-reset" if force else "baseline",
                   models=len(catalog_rows), providers=len(provider_rows),
+                  custom_io_refreshed=custom_io_refreshed,
                   files=write_targets,
                   message=(("Reset baseline and cleared the custom layer from setup.ini. "
                             if force else
@@ -3040,21 +3323,37 @@ def catalog():
 @click.option("--table", "as_table", is_flag=True, help="Human-readable table instead of JSON")
 def catalog_list(model_class, as_table):
     """List catalog entries, optionally filtered by class."""
+    from model_catalog import load_catalog_pricing
+    from harness.model_params import resolve_model_params
     cat = _load_catalog()
+    pricing = load_catalog_pricing()
     rows = []
     for key, m in cat.items():
         if model_class and m["class"] != model_class:
             continue
-        rows.append({"key": key, **m})
+        row = {"key": key, **m}
+        resolved = resolve_model_params(key)
+        row["reasoning_effort"] = resolved.get("reasoning_effort") or "none"
+        pr = pricing.get(key)
+        if pr:
+            row["pricing"] = pr
+            row["prompt_per_m"] = pr.get("prompt_per_m", 0)
+            row["completion_per_m"] = pr.get("completion_per_m", 0)
+        rows.append(row)
     if as_table:
         if not rows:
             click.echo("No catalog entries.")
             return
-        click.echo(f"{'KEY':<32} {'CLASS':<12} {'PROVIDER':<10} {'EN':<3} {'COA':<4} {'CTX_MAX':<9} LABEL")
+        click.echo(f"{'KEY':<32} {'CLASS':<12} {'WORK':<10} {'EN':<3} {'COA':<4} {'RTR':<4} {'$/M in':<8} {'$/M out':<8} {'I/O':<14} LABEL")
         for r in rows:
-            click.echo(f"{r['key']:<32} {r['class']:<12} {r['provider']:<10} "
+            io = f"{r.get('input_modalities','text')}→{r.get('output_modalities','text')}"
+            pin = r.get("prompt_per_m")
+            pout = r.get("completion_per_m")
+            pin_s = f"{pin:.4g}" if pin else "—"
+            pout_s = f"{pout:.4g}" if pout else "—"
+            click.echo(f"{r['key']:<32} {r['class']:<12} {r.get('work_modality','balanced'):<10} "
                        f"{'✓' if r['enabled'] else '·':<3} {'✓' if r['coa'] else '·':<4} "
-                       f"{r['ctx_max']:<9} {r['label']}")
+                       f"{'✓' if r.get('router_eligible') else '·':<4} {pin_s:<8} {pout_s:<8} {io:<14} {r['label']}")
         return
     json_response(True, count=len(rows), models=rows)
 
@@ -3069,12 +3368,17 @@ def catalog_list(model_class, as_table):
 @click.option("--ctx-max", type=int, default=0, help="Maximum context window (drives trim budget)")
 @click.option("--coa-approved/--no-coa-approved", default=False, help="Allow assignment to the COA")
 @click.option("--enabled/--disabled", default=True, help="Offer the model at runtime")
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default="balanced")
+@click.option("--input-modalities", default="text", help="CSV: text,image,audio,video")
+@click.option("--output-modalities", default="text", help="CSV: text,image,audio,video")
+@click.option("--router-eligible/--no-router-eligible", default=False, help="Include in auto-routing pool")
 @click.option("--gguf-repo", default=None, help="(local) HuggingFace repo — also registers [sycl_models]")
 @click.option("--gguf-file", default=None, help="(local) GGUF filename")
 @click.option("--size", "size_gb", type=int, default=None, help="(local) approximate GGUF size in GB")
 @click.option("--no-sync", is_flag=True, help="Skip regenerating derived config")
 def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
-                coa_approved, enabled, gguf_repo, gguf_file, size_gb, no_sync):
+                coa_approved, enabled, work_modality, input_modalities, output_modalities,
+                router_eligible, gguf_repo, gguf_file, size_gb, no_sync):
     """Add a model to the catalog.
 
     For third-party models the provider must be enabled (and keyed) before the
@@ -3091,14 +3395,22 @@ def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
                       f"Add it first: agictl provider add {provider} --label '<name>' --class <ChatX>. "
                       f"Known: {', '.join(providers.keys()) or '(none)'}")
         sys.exit(1)
+    if model_class == "local" and provider not in ("ollama", "llamacpp"):
+        json_response(False, error=f"Local models must use provider 'ollama' or 'llamacpp', not '{provider}'.")
+        sys.exit(1)
 
     targets = _models_ini_write_targets()
     if not targets:
         json_response(False, error="models.ini not found")
         sys.exit(1)
 
-    value = (f"{model_class}|{provider}|{'true' if enabled else 'false'}|"
-             f"{'true' if coa_approved else 'false'}|{ctx_recommended}|{ctx_max}|{label}")
+    value = catalog_row_to_value({
+        "class": model_class, "provider": provider, "enabled": enabled, "coa": coa_approved,
+        "ctx_recommended": ctx_recommended, "ctx_max": ctx_max,
+        "work_modality": work_modality, "input_modalities": input_modalities,
+        "output_modalities": output_modalities, "router_eligible": router_eligible,
+        "label": label,
+    })
     try:
         for path in targets:
             # User additions live in the custom overlay — never clobbered by migrate.
@@ -3134,9 +3446,14 @@ def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
 @click.option("--ctx-max", type=int, default=None)
 @click.option("--enable/--disable", "enabled", default=None, help="Enable or disable the model")
 @click.option("--coa-approve/--coa-revoke", "coa", default=None, help="Toggle COA eligibility")
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--input-modalities", default=None)
+@click.option("--output-modalities", default=None)
+@click.option("--router-eligible/--no-router-eligible", "router_eligible", default=None)
 @click.option("--no-sync", is_flag=True)
 def catalog_update(key, label, provider, model_class, ctx_recommended, ctx_max,
-                   enabled, coa, no_sync):
+                   enabled, coa, work_modality, input_modalities, output_modalities,
+                   router_eligible, no_sync):
     """Update fields on an existing catalog entry (only provided fields change)."""
     cat = _load_catalog()
     if key not in cat:
@@ -3161,9 +3478,16 @@ def catalog_update(key, label, provider, model_class, ctx_recommended, ctx_max,
         m["enabled"] = enabled
     if coa is not None:
         m["coa"] = coa
+    if work_modality is not None:
+        m["work_modality"] = work_modality
+    if input_modalities is not None:
+        m["input_modalities"] = input_modalities
+    if output_modalities is not None:
+        m["output_modalities"] = output_modalities
+    if router_eligible is not None:
+        m["router_eligible"] = router_eligible
 
-    value = (f"{m['class']}|{m['provider']}|{'true' if m['enabled'] else 'false'}|"
-             f"{'true' if m['coa'] else 'false'}|{m['ctx_recommended']}|{m['ctx_max']}|{m['label']}")
+    value = catalog_row_to_value(m)
     try:
         for path in _models_ini_write_targets():
             # Edits always land in the custom overlay — for a baseline model this
@@ -3198,10 +3522,9 @@ def catalog_remove(key, no_sync):
     try:
         for path in _models_ini_write_targets():
             if baseline_backed:
-                # Write a disabling override into the custom layer (preserve other fields).
-                value = (f"{m['class']}|{m['provider']}|false|"
-                         f"{'true' if m['coa'] else 'false'}|{m['ctx_recommended']}|"
-                         f"{m['ctx_max']}|{m['label']}")
+                m = dict(m)
+                m["enabled"] = False
+                value = catalog_row_to_value(m)
                 _upsert_models_ini_entry(path, "catalog_custom", key, value)
             else:
                 _remove_ini_entry(path, "catalog_custom", key)
@@ -3218,6 +3541,257 @@ def catalog_remove(key, no_sync):
         msg = f"Removed custom model '{key}' from catalog."
     _auto_sync_and_respond({"model": key, "disabled_only": baseline_backed,
                             "message": msg}, do_sync=not no_sync)
+
+
+@catalog.command("reset")
+@click.argument("key")
+@click.option("--params/--no-params", "clear_params", default=True,
+              help="Also clear [model_params_custom] for this model (default: yes)")
+@click.option("--no-sync", is_flag=True)
+def catalog_reset(key, clear_params, no_sync):
+    """Drop [catalog_custom] overrides for a baseline model and revert to setup.ini stock.
+
+    Custom-added models (origin=custom) have no baseline — use ``catalog remove``.
+    Clears the user-layer catalog row; optionally clears per-model default params too.
+    """
+    cat = _load_catalog()
+    if key not in cat:
+        json_response(False, error=f"Model '{key}' not in catalog.")
+        sys.exit(1)
+    if cat[key].get("origin") == "custom":
+        json_response(
+            False,
+            error=f"'{key}' is a custom model — no baseline to restore. Use 'catalog remove'.",
+        )
+        sys.exit(1)
+
+    removed_catalog = False
+    removed_params = False
+    try:
+        for path in _models_ini_write_targets():
+            if _remove_ini_entry(path, "catalog_custom", key):
+                removed_catalog = True
+            if clear_params and _remove_ini_entry(path, "model_params_custom", f"model:{key}"):
+                removed_params = True
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    if not removed_catalog and not removed_params:
+        json_response(
+            True,
+            model=key,
+            reset=False,
+            message=f"'{key}' is already on the setup.ini baseline (no custom overrides).",
+        )
+        return
+
+    parts = [f"Reset '{key}' to setup.ini baseline."]
+    if removed_catalog:
+        parts.append("Catalog override removed.")
+    if removed_params:
+        parts.append("Custom default params cleared.")
+    _auto_sync_and_respond(
+        {"model": key, "reset": True, "catalog_custom_cleared": removed_catalog,
+         "params_cleared": removed_params, "message": " ".join(parts)},
+        do_sync=not no_sync,
+    )
+
+
+def _require_pu_or_coa():
+    """Reject sub-agent callers for PU/COA-only writes."""
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        json_response(False, error=f"Permission denied (caller: {caller})")
+        sys.exit(1)
+
+
+@model.group()
+def feedback():
+    """PU/COA model preference log for triage routing."""
+    pass
+
+
+@feedback.command("add")
+@click.option("--key", "catalog_key", required=True, help="Catalog model key")
+@click.option("--preference", required=True, type=click.Choice(["prefer", "avoid"]))
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--task-hint", default=None)
+@click.option("--note", default=None)
+def feedback_add(catalog_key, preference, work_modality, task_hint, note):
+    """Add a model feedback entry."""
+    _require_pu_or_coa()
+    cat = _load_catalog()
+    if catalog_key not in cat:
+        json_response(False, error=f"Model '{catalog_key}' not in catalog")
+        sys.exit(1)
+    created_by = os.environ.get("AGICTL_AGENT_USER") or "pu"
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        dup = conn.execute(
+            """SELECT id FROM model_feedback
+               WHERE catalog_key=? AND preference=?
+                 AND COALESCE(work_modality, '') = COALESCE(?, '')""",
+            (catalog_key, preference, work_modality),
+        ).fetchone()
+        if dup:
+            conn.close()
+            json_response(
+                False,
+                error=(
+                    f"Duplicate feedback: '{catalog_key}' + {preference}"
+                    + (f" + {work_modality}" if work_modality else " (any modality)")
+                ),
+            )
+            sys.exit(1)
+        conn.execute(
+            """INSERT INTO model_feedback
+               (catalog_key, work_modality, task_hint, preference, note, created_by)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (catalog_key, work_modality, task_hint, preference, note, created_by),
+        )
+        conn.commit()
+        row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        json_response(True, action="feedback_add", id=row_id, catalog_key=catalog_key,
+                      preference=preference)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("list")
+@click.option("--key", "catalog_key", default=None)
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--table", "as_table", is_flag=True)
+def feedback_list(catalog_key, work_modality, as_table):
+    """List model feedback entries."""
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        q = "SELECT * FROM model_feedback WHERE 1=1"
+        params = []
+        if catalog_key:
+            q += " AND catalog_key=?"
+            params.append(catalog_key)
+        if work_modality:
+            q += " AND (work_modality=? OR work_modality IS NULL)"
+            params.append(work_modality)
+        q += " ORDER BY updated_at DESC"
+        rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+        conn.close()
+        if as_table:
+            if not rows:
+                click.echo("No feedback entries.")
+                return
+            click.echo(f"{'ID':<5} {'KEY':<28} {'PREF':<7} {'MOD':<10} {'BY':<8} NOTE")
+            for r in rows:
+                click.echo(f"{r['id']:<5} {r['catalog_key']:<28} {r['preference']:<7} "
+                           f"{(r.get('work_modality') or 'any'):<10} {r['created_by']:<8} "
+                           f"{(r.get('note') or '')[:40]}")
+            return
+        json_response(True, count=len(rows), feedback=rows)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("show")
+@click.argument("feedback_id", type=int)
+def feedback_show(feedback_id):
+    """Show one feedback entry."""
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM model_feedback WHERE id=?", (feedback_id,)).fetchone()
+        conn.close()
+        if not row:
+            json_response(False, error=f"Feedback {feedback_id} not found")
+            sys.exit(1)
+        json_response(True, feedback=dict(row))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("update")
+@click.argument("feedback_id", type=int)
+@click.option("--preference", type=click.Choice(["prefer", "avoid"]), default=None)
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--task-hint", default=None)
+@click.option("--note", default=None)
+def feedback_update(feedback_id, preference, work_modality, task_hint, note):
+    """Update a model feedback entry."""
+    _require_pu_or_coa()
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        row = conn.execute("SELECT id FROM model_feedback WHERE id=?", (feedback_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Feedback {feedback_id} not found")
+            sys.exit(1)
+        updates, params = [], []
+        for col, val in (
+            ("preference", preference), ("work_modality", work_modality),
+            ("task_hint", task_hint), ("note", note),
+        ):
+            if val is not None:
+                updates.append(f"{col}=?")
+                params.append(val)
+        if not updates:
+            json_response(False, error="No fields to update")
+            sys.exit(1)
+        updates.append("updated_at=datetime('now')")
+        params.append(feedback_id)
+        conn.execute(f"UPDATE model_feedback SET {', '.join(updates)} WHERE id=?", params)
+        conn.commit()
+        conn.close()
+        json_response(True, action="feedback_update", id=feedback_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("remove")
+@click.argument("feedback_id", type=int)
+def feedback_remove(feedback_id):
+    """Remove a model feedback entry."""
+    _require_pu_or_coa()
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        cur = conn.execute("DELETE FROM model_feedback WHERE id=?", (feedback_id,))
+        conn.commit()
+        conn.close()
+        if cur.rowcount == 0:
+            json_response(False, error=f"Feedback {feedback_id} not found")
+            sys.exit(1)
+        json_response(True, action="feedback_remove", id=feedback_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@model.command("routing-context")
+@click.option("--agent", "agent_name", required=True)
+@click.option("--assigned-model", required=True)
+@click.option("--routing-enabled", type=int, default=0)
+@click.option("--routing-mode", default="")
+@click.option("--attachments", default="", help="Comma-separated attachment paths")
+def model_routing_context(agent_name, assigned_model, routing_enabled, routing_mode, attachments):
+    """Build ephemeral routing JSON for lifeline/harness (stdout JSON or empty)."""
+    from harness.model_routing import build_routing_context, detect_required_input_modalities
+    paths = [p for p in attachments.split(",") if p.strip()] if attachments else []
+    ctx = build_routing_context(
+        agent_name=agent_name,
+        assigned_model=assigned_model,
+        routing_enabled=bool(routing_enabled),
+        routing_mode=routing_mode or None,
+        required_input_modalities=detect_required_input_modalities(paths),
+    )
+    if ctx:
+        print(json.dumps(ctx))
+    else:
+        print("")
 
 
 # ─── Model Params Subcommand Group ─────────────────────
@@ -3237,23 +3811,18 @@ def _validate_params_scope(scope: str) -> str:
     )
 
 
-def _build_params_json(temperature, reasoning_effort, reasoning_max_tokens, extra, base=None):
-    data = dict(base or {})
-    if temperature is not None:
-        data["temperature"] = temperature
-    if reasoning_effort is not None:
-        data["reasoning_effort"] = reasoning_effort
-    if reasoning_max_tokens is not None:
-        data["reasoning_max_tokens"] = reasoning_max_tokens
-    if extra is not None:
-        try:
-            parsed = json.loads(extra)
-            if not isinstance(parsed, dict):
-                raise ValueError("extra must be a JSON object")
-            data["extra"] = parsed
-        except (json.JSONDecodeError, ValueError) as e:
-            raise click.BadParameter(f"Invalid --extra JSON: {e}")
-    return data
+def _build_params_json(temperature, reasoning_effort, reasoning_max_tokens, extra,
+                       allowed_reasoning_efforts=None, think_mode=None, base=None):
+    from harness.model_params import build_params_layer_update
+    return build_params_layer_update(
+        base=base,
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
+        reasoning_max_tokens=reasoning_max_tokens,
+        allowed_reasoning_efforts=allowed_reasoning_efforts,
+        think_mode=think_mode,
+        extra=extra,
+    )
 
 
 @model.group()
@@ -3290,12 +3859,23 @@ def params_list(as_table):
 @click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
 def params_get(scope):
     """Get params for a scope, including effective resolution for model:* scopes."""
-    from harness.model_params import list_model_params, resolve_model_params
+    from harness.model_params import (
+        list_model_params,
+        resolve_model_params,
+        allowed_reasoning_efforts,
+        _load_model_params_custom_layers,
+    )
     layers = list_model_params()
-    payload = {"scope": scope, "params": layers.get(scope, {})}
+    custom_layers = _load_model_params_custom_layers()
+    payload = {
+        "scope": scope,
+        "params": custom_layers.get(scope, {}),
+        "effective": layers.get(scope, {}),
+    }
     if scope.startswith("model:"):
         model_id = scope.split(":", 1)[1]
         payload["resolved"] = resolve_model_params(model_id)
+        payload["allowed_reasoning_efforts"] = list(allowed_reasoning_efforts(model_id))
     json_response(True, **payload)
 
 
@@ -3303,22 +3883,41 @@ def params_get(scope):
 @click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
 @click.option("--temperature", type=float, default=None, help="Sampling temperature (0.0–2.0)")
 @click.option("--reasoning-effort",
-              type=click.Choice(["none", "minimal", "low", "medium", "high", "max"]),
+              type=click.Choice(["none", "minimal", "low", "medium", "high", "max", "xhigh"]),
               default=None, help="Reasoning effort level")
 @click.option("--reasoning-max-tokens", type=int, default=None, help="Reasoning token budget")
+@click.option("--allowed-reasoning-efforts", default=None,
+              help="CSV override for allowed reasoning levels (e.g. none,low,high,xhigh)")
+@click.option("--think-mode", type=click.Choice(["boolean", "levels"]), default=None,
+              help="Ollama thinking mapping: boolean (on/off) or levels (low/medium/high)")
 @click.option("--extra", default=None, help="JSON object merged into the passthrough bag")
 @click.option("--no-sync", is_flag=True, help="Skip regenerating inference endpoint config")
-def params_set(scope, temperature, reasoning_effort, reasoning_max_tokens, extra, no_sync):
+def params_set(scope, temperature, reasoning_effort, reasoning_max_tokens,
+               allowed_reasoning_efforts, think_mode, extra, no_sync):
     """Set or update params for a scope (writes [model_params_custom])."""
     from harness.model_params import list_model_params
-    if not any(v is not None for v in (temperature, reasoning_effort, reasoning_max_tokens, extra)):
+    if not any(v is not None for v in (
+        temperature, reasoning_effort, reasoning_max_tokens, allowed_reasoning_efforts,
+        think_mode, extra,
+    )):
         json_response(False, error="Provide at least one of --temperature, --reasoning-effort, "
-                      "--reasoning-max-tokens, --extra")
+                      "--reasoning-max-tokens, --allowed-reasoning-efforts, --think-mode, "
+                      "--extra")
         sys.exit(1)
+    if extra is not None:
+        try:
+            parsed = json.loads(extra)
+            if not isinstance(parsed, dict):
+                raise ValueError("extra must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            json_response(False, error=f"Invalid --extra JSON: {e}")
+            sys.exit(1)
     layers = list_model_params()
     merged = _build_params_json(
         temperature, reasoning_effort, reasoning_max_tokens, extra,
-        base=layers.get(scope, {}),
+        allowed_reasoning_efforts=allowed_reasoning_efforts,
+        think_mode=think_mode,
+        base=layers.get(scope) or {},
     )
     value = json.dumps(merged, separators=(",", ":"))
     targets = _models_ini_write_targets()
@@ -3332,11 +3931,6 @@ def params_set(scope, temperature, reasoning_effort, reasoning_max_tokens, extra
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
     payload = {"scope": scope, "params": merged, "message": f"Set params for '{scope}'."}
-    if not no_sync:
-        ok, msg = _regenerate_inference_endpoint_config()
-        payload["inference_config_regenerated"] = ok
-        if msg:
-            payload["inference_message"] = msg
     json_response(True, **payload)
 
 
@@ -3360,11 +3954,6 @@ def params_clear(scope, no_sync):
         json_response(False, error=f"No custom params found for scope '{scope}'")
         sys.exit(1)
     payload = {"scope": scope, "message": f"Cleared custom params for '{scope}'."}
-    if not no_sync:
-        ok, msg = _regenerate_inference_endpoint_config()
-        payload["inference_config_regenerated"] = ok
-        if msg:
-            payload["inference_message"] = msg
     json_response(True, **payload)
 
 
@@ -3530,6 +4119,50 @@ def provider_remove(slug, no_sync):
                             "message": msg}, do_sync=not no_sync)
 
 
+@provider.command("reset")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_reset(slug, no_sync):
+    """Drop [providers_custom] overrides for a baseline provider and revert to setup.ini stock.
+
+    Custom-added providers have no baseline — use ``provider remove``.
+    """
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found.")
+        sys.exit(1)
+    if provs[slug].get("origin") == "custom":
+        json_response(
+            False,
+            error=f"'{slug}' is a custom provider — no baseline to restore. Use 'provider remove'.",
+        )
+        sys.exit(1)
+
+    removed = False
+    try:
+        for path in _models_ini_write_targets():
+            if _remove_ini_entry(path, "providers_custom", slug):
+                removed = True
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    if not removed:
+        json_response(
+            True,
+            provider=slug,
+            reset=False,
+            message=f"'{slug}' is already on the setup.ini baseline (no custom override).",
+        )
+        return
+
+    _auto_sync_and_respond(
+        {"provider": slug, "reset": True,
+         "message": f"Reset '{slug}' to setup.ini baseline (custom override removed)."},
+        do_sync=not no_sync,
+    )
+
+
 @model.group()
 def registry():
     """Manage the SYCL model registry (add, update, remove, list)."""
@@ -3547,7 +4180,7 @@ def registry_list():
 
     # Also load context windows for display
     import configparser
-    ini = configparser.ConfigParser(delimiters=('=',))
+    ini = _models_ini_parser()
     for path in _MODELS_INI_PATHS:
         if os.path.exists(path):
             ini.read(path)
@@ -3648,7 +4281,7 @@ def registry_update(name, repo, gguf_file, size_gb, ctx_recommended, ctx_max, la
             # Update context windows if provided
             if ctx_recommended is not None or ctx_max is not None:
                 import configparser
-                ini = configparser.ConfigParser(delimiters=('=',))
+                ini = _models_ini_parser()
                 ini.read(ini_path)
                 old_rec, old_max = 4096, 131072
                 if ini.has_section("context_windows"):
@@ -4066,6 +4699,10 @@ def agent_approve(name, force):
         os.makedirs(agent_cycles_dir, exist_ok=True)
         subprocess.run(["chown", "-R", f"{os_user}:{os_user}", agent_cycles_dir], check=False)
         subprocess.run(["chmod", "755", agent_cycles_dir], check=False)
+        view_cache_dir = os.path.join(agent_data_dir, "view-cache")
+        os.makedirs(view_cache_dir, exist_ok=True)
+        subprocess.run(["chown", "-R", f"{os_user}:{os_user}", view_cache_dir], check=False)
+        subprocess.run(["chmod", "770", view_cache_dir], check=False)
         # system.md: Lifeline writes, everyone reads (444)
         system_md_file = os.path.join(agent_root, ".agent", "system.md")
         if os.path.exists(system_md_file):
@@ -4403,6 +5040,10 @@ def agent_deploy_skills(name):
     if result.returncode != 0:
         json_response(False, error=f"rsync failed: {result.stderr.strip()}")
         sys.exit(1)
+
+    # rsync -a preserves source ownership (watchdog) — restore dir per §IX.4
+    subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
+    subprocess.run(["chmod", "775", skills_dest], check=False)
 
     # Post-rsync permissions: shipped .md files -> watchdog:agi_agents 440
     deployed = 0
@@ -5075,8 +5716,23 @@ def agent_ensure_protected():
 
 @agent.command("get-active")
 def agent_get_active():
-    """Return active agents in pipe format for Lifeline: name|os_user|workspace|model|timeout_minutes|runaway_threshold|runaway_size_threshold|context_injection_mode|token_budget|max_session_turns|tool_output_token_budget|triage_model|anchor_style|num_ctx|conversation_depth|resume_enabled|resume_max_messages|skill_injection_mode|temperature|reasoning_effort|reasoning_max_tokens|model_params_extra"""
+    """Return active agents in pipe format for Lifeline (field 23 = model_routing_enabled)."""
     agents = agent_reader.get_active_agents()
+    # Direct agents-table read — v_active_agents can be stale until init_agents_db view migration runs.
+    agent_overrides: dict[str, dict] = {}
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT name, tool_output_token_budget, model_routing_enabled FROM agents WHERE inactive=0"
+        ):
+            agent_overrides[row["name"]] = {
+                "tool_output_token_budget": row["tool_output_token_budget"],
+                "model_routing_enabled": row["model_routing_enabled"] or 0,
+            }
+        conn.close()
+    except Exception:
+        pass
     for a in agents:
         model = a.get("model") or ""
         timeout = a.get("timeout_minutes", 60)
@@ -5085,7 +5741,10 @@ def agent_get_active():
         injection_mode = a.get("context_injection_mode") or "relevant"
         token_budget = a.get("token_budget", 0)
         max_turns = a.get("max_session_turns", 50)
-        tool_budget = a.get("tool_output_token_budget", 6000)
+        ov = agent_overrides.get(a["name"], {})
+        tool_budget = ov.get("tool_output_token_budget")
+        if tool_budget is None:
+            tool_budget = a.get("tool_output_token_budget", 6000)
         triage_model = a.get("triage_model") or ""
         anchor_style = a.get("anchor_style") or "compact"
         num_ctx = a.get("num_ctx", 0)
@@ -5099,14 +5758,51 @@ def agent_get_active():
         reasoning_max_tokens = a.get("reasoning_max_tokens")
         reasoning_max_str = "" if reasoning_max_tokens is None else str(reasoning_max_tokens)
         model_params_extra = a.get("model_params_extra") or ""
-        print(f"{a['name']}|{a['os_user']}|{a['workspace']}|{model}|{timeout}|{runaway}|{runaway_size}|{injection_mode}|{token_budget}|{max_turns}|{tool_budget}|{triage_model}|{anchor_style}|{num_ctx}|{convo_depth}|{resume_enabled}|{resume_max_msgs}|{skill_mode}|{temperature_str}|{reasoning_effort}|{reasoning_max_str}|{model_params_extra}")
-
-
+        routing_enabled = ov.get("model_routing_enabled", a.get("model_routing_enabled", 0))
+        print(f"{a['name']}|{a['os_user']}|{a['workspace']}|{model}|{timeout}|{runaway}|{runaway_size}|{injection_mode}|{token_budget}|{max_turns}|{tool_budget}|{triage_model}|{anchor_style}|{num_ctx}|{convo_depth}|{resume_enabled}|{resume_max_msgs}|{skill_mode}|{temperature_str}|{reasoning_effort}|{reasoning_max_str}|{model_params_extra}|{routing_enabled}")
 
 
 # ═══════════════════════════════════════════════════════
 # 3. TASK — Cognitive task queue
 # ═══════════════════════════════════════════════════════
+
+def _caller_agent_name() -> str:
+    """Resolved logical agent name for the current caller."""
+    return os.environ.get("VERSA_AGENT_NAME") or get_agent_name()
+
+
+def _is_privileged_task_caller() -> bool:
+    """COA, watchdog, or Primary User (direct/root invocation)."""
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if not caller:
+        return True
+    return caller in ("coa", "watchdog")
+
+
+def _assert_can_manage_agent_tasks(agent_name: str) -> None:
+    if _is_privileged_task_caller():
+        return
+    mine = _caller_agent_name()
+    if mine != agent_name:
+        json_response(
+            False,
+            error=f"Permission denied: can only manage your own tasks (caller: {mine})",
+        )
+        sys.exit(1)
+
+
+def _assert_can_manage_task_row(task_row: dict) -> None:
+    if _is_privileged_task_caller():
+        return
+    assignee = (task_row.get("assigned_to") or "").strip()
+    mine = _caller_agent_name()
+    if assignee != mine:
+        json_response(
+            False,
+            error=f"Permission denied: task is assigned to '{assignee}', not '{mine}'",
+        )
+        sys.exit(1)
+
 
 @cli.group()
 def task():
@@ -5372,6 +6068,7 @@ def task_inject_followup(agent_name):
 @click.argument("agent_name")
 def task_freeze_all(agent_name):
     """Freeze all non-terminal tasks for an agent. Saves prior status in pre_freeze_status."""
+    _assert_can_manage_agent_tasks(agent_name)
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         cursor = conn.execute(
@@ -5392,12 +6089,13 @@ def task_freeze_all(agent_name):
 @click.argument("agent_name")
 def task_unfreeze_all(agent_name):
     """Unfreeze all frozen tasks for an agent. Restores prior status from pre_freeze_status."""
+    _assert_can_manage_agent_tasks(agent_name)
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         cursor = conn.execute(
             """UPDATE tasks
                SET status = COALESCE(pre_freeze_status, 'planned'), pre_freeze_status = NULL,
-                   updated_at = datetime('now')
+                   spawn_attempts = 0, updated_at = datetime('now')
                WHERE status = 'frozen'
                  AND (assigned_to = ? OR assigned_to IS NULL)""",
             (agent_name,)
@@ -5408,6 +6106,27 @@ def task_unfreeze_all(agent_name):
         json_response(True, unfrozen_count=count, agent=agent_name)
     except Exception as e:
         json_response(False, error=str(e))
+
+@task.command("unfreeze")
+@click.argument("task_id", type=int)
+def task_unfreeze_one(task_id):
+    """Unfreeze a single frozen task. Restores pre_freeze_status and resets spawn_attempts."""
+    existing = tasks_reader.get_task(task_id)
+    if not existing:
+        json_response(False, error=f"Task {task_id} not found")
+        return
+    _assert_can_manage_task_row(existing)
+    if existing.get("status") != "frozen":
+        json_response(False, error=f"Task {task_id} is not frozen (status={existing.get('status')})")
+        return
+    restore = existing.get("pre_freeze_status") or "planned"
+    if tasks_reader.update_task(
+        task_id,
+        {"status": restore, "spawn_attempts": 0, "pre_freeze_status": None},
+    ):
+        json_response(True, task_id=task_id, status=restore, action="unfrozen")
+    else:
+        json_response(False, error=f"Failed to unfreeze task {task_id}")
 
 @task.command("count-frozen")
 @click.argument("agent_name")
@@ -6236,14 +6955,6 @@ def cycle_end(summary, agent_name):
     # telemetry could be written and caused repeated cycle end calls.
     sys.exit(0)
 
-@cycle.command("trigger")
-@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
-def cycle_trigger(agent_name):
-    """Send wake signal to Lifeline to force immediate spawn check."""
-    if not agent_name:
-        agent_name = get_agent_name()
-    json_response(True, action="cycle_trigger", agent=agent_name, note="Wake signal sent")
-
 @cycle.command("tokens")
 @click.argument("agent_name")
 @click.argument("t_in", type=int)
@@ -6257,10 +6968,65 @@ def cycle_tokens(agent_name, t_in, t_out, t_think, t_total, exit_code, cached, s
     """Log token utilization metrics to cycles.db."""
     agent_reader.update_last_cycle_tokens(agent_name, t_in, t_out, t_think, t_total, exit_code=exit_code, t_cached=cached, session_path=session_path)
 
+@cycle.command("get")
+@click.argument("cycle_id")
+def cycle_get(cycle_id):
+    """Return full cycle row as JSON (incl. routing audit fields)."""
+    try:
+        conn = sqlite3.connect(cycles_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM cycles WHERE id=?", (cycle_id,)).fetchone()
+        conn.close()
+        if not row:
+            json_response(False, error=f"Cycle '{cycle_id}' not found")
+            sys.exit(1)
+        json_response(True, cycle=dict(row))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@cycle.command("set-routing")
+@click.argument("cycle_id")
+@click.option("--assigned-model", required=True)
+@click.option("--execution-model", required=True)
+@click.option("--routing-mode", required=True, type=click.Choice(["pool", "preferred", "none"]))
+@click.option("--work-modality", default=None)
+def cycle_set_routing(cycle_id, assigned_model, execution_model, routing_mode, work_modality):
+    """Record ephemeral model routing on a cycle row."""
+    try:
+        conn = sqlite3.connect(cycles_db, timeout=5)
+        cur = conn.execute(
+            """UPDATE cycles SET assigned_model=?, execution_model=?, routing_mode=?,
+               routing_work_modality=? WHERE id=?""",
+            (assigned_model, execution_model, routing_mode, work_modality, cycle_id),
+        )
+        conn.commit()
+        conn.close()
+        if cur.rowcount == 0:
+            json_response(False, error=f"Cycle '{cycle_id}' not found")
+            sys.exit(1)
+        json_response(True, action="cycle_set_routing", cycle_id=cycle_id,
+                      execution_model=execution_model, routing_mode=routing_mode)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
 @cycle.command("recent")
 @click.argument("agent_name")
-def cycle_recent(agent_name):
+@click.option("--json", "as_json", is_flag=True, help="JSON array with cycle_id and execution_model")
+def cycle_recent(agent_name, as_json):
     """Return chronological cycle summaries for context prompt."""
+    if as_json:
+        rows = agent_reader._query_cycles(
+            "SELECT id, summary, execution_model, routing_mode, routing_work_modality, "
+            "datetime(started_at, 'localtime') AS ts FROM cycles WHERE id LIKE ? "
+            "ORDER BY started_at DESC LIMIT 10",
+            (f"{agent_name}-%",),
+        )
+        print(json.dumps(rows, default=str))
+        return
     cycles = agent_reader.get_recent_cycle_summaries(agent_name)
     if cycles:
         print("\n".join(cycles))
@@ -6281,6 +7047,16 @@ def cycle_count(agent_name):
 def project():
     """Project workspace management."""
     pass
+
+
+def _get_project(conn, project_id):
+    """Fetch project row by numeric id or exit with JSON error."""
+    proj = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not proj:
+        json_response(False, error=f"Project id {project_id} not found")
+        sys.exit(1)
+    return proj
+
 
 @project.command("list")
 def project_list():
@@ -6412,18 +7188,15 @@ def project_add(name, desc, remote, git_init, agent_name):
         sys.exit(1)
 
 @project.command("pause")
-@click.argument("name")
-def project_pause(name):
+@click.argument("project_id", type=int)
+def project_pause(project_id):
     """Set project status to paused."""
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        proj = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
-        if not proj:
-            conn.close()
-            json_response(False, error=f"Project '{name}' not found")
-            sys.exit(1)
-        conn.execute("UPDATE projects SET status='paused', updated_at=datetime('now') WHERE name=?", (name,))
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
+        conn.execute("UPDATE projects SET status='paused', updated_at=datetime('now') WHERE id=?", (project_id,))
         # Inject memory note for all agents with memory on this project
         agent_name = get_agent_name()
         conn.execute(
@@ -6432,45 +7205,42 @@ def project_pause(name):
                ON CONFLICT(agent_name, project_id) DO UPDATE SET
                  current_phase = 'PAUSED — project paused at ' || datetime('now'),
                  updated_at = datetime('now')""",
-            (agent_name, proj["id"])
+            (agent_name, project_id)
         )
         conn.commit()
         conn.close()
-        json_response(True, project=name, status="paused")
+        json_response(True, project_id=project_id, project=name, status="paused")
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
 
 @project.command("resume")
-@click.argument("name")
-def project_resume(name):
+@click.argument("project_id", type=int)
+def project_resume(project_id):
     """Set project status back to active."""
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
-        rows = conn.execute("UPDATE projects SET status='active', updated_at=datetime('now') WHERE name=?", (name,)).rowcount
+        conn.row_factory = sqlite3.Row
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
+        conn.execute("UPDATE projects SET status='active', updated_at=datetime('now') WHERE id=?", (project_id,))
         conn.commit()
         conn.close()
-        if rows == 0:
-            json_response(False, error=f"Project '{name}' not found")
-            sys.exit(1)
-        json_response(True, project=name, status="active")
+        json_response(True, project_id=project_id, project=name, status="active")
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
 
 @project.command("archive")
-@click.argument("name")
+@click.argument("project_id", type=int)
 @click.option("--zip", "do_zip", is_flag=True, help="Compress to !_archive/ and delete source")
-def project_archive(name, do_zip):
+def project_archive(project_id, do_zip):
     """Soft-delete: set project status to archived. --zip compresses and removes source."""
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT workspace_path FROM projects WHERE name=?", (name,)).fetchone()
-        if not row:
-            conn.close()
-            json_response(False, error=f"Project '{name}' not found")
-            sys.exit(1)
+        row = _get_project(conn, project_id)
+        name = row["name"]
         workspace_path = row["workspace_path"]
         archive_path = None
         if do_zip and workspace_path and os.path.isdir(workspace_path):
@@ -6486,22 +7256,20 @@ def project_archive(name, do_zip):
                 json_response(False, error=f"Archive failed: {result.stderr.strip()}")
                 sys.exit(1)
             shutil.rmtree(workspace_path, ignore_errors=True)
-        conn.execute("UPDATE projects SET status='archived', updated_at=datetime('now') WHERE name=?", (name,))
+        conn.execute("UPDATE projects SET status='archived', updated_at=datetime('now') WHERE id=?", (project_id,))
         # Inject memory note for all agents with memory on this project
-        project_id = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
-        if project_id:
-            agent_name = get_agent_name()
-            conn.execute(
-                """INSERT OR REPLACE INTO agent_memory_project (agent_name, project_id, current_phase, updated_at)
-                   VALUES (?, ?, 'ARCHIVED — project archived at ' || datetime('now'), datetime('now'))
-                   ON CONFLICT(agent_name, project_id) DO UPDATE SET
-                     current_phase = 'ARCHIVED — project archived at ' || datetime('now'),
-                     updated_at = datetime('now')""",
-                (agent_name, project_id["id"] if isinstance(project_id, dict) else project_id[0])
-            )
+        agent_name = get_agent_name()
+        conn.execute(
+            """INSERT OR REPLACE INTO agent_memory_project (agent_name, project_id, current_phase, updated_at)
+               VALUES (?, ?, 'ARCHIVED — project archived at ' || datetime('now'), datetime('now'))
+               ON CONFLICT(agent_name, project_id) DO UPDATE SET
+                 current_phase = 'ARCHIVED — project archived at ' || datetime('now'),
+                 updated_at = datetime('now')""",
+            (agent_name, project_id)
+        )
         conn.commit()
         conn.close()
-        response_data = {"project": name, "status": "archived"}
+        response_data = {"project_id": project_id, "project": name, "status": "archived"}
         if archive_path:
             response_data["archive"] = archive_path
         json_response(True, **response_data)
@@ -6514,23 +7282,19 @@ def project_archive(name, do_zip):
 
 
 @project.command("update")
-@click.argument("name")
+@click.argument("project_id", type=int)
 @click.option("--remote", "remote_url", default=None, help="Git remote URL")
 @click.option("--branch", default=None, help="Default branch")
 @click.option("--desc", default=None, help="Project description")
 @click.option("--platform", default=None, type=click.Choice(["github", "gitlab"]), help="Git platform")
 @click.option("--access-token", "access_token", default=None, help="Git platform access token")
 @click.option("--type", "proj_type", default=None, type=click.Choice(["git", "local"]), help="Project type")
-def project_update(name, remote_url, branch, desc, platform, access_token, proj_type):
-    """Update mutable fields on an existing project."""
+def project_update(project_id, remote_url, branch, desc, platform, access_token, proj_type):
+    """Update mutable fields on an existing project (by ID from project list)."""
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        proj = conn.execute("SELECT id, type FROM projects WHERE name=?", (name,)).fetchone()
-        if not proj:
-            conn.close()
-            json_response(False, error=f"Project '{name}' not found")
-            sys.exit(1)
+        proj = _get_project(conn, project_id)
         updates = []
         params = []
         if remote_url is not None:
@@ -6559,29 +7323,30 @@ def project_update(name, remote_url, branch, desc, platform, access_token, proj_
             json_response(False, error="No fields to update. Use --remote, --branch, --desc, --platform, --access-token, or --type.")
             sys.exit(1)
         updates.append("updated_at = datetime('now')")
-        params.append(name)
+        params.append(project_id)
         conn.execute(
-            f"UPDATE projects SET {', '.join(updates)} WHERE name=?",
+            f"UPDATE projects SET {', '.join(updates)} WHERE id=?",
             params
         )
         conn.commit()
-        updated = conn.execute("SELECT * FROM projects WHERE name=?", (name,)).fetchone()
+        updated = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         conn.close()
-        json_response(True, project=name, remote_url=updated["remote_url"],
-                      branch=updated["branch"], type=updated["type"],
-                      platform=updated["platform"], description=updated["description"])
+        json_response(True, project_id=project_id, project=updated["name"],
+                      remote_url=updated["remote_url"], branch=updated["branch"],
+                      type=updated["type"], platform=updated["platform"],
+                      description=updated["description"])
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
 
 
 @project.command("assign")
-@click.argument("name")
+@click.argument("project_id", type=int)
 @click.option("--agent", "agent_name", default=None, help="Agent name to assign")
 @click.option("--connection", "connection_uid", default=None, help="Connection UID to assign")
 @click.option("--roles", default="contributor", help="Comma-separated roles (e.g. 'developer,reviewer')")
 @click.option("--branch", default=None, help="Git branch (auto-generated for agents if omitted)")
-def project_assign(name, agent_name, connection_uid, roles, branch):
+def project_assign(project_id, agent_name, connection_uid, roles, branch):
     """Assign an agent or connection to a project. Provisions workspace for agents."""
     if not agent_name and not connection_uid:
         json_response(False, error="Must specify --agent or --connection")
@@ -6592,12 +7357,8 @@ def project_assign(name, agent_name, connection_uid, roles, branch):
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        proj = conn.execute("SELECT id, name, type, remote_url, branch, workspace_path, access_token FROM projects WHERE name=?", (name,)).fetchone()
-        if not proj:
-            conn.close()
-            json_response(False, error=f"Project '{name}' not found")
-            sys.exit(1)
-        project_id = proj["id"]
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
         proj_type = proj["type"]
         remote_url = proj["remote_url"]
         proj_branch = proj["branch"] or "main"
@@ -6732,7 +7493,7 @@ def project_assign(name, agent_name, connection_uid, roles, branch):
                             )
                             conn.commit()
                             conn.close()
-                            json_response(True, project=name, member_type="agent", member=agent_name,
+                            json_response(True, project_id=project_id, project=name, member_type="agent", member=agent_name,
                                           workspace=agent_project_path, branch=agent_branch, roles=roles,
                                           initialization_failed=True,
                                           error=f"Initial push failed: {push_result.stderr.strip()}. Report to Primary User.")
@@ -6746,7 +7507,7 @@ def project_assign(name, agent_name, connection_uid, roles, branch):
                         )
                         conn.commit()
                         conn.close()
-                        json_response(True, project=name, member_type="agent", member=agent_name,
+                        json_response(True, project_id=project_id, project=name, member_type="agent", member=agent_name,
                                       workspace=agent_project_path, branch=agent_branch, roles=roles,
                                       initialization_failed=True,
                                       error=f"Repo init error: {str(init_err)}. Report to Primary User.")
@@ -6791,7 +7552,7 @@ def project_assign(name, agent_name, connection_uid, roles, branch):
             result_extra = {}
             if proj_type == "git" and locals().get("repo_initialized"):
                 result_extra["repo_initialized"] = True
-            json_response(True, project=name, member_type="agent", member=agent_name,
+            json_response(True, project_id=project_id, project=name, member_type="agent", member=agent_name,
                           workspace=agent_project_path, branch=agent_branch, roles=roles, **result_extra)
 
         else:
@@ -6816,7 +7577,7 @@ def project_assign(name, agent_name, connection_uid, roles, branch):
             )
             conn.commit()
             conn.close()
-            json_response(True, project=name, member_type="connection", member=display,
+            json_response(True, project_id=project_id, project=name, member_type="connection", member=display,
                           uid=connection_uid, branch=conn_branch, roles=roles)
 
     except subprocess.TimeoutExpired:
@@ -6828,10 +7589,10 @@ def project_assign(name, agent_name, connection_uid, roles, branch):
 
 
 @project.command("unassign")
-@click.argument("name")
+@click.argument("project_id", type=int)
 @click.option("--agent", "agent_name", default=None, help="Agent name to unassign")
 @click.option("--connection", "connection_uid", default=None, help="Connection UID to unassign")
-def project_unassign(name, agent_name, connection_uid):
+def project_unassign(project_id, agent_name, connection_uid):
     """Remove an agent or connection from a project. Agents: freezes tasks, cleans workspace."""
     if not agent_name and not connection_uid:
         json_response(False, error="Must specify --agent or --connection")
@@ -6839,12 +7600,8 @@ def project_unassign(name, agent_name, connection_uid):
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        proj = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
-        if not proj:
-            conn.close()
-            json_response(False, error=f"Project '{name}' not found")
-            sys.exit(1)
-        project_id = proj["id"]
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
 
         if agent_name:
             member = conn.execute(
@@ -6892,7 +7649,7 @@ def project_unassign(name, agent_name, connection_uid):
             )
             conn.commit()
             conn.close()
-            json_response(True, project=name, unassigned="agent", member=agent_name,
+            json_response(True, project_id=project_id, project=name, unassigned="agent", member=agent_name,
                           tasks_frozen=frozen_count, workspace_cleaned=bool(ws))
         else:
             member = conn.execute(
@@ -6909,7 +7666,7 @@ def project_unassign(name, agent_name, connection_uid):
             )
             conn.commit()
             conn.close()
-            json_response(True, project=name, unassigned="connection", uid=connection_uid)
+            json_response(True, project_id=project_id, project=name, unassigned="connection", uid=connection_uid)
 
     except Exception as e:
         json_response(False, error=str(e))
@@ -6917,21 +7674,18 @@ def project_unassign(name, agent_name, connection_uid):
 
 
 @project.command("members")
-@click.argument("name")
-def project_members(name):
+@click.argument("project_id", type=int)
+def project_members(project_id):
     """List all members (agents + connections) assigned to a project."""
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        proj = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
-        if not proj:
-            conn.close()
-            json_response(False, error=f"Project '{name}' not found")
-            sys.exit(1)
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
         members = conn.execute(
             "SELECT member_type, member_id, display_name, workspace_path, branch, roles, assigned_at "
             "FROM project_members WHERE project_id=? ORDER BY roles DESC, assigned_at ASC",
-            (proj["id"],)
+            (project_id,)
         ).fetchall()
         conn.close()
         result = []
@@ -6945,7 +7699,7 @@ def project_members(name):
                 "roles": m["roles"],
                 "assigned": m["assigned_at"]
             })
-        print(json.dumps({"ok": True, "project": name, "members": result}, indent=2, default=str))
+        print(json.dumps({"ok": True, "project_id": project_id, "project": name, "members": result}, indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -8069,15 +8823,13 @@ def execute():
     """Execute code (bash/python) safely."""
     pass
 
-@execute.command("bash")
-@click.argument("script", type=str)
-def execute_bash(script):
-    """Execute a bash script as the calling agent user."""
+
+def _execute_bash_script(script: str) -> None:
+    """Run a bash script as the calling agent user."""
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
         f.write(script)
         temp_name = f.name
-    # Make readable by agent user (tempfile defaults to 600 owned by watchdog)
     os.chmod(temp_name, 0o644)
     try:
         cmd = _get_exec_cmd("bash", temp_name)
@@ -8093,6 +8845,20 @@ def execute_bash(script):
     finally:
         if os.path.exists(temp_name):
             os.remove(temp_name)
+
+
+@cli.command("bash")
+@click.argument("script", type=str)
+def bash_alias(script):
+    """Run bash (alias for `agictl execute bash`)."""
+    _execute_bash_script(script)
+
+
+@execute.command("bash")
+@click.argument("script", type=str)
+def execute_bash(script):
+    """Execute a bash script as the calling agent user."""
+    _execute_bash_script(script)
 
 @execute.command("python")
 @click.argument("script", type=str)
@@ -8189,6 +8955,56 @@ def search_web(query, count, categories):
         })
 
     json_response(True, query=query, results=results, count=len(results))
+
+
+# ═══════════════════════════════════════════════════════
+# VIEW — Agent-initiated multimodal input
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def view():
+    """View local images for multimodal perception."""
+    pass
+
+
+@view.command("image")
+@click.argument("path")
+@click.option(
+    "--execution-model",
+    default=None,
+    help="Optional catalog key to test modality gate (harness passes this automatically)",
+)
+def view_image(path, execution_model):
+    """Validate a local image path and return metadata for multimodal inject."""
+    from model_catalog import execution_model_supports_input
+    from model_drivers.view_paths import ViewPathError, inspect_image_for_view
+
+    agent_name = get_agent_name()
+    try:
+        result = inspect_image_for_view(path, agent_name)
+    except ViewPathError as e:
+        json_response(False, error=e.message, code=e.code)
+        sys.exit(1)
+    except OSError as e:
+        json_response(False, error=str(e), code="io_error")
+        sys.exit(1)
+
+    if execution_model:
+        if not execution_model_supports_input(execution_model, "image"):
+            json_response(
+                False,
+                error=(
+                    f"Execution model '{execution_model}' does not support image input "
+                    "(catalog input_modalities lacks 'image')"
+                ),
+                code="modality_unsupported",
+                execution_model=execution_model,
+                path=result.get("path"),
+            )
+            sys.exit(1)
+        result["execution_model"] = execution_model
+
+    json_response(True, **result)
 
 
 # ═══════════════════════════════════════════════════════
@@ -8951,10 +9767,18 @@ def skill_register():
         asset_dir = os.path.join(skills_dir, skill_name)
         has_assets = os.path.isdir(asset_dir)
 
+        shipped_file = os.path.join("/home/watchdog/core-infra/skills", f"{skill_name}.md")
+        if skill_name.endswith("_override"):
+            skill_type, origin = "override", "coa"
+        elif os.path.isfile(shipped_file):
+            skill_type, origin = "system", "shipped"
+        else:
+            skill_type, origin = "agent_created", "coa"
+
         conn.execute(
             "INSERT INTO skills (name, type, origin, has_assets, description, status) "
-            "VALUES (?, 'system', 'shipped', ?, ?, 'synced')",
-            (skill_name, 1 if has_assets else 0, description)
+            "VALUES (?, ?, ?, ?, ?, 'draft')",
+            (skill_name, skill_type, origin, 1 if has_assets else 0, description),
         )
         registered += 1
 

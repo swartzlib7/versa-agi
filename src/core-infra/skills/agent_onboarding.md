@@ -1,5 +1,7 @@
 # Sub-Agent Onboarding
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 **Trigger:** Primary User requests a new agent, COA proposes an agent, or a `hire_agent` task is due.
 
 ## Pre-Flight Check
@@ -30,7 +32,7 @@ Run `agictl agent list-roles` to see the deployed role registry. Each role inclu
    - **Define duties:** Author a duties markdown file, then run `sudo agictl agent set-duties <name> <file>` to provision it
    - **Skills:** Skills are automatically deployed to sub-agents by Lifeline via the DB-driven sync pipeline (`rsync --delete`). Use `agictl skill new` to create custom skills and `agictl skill status` to distribute them. Use `sudo agictl agent deploy-skills <name>` to force an immediate sync.
    - **SSH key:** The agent's SSH keypair was auto-generated at provisioning. For the first git project, deliver the public key to the Primary User (see `git_operations.md`)
-   - **Assign to project:** Use `agictl project assign-member` if applicable
+   - **Assign to project:** Use `agictl project assign <id> --agent <name>` if applicable (resolve `<id>` via `project list`)
    - **Send welcome message:** Brief the new agent with orientation context
 
 5. **Verify:** `agictl agent list --all` — the agent should show as active. Lifeline begins spawning on its next tick.

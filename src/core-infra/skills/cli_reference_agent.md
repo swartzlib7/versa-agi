@@ -1,6 +1,46 @@
-# agictl — Command Reference
+# agictl — Command Reference (agent subset)
+
+> **Spawn injection:** This file is **always injected** every cycle for all agents.
+>
+> **COA — full operator manual:** `cli_reference.md` covers model catalog, provider CRUD, and admin-only commands. It is **not** auto-injected (token budget). Load when needed:
+> - tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/cli_reference.md"`**
 
 agictl is the **only authorized interface** to your data layer. Never use `sqlite3` directly or read config files. If you need data — use agictl.
+
+## Harness tool invocation
+
+During a work cycle you do **not** run shell commands. The LangGraph harness exposes **typed tools** — one per `agictl` command group. Each tool executes the real CLI for you.
+
+| CLI group | Harness tool | `command` argument (omit leading `agictl`) |
+|---|---|---|
+| `system` | `agictl_system` | `system whoami` |
+| `model` | `agictl_model` | `model list` |
+| `agent` | `agictl_agent` | `agent list` |
+| `task` | `agictl_task` | `task snooze 43 1440` |
+| `message` | `agictl_message` | `message send UID "Hello" --mode typed` |
+| `cycle` | `agictl_cycle` | `cycle end "Summary of work"` |
+| `project` | `agictl_project` | `project list` |
+| `connection` | `agictl_connection` | `connection list-primary-user` |
+| `memory` | `agictl_memory` | `memory system list` |
+| `game` | `agictl_game` | `game list` |
+| `awareness` | `agictl_awareness` | `awareness add conclusion --subject self --content "..."` |
+| `identity` | `agictl_identity` | `identity provision …` |
+| `execute` / `bash` | `agictl_execute` | `bash "ls -la"` or `execute python "print(1)"` |
+| `browser` | `agictl_browser` | `browser goto "https://…"` |
+| `search` | `agictl_search` | typed args: `query`, `count` (not a command string) |
+| `view` | `agictl_view_image` | typed arg: `path` (not a command string) |
+
+**Convention:** Examples in this reference use **shell notation** (`agictl group subcommand …`) so they match `--help` and operator docs. Translate when calling a tool:
+
+| Shell (documentation) | Harness call |
+|---|---|
+| `agictl task list` | tool **`agictl_task`**, argument **`task list`** |
+| `agictl cycle end "Done"` | tool **`agictl_cycle`**, argument **`cycle end "Done"`** |
+| `agictl message get UID --unread` | tool **`agictl_message`**, argument **`message get UID --unread`** |
+
+**Do not** prefix the `command` argument with `agictl` — the harness adds it. Passing `agictl cycle end …` runs `agictl agictl cycle end …` and fails.
+
+**Cycle end:** call tool **`agictl_cycle`** alone in the final step (no parallel tool calls). Argument: `cycle end "your summary"`.
 
 ---
 
@@ -58,8 +98,12 @@ agictl task progress <id> [--last N]                  # No text: list the progre
 agictl task done <id>                                 # Shortcut: mark as done
 agictl task cancel <id>                               # Shortcut: mark as cancelled
 agictl task snooze <id> <minutes>                     # Set wake_after (min 5 minutes)
+agictl task unfreeze <id>                             # Resume a frozen task assigned to you
+agictl task unfreeze-all <your_agent_name>              # Resume all your frozen tasks
 agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 ```
+
+> **Frozen tasks**: Lifeline auto-freezes overdue tasks after the configured retry budget. If the Primary User asks you to resume, use `agictl task unfreeze <id>` (or `unfreeze-all` with your agent name). You can only unfreeze tasks assigned to you — COA and the Primary User can unfreeze any agent's tasks.
 
 **task add options**: `--desc`, `--priority low|normal|high|urgent`, `--assignee`, `--project <id>`, `--callback notify_sponsor|notify_connection|await_reply|check_connection|none`, `--source-msg <id>`, `--requested-by <uid>`, `--due-date "YYYY-MM-DD HH:MM:SS"`
 
@@ -117,11 +161,13 @@ agictl cycle recent <agent>                           # Recent cycle summaries f
 ```bash
 agictl project list                                   # All projects as JSON
 agictl project add <name> [--desc TEXT] [--remote URL] [--git-init]  # Register project
-agictl project pause <name>                           # Pause project
-agictl project resume <name>                          # Resume project
-agictl project archive <name> [--zip]                 # Archive project
+agictl project pause <id>                             # Pause project
+agictl project resume <id>                            # Resume project
+agictl project archive <id> [--zip]                 # Archive project
 agictl project git-setup                              # Configure git identity + SSH
 ```
+
+> **Project IDs**: Resolve numeric IDs via `project list`. Only `project add` takes a name (for new registration).
 
 ## 7. connection
 
@@ -216,7 +262,23 @@ agictl search web "<query>" --categories science      # Filter by search categor
 
 Use for: technical research, version compatibility checks, documentation lookups, competitive intelligence.
 
-## 12. browser — Headless Browser
+## 12. view — Image perception
+
+**Harness tool:** `agictl_view_image(path="...")` — preferred in-cycle (validates, injects image into context).
+
+**CLI (standalone validation):**
+
+```bash
+agictl view image <path>                              # Validate path; return JSON metadata
+agictl view image workspace/screenshots/page.png      # Relative to agent workspace
+agictl view image /any/local/path.png                 # Absolute path anywhere on disk
+```
+
+**Requirement:** execution model catalog `input_modalities` must include `image`. Refused when fewer than 8 steps remain.
+
+**Cross-spawn fallback:** if the execution model lacks vision: `agictl agent set-model` (COA/admin), journal progress, snooze or create a self-assigned task due now, then `agictl cycle end`. Next Lifeline tick respawns on the vision model.
+
+## 13. browser — Headless Browser
 
 ```bash
 agictl browser goto "<url>"                           # Load page, return text content
@@ -240,9 +302,10 @@ agictl browser extract "<url>" --selector "<css>" --attribute "<attr>"  # Extrac
 
 Use for: web page verification, content extraction, form testing, dashboard screenshots, API documentation scraping.
 
-## 13. execute — Code Execution
+## 14. execute — Code Execution
 
 ```bash
+agictl bash "<script>"                                # Shorthand for execute bash
 agictl execute bash "<script>"                        # Run a bash script
 agictl execute python "<script>"                      # Run a Python script
 ```
@@ -253,7 +316,7 @@ Scripts execute as **your agent user** (not root/watchdog) with a 120-second tim
 
 **Returns JSON**: `{success: true/false, output: "...", exit_code: N}`
 
-## 14. model — LLM Model Management
+## 15. model — LLM Model Management
 
 ```bash
 agictl model list                                     # List registered models with status
@@ -263,9 +326,9 @@ sudo agictl agent set-model <name> <catalog-key>      # Assign model (COA or PU 
 sudo agictl agent set-model <name> --clear            # Clear → inherit default
 ```
 
-> **Access**: Sub-agents see their assigned model via `system whoami` only. **COA** can assign models with `agent set-model` (must be `coa_approved` when assigning to COA). Full catalog/params/provider CRUD is in the **`cli_reference`** skill (always available to COA).
+> **Access**: Sub-agents see their assigned model via `system whoami` only. **COA** can assign models with `agent set-model` (must be `coa_approved` when assigning to COA). Full catalog/params/provider CRUD is in **`cli_reference.md`** — load on demand via tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/cli_reference.md"`** (see top of this file).
 
-## 15. pkg — System Package Registry
+## 16. pkg — System Package Registry
 
 ```bash
 agictl pkg list                                       # View all registered packages and statuses
@@ -296,6 +359,7 @@ Use for: requesting build tools, libraries, or runtime dependencies that your wo
 ## Rules
 
 - **ALWAYS** use agictl — never read config files or databases directly
+- **Harness first** — call typed tools (`agictl_task`, …); pass subcommands without the `agictl` prefix (see *Harness tool invocation* above)
 - **NEVER** guess command syntax — consult this reference
 - All effectful commands return JSON: `{"success": true/false, ...}`
 - Commands marked **(STUB)** return confirmation but are not fully wired yet

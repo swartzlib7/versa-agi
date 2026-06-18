@@ -1,12 +1,14 @@
 """Tasks panel — active tasks list with live data."""
 
+import os
 import time
+import configparser
 from typing import Optional
 from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Vertical, VerticalScroll, Horizontal
-from textual.widgets import DataTable, Static, Button, Select, Input, TextArea
+from textual.widgets import DataTable, Static, Button, Select, Input, TextArea, TabbedContent, TabPane
 from rich.markup import escape
 
 from agitop.data import TasksReader
@@ -27,6 +29,46 @@ def _utc_to_local(utc_str: str) -> str:
         return utc_str
 
 
+def _local_to_utc(local_str: str) -> str:
+    """Convert 'YYYY-MM-DD HH:MM:SS' local time to UTC for storage."""
+    if not local_str or len(local_str) < 16:
+        return local_str
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.strptime(local_str[:19], "%Y-%m-%d %H:%M:%S")
+        dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo).astimezone(timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError):
+        return local_str
+
+
+def _parse_task_due_parts(due: str) -> tuple[str, str, str]:
+    """Split stored due_date into date, hour, minute strings."""
+    due = (due or "").strip()
+    if not due:
+        return "", "00", "00"
+    try:
+        date_part, time_part = due.split(" ", 1) if " " in due else (due, "00:00:00")
+        bits = time_part.split(":")
+        hour = (bits[0] if bits else "00").zfill(2)[:2]
+        minute = (bits[1] if len(bits) > 1 else "00").zfill(2)[:2]
+        return date_part[:10], hour, minute
+    except Exception:
+        return "", "00", "00"
+
+
+def _combine_task_due(date_part: str, hour: str, minute: str) -> str:
+    """Build due_date string from date + time picker parts."""
+    date_part = (date_part or "").strip()
+    if not date_part:
+        return ""
+    hour_s = str(hour or "00").zfill(2)[:2]
+    minute_s = str(minute or "00").zfill(2)[:2]
+    from datetime import datetime
+    datetime.strptime(f"{date_part} {hour_s}:{minute_s}:00", "%Y-%m-%d %H:%M:%S")
+    return f"{date_part} {hour_s}:{minute_s}:00"
+
+
 PRIORITY_COLORS = {
     "urgent": "bold red",
     "high": "yellow",
@@ -44,7 +86,56 @@ TASK_STATUSES = [
     ("done", "done"),
 ]
 
+STATUS_DISPLAY = {
+    "planned": ("📋", "cyan"),
+    "in_progress": ("▶", "yellow"),
+    "waiting": ("⏳", "orange1"),
+    "blocked": ("🚧", "red"),
+    "frozen": ("❄", "blue"),
+    "done": ("✓", "green"),
+    "cancelled": ("✗", "dim"),
+}
+
+
+def _format_task_status(status: str) -> str:
+    key = (status or "planned").strip().lower()
+    icon, color = STATUS_DISPLAY.get(key, ("•", "white"))
+    return f"[{color}]{icon} {key}[/]"
+
+
+def _format_spawn_attempts(count: int, max_attempts: int = 3) -> str:
+    """Lifeline retry counter — highlights as budget is consumed."""
+    n = max(0, int(count or 0))
+    if n == 0:
+        return "[dim]0[/]"
+    if n >= max_attempts:
+        return f"[bold red]{n}[/]"
+    if n >= max(1, max_attempts - 1):
+        return f"[yellow]{n}[/]"
+    return f"[orange1]{n}[/]"
+
 _PROGRESS_PRUNE_DEFAULT = "Wake cycle review:%"
+
+_SETUP_INI_PATHS = [
+    "/etc/versa-agi/setup.ini",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "setup.ini",
+    ),
+]
+
+
+def _read_task_max_spawn_attempts() -> int:
+    for path in _SETUP_INI_PATHS:
+        if not os.path.isfile(path):
+            continue
+        cfg = configparser.ConfigParser()
+        try:
+            cfg.read(path)
+            return max(1, int(cfg.get("agent", "task_max_spawn_attempts", fallback="3")))
+        except (ValueError, configparser.Error):
+            return 3
+    return 3
 
 
 class ProgressRemoveConfirmModal(ModalScreen[bool]):
@@ -257,14 +348,14 @@ class ProgressPruneModal(ModalScreen[Optional[str]]):
 
 
 class TaskEditModal(ModalScreen):
-    """Modal dialog to view task details and edit status/due_date/project/assignee."""
+    """Modal dialog to view task details and edit status, due_date, wake_after, project, assignee."""
 
     def __init__(self, task: dict, tasks_reader: Optional[TasksReader], **kwargs):
         super().__init__(**kwargs)
         self._task_record = task
         self._tasks_reader = tasks_reader
         self._progress_page = 0
-        self._progress_page_size = 8
+        self._progress_page_size = 16
         self._progress_total = 0
         self._progress_entry_notes: dict[str, str] = {}
 
@@ -275,6 +366,7 @@ class TaskEditModal(ModalScreen):
         desc = task.get("description") or "No description."
         current_status = task.get("status", "planned")
         current_due = task.get("due_date") or ""
+        current_wake = task.get("wake_after") or ""
         current_project = task.get("project_id")
         current_assignee = task.get("assigned_to") or ""
 
@@ -296,81 +388,195 @@ class TaskEditModal(ModalScreen):
         if current_assignee and current_assignee not in assignee_values:
             assignee_options.append((current_assignee, current_assignee))
 
+        due_date_part, due_hour, due_minute = _parse_task_due_parts(
+            _utc_to_local(current_due) if current_due else ""
+        )
+        wake_date_part, wake_hour, wake_minute = _parse_task_due_parts(
+            _utc_to_local(current_wake) if current_wake else ""
+        )
+
         with Vertical(id="task-dialog"):
             yield Static(f"[bold]#{task_id}[/]", id="task-dialog-title")
-            yield Static("[b]Title[/b]")
-            yield Input(
-                value=title,
-                placeholder="Task title",
-                id="task-edit-title",
-            )
-            yield Static("[b]Description[/b]")
-            yield TextArea(
-                desc,
-                id="task-edit-desc",
-            )
-            with Horizontal(classes="task-field-row"):
-                with Vertical(classes="task-field-col"):
-                    yield Static("[b]Project[/b]")
-                    yield Select(
-                        project_options,
-                        value=project_value,
-                        id="task-edit-project",
-                        allow_blank=False,
-                    )
-                with Vertical(classes="task-field-col"):
-                    yield Static("[b]Assigned To[/b]")
-                    yield Select(
-                        assignee_options,
-                        value=current_assignee,
-                        id="task-edit-assignee",
-                        allow_blank=False,
-                    )
-                with Vertical(classes="task-field-col"):
-                    yield Static("[b]Status[/b]")
-                    yield Select(
-                        TASK_STATUSES,
-                        value=current_status,
-                        id="task-edit-status",
-                        allow_blank=False,
-                    )
-                with Vertical(classes="task-field-col"):
-                    yield Static("[b]Due Date[/b] [dim](YYYY-MM-DD HH:MM:SS)[/]")
-                    yield Input(
-                        value=current_due,
-                        placeholder="YYYY-MM-DD HH:MM:SS",
-                        id="task-edit-due",
-                    )
 
-            # ── Progress Journal (read-only, paginated) ──
-            yield Static("")
-            yield Static("[b]Progress Journal[/b]", id="task-progress-header")
-            yield PaginatedDataTable(self._handle_progress_key, id="task-progress-table")
-            with Horizontal(classes="task-progress-actions"):
-                yield Button("Edit selected", variant="primary", id="task-progress-edit")
-                yield Button("Remove selected", variant="warning", id="task-progress-remove")
-                yield Button("Prune matching…", variant="error", id="task-progress-prune")
-            yield Static(
-                "[dim]PgUp/PgDn to navigate · agents journal via agictl task progress · "
-                "PU: edit/remove/prune entries here[/]",
-                id="task-progress-hint",
-            )
+            with TabbedContent(initial="task-general-tab", id="task-tabs"):
+                with TabPane("General", id="task-general-tab"):
+                    with Vertical(id="task-general-pane"):
+                        with VerticalScroll(id="task-general-scroll"):
+                            yield Static("", classes="modal-tab-spacer")
+                            yield Static("[b]Title[/b]", classes="modal-form-label")
+                            yield Input(
+                                value=title,
+                                placeholder="Task title",
+                                id="task-edit-title",
+                            )
+                            yield Static("[b]Description[/b]", classes="modal-form-label")
+                            yield TextArea(
+                                desc,
+                                id="task-edit-desc",
+                            )
+                            with Horizontal(classes="task-schedule-grid"):
+                                with Vertical(classes="task-field-col task-schedule-meta-col"):
+                                    yield Static("[b]Project[/b]", classes="modal-form-label")
+                                    yield Select(
+                                        project_options,
+                                        value=project_value,
+                                        id="task-edit-project",
+                                        allow_blank=False,
+                                    )
+                                    yield Static("[b]Assigned To[/b]", classes="modal-form-label")
+                                    yield Select(
+                                        assignee_options,
+                                        value=current_assignee,
+                                        id="task-edit-assignee",
+                                        allow_blank=False,
+                                    )
+                                    yield Static("[b]Status[/b]", classes="modal-form-label")
+                                    yield Select(
+                                        TASK_STATUSES,
+                                        value=current_status,
+                                        id="task-edit-status",
+                                        allow_blank=False,
+                                    )
+                                with Vertical(classes="task-field-col task-schedule-datetime-col"):
+                                    yield Static(
+                                        f"[b]Due Date[/b] [dim](local — {_TZ}, stored UTC)[/]",
+                                        classes="modal-form-label",
+                                    )
+                                    with Vertical(classes="task-schedule-datetime-box"):
+                                        with Vertical(classes="task-schedule-datetime-inner"):
+                                            yield Input(
+                                                value=due_date_part,
+                                                placeholder="YYYY-MM-DD",
+                                                id="task-edit-due-date",
+                                            )
+                                            with Horizontal(classes="task-due-time-row"):
+                                                with Vertical(classes="task-time-field"):
+                                                    yield Static("[dim]Hour[/]", classes="task-time-label")
+                                                    yield Input(
+                                                        value=due_hour,
+                                                        placeholder="00",
+                                                        id="task-edit-due-hour",
+                                                        classes="task-time-input",
+                                                        max_length=2,
+                                                    )
+                                                yield Static(":", classes="task-due-sep")
+                                                with Vertical(classes="task-time-field"):
+                                                    yield Static("[dim]Min[/]", classes="task-time-label")
+                                                    yield Input(
+                                                        value=due_minute,
+                                                        placeholder="00",
+                                                        id="task-edit-due-minute",
+                                                        classes="task-time-input",
+                                                        max_length=2,
+                                                    )
+                                            yield Button(
+                                                "Now", variant="default",
+                                                id="btn-task-due-today", classes="task-due-today-btn",
+                                            )
+                                with Vertical(classes="task-field-col task-schedule-datetime-col"):
+                                    yield Static(
+                                        f"[b]Wake After[/b] [dim](local — {_TZ})[/]",
+                                        classes="modal-form-label",
+                                    )
+                                    with Vertical(classes="task-schedule-datetime-box"):
+                                        with Vertical(classes="task-schedule-datetime-inner"):
+                                            yield Input(
+                                                value=wake_date_part,
+                                                placeholder="YYYY-MM-DD (optional)",
+                                                id="task-edit-wake-date",
+                                            )
+                                            with Horizontal(classes="task-due-time-row"):
+                                                with Vertical(classes="task-time-field"):
+                                                    yield Static("[dim]Hour[/]", classes="task-time-label")
+                                                    yield Input(
+                                                        value=wake_hour,
+                                                        placeholder="00",
+                                                        id="task-edit-wake-hour",
+                                                        classes="task-time-input",
+                                                        max_length=2,
+                                                    )
+                                                yield Static(":", classes="task-due-sep")
+                                                with Vertical(classes="task-time-field"):
+                                                    yield Static("[dim]Min[/]", classes="task-time-label")
+                                                    yield Input(
+                                                        value=wake_minute,
+                                                        placeholder="00",
+                                                        id="task-edit-wake-minute",
+                                                        classes="task-time-input",
+                                                        max_length=2,
+                                                    )
+                                            yield Button(
+                                                "Clear", variant="default",
+                                                id="btn-task-wake-clear", classes="task-due-today-btn",
+                                            )
+                            yield Static("", id="task-edit-error")
+                        with Horizontal(classes="task-dialog-buttons"):
+                            yield Button("Save", variant="success", id="task-dialog-save")
+                            yield Button("Close", classes="dismiss-btn", variant="default", id="task-dialog-close")
 
-            yield Static("", id="task-edit-error")
-            with Horizontal(classes="task-dialog-buttons"):
-                yield Button("Save", variant="success", id="task-dialog-save")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="task-dialog-close")
+                with TabPane("Progress Journal", id="task-journal-tab"):
+                    with Vertical(id="task-journal-pane"):
+                        yield Static("", classes="modal-tab-spacer")
+                        yield PaginatedDataTable(self._handle_progress_key, id="task-progress-table")
+                        yield Static(
+                            "[dim]Double-click or Enter to edit · PgUp/PgDn to navigate · "
+                            "agents journal via agictl task progress · "
+                            "PU: edit/remove/prune entries here[/]",
+                            id="task-progress-hint",
+                        )
+                        with Horizontal(classes="task-progress-actions"):
+                            yield Button("Edit selected", variant="primary", id="task-progress-edit")
+                            yield Button("Remove selected", variant="warning", id="task-progress-remove")
+                            yield Button("Prune matching…", variant="error", id="task-progress-prune")
+                            yield Button(
+                                "Close", variant="default",
+                                id="task-journal-close", classes="dismiss-btn",
+                            )
 
     def on_mount(self) -> None:
         try:
-            table = self.query_one("#task-progress-table", DataTable)
+            table = self.query_one("#task-progress-table", PaginatedDataTable)
             table.cursor_type = "row"
             table.add_columns("When", "Agent", "Note")
             if self._tasks_reader and isinstance(self._task_record.get("id"), int):
                 self._progress_total = self._tasks_reader.count_task_progress(self._task_record["id"])
-            self._update_progress_table()
+            self.call_after_refresh(self._sync_progress_page_size)
         except Exception:
             pass
+
+    def on_resize(self, event) -> None:
+        self._sync_progress_page_size()
+
+    @on(TabbedContent.TabActivated)
+    def _on_task_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if event.pane.id == "task-journal-tab":
+            self.call_after_refresh(self._sync_progress_page_size)
+
+    def _progress_rows_per_page(self) -> int:
+        """Fit one page of journal rows to the visible table height."""
+        try:
+            table = self.query_one("#task-progress-table", PaginatedDataTable)
+        except Exception:
+            return self._progress_page_size
+        # Header row + border/chrome; each data row is one terminal line.
+        overhead = 2
+        return max(4, table.size.height - overhead)
+
+    def _sync_progress_page_size(self) -> None:
+        """Recalculate page size from layout and reload if it changed."""
+        new_size = self._progress_rows_per_page()
+        if new_size == self._progress_page_size:
+            self._update_progress_table()
+            return
+        self._progress_page_size = new_size
+        if self._progress_total:
+            max_page = max(0, (self._progress_total - 1) // self._progress_page_size)
+            self._progress_page = min(self._progress_page, max_page)
+        self._update_progress_table()
+
+    def _ensure_progress_columns(self, table: PaginatedDataTable) -> None:
+        if not table.columns:
+            table.add_columns("When", "Agent", "Note")
 
     def _handle_progress_key(self, key: str) -> None:
         if key == "pageup":
@@ -385,10 +591,15 @@ class TaskEditModal(ModalScreen):
 
     def _update_progress_table(self) -> None:
         try:
-            table = self.query_one("#task-progress-table", DataTable)
-            table.clear()
+            table = self.query_one("#task-progress-table", PaginatedDataTable)
+            try:
+                table.clear(columns=False)
+            except TypeError:
+                table.clear()
+            self._ensure_progress_columns(table)
             task_id = self._task_record.get("id")
             if not self._tasks_reader or not isinstance(task_id, int):
+                table.border_title = "Progress Journal"
                 return
 
             self._progress_total = self._tasks_reader.count_task_progress(task_id)
@@ -423,10 +634,20 @@ class TaskEditModal(ModalScreen):
             pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "task-dialog-close":
+        if event.button.id in ("task-dialog-close", "task-journal-close"):
             self.app.pop_screen()
         elif event.button.id == "task-dialog-save":
             self._save()
+        elif event.button.id == "btn-task-due-today":
+            from datetime import datetime
+            now = datetime.now()
+            self.query_one("#task-edit-due-date", Input).value = now.strftime("%Y-%m-%d")
+            self.query_one("#task-edit-due-hour", Input).value = now.strftime("%H")
+            self.query_one("#task-edit-due-minute", Input).value = now.strftime("%M")
+        elif event.button.id == "btn-task-wake-clear":
+            self.query_one("#task-edit-wake-date", Input).value = ""
+            self.query_one("#task-edit-wake-hour", Input).value = "00"
+            self.query_one("#task-edit-wake-minute", Input).value = "00"
         elif event.button.id == "task-progress-edit":
             self._edit_selected_progress()
         elif event.button.id == "task-progress-remove":
@@ -434,9 +655,19 @@ class TaskEditModal(ModalScreen):
         elif event.button.id == "task-progress-prune":
             self._prune_progress()
 
+    @on(DataTable.RowSelected, "#task-progress-table")
+    def _on_progress_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Double-click or Enter on a row opens the edit modal."""
+        self._edit_selected_progress()
+
     def _get_selected_progress_entry_id(self) -> Optional[str]:
-        table = self.query_one("#task-progress-table", DataTable)
-        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        table = self.query_one("#task-progress-table", PaginatedDataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        except Exception:
+            return None
         entry_id_str = str(row_key.value) if row_key and row_key.value else ""
         if not entry_id_str:
             return None
@@ -533,10 +764,29 @@ class TaskEditModal(ModalScreen):
         new_title = self.query_one("#task-edit-title", Input).value.strip()
         new_desc = self.query_one("#task-edit-desc", TextArea).text.strip()
         new_status = self.query_one("#task-edit-status", Select).value
-        new_due = self.query_one("#task-edit-due", Input).value.strip()
+        error_label = self.query_one("#task-edit-error", Static)
+        try:
+            new_due_local = _combine_task_due(
+                self.query_one("#task-edit-due-date", Input).value,
+                self.query_one("#task-edit-due-hour", Input).value,
+                self.query_one("#task-edit-due-minute", Input).value,
+            )
+            new_due = _local_to_utc(new_due_local) if new_due_local else ""
+            wake_date_val = self.query_one("#task-edit-wake-date", Input).value.strip()
+            if wake_date_val:
+                new_wake_local = _combine_task_due(
+                    wake_date_val,
+                    self.query_one("#task-edit-wake-hour", Input).value,
+                    self.query_one("#task-edit-wake-minute", Input).value,
+                )
+                new_wake = _local_to_utc(new_wake_local) if new_wake_local else None
+            else:
+                new_wake = None
+        except ValueError:
+            error_label.update("[bold red]Due/wake dates must be YYYY-MM-DD with valid time[/]")
+            return
         new_project = self.query_one("#task-edit-project", Select).value
         new_assignee = self.query_one("#task-edit-assignee", Select).value
-        error_label = self.query_one("#task-edit-error", Static)
 
         # Validate: title is required
         if not new_title:
@@ -553,6 +803,7 @@ class TaskEditModal(ModalScreen):
         old_desc = self._task_record.get("description") or ""
         old_status = self._task_record.get("status", "planned")
         old_due = self._task_record.get("due_date") or ""
+        old_wake = self._task_record.get("wake_after") or ""
         old_project = self._task_record.get("project_id")
         old_assignee = self._task_record.get("assigned_to") or ""
 
@@ -564,6 +815,8 @@ class TaskEditModal(ModalScreen):
             updates["status"] = new_status
         if new_due != old_due:
             updates["due_date"] = new_due if new_due else None
+        if new_wake != (old_wake or None):
+            updates["wake_after"] = new_wake
         if new_project != old_project:
             updates["project_id"] = new_project if new_project else None
         if new_assignee != old_assignee:
@@ -589,6 +842,31 @@ class TaskEditModal(ModalScreen):
 class DeleteTaskModal(ModalScreen):
     """Confirmation modal for deleting a done/cancelled task."""
 
+    CSS = """
+    DeleteTaskModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #task-delete-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $error;
+        background: $surface;
+    }
+    #task-delete-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #task-delete-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
     def __init__(self, task_id: str, task_title: str, tasks_reader: TasksReader, **kwargs):
         super().__init__(**kwargs)
         self.task_id = int(task_id)
@@ -596,19 +874,25 @@ class DeleteTaskModal(ModalScreen):
         self.tasks_reader = tasks_reader
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="msg-dialog"):
+        title = escape(self.task_title)
+        if len(title) > 120:
+            title = title[:117] + "..."
+        with Vertical(id="task-delete-dialog"):
+            yield Static(f"[bold red]⚠ Delete Task #{self.task_id}[/]\n")
+            yield Static(f"[dim]{title}[/]\n")
             yield Static(
-                f"[bold red]Delete Task[/]\n\n"
-                f"Permanently delete task [bold]#{self.task_id}[/]: {self.task_title}?",
-                id="msg-dialog-header"
+                "Permanently deletes this task and its progress journal.\n\n"
+                "[bold]This cannot be undone.[/]"
             )
-            yield Button("Delete", variant="error", id="confirm-delete")
-            yield Button("Cancel", classes="dismiss-btn", variant="default", id="cancel-delete")
+            with Horizontal(id="task-delete-actions"):
+                yield Button("Delete", variant="error", id="btn-task-delete-confirm")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-task-delete-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "confirm-delete":
+        event.stop()
+        if event.button.id == "btn-task-delete-confirm":
             success, msg = self.tasks_reader.delete_task(self.task_id)
-            self.app.pop_screen()
+            self.dismiss(None)
             if success:
                 self.app.notify(msg, severity="information")
             else:
@@ -618,11 +902,12 @@ class DeleteTaskModal(ModalScreen):
             except Exception:
                 pass
         else:
-            self.app.pop_screen()
+            self.dismiss(None)
 
     def on_key(self, event) -> None:
         if event.key == "escape":
-            self.app.pop_screen()
+            event.stop()
+            self.dismiss(None)
 
 
 class TasksPanel(DataTable):
@@ -636,6 +921,7 @@ class TasksPanel(DataTable):
         self.message_reader = message_reader
         self._page = 0
         self._total = 0
+        self._max_spawn_attempts = _read_task_max_spawn_attempts()
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
@@ -643,7 +929,8 @@ class TasksPanel(DataTable):
         self.add_column("ID", width=5)
         self.add_column("Title", width=50)
         self.add_column("Desc", width=40)
-        self.add_column("Status", width=11)
+        self.add_column("Status", width=14)
+        self.add_column("Spawns", width=7)
         self.add_column("Priority", width=9)
         self.add_column("Requested By", width=14)
         self.add_column("Project", width=16)
@@ -737,7 +1024,8 @@ class TasksPanel(DataTable):
                 task_id,
                 str(task.get("title") or "Untitled"),
                 desc_truncated,
-                str(task.get("status") or "planned"),
+                _format_task_status(str(task.get("status") or "planned")),
+                _format_spawn_attempts(task.get("spawn_attempts", 0), self._max_spawn_attempts),
                 p_formatted,
                 str(self._resolve_name(task.get("requested_by")) or "--"),
                 self._resolve_project(task.get("project_id")),

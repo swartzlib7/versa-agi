@@ -24,6 +24,8 @@ class TriageResult:
     signal_results: dict = field(default_factory=dict)
     has_attachments: bool = False
     attachment_paths: list = field(default_factory=list)
+    required_work_modality: Optional[str] = None
+    recommended_model: Optional[str] = None
 
 
 # ═══════════════════════════════════════════════════════
@@ -64,6 +66,24 @@ Then classify the message:
 Determine which skills should be injected (filenames only, select ALL that apply):
 {skills_catalog}
 
+## COMMUNICATION ORDER (mandatory when inbound messages need a response)
+The agent's poise, task protocol, and communication skills already define how to handle
+messages and attachments. Do NOT repeat CLI syntax or filesystem paths in strategy_notes.
+
+1. **Reply first** — The agent MUST `agictl message send` to the sender with their answer
+   or acknowledgment BEFORE `agictl message mark-processed`.
+2. **mark-processed last** — Only after a meaningful reply (or a deliberate decision that
+   no reply is needed). Never list mark-processed as the first task action.
+3. **task_actions** — High-level work items only (e.g. "reply-to-sender-with-analysis").
+   Do NOT put raw CLI commands in task_actions.
+4. **cycle end is not a reply** — Journal/cycle-end summaries do not reach the sender.
+
+## ATTACHMENTS (flag only — mechanics live in poise/skills)
+Set `has_attachments: true` when the wake prompt or conversation context indicates
+media, images, files, or markdown attached to an inbound message.
+Do NOT put attachment paths or view/send instructions in strategy_notes — poise documents
+`.agent/attachments/{{message_id}}/` and skills document `agictl_view_image`.
+
 Output ONLY valid JSON in this exact format:
 ```json
 {{
@@ -89,6 +109,58 @@ Output ONLY valid JSON in this exact format:
   }}
 }}
 ```"""
+
+
+ROUTING_APPENDIX = """
+## MODEL ROUTING (optional — only when routing context is provided)
+Assigned model: {assigned_model} (work_modality: {assigned_work_modality})
+Required input modalities: {required_input_modalities}
+Mode: {mode}
+{candidates_block}
+{feedback_block}
+{coa_note}
+
+Classify the cognitive work tier as required_work_modality: fast|balanced|reasoning|code|local
+Pool mode only: set recommended_model to a candidate key or null to keep assigned model.
+Deprioritize PU 'avoid' feedback; favor 'prefer' when task/modality matches.
+Never override COA approval rules.
+
+Add to your JSON output:
+  "required_work_modality": "fast|balanced|reasoning|code|local",
+  "recommended_model": null or "catalog_key"
+"""
+
+COA_ROUTING_NOTE = """
+COA (Chief Orchestrator) — classify **this agent's** cognitive work, not work delegated to sub-agents.
+Assigning tasks, routing to another agent, or discussing their implementation → balanced or reasoning, not code.
+Use code only when COA will directly write, edit, or patch code in this cycle (not when merely mentioning coding work for others).
+"""
+
+
+def _format_routing_appendix(routing: dict, agent_name: str = "coa") -> str:
+    if not routing:
+        return ""
+    candidates = routing.get("candidates") or []
+    cand_lines = "\n".join(
+        f"  - {c['key']}: work={c.get('work_modality')}, in={c.get('input')}, out={c.get('output')}"
+        for c in candidates
+    ) or "  (none — preferred-map mode)"
+    feedback = routing.get("pu_feedback") or []
+    fb_lines = "\n".join(
+        f"  - {f['preference']} {f['catalog_key']} "
+        f"(modality={f.get('work_modality') or 'any'}, hint={f.get('task_hint') or ''})"
+        for f in feedback
+    ) or "  (none)"
+    coa_note = COA_ROUTING_NOTE if (agent_name or "").lower() == "coa" else ""
+    return ROUTING_APPENDIX.format(
+        assigned_model=routing.get("assigned_model", ""),
+        assigned_work_modality=routing.get("assigned_work_modality", "balanced"),
+        required_input_modalities=", ".join(routing.get("required_input_modalities") or ["text"]),
+        mode=routing.get("mode", "pool"),
+        candidates_block=f"Candidates:\n{cand_lines}",
+        feedback_block=f"PU feedback:\n{fb_lines}",
+        coa_note=coa_note,
+    )
 
 
 # ═══════════════════════════════════════════════════════
@@ -201,7 +273,7 @@ def _extract_json(text: str) -> dict:
 
 def run_triage(llm, wake_prompt: str, tasks_context: str = "",
                conversation_context: str = "", skills_dir: str = None,
-               agent_name: str = "coa") -> TriageResult:
+               agent_name: str = "coa", routing_context: dict = None) -> TriageResult:
     """Execute the triage node: classify the wake prompt and determine routing.
 
     Args:
@@ -225,6 +297,8 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
         conversation_context=conversation_context[:2000] if conversation_context else "(none)",
         skills_catalog=skills_catalog,
     )
+    if routing_context:
+        prompt += _format_routing_appendix(routing_context, agent_name=agent_name)
 
     try:
         response = llm.invoke([HMsg(content=prompt)])
@@ -263,6 +337,8 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
         parallel_work_viable=data.get("parallel_work_viable", False),
         has_attachments=data.get("has_attachments", False),
         signal_results=data.get("signal_results", {}),
+        required_work_modality=data.get("required_work_modality"),
+        recommended_model=data.get("recommended_model"),
     )
 
     print(f"TRIAGE: {result.classification} (confidence={result.confidence:.2f})", flush=True)
@@ -274,6 +350,70 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
             print(f"TRIAGE: Negative signals: {', '.join(neg)}", flush=True)
     if result.skills_to_inject:
         print(f"TRIAGE: Skills to inject: {', '.join(result.skills_to_inject)}", flush=True)
+    if result.required_work_modality:
+        print(f"TRIAGE: Work modality: {result.required_work_modality}", flush=True)
+    if result.recommended_model:
+        print(f"TRIAGE: Recommended model: {result.recommended_model}", flush=True)
+
+    return result
+
+
+def enrich_triage_from_inbox(result: TriageResult, agent_name: str) -> TriageResult:
+    """Set has_attachments from unprocessed inbox rows (mechanics stay in poise/skills)."""
+    if result.has_attachments:
+        return result
+
+    db_path = os.environ.get("AGICTL_MESSAGES_DB", "")
+    if not db_path or not os.path.isfile(db_path):
+        return result
+
+    sub_account = ""
+    config_path = os.environ.get("AGICTL_CONFIG", "")
+    if config_path and os.path.isfile(config_path):
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                sub_account = (json.load(f).get("versavoice") or {}).get("sub_account_id") or ""
+        except Exception:
+            pass
+
+    ids = list(dict.fromkeys(x for x in (sub_account, agent_name) if x))
+    if not ids:
+        return result
+
+    placeholders = ",".join("?" * len(ids))
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path, timeout=5)
+        rows = conn.execute(
+            f"SELECT has_attachments, attachment_path, raw_payload FROM messages "
+            f"WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({placeholders})",
+            tuple(ids),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return result
+
+    paths: list[str] = []
+    for has_flag, attach_path, raw_payload in rows:
+        path = (attach_path or "").strip()
+        if path and not path.startswith("http"):
+            paths.append(path)
+        if has_flag and not paths:
+            result.has_attachments = True
+        if raw_payload:
+            try:
+                payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                attachments = payload.get("attachments") if isinstance(payload, dict) else None
+                if isinstance(attachments, list) and attachments:
+                    result.has_attachments = True
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    if paths:
+        result.has_attachments = True
+        result.attachment_paths = paths
+    elif result.has_attachments:
+        result.attachment_paths = []
 
     return result
 
@@ -403,10 +543,15 @@ def build_triage_context(result: TriageResult) -> str:
     ]
     if result.strategy_notes:
         lines.append(f"Strategy: {result.strategy_notes}")
+    if result.required_work_modality:
+        lines.append(f"Work modality: **{result.required_work_modality}**")
+    if result.recommended_model:
+        lines.append(f"Routed model (ephemeral): **{result.recommended_model}**")
     if result.has_attachments:
-        lines.append("⚠ This message includes attachments — read them before acting.")
-        if result.attachment_paths:
-            lines.append(f"  Paths: {', '.join(result.attachment_paths)}")
+        lines.append(
+            "⚠ Inbound attachment(s) detected — locate under `.agent/attachments/` "
+            "(see poise) and use `agictl_view_image` per cli_reference before replying."
+        )
     if result.task_actions:
         lines.append(f"Task actions: {json.dumps(result.task_actions)}")
 
@@ -428,12 +573,17 @@ def build_triage_context(result: TriageResult) -> str:
     lines.append("## ── TRIAGE DIRECTIVES ──")
     lines.append("Follow this execution order for this cycle:")
     lines.append("")
+    lines.append(
+        "**Inbound message rule:** `agictl message send` to the sender BEFORE "
+        "`agictl message mark-processed`. Cycle-end text does not notify them."
+    )
+    lines.append("")
 
     cls = result.classification
 
     if cls == "work_request":
         lines.append("### Execution Order")
-        lines.append("1. **COMMUNICATE FIRST** — Acknowledge the sender's message before doing any work. Let them know you received their request and what you plan to do.")
+        lines.append("1. **COMMUNICATE FIRST** — `agictl message send` to acknowledge the request before any work. Tell them what you understood and what you will do.")
         if len(result.task_actions) > 1:
             lines.append(f"2. **PLAN WORK** — This request contains {len(result.task_actions)} distinct work items. Review existing tasks for overlap before planning new ones.")
         elif result.task_actions:
@@ -441,14 +591,17 @@ def build_triage_context(result: TriageResult) -> str:
         else:
             lines.append("2. **PLAN WORK** — Determine the scope. Create tasks if the work is non-trivial and no existing tasks cover it.")
         lines.append("3. **EXECUTE** — Begin the work, keeping task states accurate as you progress.")
-        lines.append("4. **REPORT** — When work is complete, update tracking and notify the sender with results.")
+        lines.append("4. **REPORT** — When work is complete, `agictl message send` results to the sender, then `mark-processed`, then `cycle end`.")
 
     elif cls == "follow_up":
         lines.append("### Execution Order")
-        lines.append("1. **REVIEW CONTEXT** — This continues an existing thread. Review your current state (tasks, conversation history) before responding.")
-        lines.append("2. **WAITING TASKS** — If a task is `waiting` or `blocked` on external input and nothing has changed since your last cycle, do NOT append redundant progress notes. Snooze it before ending: `agictl task snooze <id> <minutes>` (60–1440 for external waits).")
-        lines.append("3. **COMMUNICATE** — Respond only if there is genuinely new information. Do not re-message the PU for unchanged waiting states.")
-        lines.append("4. **CONTINUE WORK** — Resume any in-progress tasks related to this thread.")
+        lines.append("1. **REVIEW CONTEXT** — Read related tasks (`agictl task get`), progress journal, and conversation history.")
+        lines.append("2. **CLASSIFY** — Is this (a) confirmation that completes work, (b) new direction, or (c) no change since last cycle?")
+        lines.append("3. **IF (a) confirmation** — `agictl message send` brief reply → `task done` → `mark-processed` → `cycle end`.")
+        lines.append("4. **IF (b) new direction** — `agictl message send` acknowledgment → update task `in_progress` → resume work.")
+        lines.append("5. **IF (c) no change** — `task snooze` only (60–1440 min). No inbox poll. No status message. `cycle end`.")
+        lines.append("6. **UNREAD INBOUND** — If triage flagged an unread message: compose and send your reply FIRST, then `mark-processed`. Never mark-processed before the sender receives your answer.")
+        lines.append("7. **TASK STATUS** — `task progress` `DONE:` is cycle notes only. `task done` only when work is actually complete or explicitly accepted.")
 
     elif cls == "informational":
         lines.append("### Execution Order")

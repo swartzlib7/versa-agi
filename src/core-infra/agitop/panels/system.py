@@ -1,18 +1,19 @@
 """System panel — CRON, disk, memory, uptime, AI mode."""
 
+import os
 import time
 from typing import Optional
+from datetime import datetime
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static, Button
-from textual.timer import Timer
-import time
-from datetime import datetime
 
 from agitop.data.system_reader import SystemReader
 from agitop.data.config_reader import ConfigReader
 from agitop.data.status_reader import StatusReader
 from agitop.data.agent_reader import AgentReader
+from agitop.widgets.atrium_display import AtriumPanel
 
 
 class MetricLabel(Static):
@@ -42,43 +43,47 @@ class SystemPanel(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="system-columns"):
-            with Vertical(classes="sys-col"):
-                yield Static(" [b]Machine[/b]", classes="col-header")
-                yield MetricLabel(id="m-cpu")
-                yield MetricLabel(id="m-disk")
-                yield MetricLabel(id="m-mem")
-                yield MetricLabel(id="m-up")
-            with Vertical(classes="sys-col"):
-                yield Static(" [b]System[/b]", classes="col-header")
-                yield MetricLabel(id="m-cron")
-                yield MetricLabel(id="m-inference_endpoint")
-                yield MetricLabel(id="m-localai")
-                yield MetricLabel(id="m-cloudproxy")
-                yield MetricLabel(id="m-cooldown")
-                yield MetricLabel(id="m-logging")
-                yield MetricLabel(id="m-loginfo")
-                yield MetricLabel(id="m-config-error")
-            with Vertical(classes="sys-col"):
-                yield Static(" [b]Agents[/b]", classes="col-header")
-                yield MetricLabel(id="m-active")
-                yield MetricLabel(id="m-count")
-                yield MetricLabel(id="m-timer")
+            with Vertical(classes="sys-left-stack"):
+                with Horizontal(classes="sys-metrics-row"):
+                    with Vertical(classes="sys-col"):
+                        yield Static(" [b]Machine[/b]", classes="col-header")
+                        yield MetricLabel(id="m-cpu")
+                        yield MetricLabel(id="m-disk")
+                        yield MetricLabel(id="m-mem")
+                        yield MetricLabel(id="m-up")
+                    with Vertical(classes="sys-col"):
+                        yield Static(" [b]System[/b]", classes="col-header")
+                        yield MetricLabel(id="m-cron")
+                        yield MetricLabel(id="m-inference_endpoint")
+                        yield MetricLabel(id="m-localai")
+                        yield MetricLabel(id="m-cloudproxy")
+                        yield MetricLabel(id="m-cooldown")
+                        yield MetricLabel(id="m-logging")
+                        yield MetricLabel(id="m-loginfo")
+                        yield MetricLabel(id="m-config-error")
+                    with Vertical(classes="sys-col"):
+                        yield Static(" [b]Agents[/b]", classes="col-header")
+                        yield MetricLabel(id="m-running")
+                        yield MetricLabel(id="m-count")
+                        yield MetricLabel(id="m-timer")
+                yield AtriumPanel(id="sys-atrium", classes="sys-atrium-panel")
             with Vertical(classes="sys-col controls-col"):
                 yield Static(" [b]Controls[/b]", classes="col-header")
                 with Horizontal(classes="btn-grid-row"):
-                    yield Button("LIFELINE: ON / OFF", id="btn-cron-toggle", variant="primary", classes="panel-btn")
+                    yield Button("LIFELINE: ON / OFF", id="btn-cron-toggle", classes="panel-btn ctrl-lifeline")
                     yield Button("KILL ALL AGENTS", id="btn-kill-agents", variant="error", classes="panel-btn")
                 with Horizontal(classes="btn-grid-row"):
+                    yield Button("⚙ SYSTEM SETTINGS", id="btn-system-settings", classes="panel-btn ctrl-system-settings")
+                    yield Button("LOG: ON / OFF", id="btn-log-toggle", classes="panel-btn ctrl-log-toggle")
+                with Horizontal(classes="btn-grid-row"):
                     yield Button("🎯 GAME OF LIFE", id="btn-strategy", variant="warning", classes="panel-btn strategy-btn")
-                    yield Button("LOG:  ON / OFF", id="btn-log-toggle", variant="default", classes="panel-btn")
+                    yield Button("🗜 VACUUM DBs", id="btn-vacuum", classes="panel-btn ctrl-vacuum")
                 with Horizontal(classes="btn-grid-row"):
-                    yield Button("⚙ SETTINGS", id="btn-system-settings", variant="default", classes="panel-btn")
-                    yield Button("🗜 VACUUM DBs", id="btn-vacuum", variant="default", classes="panel-btn")
-                with Horizontal(classes="btn-grid-row"):
-                    yield Button("🔑 API KEYS", id="btn-api-keys", variant="default", classes="panel-btn api-keys-btn")
-                    yield Button("🧩 MODELS", id="btn-model-manager", variant="default", classes="panel-btn model-manager-btn")
+                    yield Button("🔑 API KEYS", id="btn-api-keys", classes="panel-btn api-keys-btn")
+                    yield Button("🧩 MODEL MANAGER", id="btn-model-manager", classes="panel-btn model-manager-btn")
                 with Horizontal(classes="btn-grid-row"):
                     yield Button("◀ REFRESH - 5m ▶", id="btn-refresh-cycle", variant="default", classes="panel-btn")
+                    yield Button("🔀 MODEL ROUTING", id="btn-model-routing", variant="default", classes="panel-btn")
             with Vertical(classes="sys-col clock-col"):
                 yield Static("", id="m-clock")
 
@@ -148,6 +153,9 @@ class SystemPanel(Static):
             self._update_refresh_label()
             # Notify app to update its timers
             self.app.action_update_refresh_interval()
+        elif button_id == "btn-model-routing":
+            from agitop.panels.model_routing_modal import ModelRoutingModal
+            self.app.push_screen(ModelRoutingModal())
         elif button_id == "btn-system-settings":
             from agitop.panels.system_settings_modal import SystemSettingsModal
             self.app.push_screen(SystemSettingsModal())
@@ -179,6 +187,23 @@ class SystemPanel(Static):
     def _dot(self, active: bool) -> str:
         return "[bold green]●[/]" if active else "[bold red]●[/]"
 
+    def _update_control_labels(self) -> None:
+        """Sync toggle button labels with current lifeline / logging state."""
+        cron_on = self.system_reader.is_cron_enabled()
+        log_on = self.system_reader.is_logging_enabled()
+        try:
+            self.query_one("#btn-cron-toggle", Button).label = (
+                f"LIFELINE: {'ON' if cron_on else 'OFF'}"
+            )
+        except Exception:
+            pass
+        try:
+            self.query_one("#btn-log-toggle", Button).label = (
+                f"LOG: {'ON' if log_on else 'OFF'}"
+            )
+        except Exception:
+            pass
+
     def refresh_data(self) -> None:
         """Refresh all metric cells."""
         cpu = self.system_reader.get_cpu_usage()
@@ -189,15 +214,14 @@ class SystemPanel(Static):
         cron_on = self.system_reader.is_cron_enabled()
         agent_running = self.system_reader.is_agent_process_running()
 
-
+        running_count = 0
+        total_agents = 0
+        if self.agent_reader:
+            all_agents = self.agent_reader.get_all_agents()
+            total_agents = len(all_agents)
+            running_count = sum(1 for a in all_agents if a.get("status") == "active")
         
-        active_agents = len(self.agent_reader.get_active_agents()) if self.agent_reader else 0
-        total_agents = len(self.agent_reader.get_all_agents()) if self.agent_reader else 0
-        
-        active_color = "green" if active_agents > 0 else "red"
-        active_str = "YES" if active_agents > 0 else "NO"
-
-        # Compute runtime timer from cycle_id (format: agent-EPOCH)
+        # Elapsed time for the current harness spawn (cycle_id format: agent-EPOCH)
         timer_str = "--:--"
         cycle_id = self.status_reader.get_current_cycle_id()
         if cycle_id and agent_running:
@@ -303,7 +327,10 @@ class SystemPanel(Static):
         else:
             self.query_one("#m-config-error").update("")
 
-        self.query_one("#m-active").update(f" ACTIVE: [{active_color}]{active_str}[/{active_color}]")
-        self.query_one("#m-count").update(f" COUNT:  [bold]{active_agents}[/bold]/{total_agents}")
+        self.query_one("#m-running").update(
+            f" RUNNING: [bold]{running_count}[/]"
+        )
+        self.query_one("#m-count").update(f" AGENTS: [bold]{total_agents}[/]")
         timer_color = "yellow" if agent_running else "dim"
-        self.query_one("#m-timer").update(f" CYCLE: [{timer_color}]{timer_str}[/{timer_color}]")
+        self.query_one("#m-timer").update(f" SPAWN: [{timer_color}]{timer_str}[/{timer_color}]")
+        self._update_control_labels()

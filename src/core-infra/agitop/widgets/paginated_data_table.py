@@ -1,4 +1,4 @@
-"""Shared agitop UI widgets."""
+"""DataTable with PageUp/PageDown pagination callback."""
 
 from textual.widgets import DataTable
 

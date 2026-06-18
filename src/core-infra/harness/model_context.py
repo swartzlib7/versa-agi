@@ -73,7 +73,7 @@ def _load_context_map() -> dict[str, tuple[int, int]]:
     catalog row, so dashboard/CLI edits always win. Falls back to the built-in
     map if models.ini is unavailable / yields nothing.
     """
-    ini = configparser.ConfigParser(delimiters=('=',))
+    ini = configparser.ConfigParser(delimiters=('=',), strict=False)
     for path in _MODELS_INI_PATHS:
         if os.path.exists(path):
             ini.read(path)
@@ -160,7 +160,7 @@ def get_server_ctx_ceiling() -> int | None:
             cfg = configparser.ConfigParser()
             cfg.read(path)
             backend = cfg.get("local_ai", "gpu_backend", fallback="standard")
-            if backend in ("intel", "remote"):
+            if backend == "intel":
                 try:
                     return int(cfg.get("local_ai", "sycl_ctx_size", fallback="4096"))
                 except ValueError:

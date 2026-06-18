@@ -2,6 +2,9 @@
 description: Awareness-First memory procedure (MANDATORY — always injected)
 ---
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
+
 # Memory Management Skill
 
 > **MANDATORY**: This skill MUST be executed before ending every cycle. It is always injected regardless of triage classification.

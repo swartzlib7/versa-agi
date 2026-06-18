@@ -3,6 +3,9 @@ name: project_management
 description: Guide the COA through onboarding new projects — Git-backed or local
 ---
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
+
 # Project Management Skill
 
 ## Purpose
@@ -47,6 +50,7 @@ Use this skill when:
 - The Primary User mentions a **new project** or asks you to work on something new
 - The user asks to **add a repository** or **set up a project workspace**
 - A task requires working in a codebase that is not yet registered
+- The Primary User asks to **update project metadata** (description, remote URL, branch, platform, or access token)
 
 ## Pre-Check
 
@@ -109,16 +113,37 @@ After either path, summarize:
 - Workspace path
 - Current branch (if git)
 
+## Updating Existing Projects
+
+When the Primary User asks to change a project description or other registered metadata:
+
+1. Resolve the project ID:
+   ```bash
+   agictl project list
+   ```
+2. Update by ID (not name):
+   ```bash
+   agictl project update <id> --desc "Updated summary"
+   ```
+   Other flags: `--remote`, `--branch`, `--platform`, `--access-token`, `--type`.
+3. Confirm the JSON response includes the updated `description` (and other fields changed).
+
+> **Name changes** are not available via CLI — use the agitop Projects panel (General tab).
+
 ## Project Lifecycle Commands
 
 Reference for managing projects after onboarding:
 
 | Command | Effect |
 |---|---|
-| `agictl project list` | Show all projects with status |
-| `agictl project pause <name>` | Pause — sentinel/lifeline skip this project |
-| `agictl project resume <name>` | Resume a paused project |
-| `agictl project archive <name>` | Archive — soft-delete, excluded everywhere |
+| `agictl project list` | Show all projects with status (includes `id`) |
+| `agictl project update <id> [--desc TEXT] [--remote URL] [--branch B] [--platform github\|gitlab] [--access-token T] [--type git\|local]` | Update project metadata by ID (description, git remote/branch, platform, credentials) |
+| `agictl project assign <id> --agent <name>` | Assign agent to project (provisions workspace) |
+| `agictl project unassign <id> --agent <name>` | Remove agent from project |
+| `agictl project members <id>` | List project members |
+| `agictl project pause <id>` | Pause — sentinel/lifeline skip this project |
+| `agictl project resume <id>` | Resume a paused project |
+| `agictl project archive <id>` | Archive — soft-delete, excluded everywhere |
 
 ## Important Notes
 

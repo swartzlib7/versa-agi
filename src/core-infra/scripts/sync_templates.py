@@ -124,34 +124,57 @@ def sync():
     except Exception as e:
         results["errors"].append(f"Agent DB error: {e}")
 
-    # 3. Sync COA Skills directly
+    # 3. Sync COA Skills directly (merge shipped copies — never --delete; COA dir
+    # also holds agent_created and override skills that must survive setup --update)
     coa_skills_dest = f"/home/{coa_user}/coa-env/.agent/skills/"
+    try:
+        _conn = sqlite3.connect(agents_db, timeout=5)
+        _row = _conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+        _conn.close()
+        if _row and _row[0]:
+            coa_skills_dest = os.path.join(_row[0], ".agent", "skills") + os.sep
+    except Exception:
+        pass
     coa_skills_src = os.path.join(core_infra, "skills/")
-    if os.path.isdir(coa_skills_src) and os.path.isdir(os.path.dirname(coa_skills_dest)):
+    shipped_md_names = set()
+    if os.path.isdir(coa_skills_src):
+        shipped_md_names = {
+            os.path.basename(p)
+            for p in glob.glob(os.path.join(coa_skills_src, "*.md"))
+            if os.path.basename(p).lower() != "readme.md"
+        }
+    shipped_dir_names = set()
+    if os.path.isdir(coa_skills_src):
+        shipped_dir_names = {
+            d for d in os.listdir(coa_skills_src)
+            if os.path.isdir(os.path.join(coa_skills_src, d))
+        }
+    if os.path.isdir(coa_skills_src) and os.path.isdir(os.path.dirname(coa_skills_dest.rstrip(os.sep))):
         try:
             os.makedirs(coa_skills_dest, exist_ok=True)
             subprocess.run(["chown", f"{coa_user}:agi_agents", coa_skills_dest], check=False)
             subprocess.run(["chmod", "775", coa_skills_dest], check=False)
-            
+
             rsync_cmd = [
-                "rsync", "-a", "--delete",
+                "rsync", "-a",
                 "--exclude", "README.md",
                 coa_skills_src, coa_skills_dest
             ]
             res = subprocess.run(rsync_cmd, capture_output=True, text=True)
             if res.returncode == 0:
-                # Fix directory ownership AFTER rsync (rsync -a preserves source owner)
                 subprocess.run(["chown", f"{coa_user}:agi_agents", coa_skills_dest], check=False)
                 subprocess.run(["chmod", "775", coa_skills_dest], check=False)
                 for skill_file in glob.glob(os.path.join(coa_skills_dest, "*.md")):
+                    if os.path.basename(skill_file) not in shipped_md_names:
+                        continue  # agent_created / override — leave COA-owned perms
                     subprocess.run(["chown", f"{watchdog_user}:agi_agents", skill_file], check=False)
                     subprocess.run(["chmod", "440", skill_file], check=False)
                 for item in os.listdir(coa_skills_dest):
                     item_path = os.path.join(coa_skills_dest, item)
-                    if os.path.isdir(item_path):
+                    if os.path.isdir(item_path) and item in shipped_dir_names:
                         subprocess.run(["chown", "-R", f"{coa_user}:agi_agents", item_path], check=False)
                         subprocess.run(["chmod", "-R", "755", item_path], check=False)
-                        
+
                 results["skills_deployed_to"].append(coa_user)
             else:
                 results["errors"].append(f"Failed to deploy skills to COA: {res.stderr.strip()}")

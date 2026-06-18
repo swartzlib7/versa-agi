@@ -139,61 +139,105 @@ def _drain_all_threads(agent_name: str) -> bool:
 
 
 class DrainConfirmModal(ModalScreen):
-    """Confirmation before draining a thread."""
+    """Confirmation before draining checkpoint thread(s)."""
 
-    def __init__(self, agent_name: str, thread_id: str, project_name: str,
-                 drain_all: bool = False, **kwargs):
+    CSS = """
+    DrainConfirmModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #thread-drain-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $error;
+        background: $surface;
+    }
+    #thread-drain-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #thread-drain-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(
+        self,
+        agent_name: str,
+        thread_id: str,
+        project_name: str,
+        drain_all: bool = False,
+        parent=None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.agent_name = agent_name
         self.thread_id = thread_id
         self.project_name = project_name
         self.drain_all = drain_all
+        self._parent = parent
 
     def compose(self) -> ComposeResult:
         if self.drain_all:
-            msg = (
+            body = (
                 f"[bold red]Drain ALL threads for {self.agent_name}?[/]\n\n"
                 "This will delete all checkpoint state.\n"
-                "The agent will start with a fresh context on its next cycle.\n\n"
-                "[dim]This action cannot be undone.[/]"
+                "The agent will start with a fresh context on its next cycle.\n"
             )
         else:
-            label = f"{self.thread_id}"
+            label = self.thread_id
             if self.project_name:
                 label += f" ({self.project_name})"
-            msg = (
+            body = (
                 f"[bold red]Drain thread {label}?[/]\n\n"
                 "This will delete all checkpoint state for this thread.\n"
-                "The agent will start fresh on this thread's next cycle.\n\n"
-                "[dim]This action cannot be undone.[/]"
+                "The agent will start fresh on this thread's next cycle.\n"
             )
 
-        with Vertical(id="msg-dialog"):
-            yield Static("[bold]Confirm Drain[/]", id="msg-dialog-header")
-            yield Static(msg)
-            with Horizontal(id="msg-dialog-actions"):
+        with Vertical(id="thread-drain-dialog"):
+            yield Static(body)
+            yield Static("[bold]This cannot be undone.[/]")
+            with Horizontal(id="thread-drain-actions"):
                 yield Button("Drain", variant="error", id="btn-confirm-drain")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+                yield Button(
+                    "Cancel", classes="dismiss-btn", variant="default", id="btn-cancel-drain",
+                )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-confirm-drain":
-            if self.drain_all:
-                ok = _drain_all_threads(self.agent_name)
-            else:
-                ok = _drain_thread(self.agent_name, self.thread_id)
-
-            self.app.pop_screen()  # Remove this confirm dialog → ThreadManagerModal is now active
-            if ok:
-                label = "all threads" if self.drain_all else self.thread_id
-                self.app.notify(f"✓ Drained {label} for {self.agent_name}", title="Thread Manager")
-                # Refresh the parent ThreadManagerModal (now the active screen)
-                active = self.app.screen
-                if isinstance(active, ThreadManagerModal):
-                    active.refresh_table()
-            else:
-                self.app.notify("Drain failed — check DB permissions", title="Error", severity="error")
-        elif event.button.id == "msg-dialog-close":
+        event.stop()
+        if event.button.id == "btn-cancel-drain":
             self.app.pop_screen()
+            return
+        if event.button.id != "btn-confirm-drain":
+            return
+        if self.drain_all:
+            ok = _drain_all_threads(self.agent_name)
+        else:
+            ok = _drain_thread(self.agent_name, self.thread_id)
+
+        self.app.pop_screen()
+        if ok:
+            label = "all threads" if self.drain_all else self.thread_id
+            self.app.notify(f"✓ Drained {label} for {self.agent_name}", title="Threads")
+            parent = self._parent
+            if parent is not None:
+                if hasattr(parent, "refresh_thread_table"):
+                    parent.refresh_thread_table()
+                elif hasattr(parent, "refresh_table"):
+                    parent.refresh_table()
+            else:
+                active = self.app.screen
+                if hasattr(active, "refresh_thread_table"):
+                    active.refresh_thread_table()
+                elif hasattr(active, "refresh_table"):
+                    active.refresh_table()
+        else:
+            self.app.notify("Drain failed — check DB permissions", title="Error", severity="error")
 
 
 class ThreadManagerModal(ModalScreen):
@@ -203,6 +247,7 @@ class ThreadManagerModal(ModalScreen):
         super().__init__(**kwargs)
         self.agent_name = agent_name
         self.db_path = f"/var/lib/versa-agi/{agent_name}/cycles/checkpoints.db"
+        self.selected_thread_id: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         exists = os.path.exists(self.db_path)
@@ -216,7 +261,7 @@ class ThreadManagerModal(ModalScreen):
             if not exists:
                 yield Static("[dim]No checkpoints.db found — agent has not run with persistence yet.[/]")
             else:
-                table = DataTable(id="thread-table")
+                table = DataTable(id="thread-table", cursor_type="row")
                 table.add_columns(
                     "Thread ID", "Project", "Checkpoints", "Writes", "Size"
                 )
@@ -225,7 +270,11 @@ class ThreadManagerModal(ModalScreen):
 
             with Horizontal(id="msg-dialog-actions"):
                 if exists:
-                    yield Button("🗑 Drain All", variant="error", id="btn-drain-all")
+                    yield Button(
+                        "🗑 Drain Selected", variant="error", id="btn-drain-selected",
+                        disabled=True, classes="panel-btn",
+                    )
+                    yield Button("🗑 Drain All", variant="error", id="btn-drain-all", classes="panel-btn")
                 yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
@@ -239,6 +288,11 @@ class ThreadManagerModal(ModalScreen):
             return
 
         table.clear()
+        self.selected_thread_id = None
+        try:
+            self.query_one("#btn-drain-selected", Button).disabled = True
+        except Exception:
+            pass
         threads = _get_thread_data(self.agent_name)
 
         summary = self.query_one("#thread-summary")
@@ -273,21 +327,29 @@ class ThreadManagerModal(ModalScreen):
 
         summary.update(
             f"[dim]{len(threads)} thread(s) — {total_str} total  │  "
-            f"Select a row to drain one thread, or use Drain All[/]"
+            f"Select a row, then Drain Selected or Drain All[/]"
         )
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Drain a specific thread when clicked."""
-        thread_id = str(event.row_key.value)
-        project = _resolve_project_name(thread_id)
-        self.app.push_screen(
-            DrainConfirmModal(self.agent_name, thread_id, project)
-        )
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is None:
+            return
+        self.selected_thread_id = str(event.row_key.value)
+        try:
+            self.query_one("#btn-drain-selected", Button).disabled = False
+        except Exception:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-drain-all":
+        if event.button.id == "btn-drain-selected" and self.selected_thread_id:
+            project = _resolve_project_name(self.selected_thread_id)
             self.app.push_screen(
-                DrainConfirmModal(self.agent_name, "", "", drain_all=True)
+                DrainConfirmModal(
+                    self.agent_name, self.selected_thread_id, project, parent=self,
+                )
+            )
+        elif event.button.id == "btn-drain-all":
+            self.app.push_screen(
+                DrainConfirmModal(self.agent_name, "", "", drain_all=True, parent=self)
             )
         elif event.button.id == "msg-dialog-close":
             self.app.pop_screen()

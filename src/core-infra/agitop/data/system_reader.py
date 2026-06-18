@@ -20,24 +20,44 @@ class SystemReader:
         try:
             import psutil
             pct = psutil.cpu_percent(interval=0.1)
-            cores = psutil.cpu_count(logical=True)
+            cores = psutil.cpu_count(logical=True) or 0
             freq = psutil.cpu_freq()
             speed_ghz = (freq.current / 1000.0) if freq else 0.0
-            return f"{pct:.1f}% ({cores}c @ {speed_ghz:.1f}GHz)"
+            if speed_ghz:
+                return f"{pct:.0f}% · {cores} cores @ {speed_ghz:.1f}GHz"
+            return f"{pct:.0f}% · {cores} cores"
         except ImportError:
             return "--"
 
+    @staticmethod
+    def _format_bytes_gb(num_bytes: float) -> str:
+        gb = num_bytes / (1024 ** 3)
+        if gb >= 100:
+            return f"{gb:.0f}G"
+        if gb >= 10:
+            return f"{gb:.1f}G"
+        return f"{gb:.2f}G"
+
     def get_disk_free(self) -> str:
-        """Get free disk space on root partition."""
+        """Get free and total disk space on root partition."""
         try:
             usage = shutil.disk_usage("/")
-            free_gb = usage.free / (1024 ** 3)
-            return f"{free_gb:.0f}G"
+            free = self._format_bytes_gb(usage.free)
+            total = self._format_bytes_gb(usage.total)
+            return f"{free} free / {total}"
         except Exception:
             return "--"
 
     def get_memory_free(self) -> str:
-        """Get available memory."""
+        """Get available and total memory."""
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            avail = self._format_bytes_gb(mem.available)
+            total = self._format_bytes_gb(mem.total)
+            return f"{avail} free / {total}"
+        except ImportError:
+            pass
         try:
             result = subprocess.run(
                 ["free", "-m"],
@@ -46,10 +66,11 @@ class SystemReader:
             for line in result.stdout.splitlines():
                 if line.startswith("Mem:"):
                     parts = line.split()
-                    avail_mb = int(parts[6]) if len(parts) >= 7 else 0
-                    if avail_mb >= 1024:
-                        return f"{avail_mb / 1024:.1f}G"
-                    return f"{avail_mb}M"
+                    total_mb = int(parts[1]) if len(parts) >= 2 else 0
+                    avail_mb = int(parts[6]) if len(parts) >= 7 else int(parts[3])
+                    total = self._format_bytes_gb(total_mb * 1024 * 1024)
+                    avail = self._format_bytes_gb(avail_mb * 1024 * 1024)
+                    return f"{avail} free / {total}"
         except Exception:
             pass
         return "--"
@@ -303,7 +324,7 @@ class SystemReader:
 
         Handles multiple backends:
           - Ollama (standard/remote): 'ollama serve' process
-          - Intel IPEX: 'inference_endpoint.*--port' process
+          - Intel SYCL: llama-server process
           - Remote: HTTP reachability check on VERSA_INFERENCE_URL
         """
         # Check for local Ollama process
@@ -317,10 +338,10 @@ class SystemReader:
         except Exception:
             pass
 
-        # Check for Intel IPEX inference daemon
+        # Check for Intel SYCL / llama-server process (legacy pgrep name retained)
         try:
             result = subprocess.run(
-                ["pgrep", "-f", "inference_endpoint.*--port"],
+                ["pgrep", "-f", "llama-server"],
                 capture_output=True, text=True, timeout=3,
             )
             if result.returncode == 0:

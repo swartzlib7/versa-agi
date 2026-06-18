@@ -528,8 +528,7 @@ with open(out, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-  local wd="${WATCHDOG_USER:-watchdog}"
-  chown root:"${wd}" "${INSTALL_ACCEPTANCE_JSON}" 2>/dev/null || chown root:root "${INSTALL_ACCEPTANCE_JSON}" 2>/dev/null || true
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${INSTALL_ACCEPTANCE_JSON}" 2>/dev/null || true
   chmod 640 "${INSTALL_ACCEPTANCE_JSON}"
 }
 
@@ -608,13 +607,27 @@ install_acceptance_record_update() {
   local email="${INSTALL_ACCEPTANCE_EMAIL:-}"
   local event="update_acceptance"
   local install_mode="update"
+  local already_submitted
+  local last_heartbeat hb_epoch stale_epoch heartbeat_needed=false
+  local submitted_at
 
   if [ "${DRY_RUN:-false}" = true ]; then
     info "[DRY-RUN] Would record update acceptance"
     return 0
   fi
 
+  already_submitted="$(_install_acceptance_ini_get registration_submitted "false")"
   versavoice_enabled="$(ini_get versavoice enabled false)"
+
+  # Legacy bug: --update cleared registration_submitted despite a prior successful submit
+  if [ "${already_submitted}" != "true" ]; then
+    submitted_at="$(_install_acceptance_ini_get registration_submitted_at "")"
+    if [ -n "${submitted_at}" ]; then
+      _install_acceptance_ini_set registration_submitted "true"
+      already_submitted="true"
+      ok "Registration status restored from prior successful submit"
+    fi
+  fi
 
   # Legacy install: no prior acceptance file - treat as first registration
   if [ ! -f "${INSTALL_ACCEPTANCE_JSON}" ]; then
@@ -626,7 +639,33 @@ install_acceptance_record_update() {
     "${event}" "${install_mode}" "${accepted_at}" "${email}" "${versavoice_enabled}"
 
   _install_acceptance_ini_set acceptance_file "${INSTALL_ACCEPTANCE_JSON}"
-  _install_acceptance_ini_set registration_submitted "false"
 
+  # Already registered — preserve submitted flag; heartbeat only when >7 days stale
+  if [ "${already_submitted}" = "true" ]; then
+    last_heartbeat="$(_install_acceptance_ini_get registration_last_heartbeat_at "")"
+    if [ -z "${last_heartbeat}" ]; then
+      heartbeat_needed=true
+    else
+      hb_epoch=$(date -d "${last_heartbeat}" +%s 2>/dev/null || echo 0)
+      stale_epoch=$(date -d '7 days ago' +%s)
+      if [ "${hb_epoch}" -lt "${stale_epoch}" ]; then
+        heartbeat_needed=true
+      fi
+    fi
+    if [ "${heartbeat_needed}" = true ]; then
+      if python3 "${INSTALL_ACCEPTANCE_PY}" heartbeat 2>/dev/null; then
+        ok "Registration heartbeat sent (update)"
+      else
+        warn "Registration active — heartbeat deferred (offline or endpoint unavailable)"
+      fi
+    else
+      ok "Registration already active (heartbeat not due)"
+    fi
+    _install_acceptance_sync_source_ini
+    return 0
+  fi
+
+  # Not yet registered — fresh retry budget after update acceptance
+  _install_acceptance_ini_set registration_attempt_count "0"
   install_acceptance_submit
 }

@@ -105,11 +105,34 @@ class AgentReader:
 
     def get_active_agents(self) -> list[dict]:
         """Get active agents from agents.db."""
-        return self._query_agents("SELECT * FROM v_active_agents")
+        return self._enrich_agent_table_fields(self._query_agents("SELECT * FROM v_active_agents"))
 
     def get_all_agents(self) -> list[dict]:
         """Get full registry from agents.db."""
-        return self._query_agents("SELECT * FROM v_agent_registry")
+        return self._enrich_agent_table_fields(self._query_agents("SELECT * FROM v_agent_registry"))
+
+    def _enrich_agent_table_fields(self, agents: list[dict]) -> list[dict]:
+        """Merge authoritative agents-table flags when views are stale."""
+        if not agents or not self.agents_db_path:
+            return agents
+        try:
+            conn = sqlite3.connect(self.agents_db_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT name, tool_output_token_budget, model_routing_enabled FROM agents"""
+            ).fetchall()
+            conn.close()
+            by_name = {r["name"]: dict(r) for r in rows}
+            for agent in agents:
+                src = by_name.get(agent.get("name"))
+                if not src:
+                    continue
+                for key in ("tool_output_token_budget", "model_routing_enabled"):
+                    if src.get(key) is not None:
+                        agent[key] = src[key]
+        except Exception:
+            pass
+        return agents
 
     def update_agent_field(self, agent_name: str, field: str, value) -> bool:
         """Update a mutable field on an agent record."""
@@ -121,7 +144,8 @@ class AgentReader:
                    "session_retention_max_count", "anchor_style", "triage_model",
                    "num_ctx", "temperature", "reasoning_effort", "reasoning_max_tokens",
                    "model_params_extra", "conversation_depth", "resume_enabled",
-                   "resume_max_messages", "skill_injection_mode"}
+                   "resume_max_messages", "skill_injection_mode", "browser_enabled",
+                   "model_routing_enabled"}
         if field not in allowed:
             return False
         try:
@@ -282,23 +306,44 @@ class AgentReader:
     def update_last_cycle_tokens(self, agent_name: str, t_in: int, t_out: int, t_think: int, t_total: int, exit_code: int = None, t_cached: int = 0, session_path: str = None) -> bool:
         try:
             conn = sqlite3.connect(self.cycles_db_path, timeout=5)
-            # Have to fetch the last cycle ID first
+            conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT id FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1",
+                "SELECT id, execution_model FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1",
                 (f"{agent_name}-%",)
             )
             row = cursor.fetchone()
             if row:
-                cycle_id = row[0]
+                cycle_id = row["id"]
+                execution_model = row["execution_model"] or ""
+                cost_usd = None
+                pricing_source = None
+                if execution_model:
+                    try:
+                        import sys as _sys
+                        _lib = "/usr/local/lib/versa-agi"
+                        if _lib not in _sys.path:
+                            _sys.path.insert(0, _lib)
+                        from model_catalog import estimate_cycle_cost_usd
+                        cost_usd, pricing_source = estimate_cycle_cost_usd(
+                            execution_model, t_in, t_out, tokens_thinking=t_think, tokens_cached=t_cached,
+                        )
+                    except Exception:
+                        pass
                 if exit_code is not None:
                     conn.execute(
-                        "UPDATE cycles SET tokens_input=?, tokens_output=?, tokens_thinking=?, tokens_cached=?, tokens_total=?, exit_code=?, json_output_path=? WHERE id=?",
-                        (t_in, t_out, t_think, t_cached, t_total, exit_code, session_path, cycle_id)
+                        """UPDATE cycles SET tokens_input=?, tokens_output=?, tokens_thinking=?,
+                           tokens_cached=?, tokens_total=?, exit_code=?, json_output_path=?,
+                           cost_usd_estimated=?, pricing_source=? WHERE id=?""",
+                        (t_in, t_out, t_think, t_cached, t_total, exit_code, session_path,
+                         cost_usd, pricing_source, cycle_id)
                     )
                 else:
                     conn.execute(
-                        "UPDATE cycles SET tokens_input=?, tokens_output=?, tokens_thinking=?, tokens_cached=?, tokens_total=?, json_output_path=? WHERE id=?",
-                        (t_in, t_out, t_think, t_cached, t_total, session_path, cycle_id)
+                        """UPDATE cycles SET tokens_input=?, tokens_output=?, tokens_thinking=?,
+                           tokens_cached=?, tokens_total=?, json_output_path=?,
+                           cost_usd_estimated=?, pricing_source=? WHERE id=?""",
+                        (t_in, t_out, t_think, t_cached, t_total, session_path,
+                         cost_usd, pricing_source, cycle_id)
                     )
                 conn.commit()
             conn.close()

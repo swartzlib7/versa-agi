@@ -1,6 +1,8 @@
-# Skill: CLI Reference — agictl (V3)
+# Skill: CLI Reference — agictl (V3, COA / operator)
 
-> **Trigger**: This is your **primary tool**. Reference this skill whenever you need to interact with the system. All database operations, status updates, messaging, task management, and project management go through `agictl`.
+> **Trigger (COA):** Load on demand when doing model/provider catalog work, admin commands, or anything not in **`cli_reference_agent.md`**. This file is **not** auto-injected — all agents receive the agent subset at spawn instead.
+>
+> **Load via harness:** tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/cli_reference.md"`**
 
 ## Why agictl?
 
@@ -8,7 +10,7 @@ You do NOT have direct access to your SQLite database or system configuration fi
 
 ## Command Groups
 
-agictl is organized into 18 data-model-driven command groups:
+agictl is organized into 19 data-model-driven command groups:
 
 | Group | Purpose |
 |---|---|
@@ -26,10 +28,20 @@ agictl is organized into 18 data-model-driven command groups:
 | `awareness` | Agent cognitive state (conclusions + actions) |
 | `identity` | Sub-account provisioning (setup only) |
 | `execute` | Code execution (bash/python) |
+| `bash` | Shorthand for `execute bash` |
 | `search` | Web search via SearXNG |
+| `view` | Local image perception for multimodal models |
 | `skill` | Skill management (create, distribute, override) |
 | `browser` | Headless browser automation (Playwright) |
 | `pkg` | System package registry (request, approve, install) |
+
+## Harness tool invocation (agents)
+
+When COA or a sub-agent runs inside the LangGraph harness, commands are **not** typed at a shell. Each CLI group above maps to a harness tool (`agictl_task`, `agictl_cycle`, …). Pass only the subcommand **after** `agictl` as the tool's `command` argument — e.g. shell `agictl task list` → tool **`agictl_task`**, argument **`task list`**. Never prefix `agictl` in the argument.
+
+Special cases: **`agictl_search`** (`query`, `count`) and **`agictl_view_image`** (`path`) use typed fields, not a command string. **`agictl_cycle`** must be the sole tool call when ending a cycle.
+
+Full mapping and examples: **`cli_reference_agent.md`** (*Harness tool invocation*). Shell notation in this file is the operator/human reference.
 
 ---
 
@@ -53,8 +65,8 @@ agictl system vacuum                                  # Compact all system datab
 ```bash
 sudo agictl system set-key gemini <key>               # Update Gemini API key → coa.env, *.env, .bashrc, setup.ini
 sudo agictl system set-key versavoice <token>         # Update VersaVoice API token → all *_config.json, setup.ini
-sudo agictl system set-key xai <key>                  # Update xAI API key → inference_endpoint.env, setup.ini → restarts Inference Server
-sudo agictl system set-key openrouter <key>           # Update OpenRouter API key → inference_endpoint.env, setup.ini → restarts Inference Server
+sudo agictl system set-key xai <key>                  # Update xAI API key → provider_keys.env, setup.ini
+sudo agictl system set-key openrouter <key>           # Update OpenRouter API key → provider_keys.env, setup.ini
 ```
 
 > **Alternative**: The `agitop` dashboard provides a **🔑 API KEYS** button (purple, in System Controls) for GUI-based credential management. Re-running `setup.sh` after editing `setup.ini` is also a valid workaround.
@@ -161,6 +173,7 @@ agictl task get-blocked-detail <agent_name>           # Blocked task diagnostics
 agictl task check-followup <agent_name>               # Check callback_action routing
 agictl task inject-followup <agent_name>              # Inject connection follow-up task
 agictl task freeze-all <agent_name>                   # Freeze all non-terminal tasks (saves prior status)
+agictl task unfreeze <task_id>                        # Restore one frozen task (resets spawn_attempts)
 agictl task unfreeze-all <agent_name>                 # Restore all frozen tasks to their prior status
 agictl task count-frozen <agent_name>                 # Count frozen tasks
 ```
@@ -223,7 +236,6 @@ agictl message sync-outbox <agent_uid> [file]              # Bulk-import outbox 
 ```bash
 agictl cycle start [--agent NAME]                     # INSERT cycle row, returns JSON {cycle_id}
 agictl cycle end "Summary" [--agent NAME]             # Mark end + kill execution (SIGTERM parent)
-agictl cycle trigger [--agent NAME]                   # Wake signal to Lifeline (STUB)
 agictl cycle tokens <agent> <in> <out> <think> <total> [--exit-code N]  # Log token metrics + exit code
 agictl cycle recent <agent>                           # Chronological summaries for context
 agictl cycle count <agent>                            # Total cycles executed by the agent
@@ -234,17 +246,19 @@ agictl cycle count <agent>                            # Total cycles executed by
 ```bash
 agictl project list                                   # All projects as JSON (from tasks.db)
 agictl project add <name> [--desc TEXT] [--remote URL] [--git-init]  # Register (STUB)
-agictl project update <name> [--remote URL] [--branch B] [--desc TEXT] [--platform github|gitlab] [--access-token T] [--type git|local]
-agictl project pause <name>                           # Set status to paused (STUB)
-agictl project resume <name>                          # Set status to active (STUB)
-agictl project archive <name> [--zip]                 # Soft-delete / archive (STUB)
-agictl project assign <name> (--agent NAME | --connection UID) [--roles contributor] [--branch B]  # Assign + provision agent workspace
-agictl project unassign <name> (--agent NAME | --connection UID)     # Remove member (agents: freeze tasks + clean workspace)
-agictl project members <name>                         # List all members (agents + connections) as JSON
+agictl project update <id> [--remote URL] [--branch B] [--desc TEXT] [--platform github|gitlab] [--access-token T] [--type git|local]
+agictl project pause <id>                             # Set status to paused (STUB)
+agictl project resume <id>                            # Set status to active (STUB)
+agictl project archive <id> [--zip]                   # Soft-delete / archive (STUB)
+agictl project assign <id> (--agent NAME | --connection UID) [--roles contributor] [--branch B]  # Assign + provision agent workspace
+agictl project unassign <id> (--agent NAME | --connection UID)     # Remove member (agents: freeze tasks + clean workspace)
+agictl project members <id>                           # List all members (agents + connections) as JSON
 agictl project git-setup                              # Manual fallback: configure git identity + SSH (auto-generated at provisioning)
 ```
 
-> **Assignment**: `project assign --agent <name>` provisions the sub-agent's project workspace and (for git projects) a working branch. The owner cannot be unassigned — transfer ownership first. Unassigning an agent freezes its project tasks and cleans up its workspace.
+> **Project IDs**: Every command except `project add` takes the numeric project ID from `project list`. Use `--desc` on `project update` to change the description; name changes are dashboard-only (agitop).
+
+> **Assignment**: `project assign <id> --agent <name>` provisions the sub-agent's project workspace and (for git projects) a working branch. The owner cannot be unassigned — transfer ownership first. Unassigning an agent freezes its project tasks and cleans up its workspace.
 
 ## 7. connection — Social Graph
 
@@ -349,6 +363,7 @@ agictl search web "<query>" --categories science      # Filter by search categor
 ## 12. execute — Code Execution
 
 ```bash
+agictl bash "<script>"                                # Shorthand for execute bash (preferred)
 agictl execute bash "<script>"                        # Run a bash script as the agent user
 agictl execute python "<script>"                      # Run a Python script as the agent user
 ```
@@ -414,9 +429,34 @@ agictl model catalog add <key> --class cloud|third_party|local --provider <slug>
 agictl model catalog update <key> [--label] [--provider] [--class C] [--ctx-recommended N] [--ctx-max N] \
     [--enable|--disable] [--coa-approve|--coa-revoke]
 agictl model catalog remove <key>                     # Custom model → deleted; baseline model → disabled via override
+agictl model catalog reset <key> [--no-params]        # Baseline/shipped* → drop [catalog_custom] (+ custom params); custom → use remove
 ```
 
-> Third-party models require their **provider** to exist, be enabled, and be keyed before they route at runtime. Additions/edits land in `[catalog_custom]`. A `setup.ini` **baseline** model can't be deleted here (migrate would re-add it) — it is *disabled* via an override; to drop it entirely, remove it from `setup.ini`. Mutating commands auto-run `sync` unless `--no-sync`.
+> Third-party models require their **provider** to exist, be enabled, and be keyed before they route at runtime. Additions/edits land in `[catalog_custom]`. A `setup.ini` **baseline** model can't be deleted here (migrate would re-add it) — it is *disabled* via an override; to drop it entirely, remove it from `setup.ini`. **Reset** clears custom overrides and restores the shipped baseline row (agitop **↩ Reset** on shipped* rows). Mutating commands auto-run `sync` unless `--no-sync`.
+
+### model feedback — PU routing preferences (CRUD)
+
+```bash
+agictl model feedback add --key <catalog_key> --preference prefer|avoid \
+    [--work-modality fast|balanced|reasoning|code|local] [--task-hint TEXT] [--note TEXT]
+agictl model feedback list [--key <catalog_key>] [--work-modality TIER] [--table]
+agictl model feedback show <id>
+agictl model feedback update <id> [--preference] [--work-modality] [--task-hint] [--note]
+agictl model feedback remove <id>                     # Hard delete from agents.db
+```
+
+> PU + COA only (same caller guard as `agent set-model`). Consumed by triage in **Pool** mode. Duplicate `key + preference + work_modality` combinations are rejected on add. agitop **Model Feedback** modal: catalog key picklist; **Delete** permanently removes the selected row.
+
+### model openrouter — browse OpenRouter API (when provider is configured)
+
+```bash
+agictl model openrouter status                          # enabled + API key present?
+agictl model openrouter list [--addable-only|--all] [--table]
+agictl model openrouter add <vendor/model>              # Add to [catalog_custom] with live metadata
+agictl model openrouter patch-template [--models-ini PATH]  # Refresh OR [catalog] rows + [catalog_pricing] for all non-local catalog keys (setup.sh --update)
+```
+
+> Listing uses the public OpenRouter Models API (no key required). agitop **Add (OpenRouter)** on the **＋ Add Model** form header (fixed top bar) opens the browse/add flow.
 
 ### model params — generation defaults (temperature, reasoning, extra)
 
@@ -441,9 +481,10 @@ agictl provider update <slug> [--label] [--class <ChatX>] [--enable|--disable]
 agictl provider enable <slug>                         # Its models become routable (once a key is present)
 agictl provider disable <slug>                        # Removes its models from the runtime registry
 agictl provider remove <slug>                         # Custom provider → deleted; baseline provider → disabled via override
+agictl provider reset <slug>                          # Baseline/shipped* → drop [providers_custom]; custom → use remove
 ```
 
-> `--class` is the LangChain chat class: `ChatGoogleGenerativeAI`, `ChatOpenAI`, `ChatAnthropic`, `ChatOllama`. The provider's **API key** is set separately: `sudo agictl system set-key <slug> <key>` (supported: `gemini`, `versavoice`, `xai`, `openai`, `anthropic`, `openrouter`). Edits land in `[providers_custom]`; baseline providers are disabled via override, not deleted.
+> `--class` is the LangChain chat class: `ChatGoogleGenerativeAI`, `ChatOpenAI`, `ChatAnthropic`, `ChatOllama`. The provider's **API key** is set separately: `sudo agictl system set-key <slug> <key>` (supported: `gemini`, `versavoice`, `xai`, `openai`, `anthropic`, `openrouter`). Edits land in `[providers_custom]`; baseline providers are disabled via override, not deleted. **Reset** restores the shipped baseline row (agitop **↩ Reset**).
 
 ### model registry — SYCL / GGUF download registry
 
@@ -457,7 +498,7 @@ agictl model registry remove <name>                   # Removes the [sycl_models
 
 > `[sycl_models]` carries the HuggingFace download metadata for local Intel-GPU/GGUF models. After registering, `agictl model run <name>` downloads it. For most local models prefer `model catalog add --class local --gguf-*`, which registers both the catalog row and the SYCL metadata in one step.
 
-> **Local model backend**: Local models are routed by the configured GPU backend — `VERSA_GPU_BACKEND` (`sycl` = Intel/GGUF, `ollama` = standard, `remote` = inference server) — **not** by the catalog provider slug. A local row shows provider `ollama` in the catalog but may actually run on SYCL.
+> **Local model providers**: Local catalog rows use provider `ollama` (`gpu_backend=standard`, ChatOllama) or `llamacpp` (`gpu_backend=intel`, ChatOpenAI → llama-server). On `topology=client`, `gpu_backend` still describes the **remote server's** stack — remote Ollama is `standard` + `ollama`, not `llamacpp`. `agictl model migrate` assigns the slug from setup.ini `gpu_backend`. `VERSA_GPU_BACKEND=remote` in paths.env is topology only; runtime resolves the provider via setup.ini.
 
 ### Remote (server) topology
 
@@ -473,7 +514,20 @@ agictl identity provision <agent_user> --token TOKEN --first-name NAME --last-na
 
 > **Voice options**: `female` (default), `male`, `reflective` (clones Primary User's voice).
 
-## 16. browser — Headless Browser Automation
+## 16. view — Image perception
+
+```bash
+agictl view image <path>                              # Validate local image; JSON metadata
+agictl view image <path> --execution-model <key>      # Test modality gate for a catalog key
+```
+
+**Harness tool:** agents call `agictl_view_image(path="...")` during a cycle. On success the harness injects a multimodal message (same spawn) and trims image payloads from checkpoint history after the next reasoning turn.
+
+**Gate:** the spawn's execution model must declare `image` in catalog `input_modalities`. Text-only models receive a clear tool refusal. Refused when fewer than 8 steps remain in the cycle.
+
+**Paths:** any local file the agent OS user can read. Relative paths resolve from the agent workspace.
+
+## 17. browser — Headless Browser Automation
 
 ```bash
 agictl browser goto "<url>"                           # Load page, return text content
@@ -504,7 +558,7 @@ sudo agictl browser disable <agent_name>              # Set browser_enabled=0 + 
 
 **Harness Integration**: The harness conditionally registers the `agictl_browser` tool at startup based on `_is_browser_enabled()`. When `enabled=false`, agents cannot use browser.
 
-## 17. pkg — System Package Registry
+## 18. pkg — System Package Registry
 
 ```bash
 agictl pkg list                                       # List all packages and their statuses (JSON)

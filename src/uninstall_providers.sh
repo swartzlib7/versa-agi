@@ -48,8 +48,7 @@ echo ""
 
 # ─── Paths ──────────────────────────────────────────
 PATHS_ENV="/etc/versa-agi/paths.env"
-INFERENCE_ENV="/etc/versa-agi/inference_endpoint.env"
-INFERENCE_CONFIG="/etc/versa-agi/inference_endpoint_config.yaml"
+PROVIDER_ENV="/etc/versa-agi/provider_keys.env"
 AGENTS_DB="/var/lib/versa-agi/agents.db"
 
 # ─── Step 1: Disable in paths.env ──────────────────
@@ -59,47 +58,27 @@ if [ -f "${PATHS_ENV}" ]; then
   ok "paths.env updated (THIRD_PARTY_ENABLED=false, THIRD_PARTY_MODELS cleared)"
 fi
 
-# ─── Step 2: Remove API keys from inference_endpoint.env ──────
-if [ -f "${INFERENCE_ENV}" ]; then
-  # Remove all provider keys (XAI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.)
-  sed -i '/^XAI_API_KEY=/d' "${INFERENCE_ENV}"
-  sed -i '/^OPENAI_API_KEY=/d' "${INFERENCE_ENV}"
-  sed -i '/^ANTHROPIC_API_KEY=/d' "${INFERENCE_ENV}"
-  sed -i '/^OPENROUTER_API_KEY=/d' "${INFERENCE_ENV}"
-  ok "Provider API keys removed from ${INFERENCE_ENV}"
+# ─── Step 2: Remove API keys from provider_keys.env ──────
+if [ -f "${PROVIDER_ENV}" ]; then
+  sed -i '/^XAI_API_KEY=/d' "${PROVIDER_ENV}"
+  sed -i '/^OPENAI_API_KEY=/d' "${PROVIDER_ENV}"
+  sed -i '/^ANTHROPIC_API_KEY=/d' "${PROVIDER_ENV}"
+  sed -i '/^OPENROUTER_API_KEY=/d' "${PROVIDER_ENV}"
+  sed -i '/^OR_SITE_URL=/d' "${PROVIDER_ENV}"
+  sed -i '/^OR_APP_NAME=/d' "${PROVIDER_ENV}"
+  ok "Provider API keys removed from ${PROVIDER_ENV}"
+fi
+# Legacy env file (pre-rename)
+LEGACY_ENV="/etc/versa-agi/inference_endpoint.env"
+if [ -f "${LEGACY_ENV}" ]; then
+  sed -i '/^XAI_API_KEY=/d' "${LEGACY_ENV}"
+  sed -i '/^OPENAI_API_KEY=/d' "${LEGACY_ENV}"
+  sed -i '/^ANTHROPIC_API_KEY=/d' "${LEGACY_ENV}"
+  sed -i '/^OPENROUTER_API_KEY=/d' "${LEGACY_ENV}"
+  ok "Provider API keys removed from ${LEGACY_ENV}"
 fi
 
-# ─── Step 3: Regenerate inference_endpoint_config.yaml ─────────
-# Only keep local models if local AI is enabled
-if [ -f "${PATHS_ENV}" ]; then
-  LOCAL_ENABLED=$(grep '^VERSA_LOCAL_AI_ENABLED=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2)
-  LOCAL_MODELS=$(grep '^VERSA_LOCAL_MODELS=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2)
-  OLLAMA_HOST=$(grep '^VERSA_OLLAMA_HOST=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2)
-  OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-
-  if [ "${LOCAL_ENABLED}" = "true" ] && [ -n "${LOCAL_MODELS}" ]; then
-    {
-      echo "model_list:"
-      IFS=',' read -ra LM <<< "${LOCAL_MODELS}"
-      for model in "${LM[@]}"; do
-        model=$(echo "${model}" | xargs)
-        echo "  - model_name: ${model}"
-        echo "    inference_endpoint_params:"
-        echo "      model: ollama/${model}"
-        echo "      api_base: ${OLLAMA_HOST}"
-      done
-    } > "${INFERENCE_CONFIG}"
-    ok "inference_endpoint_config.yaml regenerated (local models only)"
-    # Restart proxy for local models
-    systemctl restart versa-agi-inference_endpoint 2>/dev/null || true
-  else
-    # No local models either — stop Inference Server if nothing needs it
-    info "No local models configured — Inference Endpoint not needed"
-    # Don't stop it — setup.sh --update will handle lifecycle
-  fi
-fi
-
-# ─── Step 4: Mark proxy agents as invalid_config ───
+# ─── Step 3: Mark proxy agents as invalid_config ───
 if [ -f "${AGENTS_DB}" ]; then
   sqlite3 "${AGENTS_DB}" "
     UPDATE agents

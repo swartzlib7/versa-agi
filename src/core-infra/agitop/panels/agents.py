@@ -8,12 +8,21 @@ from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Button, Static, Input, TextArea
+from textual.widgets import DataTable, Button, Static, Input, TextArea, Select
 
 from agitop.data import AgentReader
 from agitop.data.system_reader import SystemReader
+from agitop.panels.agent_prompt_menu import AgentPromptMenu
+from agitop.panels.model_params_ui import format_json_pretty, parse_json_object
 
 _TZ = time.strftime("%Z")
+
+
+def _agent_extra_display(raw: str | None) -> str:
+    """Pretty-print stored agent extra JSON for TextArea display."""
+    if not raw:
+        return ""
+    return format_json_pretty(raw)
 
 def _utc_to_local(utc_str: str) -> str:
     """Convert 'YYYY-MM-DD HH:MM:SS' UTC string to local timezone."""
@@ -98,7 +107,8 @@ class AgentsPanel(DataTable):
         self.cursor_type = "row"
         self.border_title = "Agents (Registry & Telemetry)"
         self.add_columns(
-            "Agent", "Provider", "Model", "Role", "Inactive", "Protected", "Browser", "Comms", "Req. By",
+            "Agent", "Provider", "Model", "Role", "Reasoning", "Skills", "Routing",
+            "Inactive", "Protected", "Browser", "Comms", "Req. By",
             f"Last Cycle ({_TZ})", "Sent", "Recv", "Tasks", "Tokens", "Budget", "Status"
         )
         self.refresh_data()
@@ -225,11 +235,27 @@ class AgentsPanel(DataTable):
             browser_val = agent.get("browser_enabled", 0)
             browser_display = "[green]●[/]" if browser_val else "[dim]○[/]"
 
+            reasoning = (agent.get("reasoning_effort") or "").strip()
+            if reasoning:
+                reasoning_display = f"[cyan]{reasoning}[/]"
+            else:
+                reasoning_display = "[dim]default[/]"
+
+            skill_mode = (agent.get("skill_injection_mode") or "hybrid").strip().lower()
+            skill_labels = {"full": "full", "lazy": "lazy", "hybrid": "hybrid"}
+            skill_display = f"[magenta]{skill_labels.get(skill_mode, skill_mode)}[/]"
+
+            routing_on = agent.get("model_routing_enabled", 0)
+            routing_display = "[green]● on[/]" if routing_on else "[dim]○ off[/]"
+
             self.add_row(
                 name_markup,
                 provider_display,
                 model_display,
                 role + coa_warning,
+                reasoning_display,
+                skill_display,
+                routing_display,
                 inactive,
                 protected,
                 browser_display,
@@ -251,259 +277,6 @@ class AgentsPanel(DataTable):
         agent_name = event.row_key.value
         if agent_name:
             self.app.push_screen(AgentPromptMenu(agent_name))
-
-
-class AgentPromptMenu(ModalScreen):
-    """Prompt viewer menu — choose System Prompt or Context Prompt."""
-
-    def __init__(self, agent_name: str, **kwargs):
-        super().__init__(**kwargs)
-        self.agent_name = agent_name
-
-    def compose(self) -> ComposeResult:
-        # Fetch agent details for the info section
-        agents_panel = self.app.query_one(AgentsPanel)
-        agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
-        agent = next((a for a in agents if a.get("name") == self.agent_name), {})
-
-        os_user = agent.get("os_user") or "--"
-        workspace = agent.get("workspace") or "--"
-        req_name = agent.get("requested_by_name") or agent.get("requested_by") or "--"
-        created = _utc_to_local(agent.get("created_at") or "--")
-        status = agent.get("status") or "--"
-        status_msg = agent.get("status_message") or ""
-        role = agent.get("role") or "--"
-        model = agent.get("model") or "System default"
-        ctx_mode = agent.get("context_injection_mode") or "relevant"
-        budget = agent.get("token_budget", 0)
-        budget_str = "Unlimited" if not budget else f"{budget:,}"
-        num_ctx_val = agent.get("num_ctx", 0)
-        if num_ctx_val and num_ctx_val > 0 and num_ctx_val >= 1024:
-            num_ctx_str = f"{num_ctx_val // 1024}K"
-        elif num_ctx_val and num_ctx_val > 0:
-            num_ctx_str = str(num_ctx_val)
-        else:
-            num_ctx_str = "Auto"
-
-        status_line = status + (f" — {status_msg}" if status_msg else "")
-        info_text = (
-            f"  [dim]Model:[/]  [cyan]{model}[/]        [dim]Role:[/]  {role:16s}  [dim]Budget:[/]  {budget_str}\n"
-            f"  [dim]User:[/]   {os_user:16s}  [dim]Ctx:[/]   {ctx_mode:16s}  [dim]num_ctx:[/] {num_ctx_str}\n"
-            f"  [dim]By:[/]     {req_name:16s}  [dim]Since:[/] {created}\n"
-            f"  [dim]Status:[/] {status_line}"
-        )
-
-        is_pending = agent.get("inactive", 0) == 1
-        is_removal_pending = (agent.get("status") or "") == "removal_requested"
-        is_circuit_broken = (agent.get("status") or "") == "circuit_breaker"
-        is_halted = (agent.get("status") or "") == "halted"
-        is_protected = agent.get("protected") == 1
-
-        with Vertical(id="msg-dialog"):
-            yield Static(f"[bold]Prompts — {self.agent_name}[/]", id="msg-dialog-header")
-            yield Static(info_text)
-            if is_circuit_broken:
-                yield Button("🔓 Clear Circuit Breaker", id="btn-clear-breaker", variant="error")
-            elif is_halted:
-                yield Button("▶ Re-activate Agent", id="btn-clear-breaker", variant="error")
-            elif is_removal_pending:
-                yield Button("🗑 Confirm Removal", id="btn-confirm-remove", variant="error")
-                yield Button("↩ Cancel Removal", id="btn-cancel-remove", variant="warning")
-            elif is_pending:
-                yield Button("✓ Approve & Provision", id="btn-approve-agent", variant="success")
-            # Show unfreeze button when agent has frozen tasks
-            frozen_count = 0
-            if hasattr(self.app, 'tasks_reader') and self.app.tasks_reader:
-                frozen_count = self.app.tasks_reader.count_frozen(self.agent_name)
-            if frozen_count > 0:
-                yield Button(f"❄ Unfreeze Tasks ({frozen_count})", id="btn-unfreeze-tasks", variant="error")
-            # Halt button — non-protected, active agents only (not already halted/breaker/removal)
-            if not is_protected and not is_halted and not is_circuit_broken and not is_removal_pending and not is_pending:
-                yield Button("✋ Halt Agent", id="btn-halt-agent", variant="error")
-            yield Static("")
-            with Horizontal(classes="btn-grid-row"):
-                yield Button("Agent Settings", id="btn-edit-settings", variant="warning", classes="panel-btn")
-                yield Button("⚙ Technical Setup", id="btn-tech-setup", variant="warning", classes="panel-btn")
-                yield Button("View Memory", id="btn-view-memory", variant="primary", classes="panel-btn")
-            with Horizontal(classes="btn-grid-row"):
-                yield Button("Poise Template", id="btn-system-prompt", variant="primary", classes="panel-btn")
-                yield Button("Last System Prompt", id="btn-context-prompt", variant="primary", classes="panel-btn")
-                yield Button("📋 Cycle Log", id="btn-cycle-log", variant="primary", classes="panel-btn")
-            with Horizontal(classes="btn-grid-row"):
-                if not is_protected and not is_removal_pending:
-                    yield Button("🗑 Request Removal", id="btn-request-remove", variant="error", classes="panel-btn")
-                else:
-                    yield Button("🗑 Request Removal", id="btn-request-remove-disabled", variant="error", classes="panel-btn", disabled=True)
-                yield Button("Close", variant="default", id="msg-dialog-close", classes="panel-btn dismiss-btn")
-                yield Button("🧵 Manage Threads", id="btn-thread-manager", variant="primary", classes="panel-btn")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        name = self.agent_name
-        if event.button.id == "btn-system-prompt":
-            # Canonical poise location — deployed by setup.sh from repo templates.
-            path = f"/etc/versa-agi/poise/{name}.md"
-            content = _read_file(path)
-            self.app.push_screen(PromptViewModal(f"Poise Template — {name}", content))
-        elif event.button.id == "btn-context-prompt":
-            path = f"/var/lib/versa-agi/{name}/last_prompt.txt"
-            content = _read_file(path)
-            self.app.push_screen(PromptViewModal(f"Context Prompt — {name}", content))
-        elif event.button.id == "btn-edit-settings":
-            self.app.push_screen(AgentEditModal(name))
-        elif event.button.id == "btn-tech-setup":
-            self.app.push_screen(TechnicalSetupModal(name))
-        elif event.button.id == "btn-view-memory":
-            self.app.push_screen(MemoryViewModal(name))
-        elif event.button.id == "btn-cycle-log":
-            from agitop.panels.cycle_log_modal import CycleLogModal
-            agents_panel = self.app.query_one(AgentsPanel)
-            agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
-            agent = next((a for a in agents if a.get("name") == name), {})
-            os_user = agent.get("os_user") or name
-            self.app.push_screen(CycleLogModal(name, system_reader=agents_panel.system_reader, os_user=os_user))
-        elif event.button.id == "btn-unfreeze-tasks":
-            if hasattr(self.app, 'tasks_reader') and self.app.tasks_reader:
-                count = self.app.tasks_reader.unfreeze_agent_tasks(name)
-                if count > 0:
-                    self.app.notify(f"Unfroze {count} task(s) for {name}", title="Tasks")
-                    # Refresh the tasks panel
-                    try:
-                        from agitop.panels.tasks import TasksPanel
-                        self.app.query_one("#tasks-panel", TasksPanel).refresh_data()
-                    except Exception:
-                        pass
-                else:
-                    self.app.notify(f"No frozen tasks found for {name}", title="Tasks")
-            self.app.pop_screen()
-        elif event.button.id == "btn-approve-agent":
-            import subprocess, json as _json
-            result = subprocess.run(
-                ["agictl", "agent", "approve", self.agent_name],
-                capture_output=True, text=True, timeout=30
-            )
-            self.app.pop_screen()
-            if result.returncode == 0:
-                try:
-                    data = _json.loads(result.stdout)
-                    if data.get("success"):
-                        self.app.notify(f"✓ Agent '{self.agent_name}' approved & provisioned", severity="information")
-                    else:
-                        self.app.notify(f"Approve failed: {data.get('error', 'unknown')}", severity="error")
-                except Exception:
-                    self.app.notify(f"Approve returned: {result.stdout[:200]}", severity="warning")
-            else:
-                self.app.notify(f"Approve failed: {result.stderr[:200]}", severity="error")
-            # Refresh agents table
-            try:
-                self.app.query_one(AgentsPanel).refresh_data()
-            except Exception:
-                pass
-        elif event.button.id == "btn-confirm-remove":
-            import subprocess, json as _json
-            result = subprocess.run(
-                ["agictl", "agent", "confirm-remove", self.agent_name],
-                capture_output=True, text=True, timeout=60
-            )
-            self.app.pop_screen()
-            if result.returncode == 0:
-                try:
-                    data = _json.loads(result.stdout)
-                    if data.get("success"):
-                        archive = data.get("archive", "none")
-                        self.app.notify(
-                            f"✓ Agent '{self.agent_name}' removed (archive: {archive})",
-                            severity="information"
-                        )
-                    else:
-                        self.app.notify(f"Removal failed: {data.get('error', 'unknown')}", severity="error")
-                except Exception:
-                    self.app.notify(f"Removal returned: {result.stdout[:200]}", severity="warning")
-            else:
-                self.app.notify(f"Removal failed: {result.stderr[:200]}", severity="error")
-            try:
-                self.app.query_one(AgentsPanel).refresh_data()
-            except Exception:
-                pass
-        elif event.button.id == "btn-cancel-remove":
-            import subprocess, json as _json
-            result = subprocess.run(
-                ["agictl", "agent", "cancel-remove", self.agent_name],
-                capture_output=True, text=True, timeout=10
-            )
-            self.app.pop_screen()
-            if result.returncode == 0:
-                self.app.notify(f"↩ Removal cancelled — '{self.agent_name}' reactivated", severity="information")
-            else:
-                self.app.notify(f"Cancel failed: {result.stderr[:200]}", severity="error")
-            try:
-                self.app.query_one(AgentsPanel).refresh_data()
-            except Exception:
-                pass
-        elif event.button.id == "btn-request-remove":
-            self.app.push_screen(RemovalConfirmModal(self.agent_name))
-        elif event.button.id == "btn-clear-breaker":
-            import subprocess, json as _json
-            result = subprocess.run(
-                ["agictl", "agent", "activate", self.agent_name],
-                capture_output=True, text=True, timeout=15
-            )
-            self.app.pop_screen()
-            if result.returncode == 0:
-                try:
-                    data = _json.loads(result.stdout)
-                    if data.get("success"):
-                        tasks_status = data.get("tasks", "")
-                        self.app.notify(
-                            f"⚡ Circuit breaker cleared for '{self.agent_name}' — tasks {tasks_status}",
-                            severity="information"
-                        )
-                    else:
-                        self.app.notify(f"Reset failed: {data.get('error', 'unknown')}", severity="error")
-                except Exception:
-                    self.app.notify(f"Reset returned: {result.stdout[:200]}", severity="warning")
-            else:
-                self.app.notify(f"Reset failed: {result.stderr[:200]}", severity="error")
-            try:
-                self.app.query_one(AgentsPanel).refresh_data()
-            except Exception:
-                pass
-        elif event.button.id == "btn-halt-agent":
-            import subprocess, json as _json
-            result = subprocess.run(
-                ["agictl", "agent", "kill", self.agent_name],
-                capture_output=True, text=True, timeout=15
-            )
-            self.app.pop_screen()
-            if result.returncode == 0:
-                try:
-                    data = _json.loads(result.stdout)
-                    if data.get("success"):
-                        was_running = data.get("was_running", False)
-                        if was_running:
-                            self.app.notify(
-                                f"✋ Agent '{self.agent_name}' halted — cycle terminated",
-                                severity="warning"
-                            )
-                        else:
-                            self.app.notify(
-                                f"✋ Agent '{self.agent_name}' halted — no running cycle",
-                                severity="information"
-                            )
-                    else:
-                        self.app.notify(f"Halt failed: {data.get('error', 'unknown')}", severity="error")
-                except Exception:
-                    self.app.notify(f"Halt returned: {result.stdout[:200]}", severity="warning")
-            else:
-                self.app.notify(f"Halt failed: {result.stderr[:200]}", severity="error")
-            try:
-                self.app.query_one(AgentsPanel).refresh_data()
-            except Exception:
-                pass
-        elif event.button.id == "btn-thread-manager":
-            from agitop.panels.thread_manager_modal import ThreadManagerModal
-            self.app.push_screen(ThreadManagerModal(self.agent_name))
-        elif event.button.id == "msg-dialog-close":
-            self.app.pop_screen()
 
 
 class RemovalConfirmModal(ModalScreen):
@@ -549,21 +322,33 @@ class RemovalConfirmModal(ModalScreen):
 def _load_catalog_labels(ini) -> dict[str, tuple[str, str]]:
     """Merge [catalog] + [catalog_custom] → {key: (class, label)} (custom wins).
 
-    The unified catalog is the single source of truth for model display labels
-    (Edition 2.x). Each row is ``class|provider|enabled|coa|ctx_rec|ctx_max|label``.
+    Uses model_catalog.parse_catalog_row for 7- and 11-field catalog rows.
     """
+    import os
+    import sys
+
+    core_infra = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if core_infra not in sys.path:
+        sys.path.insert(0, core_infra)
+    from model_catalog import parse_catalog_row
+
     out: dict[str, tuple[str, str]] = {}
     for section in ("catalog", "catalog_custom"):
         if not ini.has_section(section):
             continue
         for key, raw in ini.items(section):
-            parts = raw.split("|")
-            if len(parts) < 7:
+            row = parse_catalog_row(raw)
+            if not row:
                 continue
-            cls = parts[0].strip()
-            label = "|".join(parts[6:]).strip() or key.strip()
-            out[key.strip()] = (cls, label)
+            k = key.strip()
+            out[k] = (row["class"], (row.get("label") or "").strip() or k)
     return out
+
+
+def _model_option_label(label: str, key: str) -> str:
+    """Consistent picker display: catalog key + human label."""
+    clean = (label or "").strip() or key
+    return f"{key} — {clean}"
 
 
 def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple[str, str]]:
@@ -578,7 +363,7 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
     membership/filtering still comes from paths.env via system_reader.
     """
     import configparser, os
-    ini = configparser.ConfigParser(delimiters=('=',))
+    ini = configparser.ConfigParser(delimiters=('=',), strict=False)
     # Canonical: /etc/versa-agi/models.ini, dev fallback: src/models.ini
     for path in ["/etc/versa-agi/models.ini",
                  os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -606,8 +391,14 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
 
     # Without system_reader, return all entries unfiltered
     if not system_reader:
-        local_entries = [(label, key) for key, label in local_label_map.items()]
-        return cloud_entries + proxy_entries + local_entries
+        unfiltered: list[tuple[str, str]] = []
+        for label, key in cloud_entries:
+            unfiltered.append((f"☁ {_model_option_label(label, key)}", key))
+        for label, key in proxy_entries:
+            unfiltered.append((f"☁ {_model_option_label(label, key)}", key))
+        for key, label in local_label_map.items():
+            unfiltered.append((f"🖥 {_model_option_label(label, key)}", key))
+        return unfiltered
 
     # Backend-aware filtering: only show models for enabled backends
     cloud_set = set(system_reader.get_cloud_models())
@@ -622,14 +413,13 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
     if cloud_set:
         for label, key in cloud_entries:
             if key in cloud_set:
-                filtered.append((f"☁ {label}", key))
+                filtered.append((f"☁ {_model_option_label(label, key)}", key))
 
     # Third-party models: only if third_party enabled
     if proxy_enabled and proxy_set:
         for label, key in proxy_entries:
             if key in proxy_set:
-                prefix = "☁ Open Router" if "/" in key else "☁"
-                filtered.append((f"{prefix} {label}" if prefix != "☁" else f"☁ {label}", key))
+                filtered.append((f"☁ {_model_option_label(label, key)}", key))
 
     # Local models: only if local_ai enabled — use labels from models.ini
     # VERSA_LOCAL_MODELS now contains ALL downloaded models on the server
@@ -640,65 +430,110 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
         strategy = system_reader.get_loading_strategy()
         for m in local_set:
             label = local_label_map.get(m, m)
+            display = _model_option_label(label, m)
             # Star indicator: single mode marks the VRAM-resident model;
             # router mode — all models available, no star needed.
             if strategy == "single" and gpu_backend in ("intel", "remote"):
                 star = " ★" if m == active_model else ""
             else:
                 star = ""
-            filtered.append((f"🖥 {label}{star}", m))
+            filtered.append((f"🖥 {display}{star}", m))
 
     return filtered if filtered else [("gemini-3-flash-preview", "gemini-3-flash-preview")]
 
 
-class TechnicalSetupModal(ModalScreen):
-    """Modal to view/edit agent harness configuration (max steps, tool budget, triage model)."""
+def _sanitize_agent_params_for_model(reader, agent_name: str, model_name: str) -> list[str]:
+    """Reset agent param overrides that are invalid for the assigned model (NULL = inherit)."""
+    if not reader or not model_name:
+        return []
+    agents = reader.get_all_agents()
+    agent = next((a for a in agents if a.get("name") == agent_name), {})
+    if not agent:
+        return []
+    try:
+        from harness.model_params import sanitize_agent_param_fields
+        updates = sanitize_agent_param_fields(
+            model_name,
+            reasoning_effort=agent.get("reasoning_effort"),
+            reasoning_max_tokens=agent.get("reasoning_max_tokens"),
+        )
+    except Exception:
+        return []
+    cleared: list[str] = []
+    for field, val in updates.items():
+        if reader.update_agent_field(agent_name, field, val):
+            cleared.append(field)
+    return cleared
 
-    def __init__(self, agent_name: str, **kwargs):
-        super().__init__(**kwargs)
-        self.agent_name = agent_name
 
-    def compose(self) -> ComposeResult:
-        from textual.containers import Horizontal, Vertical
-        from textual.widgets import Select
-        agents_panel = self.app.query_one(AgentsPanel)
-        agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
-        agent = next((a for a in agents if a.get("name") == self.agent_name), {})
+def _triage_model_kwargs(agents_panel, agent_name) -> tuple[list, dict]:
+    """Options/kwargs for the triage model Select on the General tab."""
+    agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
+    agent = next((a for a in agents if a.get("name") == agent_name), {})
+    current_triage_model = agent.get("triage_model") or ""
+    all_model_options = _load_models_ini(agents_panel.system_reader)
+    triage_model_options = [
+        (label, key) for label, key in all_model_options
+        if not label.startswith("🖥")
+    ]
+    triage_kwargs = {"id": "select-triage-model", "allow_blank": True, "prompt": "Use processing model"}
+    if current_triage_model and any(k == current_triage_model for _, k in triage_model_options):
+        triage_kwargs["value"] = current_triage_model
+    return triage_model_options, triage_kwargs
 
-        current_turns = str(agent.get("max_session_turns", 50))
-        current_tool_budget = str(agent.get("tool_output_token_budget", 1500))
-        current_triage_model = agent.get("triage_model") or ""
-        current_budget = str(agent.get("token_budget", 0))
-        current_timeout = str(agent.get("timeout_minutes", 60))
-        current_threshold = str(agent.get("runaway_threshold", 300))
-        current_size_threshold = str(agent.get("runaway_size_threshold", 512))
-        current_num_ctx = agent.get("num_ctx", 0)
-        current_model = agent.get("model") or ""
 
-        # Load model options for triage model selector — cloud only.
-        # Local models are excluded to prevent SYCL VRAM conflicts; use "Use
-        # agent model" (blank) to inherit the agent's own model for triage.
-        all_model_options = _load_models_ini(agents_panel.system_reader)
-        triage_model_options = [
-            (label, key) for label, key in all_model_options
-            if not label.startswith("🖥")
-        ]
-        triage_kwargs = {"id": "select-triage-model", "allow_blank": True, "prompt": "Use agent model"}
-        if current_triage_model and any(k == current_triage_model for _, k in triage_model_options):
-            triage_kwargs["value"] = current_triage_model
+def _agent_model_gen_context(agents_panel, agent_name) -> dict:
+    """Cloud/local context for num_ctx and related technical setup fields."""
+    agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
+    agent = next((a for a in agents if a.get("name") == agent_name), {})
+    current_model = agent.get("model") or ""
+    try:
+        from harness.model_context import is_cloud_model, get_server_ctx_ceiling
+        is_cloud = is_cloud_model(current_model)
+        server_ceiling = get_server_ctx_ceiling()
+    except ImportError:
+        is_cloud = False
+        server_ceiling = None
+    return {
+        "agent": agent,
+        "current_model": current_model,
+        "is_cloud": is_cloud,
+        "server_ceiling": server_ceiling,
+    }
 
-        # Load num_ctx picklist options filtered by model's max context
-        # and capped to the server's configured ctx-size for Intel/remote
-        try:
-            from harness.model_context import get_num_ctx_options, get_model_context, is_cloud_model, get_server_ctx_ceiling
-            is_cloud = is_cloud_model(current_model)
-            server_ceiling = get_server_ctx_ceiling()
-            ctx_options = get_num_ctx_options(current_model, server_ctx_ceiling=server_ceiling)
-        except ImportError:
-            is_cloud = False
-            server_ceiling = None
-            ctx_options = [("32K", 32768)]
 
+def compose_model_generation_fields(agents_panel, agent_name) -> ComposeResult:
+    """Per-agent generation parameter overrides (Overrides tab)."""
+    ctx = _agent_model_gen_context(agents_panel, agent_name)
+    agent = ctx["agent"]
+    current_model = ctx["current_model"]
+    is_cloud = ctx["is_cloud"]
+
+    try:
+        from harness.model_params import (
+            reasoning_effort_select_options,
+            effective_agent_reasoning_effort,
+            get_model_catalog_hints,
+            supports_reasoning_config,
+            resolve_local_runtime,
+        )
+        gpu_backend = (
+            agents_panel.system_reader.get_gpu_backend()
+            if agents_panel.system_reader else None
+        )
+        local_runtime = resolve_local_runtime(gpu_backend)
+        reasoning_opts = reasoning_effort_select_options(current_model, local_runtime)
+        current_reasoning = effective_agent_reasoning_effort(
+            current_model, agent.get("reasoning_effort"), local_runtime,
+        )
+        catalog_hints = get_model_catalog_hints(current_model)
+        show_reasoning_max = supports_reasoning_config(current_model, local_runtime)
+        think_ollama_only = (
+            not is_cloud
+            and local_runtime == "llamacpp"
+            and supports_reasoning_config(current_model, "ollama")
+        )
+    except ImportError:
         reasoning_opts = [
             ("Inherit", ""),
             ("none", "none"),
@@ -709,273 +544,388 @@ class TechnicalSetupModal(ModalScreen):
             ("max", "max"),
         ]
         current_reasoning = agent.get("reasoning_effort") or ""
-        temp_val = agent.get("temperature")
-        rmt_val = agent.get("reasoning_max_tokens")
+        catalog_hints = None
+        show_reasoning_max = True
+        think_ollama_only = False
 
+    temp_val = agent.get("temperature")
+    rmt_val = agent.get("reasoning_max_tokens")
+
+    yield Static(
+        "[dim]Blank fields inherit from Model Manager / models.ini for the assigned processing model.[/]"
+    )
+    yield Static("")
+    if catalog_hints:
+        yield Static(
+            f"[dim]Assigned model ({current_model or 'none'}): "
+            f"input={catalog_hints['input_modalities']} · "
+            f"output={catalog_hints['output_modalities']} · "
+            f"tier={catalog_hints['work_modality']}[/]"
+        )
+    if think_ollama_only:
+        yield Static(
+            "[dim]Thinking toggle: Ollama provider only — "
+            "not configurable on llamacpp/SYCL (model template may still reason).[/]"
+        )
+    yield Static("")
+
+    with Horizontal(classes="setup-form-row"):
+        with Vertical(classes="setup-form-col"):
+            yield Static("[cyan]Temperature[/] — blank = inherit")
+            yield Input(
+                value="" if temp_val is None else str(temp_val),
+                placeholder="Inherit",
+                id="input-temperature",
+            )
+        with Vertical(classes="setup-form-col"):
+            yield Static("[cyan]Reasoning Effort[/] — blank = inherit")
+            yield Select(
+                reasoning_opts,
+                value=current_reasoning,
+                id="select-reasoning-effort",
+                allow_blank=True,
+                prompt="Inherit",
+            )
+
+    with Horizontal(classes="setup-form-row"):
+        if show_reasoning_max:
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Reasoning Max Tokens[/] — blank = inherit")
+                yield Input(
+                    value="" if rmt_val is None else str(rmt_val),
+                    placeholder="Inherit",
+                    id="input-reasoning-max-tokens",
+                    type="integer",
+                )
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Extra Params (JSON)[/] — passthrough; blank = inherit")
+                yield Static("", id="model-params-extra-inherit-hint")
+                yield TextArea(
+                    _agent_extra_display(agent.get("model_params_extra")),
+                    id="input-model-params-extra",
+                    show_line_numbers=False,
+                )
+        else:
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Extra Params (JSON)[/] — passthrough; blank = inherit")
+                yield Static("", id="model-params-extra-inherit-hint")
+                yield TextArea(
+                    _agent_extra_display(agent.get("model_params_extra")),
+                    id="input-model-params-extra",
+                    show_line_numbers=False,
+                )
+
+
+def save_model_generation_fields(root, reader, agent_name: str, app) -> bool:
+    """Persist per-agent generation overrides from the Overrides tab."""
+    from textual.widgets import Select
+
+    def _nullable_float(wid):
+        raw = root.query_one(wid, Input).value.strip()
+        if not raw:
+            return None
+        return float(raw)
+
+    def _nullable_int(wid):
+        raw = root.query_one(wid, Input).value.strip()
+        if not raw:
+            return None
+        return int(raw)
+
+    temp_override = _nullable_float("#input-temperature")
+    reasoning_select = root.query_one("#select-reasoning-effort", Select)
+    reasoning_override = (
+        reasoning_select.value
+        if isinstance(reasoning_select.value, str) and reasoning_select.value
+        else None
+    )
+    try:
+        from harness.model_params import allowed_reasoning_efforts
+        agent_model = next(
+            (a.get("model") for a in (reader.get_all_agents() or [])
+             if a.get("name") == agent_name),
+            "",
+        ) or ""
+        if reasoning_override and reasoning_override not in allowed_reasoning_efforts(agent_model):
+            reasoning_override = None
+    except Exception:
+        pass
+    try:
+        reasoning_max_override = _nullable_int("#input-reasoning-max-tokens")
+    except ValueError:
+        app.notify("Reasoning max tokens must be a whole number", title="Error", severity="error")
+        return False
+    extra_raw = root.query_one("#input-model-params-extra", TextArea).text.strip()
+    extra_override = None
+    if extra_raw:
+        parsed, err = parse_json_object(extra_raw, field_label="Extra params")
+        if err:
+            app.notify(err, title="Error", severity="error")
+            return False
+        extra_override = json.dumps(parsed, separators=(",", ":"))
+
+    return all([
+        reader.update_agent_field(agent_name, "temperature", temp_override),
+        reader.update_agent_field(agent_name, "reasoning_effort", reasoning_override),
+        reader.update_agent_field(agent_name, "reasoning_max_tokens", reasoning_max_override),
+        reader.update_agent_field(agent_name, "model_params_extra", extra_override),
+    ])
+
+
+def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
+    """Yield harness configuration form fields (modal + agent tab)."""
+    agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
+    agent = next((a for a in agents if a.get("name") == agent_name), {})
+
+    current_turns = str(agent.get("max_session_turns", 50))
+    current_tool_budget = str(agent.get("tool_output_token_budget", 1500))
+    current_budget = str(agent.get("token_budget", 0))
+    current_timeout = str(agent.get("timeout_minutes", 60))
+    current_threshold = str(agent.get("runaway_threshold", 300))
+    current_size_threshold = str(agent.get("runaway_size_threshold", 512))
+    current_num_ctx = agent.get("num_ctx", 0)
+    current_model = agent.get("model") or ""
+    gen_ctx = _agent_model_gen_context(agents_panel, agent_name)
+    is_cloud = gen_ctx["is_cloud"]
+    server_ceiling = gen_ctx["server_ceiling"]
+
+    try:
+        from harness.model_context import get_num_ctx_options
+        ctx_options = get_num_ctx_options(current_model, server_ctx_ceiling=server_ceiling)
+    except ImportError:
+        ctx_options = [("32K", 32768)]
+
+    with Horizontal(classes="setup-form-row"):
+        with Vertical(classes="setup-form-col"):
+            yield Static("[cyan]Max Graph Steps (Recursion Limit)[/] — max LangGraph tool iterations")
+            yield Input(value=current_turns, placeholder="e.g. 50", id="input-max-turns", type="integer")
+        with Vertical(classes="setup-form-col"):
+            yield Static("[cyan]Tool Output Limit (Characters)[/] — truncate run_shell_command output")
+            yield Input(value=current_tool_budget, placeholder="e.g. 6000", id="input-tool-budget", type="integer")
+
+    if not is_cloud and ctx_options:
+        ctx_label = "[cyan]Context Window (num_ctx)[/]"
+        if server_ceiling:
+            ctx_label += f" — capped to server ctx-size: {server_ceiling:,}"
+        else:
+            ctx_label += " — Ollama context window size in tokens"
+        with Horizontal(classes="setup-form-row"):
+            with Vertical(classes="setup-form-col"):
+                yield Static(ctx_label)
+                num_ctx_select_options = [("Auto (model default)", 0)] + [(label, value) for label, value in ctx_options]
+                yield Select(
+                    num_ctx_select_options,
+                    value=current_num_ctx if current_num_ctx in [v for _, v in num_ctx_select_options] else 0,
+                    id="select-num-ctx",
+                    allow_blank=False,
+                )
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Token Budget (monthly)[/] — 0 = unlimited")
+                yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
+    else:
+        with Horizontal(classes="setup-form-row"):
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Token Budget (monthly)[/] — max tokens per month (0 = unlimited)")
+                yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
+                yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
+
+    if not is_cloud and ctx_options:
+        with Horizontal(classes="setup-form-row"):
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
+                yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
+                yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
+        with Horizontal(classes="setup-form-row"):
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
+                yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
+    else:
+        with Horizontal(classes="setup-form-row"):
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
+                yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
+            with Vertical(classes="setup-form-col"):
+                yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
+                yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
+
+    yield Static("")
+    yield Static("[bold cyan]─── Rolling Chat History (LangGraph Resume) ───[/]")
+    yield Static("")
+    yield Static(
+        "[cyan]Resume Enabled[/] — carry previous cycles' conversation into new cycles (per project thread).\n"
+        "[dim]OFF (default): each cycle starts fresh — durable state lives in tasks, memory, and awareness,\n"
+        "not chat history. ON: only for long single-thread collaborations needing verbatim continuity.[/]"
+    )
+    yield Select(
+        [("No (fresh start each cycle — default)", 0), ("Yes (roll chat history across cycles)", 1)],
+        value=agent.get("resume_enabled", 0),
+        id="select-resume-enabled",
+        allow_blank=False,
+    )
+    yield Static("[cyan]Resume Max Messages[/] — on resume, keep only the last N messages of rolled history (0 = unlimited; ignored when Resume is off)")
+    yield Input(value=str(agent.get("resume_max_messages", 0)), placeholder="0 = unlimited", id="input-resume-max-msgs", type="integer")
+    yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
+
+
+def apply_model_generation_hints(app, agent_name) -> None:
+    """Show inherited generation-param hints on the Overrides tab."""
+    from textual.widgets import Select
+    try:
+        from harness.model_params import resolve_model_params, SYSTEM_DEFAULTS
+        agents_panel = app.query_one(AgentsPanel)
+        agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
+        agent = next((a for a in agents if a.get("name") == agent_name), {})
+        model = agent.get("model") or ""
+        if model and agents_panel.agent_reader:
+            cleared = _sanitize_agent_params_for_model(
+                agents_panel.agent_reader, agent_name, model,
+            )
+            if cleared:
+                agent = next(
+                    (a for a in agents_panel.agent_reader.get_all_agents()
+                     if a.get("name") == agent_name),
+                    agent,
+                )
+                if "reasoning_effort" in cleared:
+                    app.query_one("#select-reasoning-effort", Select).value = ""
+                if "reasoning_max_tokens" in cleared:
+                    try:
+                        app.query_one("#input-reasoning-max-tokens", Input).placeholder = "Inherit"
+                    except Exception:
+                        pass
+        resolved = resolve_model_params(model) if model else dict(SYSTEM_DEFAULTS)
+
+        if agent.get("temperature") is None and resolved.get("temperature") is not None:
+            app.query_one("#input-temperature", Input).placeholder = (
+                f"Inherit ({resolved['temperature']})"
+            )
+        if not agent.get("reasoning_effort") and resolved.get("reasoning_effort"):
+            app.query_one("#select-reasoning-effort", Select).prompt = (
+                f"Inherit ({resolved['reasoning_effort']})"
+            )
+        if agent.get("reasoning_max_tokens") is None and resolved.get("reasoning_max_tokens") is not None:
+            app.query_one("#input-reasoning-max-tokens", Input).placeholder = (
+                f"Inherit ({resolved['reasoning_max_tokens']})"
+            )
+        if not agent.get("model_params_extra") and resolved.get("extra"):
+            extra = resolved["extra"]
+            if extra:
+                try:
+                    hint = app.query_one("#model-params-extra-inherit-hint", Static)
+                    hint.update(
+                        "[dim]Inherited from model layer:[/]\n"
+                        + format_json_pretty(extra)
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def apply_technical_setup_hints(app, agent_name) -> None:
+    """Sanitize stored model params when the assigned model changes."""
+    try:
+        agents_panel = app.query_one(AgentsPanel)
+        agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
+        agent = next((a for a in agents if a.get("name") == agent_name), {})
+        model = agent.get("model") or ""
+        if model and agents_panel.agent_reader:
+            _sanitize_agent_params_for_model(
+                agents_panel.agent_reader, agent_name, model,
+            )
+        apply_model_generation_hints(app, agent_name)
+    except Exception:
+        pass
+
+
+class TechnicalSetupModal(ModalScreen):
+    """Modal to view/edit agent harness configuration (max steps, tool budget, triage model)."""
+
+    def __init__(self, agent_name: str, host=None, **kwargs):
+        super().__init__(**kwargs)
+        self.agent_name = agent_name
+        self._host = host
+        self._embedded = host is not None
+
+    @property
+    def _form_root(self):
+        return self._host if self._embedded else self
+
+    @property
+    def _form_app(self):
+        return self._host.app if self._embedded else self.app
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal, VerticalScroll
+        agents_panel = self.app.query_one(AgentsPanel)
         with VerticalScroll(id="msg-dialog"):
-            yield Static(f"[bold]⚙ Technical Setup — {self.agent_name}[/]", id="msg-dialog-header")
+            yield Static(f"[bold]⚙ Technical — {self.agent_name}[/]", id="msg-dialog-header")
             yield Static("")
             with VerticalScroll(id="msg-dialog-scroll"):
-                yield Static("[cyan]Triage Model[/] — lightweight model for message classification (blank = use agent model)")
-                yield Select(triage_model_options, **triage_kwargs)
-                yield Static("")
-
-                with Horizontal(classes="setup-form-row"):
-                    with Vertical(classes="setup-form-col"):
-                        yield Static("[cyan]Max Graph Steps (Recursion Limit)[/] — max LangGraph tool iterations")
-                        yield Input(value=current_turns, placeholder="e.g. 50", id="input-max-turns", type="integer")
-                    with Vertical(classes="setup-form-col"):
-                        yield Static("[cyan]Tool Output Limit (Characters)[/] — truncate run_shell_command output")
-                        yield Input(value=current_tool_budget, placeholder="e.g. 6000", id="input-tool-budget", type="integer")
-
-                yield Static("")
-                yield Static("[bold cyan]─── Model Generation Parameters ───[/]")
-                yield Static("")
-
-                with Horizontal(classes="setup-form-row"):
-                    with Vertical(classes="setup-form-col"):
-                        yield Static("[cyan]Temperature[/] — blank = inherit")
-                        yield Input(
-                            value="" if temp_val is None else str(temp_val),
-                            placeholder="Inherit",
-                            id="input-temperature",
-                        )
-                    with Vertical(classes="setup-form-col"):
-                        yield Static("[cyan]Reasoning Effort[/] — blank = inherit")
-                        yield Select(
-                            reasoning_opts,
-                            value=current_reasoning if current_reasoning in [v for _, v in reasoning_opts] else "",
-                            id="select-reasoning-effort",
-                            allow_blank=True,
-                            prompt="Inherit",
-                        )
-
-                with Horizontal(classes="setup-form-row"):
-                    with Vertical(classes="setup-form-col"):
-                        yield Static("[cyan]Reasoning Max Tokens[/] — blank = inherit")
-                        yield Input(
-                            value="" if rmt_val is None else str(rmt_val),
-                            placeholder="Inherit",
-                            id="input-reasoning-max-tokens",
-                            type="integer",
-                        )
-                    with Vertical(classes="setup-form-col"):
-                        yield Static("[cyan]Extra Params (JSON)[/] — passthrough; blank = inherit")
-                        yield Input(
-                            value=agent.get("model_params_extra") or "",
-                            placeholder='e.g. {"top_p":0.9}',
-                            id="input-model-params-extra",
-                        )
-
-                if not is_cloud and ctx_options:
-                    ctx_label = "[cyan]Context Window (num_ctx)[/]"
-                    if server_ceiling:
-                        ctx_label += f" — capped to server ctx-size: {server_ceiling:,}"
-                    else:
-                        ctx_label += " — Ollama context window size in tokens"
-                    with Horizontal(classes="setup-form-row"):
-                        with Vertical(classes="setup-form-col"):
-                            yield Static(ctx_label)
-                            num_ctx_select_options = [("Auto (model default)", 0)] + [(label, value) for label, value in ctx_options]
-                            yield Select(
-                                num_ctx_select_options,
-                                value=current_num_ctx if current_num_ctx in [v for _, v in num_ctx_select_options] else 0,
-                                id="select-num-ctx",
-                                allow_blank=False,
-                            )
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Token Budget (monthly)[/] — 0 = unlimited")
-                            yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
-                else:
-                    with Horizontal(classes="setup-form-row"):
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Token Budget (monthly)[/] — max tokens per month (0 = unlimited)")
-                            yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
-                            yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
-
-                if not is_cloud and ctx_options:
-                    with Horizontal(classes="setup-form-row"):
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
-                            yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
-                            yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
-                    with Horizontal(classes="setup-form-row"):
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
-                            yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
-                else:
-                    with Horizontal(classes="setup-form-row"):
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
-                            yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
-                        with Vertical(classes="setup-form-col"):
-                            yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
-                            yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
-
-                yield Static("")
-                yield Static("[bold cyan]─── Rolling Chat History (LangGraph Resume) ───[/]")
-                yield Static("")
-                yield Static(
-                    "[cyan]Resume Enabled[/] — carry previous cycles' conversation into new cycles (per project thread).\n"
-                    "[dim]OFF (default): each cycle starts fresh — durable state lives in tasks, memory, and awareness,\n"
-                    "not chat history. ON: only for long single-thread collaborations needing verbatim continuity.[/]"
-                )
-                yield Select(
-                    [("No (fresh start each cycle — default)", 0), ("Yes (roll chat history across cycles)", 1)],
-                    value=agent.get("resume_enabled", 0),
-                    id="select-resume-enabled",
-                    allow_blank=False,
-                )
-                yield Static("[cyan]Resume Max Messages[/] — on resume, keep only the last N messages of rolled history (0 = unlimited; ignored when Resume is off)")
-                yield Input(value=str(agent.get("resume_max_messages", 0)), placeholder="0 = unlimited", id="input-resume-max-msgs", type="integer")
-                yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
-                yield Static("")
-                yield Static("[bold cyan]─── Skill Injection ───[/]")
-                yield Static("")
-                yield Static("[cyan]Skill Injection Mode[/] — how triage-driven skills are loaded at spawn")
-                yield Select(
-                    [("Hybrid (core injected + lazy manifest)", "hybrid"),
-                     ("Full (inject all skills)", "full"),
-                     ("Lazy (manifest only)", "lazy")],
-                    value=agent.get("skill_injection_mode", "hybrid") or "hybrid",
-                    id="select-skill-mode",
-                    allow_blank=False,
-                )
-                yield Static("[dim]Hybrid: core skills always injected, triage skills listed as a manifest for on-demand loading.[/]")
+                yield from compose_technical_setup_fields(agents_panel, self.agent_name)
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("Save", variant="success", id="btn-save-setup")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
-        """Show inherited param hints from the agent's assigned model (model → system layers)."""
-        from textual.widgets import Select
-        try:
-            from harness.model_params import resolve_model_params, SYSTEM_DEFAULTS
-            agents_panel = self.app.query_one(AgentsPanel)
-            agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
-            agent = next((a for a in agents if a.get("name") == self.agent_name), {})
-            model = agent.get("model") or ""
-            resolved = resolve_model_params(model) if model else dict(SYSTEM_DEFAULTS)
-
-            if agent.get("temperature") is None and resolved.get("temperature") is not None:
-                self.query_one("#input-temperature", Input).placeholder = (
-                    f"Inherit ({resolved['temperature']})"
-                )
-            if not agent.get("reasoning_effort") and resolved.get("reasoning_effort"):
-                self.query_one("#select-reasoning-effort", Select).prompt = (
-                    f"Inherit ({resolved['reasoning_effort']})"
-                )
-            if agent.get("reasoning_max_tokens") is None and resolved.get("reasoning_max_tokens") is not None:
-                self.query_one("#input-reasoning-max-tokens", Input).placeholder = (
-                    f"Inherit ({resolved['reasoning_max_tokens']})"
-                )
-            if not agent.get("model_params_extra") and resolved.get("extra"):
-                extra = resolved["extra"]
-                if extra:
-                    hint = json.dumps(extra, separators=(",", ":"))
-                    if len(hint) > 48:
-                        hint = hint[:45] + "..."
-                    self.query_one("#input-model-params-extra", Input).placeholder = (
-                        f"Inherit ({hint})"
-                    )
-        except Exception:
-            pass
+        apply_technical_setup_hints(self.app, self.agent_name)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         from textual.widgets import Select
         if event.button.id == "btn-save-setup":
-            agents_panel = self.app.query_one(AgentsPanel)
+            root = self._form_root
+            app = self._form_app
+            agents_panel = app.query_one(AgentsPanel)
             reader = agents_panel.agent_reader
             if reader:
                 try:
-                    turns = int(self.query_one("#input-max-turns", Input).value)
-                    tool_budget = int(self.query_one("#input-tool-budget", Input).value)
-                    budget_val = int(self.query_one("#input-budget", Input).value)
-                    timeout_val = int(self.query_one("#input-timeout", Input).value)
-                    threshold_val = int(self.query_one("#input-threshold", Input).value)
-                    size_threshold_val = int(self.query_one("#input-size-threshold", Input).value)
-                    triage_select = self.query_one("#select-triage-model", Select)
-                    triage_model = triage_select.value if isinstance(triage_select.value, str) and triage_select.value else None
-
-                    def _nullable_float(wid):
-                        raw = self.query_one(wid, Input).value.strip()
-                        if not raw:
-                            return None
-                        return float(raw)
-
-                    def _nullable_int(wid):
-                        raw = self.query_one(wid, Input).value.strip()
-                        if not raw:
-                            return None
-                        return int(raw)
-
-                    temp_override = _nullable_float("#input-temperature")
-                    reasoning_select = self.query_one("#select-reasoning-effort", Select)
-                    reasoning_override = reasoning_select.value if isinstance(reasoning_select.value, str) and reasoning_select.value else None
-                    reasoning_max_override = _nullable_int("#input-reasoning-max-tokens")
-                    extra_raw = self.query_one("#input-model-params-extra", Input).value.strip()
-                    extra_override = None
-                    if extra_raw:
-                        try:
-                            parsed = json.loads(extra_raw)
-                            if not isinstance(parsed, dict):
-                                raise ValueError("must be object")
-                            extra_override = json.dumps(parsed, separators=(",", ":"))
-                        except (json.JSONDecodeError, ValueError):
-                            self.app.notify(
-                                "Extra params must be a valid JSON object",
-                                title="Error",
-                                severity="error",
-                            )
-                            return
+                    turns = int(root.query_one("#input-max-turns", Input).value)
+                    tool_budget = int(root.query_one("#input-tool-budget", Input).value)
+                    budget_val = int(root.query_one("#input-budget", Input).value)
+                    timeout_val = int(root.query_one("#input-timeout", Input).value)
+                    threshold_val = int(root.query_one("#input-threshold", Input).value)
+                    size_threshold_val = int(root.query_one("#input-size-threshold", Input).value)
 
                     ok = all([
                         reader.update_agent_field(self.agent_name, "max_session_turns", turns),
                         reader.update_agent_field(self.agent_name, "tool_output_token_budget", tool_budget),
-                        reader.update_agent_field(self.agent_name, "triage_model", triage_model),
                         reader.update_agent_field(self.agent_name, "token_budget", budget_val),
                         reader.update_agent_field(self.agent_name, "timeout_minutes", timeout_val),
                         reader.update_agent_field(self.agent_name, "runaway_threshold", threshold_val),
                         reader.update_agent_field(self.agent_name, "runaway_size_threshold", size_threshold_val),
-                        reader.update_agent_field(self.agent_name, "temperature", temp_override),
-                        reader.update_agent_field(self.agent_name, "reasoning_effort", reasoning_override),
-                        reader.update_agent_field(self.agent_name, "reasoning_max_tokens", reasoning_max_override),
-                        reader.update_agent_field(self.agent_name, "model_params_extra", extra_override),
                     ])
                     # Update num_ctx if the Select exists (non-cloud models)
                     try:
-                        num_ctx_select = self.query_one("#select-num-ctx", Select)
+                        num_ctx_select = root.query_one("#select-num-ctx", Select)
                         num_ctx_val = num_ctx_select.value
                         if isinstance(num_ctx_val, int):
                             ok = ok and reader.update_agent_field(self.agent_name, "num_ctx", num_ctx_val)
                     except Exception:
                         pass  # Cloud models don't have the select
                     # Save resume controls
-                    resume_select = self.query_one("#select-resume-enabled", Select)
+                    resume_select = root.query_one("#select-resume-enabled", Select)
                     # Fallback must match the system default (0 = fresh start)
                     resume_val = resume_select.value if isinstance(resume_select.value, int) else 0
                     ok = ok and reader.update_agent_field(self.agent_name, "resume_enabled", resume_val)
-                    resume_max = int(self.query_one("#input-resume-max-msgs", Input).value)
+                    resume_max = int(root.query_one("#input-resume-max-msgs", Input).value)
                     ok = ok and reader.update_agent_field(self.agent_name, "resume_max_messages", resume_max)
-                    # Save skill injection mode
-                    skill_mode_select = self.query_one("#select-skill-mode", Select)
-                    skill_mode_val = skill_mode_select.value if isinstance(skill_mode_select.value, str) else "hybrid"
-                    ok = ok and reader.update_agent_field(self.agent_name, "skill_injection_mode", skill_mode_val)
                     if ok:
-                        self.app.notify(f"Settings saved for {self.agent_name}", title="Technical Setup")
+                        app.notify(f"Settings saved for {self.agent_name}", title="Technical")
                     else:
-                        self.app.notify("Save failed — check DB permissions", title="Error", severity="error")
+                        app.notify("Save failed — check DB permissions", title="Error", severity="error")
                 except ValueError:
-                    self.app.notify("Invalid input — must be valid numbers", title="Error", severity="error")
+                    app.notify("Invalid input — must be valid numbers", title="Error", severity="error")
                 except Exception as e:
-                    self.app.notify(f"Error: {e}", title="Error", severity="error")
-            self.app.pop_screen()
+                    app.notify(f"Error: {e}", title="Error", severity="error")
+            if not self._embedded:
+                app.pop_screen()
         elif event.button.id == "msg-dialog-close":
-            self.app.pop_screen()
+            if not self._embedded:
+                self._form_app.pop_screen()
 
 
 class SyclActivationModal(ModalScreen):
@@ -1069,7 +1019,7 @@ class SyclActivationModal(ModalScreen):
     def _resolve_gguf_filename(self) -> str:
         """Look up the GGUF filename for self.model_name from models.ini."""
         import configparser, os
-        ini = configparser.ConfigParser(delimiters=('=',))
+        ini = configparser.ConfigParser(delimiters=('=',), strict=False)
         for path in ["/etc/versa-agi/models.ini",
                      os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
                          os.path.abspath(__file__)))), "..", "models.ini")]:
@@ -1321,6 +1271,9 @@ class SyclActivationModal(ModalScreen):
                 agents_panel.agent_reader.update_agent_field(
                     self.agent_name, "num_ctx", self.pending_num_ctx
                 )
+                _sanitize_agent_params_for_model(
+                    agents_panel.agent_reader, self.agent_name, self.model_name,
+                )
                 updated_agents.add(self.agent_name)
 
                 # Sweep other agents on local models — only in single mode.
@@ -1342,6 +1295,9 @@ class SyclActivationModal(ModalScreen):
                             )
                             agents_panel.agent_reader.update_agent_field(
                                 name, "num_ctx", self.pending_num_ctx
+                            )
+                            _sanitize_agent_params_for_model(
+                                agents_panel.agent_reader, name, self.model_name,
                             )
                             updated_agents.add(name)
                 agents_panel.refresh_data()
@@ -1433,9 +1389,21 @@ class SyclActivationModal(ModalScreen):
 class AgentEditModal(ModalScreen):
     """Modal to edit agent timeout, runaway threshold, model, and inactive flag."""
 
-    def __init__(self, agent_name: str, **kwargs):
+    def __init__(self, agent_name: str, host=None, **kwargs):
         super().__init__(**kwargs)
         self.agent_name = agent_name
+        self._host = host
+        self._embedded = host is not None
+        self._original_model = ""
+        self._original_num_ctx = 0
+
+    @property
+    def _form_root(self):
+        return self._host if self._embedded else self
+
+    @property
+    def _form_app(self):
+        return self._host.app if self._embedded else self.app
 
     def compose(self) -> ComposeResult:
         from textual.widgets import Select
@@ -1528,7 +1496,9 @@ class AgentEditModal(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         from textual.widgets import Select
         if event.button.id == "btn-save-settings":
-            agents_panel = self.app.query_one(AgentsPanel)
+            root = self._form_root
+            app = self._form_app
+            agents_panel = app.query_one(AgentsPanel)
             reader = agents_panel.agent_reader
             sycl_activation_needed = False
             new_model = ""
@@ -1539,7 +1509,7 @@ class AgentEditModal(ModalScreen):
                     # Determine model selection and check if SYCL activation is needed
                     ok_model = True
                     try:
-                        model_select = self.query_one("#select-model", Select)
+                        model_select = root.query_one("#select-model", Select)
                         model_val = model_select.value
                         if not isinstance(model_val, str) or not model_val:
                             ok_model = reader.update_agent_field(self.agent_name, "model", None)
@@ -1584,12 +1554,21 @@ class AgentEditModal(ModalScreen):
                                     reader.update_agent_field(self.agent_name, "num_ctx", recommended)
                                 except ImportError:
                                     pass
+                                if model_val != self._original_model:
+                                    cleared = _sanitize_agent_params_for_model(
+                                        reader, self.agent_name, model_val,
+                                    )
+                                    if cleared:
+                                        app.notify(
+                                            f"Reset invalid param overrides: {', '.join(cleared)}",
+                                            title="Model Params",
+                                        )
                     except Exception:
                         pass
                     # Update context injection mode
                     ok_ctx = True
                     try:
-                        ctx_select = self.query_one("#select-ctx-mode", Select)
+                        ctx_select = root.query_one("#select-ctx-mode", Select)
                         ctx_val = ctx_select.value
                         if isinstance(ctx_val, str) and ctx_val:
                             ok_ctx = reader.update_agent_field(self.agent_name, "context_injection_mode", ctx_val)
@@ -1598,7 +1577,7 @@ class AgentEditModal(ModalScreen):
                     # Update conversation depth
                     ok_depth = True
                     try:
-                        depth_val = int(self.query_one("#input-convo-depth", Input).value)
+                        depth_val = int(root.query_one("#input-convo-depth", Input).value)
                         ok_depth = reader.update_agent_field(self.agent_name, "conversation_depth", depth_val)
                     except Exception:
                         pass
@@ -1607,7 +1586,7 @@ class AgentEditModal(ModalScreen):
                     # Update inactive flag if the Select exists (not protected)
                     ok_inactive = True
                     try:
-                        inactive_select = self.query_one("#select-inactive", Select)
+                        inactive_select = root.query_one("#select-inactive", Select)
                         inactive_val = inactive_select.value
                         ok_inactive = reader.update_agent_field(self.agent_name, "inactive", inactive_val)
                     except Exception:
@@ -1615,7 +1594,7 @@ class AgentEditModal(ModalScreen):
                     # Update comms flag if the Select exists (not protected)
                     ok_comms = True
                     try:
-                        comms_select = self.query_one("#select-comms", Select)
+                        comms_select = root.query_one("#select-comms", Select)
                         comms_val = comms_select.value
                         ok_comms = reader.update_agent_field(self.agent_name, "can_message_connections", comms_val)
                     except Exception:
@@ -1625,49 +1604,92 @@ class AgentEditModal(ModalScreen):
                     # Update anchor style
                     ok_anchor = True
                     try:
-                        anchor_select = self.query_one("#select-anchor-style", Select)
+                        anchor_select = root.query_one("#select-anchor-style", Select)
                         anchor_val = anchor_select.value
                         if isinstance(anchor_val, str) and anchor_val:
                             ok_anchor = reader.update_agent_field(self.agent_name, "anchor_style", anchor_val)
                     except Exception:
                         pass
-                    if all([ok_model, ok_ctx, ok_depth, ok_status, ok_inactive, ok_comms, ok_anchor, ok_browser]):
-                        self.app.notify(f"Saved settings for {self.agent_name}", title="Agent Settings")
+                    ok_triage = True
+                    try:
+                        triage_select = root.query_one("#select-triage-model", Select)
+                        triage_model = (
+                            triage_select.value
+                            if isinstance(triage_select.value, str) and triage_select.value
+                            else None
+                        )
+                        ok_triage = reader.update_agent_field(
+                            self.agent_name, "triage_model", triage_model,
+                        )
+                    except Exception:
+                        pass
+                    ok_routing = True
+                    try:
+                        routing_select = root.query_one("#select-model-routing", Select)
+                        routing_raw = routing_select.value
+                        routing_val = 1 if routing_raw in (1, "1", True) else 0
+                        ok_routing = reader.update_agent_field(
+                            self.agent_name, "model_routing_enabled", routing_val,
+                        )
+                    except Exception:
+                        pass
+                    ok_skill = True
+                    try:
+                        skill_mode_select = root.query_one("#select-skill-mode", Select)
+                        skill_mode_val = (
+                            skill_mode_select.value
+                            if isinstance(skill_mode_select.value, str)
+                            else "hybrid"
+                        )
+                        ok_skill = reader.update_agent_field(
+                            self.agent_name, "skill_injection_mode", skill_mode_val,
+                        )
+                    except Exception:
+                        pass
+                    if all([
+                        ok_model, ok_ctx, ok_depth, ok_status, ok_inactive, ok_comms,
+                        ok_anchor, ok_browser, ok_triage, ok_routing, ok_skill,
+                    ]):
+                        app.notify(f"Saved settings for {self.agent_name}", title="Agent Settings")
                         agents_panel.refresh_data()
                     else:
-                        self.app.notify("Save failed — check DB permissions", title="Error", severity="error")
+                        app.notify("Save failed — check DB permissions", title="Error", severity="error")
                 except ValueError:
-                    self.app.notify("Invalid input — must be whole numbers", title="Error", severity="error")
-            self.app.pop_screen()
+                    app.notify("Invalid input — must be whole numbers", title="Error", severity="error")
+            if not self._embedded:
+                app.pop_screen()
             # Push SYCL activation modal after closing the edit modal
             if sycl_activation_needed:
-                self.app.push_screen(SyclActivationModal(
+                app.push_screen(SyclActivationModal(
                     new_model, topology, self.agent_name, pending_num_ctx,
                 ))
         elif event.button.id == "msg-dialog-close":
-            self.app.pop_screen()
+            if not self._embedded:
+                self._form_app.pop_screen()
         elif event.button.id == "btn-agent-browser-toggle":
             self._toggle_agent_browser()
 
     def _update_browser_toggle_ui(self, val: int) -> None:
         """Update browser toggle button and status label in UI."""
+        root = self._form_root
         try:
-            btn = self.query_one("#btn-agent-browser-toggle", Button)
-            status_label = self.query_one("#agent-browser-status-label", Static)
+            btn = root.query_one("#btn-agent-browser-toggle", Button)
+            status_label = root.query_one("#agent-browser-status-label", Static)
             if val == 1:
                 btn.label = "Disable Browser Automation"
                 btn.variant = "error"
-                status_label.update("Status: [green]● Enabled[/]")
+                status_label.update("[cyan]Browser Automation[/] — Status: [green]● Enabled[/]")
             else:
                 btn.label = "Enable Browser Automation"
                 btn.variant = "success"
-                status_label.update("Status: [red]● Disabled[/]")
+                status_label.update("[cyan]Browser Automation[/] — Status: [red]● Disabled[/]")
         except Exception:
             pass
 
     def _toggle_agent_browser(self) -> None:
         """Fetch current agent browser state and push provisioning/cleanup modal."""
         import sqlite3 as _sql3
+        app = self._form_app
         try:
             _conn = _sql3.connect("/var/lib/versa-agi/agents.db", timeout=5)
             _row = _conn.execute(
@@ -1676,18 +1698,18 @@ class AgentEditModal(ModalScreen):
             ).fetchone()
             if not _row:
                 _conn.close()
-                self.app.notify("Agent not found in database", severity="error")
+                app.notify("Agent not found in database", severity="error")
                 return
             current_val = _row[0] or 0
             os_user = _row[1] or ""
             new_val = 0 if current_val == 1 else 1
             _conn.close()
         except Exception as e:
-            self.app.notify(f"DB error: {e}", severity="error")
+            app.notify(f"DB error: {e}", severity="error")
             return
 
         if os_user:
-            self.app.push_screen(
+            app.push_screen(
                 AgentBrowserToggleModal(
                     agent_name=self.agent_name,
                     new_val=new_val,
@@ -1695,128 +1717,6 @@ class AgentEditModal(ModalScreen):
                     parent_modal=self
                 )
             )
-
-
-class MemoryViewModal(ModalScreen):
-    """Modal to view agent memory (connection, project, system)."""
-
-    def __init__(self, agent_name: str, **kwargs):
-        super().__init__(**kwargs)
-        self.agent_name = agent_name
-
-    def compose(self) -> ComposeResult:
-        import sqlite3
-        import os
-        from textual.containers import Horizontal
-
-        tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
-        content = ""
-
-        try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
-            conn.row_factory = sqlite3.Row
-
-            # Build UID→name cache from connections table
-            name_cache = {}
-            try:
-                name_rows = conn.execute("SELECT uid, display_name FROM connections").fetchall()
-                for nr in name_rows:
-                    if nr["uid"] and nr["display_name"] and nr["display_name"] != "Unknown":
-                        name_cache[nr["uid"]] = nr["display_name"]
-            except Exception:
-                pass
-
-            # Add Primary User from config (not in connections table)
-            try:
-                import json
-                config_path = os.getenv("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
-                with open(config_path) as f:
-                    cfg = json.load(f)
-                pu = cfg.get("primary_user", {})
-                pu_uid = pu.get("uid")
-                pu_name = pu.get("display_name")
-                if pu_uid and pu_name:
-                    name_cache[pu_uid] = pu_name
-            except Exception:
-                pass
-
-            # Connection memories
-            conn_rows = conn.execute(
-                "SELECT * FROM agent_memory_connection WHERE agent_name=? ORDER BY updated_at DESC",
-                (self.agent_name,)
-            ).fetchall()
-            if conn_rows:
-                content += "[bold cyan]━━━ Connection Memory ━━━[/]\n\n"
-                for r in conn_rows:
-                    r = dict(r)
-                    uid = r.get('contact_uid') or ''
-                    display_name = name_cache.get(uid, uid[:12] + "...")
-                    content += f"  [bold]{display_name}[/] [dim]({uid[:12]}...)[/]\n"
-                    if r.get('preferences'):
-                        content += f"    Preferences: {r['preferences']}\n"
-                    if r.get('communication_style'):
-                        content += f"    Comm style: {r['communication_style']}\n"
-                    if r.get('rapport_level'):
-                        content += f"    Rapport: [green]{r['rapport_level']}[/]\n"
-                    if r.get('personal_notes'):
-                        content += f"    Notes: {r['personal_notes']}\n"
-                    if r.get('emotional_notes'):
-                        content += f"    Emotional: {r['emotional_notes']}\n"
-                    if r.get('last_interaction'):
-                        content += f"    Last interaction: {r['last_interaction']}\n"
-                    content += f"    [dim]Updated: {_utc_to_local(r.get('updated_at', '--'))}[/]\n\n"
-            else:
-                content += "[dim]No connection memories stored yet.[/]\n\n"
-
-            # Project memories
-            proj_rows = conn.execute(
-                "SELECT * FROM agent_memory_project WHERE agent_name=? ORDER BY updated_at DESC",
-                (self.agent_name,)
-            ).fetchall()
-            if proj_rows:
-                content += "[bold cyan]━━━ Project Memory ━━━[/]\n\n"
-                for r in proj_rows:
-                    r = dict(r)
-                    content += f"  [bold]Project #{r.get('project_id', '?')}[/]\n"
-                    if r.get('current_phase'):
-                        content += f"    Phase: {r['current_phase']}\n"
-                    if r.get('key_decisions'):
-                        content += f"    Decisions: {r['key_decisions']}\n"
-                    if r.get('blockers'):
-                        content += f"    Blockers: [red]{r['blockers']}[/]\n"
-                    if r.get('next_steps'):
-                        content += f"    Next: {r['next_steps']}\n"
-                    content += f"    [dim]Updated: {_utc_to_local(r.get('updated_at', '--'))}[/]\n\n"
-            else:
-                content += "[dim]No project memories stored yet.[/]\n\n"
-
-            # System memories (global — shared across all agents)
-            sys_rows = conn.execute(
-                "SELECT * FROM agent_memory_system ORDER BY updated_at ASC"
-            ).fetchall()
-            if sys_rows:
-                content += "[bold cyan]━━━ System Memory (Global) ━━━[/]\n\n"
-                for r in sys_rows:
-                    r = dict(r)
-                    stored_by = r.get('agent_name', '?')
-                    content += f"  [bold]{r.get('key', '?')}[/]: {r.get('value', '')}\n"
-                    content += f"    [dim]By: {stored_by} │ Updated: {_utc_to_local(r.get('updated_at', '--'))}[/]\n"
-            else:
-                content += "[dim]No system memories stored yet.[/]\n"
-
-            conn.close()
-        except Exception as e:
-            content = f"[red]Error reading memory: {e}[/]"
-
-        with VerticalScroll(id="msg-dialog"):
-            yield Static(f"[bold]🧠 Memory — {self.agent_name}[/]", id="msg-dialog-header")
-            with VerticalScroll(id="msg-dialog-scroll"):
-                yield Static(content)
-            yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "msg-dialog-close":
-            self.app.pop_screen()
 
 
 class AgentBrowserToggleModal(ModalScreen):

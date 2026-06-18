@@ -82,13 +82,12 @@ class AgitopApp(App):
         self._start_refresh_timer()
 
     def _should_prompt_registration(self, status: dict) -> bool:
+        """Auto-prompt only for actionable version gates — not every failed registration retry."""
         if not status:
             return False
-        if status.get("registration_submitted", "false").lower() != "true":
+        if status.get("below_min_supported"):
             return True
         if status.get("update_available"):
-            return True
-        if status.get("below_min_supported"):
             return True
         return False
 

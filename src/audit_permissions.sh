@@ -73,17 +73,37 @@ echo ""
 echo -e "${BOLD}── /etc/versa-agi/ — Configuration & Security ──${NC}"
 check "/etc/versa-agi"                      "watchdog:watchdog"  "751"  "Config root dir"
 check "/etc/versa-agi/coa_config.json"      "watchdog:coa"       "640"  "COA runtime config"
-check "/etc/versa-agi/coa.env"              "watchdog:coa"       "640"  "COA env vars"
 check "/etc/versa-agi/paths.env"            "watchdog:coa"       "644"  "System paths"
 check "/etc/versa-agi/setup.ini"            "watchdog:agi_agents"  "640"  "Setup config"
+check "/etc/versa-agi/models.ini"           "watchdog:agi_agents"  "640"  "Model catalog"
+check "/etc/versa-agi/install-acceptance.json" "watchdog:watchdog" "640" "Install acceptance"
+check "/etc/versa-agi/registration.conf"    "watchdog:watchdog"  "640"  "Registration infra"
+check "/etc/versa-agi/provider_keys.env"    "watchdog:watchdog"  "600"  "Provider API keys"
 
-# Sub-agent configs: watchdog:{name} 640
-for cfg in /etc/versa-agi/*_config.json; do
-  [ -f "${cfg}" ] || continue
-  name=$(basename "${cfg}" _config.json)
-  [ "${name}" = "coa" ] && continue
-  check "${cfg}" "watchdog:${name}" "640" "Sub-agent ${name} config"
+# Agent .env files (watchdog:coa 640) — exclude paths.env and provider_keys.env
+for envf in /etc/versa-agi/*.env; do
+  [ -f "${envf}" ] || continue
+  case "$(basename "${envf}")" in
+    paths.env|provider_keys.env|inference_endpoint.env|coa.env) continue ;;
+  esac
+  agent_name=$(basename "${envf}" .env)
+  check "${envf}" "watchdog:coa" "640" "Agent env: ${agent_name}"
 done
+check "/etc/versa-agi/coa.env"              "watchdog:coa"       "640"  "COA env vars"
+
+# Topology configs (not per-agent registry entries)
+check "/etc/versa-agi/server_config.json" "watchdog:watchdog" "640" "Server topology config"
+check "/etc/versa-agi/client_config.json" "watchdog:watchdog" "640" "Client topology config"
+
+# Sub-agent configs: watchdog:{os_user} 640 (resolved from agents.db)
+AGENTS_DB="/var/lib/versa-agi/agents.db"
+if [ -f "${AGENTS_DB}" ]; then
+  while IFS='|' read -r agent_name os_user; do
+    [ -n "${agent_name}" ] || continue
+    cfg="/etc/versa-agi/${agent_name}_config.json"
+    check "${cfg}" "watchdog:${os_user}" "640" "Sub-agent ${agent_name} config"
+  done < <(sqlite3 "${AGENTS_DB}" "SELECT name, os_user FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true)
+fi
 
 check "/etc/versa-agi/poise"              "watchdog:watchdog"  "750"  "Poise dir"
 check "/etc/versa-agi/poise/coa.md"       "watchdog:watchdog"  "640"  "COA poise"
@@ -118,7 +138,7 @@ check "/var/lib/versa-agi/coa/cycles"     "coa:coa"            "755"  "COA cycle
 check "/var/lib/versa-agi/coa/status.json" "watchdog:coa"      "640"  "COA status (§IX.2)"
 check "/var/lib/versa-agi/coa/last_prompt.txt" "watchdog:coa"  "640"  "Last prompt (§IX.2)"
 check "/var/lib/versa-agi/archive"           "watchdog:watchdog"  "755"  "Archive dir"
-check "/var/lib/versa-agi/config"            "watchdog:watchdog" "755" "Config dir"
+check "/var/lib/versa-agi/registration-status.json" "watchdog:watchdog" "640" "Registration status cache"
 
 echo ""
 
@@ -164,9 +184,9 @@ COA="/home/coa/coa-env"
 # Traversal chain: sub-agents must be able to reach workspace/ via symlinks
 check "/home/coa"                          "coa:coa"            "755"  "COA home (traversable by agi_agents)"
 check "${COA}"                             "coa:coa"            "755"  "COA env (traversable by agi_agents)"
-check "${COA}/.agent"                      "coa:coa"            "755"  ".agent dir"
+check "${COA}/.agent"                      "coa:agi_agents"     "775"  ".agent dir"
 check "${COA}/.agent/poise.md"             "watchdog:coa"       "640"  ".agent/poise.md (copied by Lifeline)"
-check "${COA}/.agent/skills"               "coa:coa"            "755"  "Skills dir"
+check "${COA}/.agent/skills"               "coa:agi_agents"     "775"  "Skills dir"
 check "${COA}/workspace"                   "coa:agi_agents"     "2770"  "Workspace dir (setgid for cross-agent collaboration §3.6)"
 check "${COA}/attachments"                "coa:agi_agents"     "2770" "Attachments dir (setgid, matches workspace/)"
 echo ""
@@ -175,20 +195,19 @@ echo ""
 # §IX.4 — Sub-Agent Environments
 # ──────────────────────────────────────────────────────
 echo -e "${BOLD}── Sub-Agent Environments ──${NC}"
-# Find sub-agents from agents.db
-AGENTS_DB="/var/lib/versa-agi/agents.db"
-if [ -f "${AGENTS_DB}" ]; then
+# Find sub-agents from agents.db (AGENTS_DB set in §IX.2 block above)
+if [ -f "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" ]; then
+  AGENTS_DB="${AGENTS_DB:-/var/lib/versa-agi/agents.db}"
   SUB_AGENTS=$(sqlite3 "${AGENTS_DB}" "SELECT name || '|' || os_user FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true)
   for agent_row in ${SUB_AGENTS}; do
     agent="${agent_row%%|*}"
     os_user="${agent_row##*|}"
     echo -e "  ${BOLD}[${agent}]${NC}  (os_user: ${os_user})"
-    AHOME="/home/agi-${agent}"
+    AHOME="/home/${os_user}"
     check "${AHOME}"                        "${os_user}:agi_agents"   "770"  "Home dir"
     check "${AHOME}/.agent"                 "${os_user}:agi_agents"   "770"  ".agent dir"
     check "${AHOME}/.agent/skills"          "${os_user}:agi_agents"   "775"  "Skills dir"
-    check "${AHOME}/workspace"              "${os_user}:agi_agents"   "770"  "Workspace dir"
-    check "/etc/versa-agi/${agent}_config.json" "watchdog:${os_user}" "640" "Config JSON"
+    check "${AHOME}/workspace"              "${os_user}:agi_agents"   "2770" "Workspace dir (setgid)"
     # §IX.2 /var/lib/versa-agi/{name}/ — agent data directory
     check "/var/lib/versa-agi/${agent}"              "watchdog:${os_user}"   "750" "Data dir"
     check "/var/lib/versa-agi/${agent}/cycles"        "${os_user}:${os_user}"   "755" "Cycles dir"

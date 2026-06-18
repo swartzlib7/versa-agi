@@ -12,6 +12,9 @@
 
 ---
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
+
 ## Scheduling Rules
 
 ### Time Awareness
@@ -85,7 +88,7 @@ planned → waiting → in_progress → done
 | `blocked` | Waiting on external input / permission issue | Does NOT wake agent (use with `wake_after` or message trigger) |
 | `waiting` | Waiting for a dependency | Wakes when `due_date` arrives (and `wake_after` has elapsed). Snooze before cycle end to defer. |
 | `done` | Completed | Ignored by Lifeline |
-| `frozen` | Emergency-stopped by runaway monitor | Requires manual review and unfreeze |
+| `frozen` | Paused by Lifeline (overdue retry budget or runaway) | Skipped until unfrozen; new messages still wake the agent |
 
 ### When to Block a Task
 
@@ -205,6 +208,17 @@ If the task requires relaying a message and waiting for a response from a third 
 
 **SQLite fields**: `callback_action=notify_sponsor`, `source_message_id=<msg_id>`. Task persists across cycles in `in_progress` status. `agictl task done` clears `wake_after` and sets `completed_at`.
 
+### Completion checklist (before `task done`)
+
+Ask in order:
+
+1. **Is the deliverable actually done?** (built, fixed, deployed, verified by you — not just described)
+2. **Does the requester need to confirm?** If yes → `waiting` + snooze + report; **not** `done`
+3. **Did you journal?** `agictl task progress <id> "DONE: … NEXT: …"`
+4. **Did you notify?** Send results or status to whoever is waiting
+5. **Is the trigger message handled?** `mark-processed` on the inbound message that started the work
+6. **Then** `agictl task done <id> "…"` and `agictl cycle end "…"`
+
 ---
 
 ## Anti-Patterns (What NOT to Do)
@@ -215,17 +229,21 @@ If the task requires relaying a message and waiting for a response from a third 
 | Due date = 2 minutes for complex work | Runaway: agent wakes, can't finish, reschedules, wakes again | Estimate realistically |
 | No due date | Task never triggers wake | Always set `--due-date` |
 | Creating task for non-existent agent | Task sits assigned to nobody | Wait for agent approval first |
-| Marking `done` without completing | Lost work, no follow-up | Only `done` when truly complete |
+| Marking `done` without completing | Lost work, no follow-up | Only `done` when truly complete — not when awaiting PU/contact confirmation |
+| Marking `done` after sending a status update | Task closes while work still open | Reply + `mark-processed` on message; task stays `waiting` until confirmed |
+| Polling inbox for feedback every cycle | Wasted spawns, notification fatigue | Snooze task; new inbound message wakes you automatically |
 | Creating task inside thinking loop | Infinite task creation | Act, don't ruminate |
 | Leaving blocked tasks as `in_progress` | Infinite respawn every tick | Set to `blocked` immediately |
 | No progress notes in task description | Next cycle has no context | Always update `--desc` with progress |
 | Retrying permission failures | Wastes entire cycle budget | Block the task, report to COA/PU |
 
-## Post-Runaway Recovery
+## Post-Runaway / Auto-Freeze Recovery
 
-If tasks are frozen after a runaway:
-1. Review all frozen tasks with `agictl task list --all`
-2. Check `pre_freeze_status` to see what the task was doing before the freeze
+If tasks are frozen after runaway or overdue retry exhaustion:
+1. Review frozen tasks with `agictl task list --all`
+2. Check `pre_freeze_status` on `agictl task get <id>` to see the prior status
 3. Consolidate duplicates — mark extras as `done`
-4. Unfreeze still-relevant tasks: `agictl task update <id> --status <pre_freeze_status>`
-5. Roll forward any past-due dates
+4. Unfreeze still-relevant tasks:
+   - **Assigned to you**: `agictl task unfreeze <id>` or `agictl task unfreeze-all <your_agent_name>`
+   - **Primary User / COA** may ask you to unfreeze when they message you directly
+5. Roll forward any past-due dates after unfreezing

@@ -2,6 +2,8 @@
 
 > **Trigger**: Before calling `send_message`. Also triggered when a contact asks about your system, infrastructure, or internal details.
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## Communication Security Check
 
 Before calling `send_message`, verify your message against this checklist:

@@ -56,5 +56,15 @@ fi
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN session_start_ts DATETIME;" 2>/dev/null || true
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN last_awareness_ts DATETIME;" 2>/dev/null || true
 
+# Model routing audit columns (modality routing plan)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN assigned_model TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN execution_model TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN routing_mode TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN routing_work_modality TEXT;" 2>/dev/null || true
+
+# Cost estimates (TD-COST-001)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN cost_usd_estimated REAL;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN pricing_source TEXT;" 2>/dev/null || true
+
 echo "Cycles database initialized: ${DB_PATH}"
 echo "Tables: cycles, config"

@@ -2,6 +2,8 @@
 
 > **Trigger:** Primary User (PU) needs a development environment or software stack configured on the host system.
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## Purpose
 
 Guide the PU through safe, non-containerized environment configuration on Ubuntu 24.04. Generate self-contained bash installation scripts that the PU (or COA in autonomous mode) can execute with `sudo` to set up development stacks, runtime environments, and supporting services.

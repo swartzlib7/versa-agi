@@ -110,8 +110,8 @@ provider_ini_set third_party anthropic_api_key "${api_key}"
 ok "setup.ini updated (anthropic_enabled=true)"
 echo "  Models: claude-opus-4-8, claude-sonnet-4-6"
 
-# Write API key to inference_endpoint.env for harness injection
-INFERENCE_ENV="/etc/versa-agi/inference_endpoint.env"
+# Write API key to provider_keys.env for harness injection
+INFERENCE_ENV="/etc/versa-agi/provider_keys.env"
 if [ -f "${INFERENCE_ENV}" ]; then
   if grep -q "^ANTHROPIC_API_KEY=" "${INFERENCE_ENV}"; then
     sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${api_key}|" "${INFERENCE_ENV}"
@@ -123,7 +123,7 @@ else
   chmod 600 "${INFERENCE_ENV}"
   chown root:root "${INFERENCE_ENV}"
 fi
-ok "inference_endpoint.env updated (ANTHROPIC_API_KEY)"
+ok "provider_keys.env updated (ANTHROPIC_API_KEY)"
 
 # Update paths.env — aggregate all enabled third-party models
 if [ -f "${PATHS_ENV}" ]; then

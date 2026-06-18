@@ -1,4 +1,4 @@
-"""System Settings Modal — configure Circuit Breaker, Web Search, COA Autonomous Mode via agitop."""
+"""System Settings Modal — configure Task Management, Circuit Breaker, Web Search, COA Autonomous Mode via agitop."""
 """Includes read-only Skill Viewer modal for inspecting skill file contents."""
 
 import os
@@ -6,10 +6,11 @@ import re
 import subprocess
 import sqlite3
 import threading
+from textual import on
 from textual.screen import ModalScreen
 from textual.app import ComposeResult
-from textual.containers import Vertical, Horizontal, VerticalScroll, Container
-from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, Collapsible, TextArea
+from textual.containers import Vertical, Horizontal, VerticalScroll
+from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, TextArea, TabbedContent, TabPane, Select
 
 from agitop.widgets import PaginatedDataTable
 
@@ -20,6 +21,8 @@ _SETUP_INI_PATHS = [
 ]
 
 PATHS_ENV_FILE = "/etc/versa-agi/paths.env"
+
+_SYS_MEMORY_PAGE_SIZE = 52
 
 
 def _find_setup_ini() -> str:
@@ -53,22 +56,43 @@ def _read_ini_value(section: str, key: str, default: str = "") -> str:
         return default
 
 
-def _write_ini_value(section: str, key: str, value: str) -> bool:
-    """Write a value to setup.ini using agictl system config set-ini."""
+def _write_ini_value_err(section: str, key: str, value: str) -> tuple[bool, str]:
+    """Write a value to setup.ini via agictl set-ini.
+
+    Returns (ok, error). The error carries the agictl validation/permission
+    message so callers can surface the actual reason (e.g. a routing model that
+    is not COA-approved) instead of a misleading generic failure.
+    """
+    import json as _json
     try:
         result = subprocess.run(
             ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "system", "config", "set-ini", section, key, str(value)],
             capture_output=True, text=True, timeout=10
         )
-        if result.returncode == 0:
-            import json as _json
-            data = _json.loads(result.stdout.strip())
-            if data.get("success", False):
-                _sync_ini_copies(_find_setup_ini())
-                return True
-    except Exception:
-        pass
-    return False
+        out = (result.stdout or "").strip()
+        data = {}
+        if out:
+            try:
+                data = _json.loads(out)
+            except Exception:
+                data = {}
+        if result.returncode == 0 and data.get("success", False):
+            _sync_ini_copies(_find_setup_ini())
+            return True, ""
+        err = (
+            data.get("error")
+            or (result.stderr or "").strip()
+            or f"set-ini failed (exit {result.returncode})"
+        )
+        return False, err
+    except Exception as e:
+        return False, str(e)
+
+
+def _write_ini_value(section: str, key: str, value: str) -> bool:
+    """Write a value to setup.ini using agictl system config set-ini."""
+    ok, _ = _write_ini_value_err(section, key, value)
+    return ok
 
 
 
@@ -223,9 +247,20 @@ def _resolve_skill_path(skill_data: dict) -> str:
     and override skills are authored in COA's .agent/skills/.
     """
     name = skill_data.get("name", "")
-    if skill_data.get("type") in ("agent_created", "override"):
-        return os.path.join(_get_coa_skills_dir(), f"{name}.md")
-    return f"/home/watchdog/core-infra/skills/{name}.md"
+    coa_path = os.path.join(_get_coa_skills_dir(), f"{name}.md")
+    shipped_path = f"/home/watchdog/core-infra/skills/{name}.md"
+    skill_type = skill_data.get("type", "")
+
+    if skill_type in ("agent_created", "override"):
+        return coa_path
+    if skill_type == "system":
+        if os.path.exists(shipped_path):
+            return shipped_path
+        # Registry row may predate a COA-only copy or be stale after rsync cleanup
+        if os.path.exists(coa_path):
+            return coa_path
+        return shipped_path
+    return coa_path if os.path.exists(coa_path) else shipped_path
 
 
 def _read_skill_file(skill_path: str) -> str:
@@ -377,7 +412,7 @@ class SkillRemoveConfirmModal(ModalScreen):
             )
             with Horizontal(id="skill-remove-actions"):
                 yield Button("Remove Permanently", variant="error", id="btn-skill-remove-confirm")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-skill-remove-cancel")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-skill-remove-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -426,7 +461,7 @@ class PackageRemoveConfirmModal(ModalScreen):
             )
             with Horizontal(id="pkg-remove-actions"):
                 yield Button("Remove Permanently", variant="error", id="btn-pkg-remove-confirm")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-pkg-remove-cancel")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-pkg-remove-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -588,7 +623,7 @@ class RouterModeConfirmModal(ModalScreen):
             with Horizontal(id="router-actions"):
                 yield Button(f"Switch to {target_label}", variant="warning", id="btn-router-confirm")
                 yield Button("Copy", variant="default", id="btn-router-copy")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-router-cancel")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-router-cancel")
 
     def _set_status(self, text: str) -> None:
         self._last_status_text = re.sub(r'\[/?[^\]]*\]', '', text)
@@ -812,13 +847,17 @@ class SystemSettingsModal(ModalScreen):
         self._pkg_rows = _get_packages_rows()
         self._skills_page = 0
         self._pkg_page = 0
-        self._page_size = 13
+        self._memory_page = 0
+        self.selected_memory_key = None
+        self._skills_page_size = 52
+        self._pkg_page_size = 39
 
     def compose(self) -> ComposeResult:
         # Circuit Breaker
         cb_consecutive = _read_ini_value("agent", "circuit_breaker_consecutive", "5")
         cb_hourly = _read_ini_value("agent", "circuit_breaker_hourly", "20")
         flood_guard_hours = _read_ini_value("agent", "flood_guard_timeout_hours", "3")
+        task_max_spawn = _read_ini_value("agent", "task_max_spawn_attempts", "3")
 
         # Web Search
         search_enabled = _read_ini_value("search", "enabled", "false").lower() == "true"
@@ -840,115 +879,274 @@ class SystemSettingsModal(ModalScreen):
         local_ai_enabled = _read_ini_value("local_ai", "enabled", "false").lower() == "true"
         self._show_strategy = local_ai_enabled and gpu_backend in ("intel", "remote")
 
+        img_enabled = _read_ini_value("image_processing", "enabled", "true").lower() == "true"
+        img_format = _read_ini_value("image_processing", "format", "jpeg").lower()
+        if img_format == "jpg":
+            img_format = "jpeg"
+        img_quality = _read_ini_value("image_processing", "jpeg_quality", "80")
+        img_dpi = _read_ini_value("image_processing", "jpeg_dpi", "72")
+        img_max_w = _read_ini_value("image_processing", "max_width", "2048")
+        img_max_h = _read_ini_value("image_processing", "max_height", "2048")
+
+        _browser_label = "Disable" if browser_enabled else "Enable"
+        _browser_variant = "error" if browser_enabled else "success"
+        _browser_status = "[bold green]● Enabled[/]" if browser_enabled else "[bold red]● Disabled[/]"
+
         with Vertical(id="settings-dialog"):
-            with VerticalScroll(id="settings-scroll"):
-                yield Static("[bold]⚙ System Settings[/]", id="settings-dialog-header")
+            yield Static("[bold]⚙ System Settings[/]", id="settings-dialog-header")
 
-                # ── Two-Column Grid ──
-                with Container(id="settings-columns"):
-                    # ── Left Column ──
-                    with Vertical(classes="settings-col"):
-                        # AI Mode (read-only)
-                        _mode_labels = {"cloud": "Cloud", "local": "Local", "hybrid": "Hybrid"}
-                        _mode_label = _mode_labels.get(ai_mode, ai_mode)
-                        yield Static(f"[bold cyan]AI Mode[/]  [bold]{_mode_label}[/]")
-                        yield Static("[dim]Edit setup.ini [gemini] mode + run: sudo ./setup.sh --update[/]")
+            with TabbedContent(initial="settings-general-tab", id="settings-tabs"):
+                with TabPane("General", id="settings-general-tab"):
+                    with Vertical(id="settings-general-pane"):
+                        with VerticalScroll(id="settings-general-scroll"):
+                            yield Static("", classes="modal-tab-spacer")
+                            with Horizontal(classes="settings-general-cols"):
+                                with Vertical(classes="settings-general-col"):
+                                    _mode_labels = {"cloud": "Cloud", "local": "Local", "hybrid": "Hybrid"}
+                                    _mode_label = _mode_labels.get(ai_mode, ai_mode)
+                                    yield Static(f"[bold cyan]AI Mode[/]  [bold]{_mode_label}[/]")
+                                    yield Static("[dim]Edit setup.ini [gemini] mode + run: sudo ./setup.sh --update[/]")
 
-                        # Circuit Breaker
-                        yield Static("")
-                        yield Static("[bold cyan]Circuit Breaker[/]")
-                        yield Static("[dim]Prevents runaway API cost from repeated spawn failures[/]")
-                        yield Static("[dim]Only exit codes 1 (error), 42 (input error), 99 (runaway) trigger the breaker.[/]")
-                        yield Static("")
-                        with Horizontal(classes="task-field-row"):
-                            with Vertical(classes="task-field-col"):
-                                yield Static("[cyan]Consecutive Failure Threshold[/]")
-                                yield Input(value=cb_consecutive, placeholder="e.g. 5", id="input-cb-consecutive", type="integer")
-                            with Vertical(classes="task-field-col"):
-                                yield Static("[cyan]Hourly Failure Threshold[/]")
-                                yield Input(value=cb_hourly, placeholder="e.g. 20", id="input-cb-hourly", type="integer")
-                            with Vertical(classes="task-field-col"):
-                                yield Static("[cyan]Flood Guard Timeout (hours)[/]")
-                                yield Input(value=flood_guard_hours, placeholder="e.g. 3", id="input-flood-guard-hours", type="integer")
-                        yield Static("[dim]Flood guard: PU messaging suppression auto-lifts after this many hours without a new outbound message.[/]")
+                                    yield Static("")
+                                    yield Static("[bold cyan]Circuit Breaker[/]")
+                                    yield Static("[dim]Prevents runaway API cost from repeated spawn failures[/]")
+                                    yield Static("[dim]Only exit codes 1 (error), 42 (input error), 99 (runaway) trigger the breaker.[/]")
+                                    yield Static("")
+                                    with Horizontal(classes="task-field-row"):
+                                        with Vertical(classes="task-field-col"):
+                                            yield Static("[cyan]Consecutive Failure Threshold[/]")
+                                            yield Input(value=cb_consecutive, placeholder="e.g. 5", id="input-cb-consecutive", type="integer")
+                                        with Vertical(classes="task-field-col"):
+                                            yield Static("[cyan]Hourly Failure Threshold[/]")
+                                            yield Input(value=cb_hourly, placeholder="e.g. 20", id="input-cb-hourly", type="integer")
 
-                        # COA Autonomous Mode
-                        with Vertical(classes="settings-section-box"):
-                            yield Static("[bold cyan]COA Autonomous Mode[/]")
-                            yield Static("[dim]Grants COA unrestricted sudo access (NOPASSWD: ALL).[/]")
-                            with Horizontal(classes="settings-inline-row"):
-                                yield Checkbox("Enable sudo access", id="chk-coa-autonomous", value=coa_autonomous)
-                                yield Static("[bold yellow]⚠ Only enable on dedicated hardware[/]")
+                                    yield Static("")
+                                    with Horizontal(classes="settings-aligned-field-row", id="settings-flood-task-row"):
+                                        with Vertical(classes="settings-aligned-field-col"):
+                                            yield Static("[cyan]Flood Guard Timeout (hours)[/]")
+                                            yield Input(
+                                                value=flood_guard_hours,
+                                                placeholder="e.g. 3",
+                                                id="input-flood-guard-hours",
+                                                type="integer",
+                                            )
+                                            yield Static(
+                                                "[dim]PU messaging suppression auto-lifts after this many hours "
+                                                "without a new outbound message.[/]"
+                                            )
+                                        with Vertical(classes="settings-aligned-field-col"):
+                                            yield Static("[cyan]Max Spawn Attempts (per overdue task)[/]")
+                                            yield Input(
+                                                value=task_max_spawn,
+                                                placeholder="e.g. 3",
+                                                id="input-task-max-spawn",
+                                                type="integer",
+                                            )
+                                            yield Static(
+                                                "[dim]Overdue planned and repeatedly-waking waiting tasks retry "
+                                                "this many lifeline wake cycles before auto-freeze. Primary User "
+                                                "is notified; spawn_attempts resets only when the task is done "
+                                                "or cancelled.[/]"
+                                            )
 
-                        # Model Loading Strategy (Intel SYCL only)
-                        if self._show_strategy:
-                            _strat_label = "Router" if loading_strategy == "router" else "Single"
-                            _strat_color = "green" if loading_strategy == "router" else "yellow"
-                            with Vertical(classes="settings-section-box"):
-                                with Horizontal(classes="settings-split-row"):
-                                    with Vertical(classes="settings-split-col"):
-                                        yield Static(f"[bold cyan]Model Loading[/]  [bold {_strat_color}]{_strat_label}[/]")
-                                        if loading_strategy == "router":
-                                            yield Static("[dim]All models available on demand — no Docker restart to switch[/]")
-                                        else:
-                                            yield Static("[dim]One model in VRAM — Docker restart required to switch[/]")
-                                    with Vertical(classes="settings-split-col settings-split-actions"):
-                                        yield Button(
-                                            f"Switch to {'Single' if loading_strategy == 'router' else 'Router'} Mode",
-                                            variant="warning", id="btn-toggle-strategy",
+                                with Vertical(classes="settings-general-col"):
+                                    if self._show_strategy:
+                                        _strat_label = "Router" if loading_strategy == "router" else "Single"
+                                        _strat_color = "green" if loading_strategy == "router" else "yellow"
+                                        with Vertical(classes="settings-section-box"):
+                                            yield Static(
+                                                f"[bold cyan]Model Loading[/]  "
+                                                f"[bold {_strat_color}]{_strat_label}[/]"
+                                            )
+                                            if loading_strategy == "router":
+                                                yield Static(
+                                                    "[dim]All models available on demand — "
+                                                    "no Docker restart to switch[/]"
+                                                )
+                                            else:
+                                                yield Static(
+                                                    "[dim]One model in VRAM — Docker restart required to switch[/]"
+                                                )
+                                            yield Button(
+                                                f"Switch to {'Single' if loading_strategy == 'router' else 'Router'} Mode",
+                                                variant="warning",
+                                                id="btn-toggle-strategy",
+                                            )
+
+                                    with Vertical(classes="settings-section-box"):
+                                        yield Static(
+                                            "[bold cyan]COA Autonomous Mode[/]  "
+                                            "[bold yellow]⚠ Only enable on dedicated hardware[/]"
+                                        )
+                                        yield Static(
+                                            "[dim]Grants COA unrestricted sudo access (NOPASSWD: ALL).[/]"
+                                        )
+                                        yield Checkbox(
+                                            "Enable sudo access",
+                                            id="chk-coa-autonomous",
+                                            value=coa_autonomous,
                                         )
 
-                    # ── Right Column ──
-                    with Vertical(classes="settings-col"):
-                        # Browser Automation
-                        _browser_label = "Disable" if browser_enabled else "Enable"
-                        _browser_variant = "error" if browser_enabled else "success"
-                        _browser_status = "[bold green]● Enabled[/]" if browser_enabled else "[bold red]● Disabled[/]"
-                        with Vertical(classes="settings-section-box"):
-                            with Horizontal(classes="settings-split-row"):
-                                with Vertical(classes="settings-split-col"):
-                                    yield Static(
-                                        f"[bold cyan]Browser Automation[/]  {_browser_status}",
-                                        id="browser-status-label",
-                                    )
-                                    yield Static("[dim]Headless Chromium for page navigation and extraction[/]")
-                                    yield Static("")
-                                    yield Static("[cyan]Page Load Timeout (seconds)[/]")
-                                    yield Input(value=browser_timeout, placeholder="e.g. 30", id="input-browser-timeout", type="integer")
-                                with Vertical(classes="settings-split-col settings-split-actions"):
-                                    yield Button(f"{_browser_label} Browser Automation", variant=_browser_variant, id="btn-browser-toggle")
+                                    with Vertical(classes="settings-section-box"):
+                                        yield Static("[bold cyan]Web Search[/]")
+                                        yield Static("[dim]Local SearXNG integration for agent research[/]")
+                                        with Horizontal(classes="settings-web-search-row"):
+                                            with Vertical(classes="settings-web-search-col"):
+                                                yield Checkbox("Enabled", id="chk-search-enabled", value=search_enabled)
+                                            with Vertical(classes="settings-web-search-col"):
+                                                yield Static("[cyan]SearXNG URL[/]")
+                                                yield Input(
+                                                    value=searxng_url,
+                                                    placeholder="http://localhost:8888",
+                                                    id="input-searxng-url",
+                                                )
 
-                        # Web Search
-                        with Vertical(classes="settings-section-box"):
-                            yield Static("[bold cyan]Web Search[/]")
-                            yield Static("[dim]Local SearXNG integration for agent research[/]")
-                            yield Checkbox("Enabled", id="chk-search-enabled", value=search_enabled)
+                                    with Vertical(classes="settings-section-box"):
+                                        with Vertical(classes="settings-browser-grid"):
+                                            with Vertical(classes="settings-browser-info"):
+                                                yield Static(
+                                                    f"[bold cyan]Browser Automation[/]  {_browser_status}",
+                                                    id="browser-status-label",
+                                                )
+                                                yield Static(
+                                                    "[dim]Headless Chromium for page navigation and extraction[/]"
+                                                )
+                                            with Vertical(classes="settings-browser-toggle-cell"):
+                                                yield Button(
+                                                    f"{_browser_label} Browser Automation",
+                                                    variant=_browser_variant,
+                                                    id="btn-browser-toggle",
+                                                )
+                                            with Vertical(
+                                                id="settings-browser-timeout-cell",
+                                                classes="settings-browser-timeout-cell",
+                                            ):
+                                                yield Static("[cyan]Page Load Timeout (seconds)[/]")
+                                                yield Input(
+                                                    value=browser_timeout,
+                                                    placeholder="e.g. 30",
+                                                    id="input-browser-timeout",
+                                                    type="integer",
+                                                )
+                        with Horizontal(classes="settings-tab-actions"):
+                            yield Button("Save", variant="success", id="btn-save-settings-general")
+                            yield Button(
+                                "Close", variant="default", id="btn-settings-close-general",
+                                classes="dismiss-btn",
+                            )
+
+                with TabPane("Skills Registry", id="settings-skills-tab"):
+                    with Vertical(id="settings-skills-pane"):
+                        yield Static("", classes="modal-tab-spacer")
+                        skills_table = PaginatedDataTable(self._handle_skills_key, id="skills-registry-table")
+                        yield skills_table
+                        yield Static(
+                            "[dim]Double-click or press Enter to view/edit/remove a skill · "
+                            "CLI: agictl skill list[/]",
+                            id="settings-skills-hint",
+                        )
+                        with Horizontal(classes="settings-tab-actions"):
+                            yield Button(
+                                "Close", variant="default", id="btn-settings-close-skills",
+                                classes="dismiss-btn",
+                            )
+
+                with TabPane("Packages & Requests", id="settings-packages-tab"):
+                    with Vertical(id="settings-packages-pane"):
+                        yield Static("", classes="modal-tab-spacer")
+                        pkg_table = PaginatedDataTable(self._handle_packages_key, id="packages-table")
+                        yield pkg_table
+                        with Horizontal(id="packages-actions", classes="settings-tab-actions"):
+                            yield Button("Approve", variant="success", id="btn-pkg-approve")
+                            yield Button("Deny", variant="error", id="btn-pkg-deny")
+                            yield Button("Install", variant="warning", id="btn-pkg-install")
+                            yield Button("Add/Request", variant="primary", id="btn-pkg-add")
+                            yield Button("Remove", variant="default", id="btn-pkg-remove")
+                            yield Button(
+                                "Close", variant="default", id="btn-settings-close-packages",
+                                classes="dismiss-btn",
+                            )
+
+                with TabPane("System Memory", id="settings-system-memory-tab"):
+                    with Vertical(id="settings-system-memory-pane"):
+                        yield Static("", classes="modal-tab-spacer")
+                        yield DataTable(id="settings-sys-memory-table", cursor_type="row")
+                        yield Static("", id="settings-sys-memory-hint")
+                        with Horizontal(classes="settings-tab-actions"):
+                            yield Button(
+                                "Edit Selected", variant="primary", id="btn-settings-edit-mem",
+                                disabled=True,
+                            )
+                            yield Button(
+                                "Delete Selected", variant="error", id="btn-settings-delete-mem",
+                                disabled=True,
+                            )
+                            yield Button(
+                                "Close", variant="default", id="btn-settings-close-memory",
+                                classes="dismiss-btn",
+                            )
+
+                with TabPane("Image Processing", id="settings-image-processing-tab"):
+                    with Vertical(id="settings-image-processing-pane"):
+                        with VerticalScroll(id="settings-image-processing-scroll"):
+                            yield Static("", classes="modal-tab-spacer")
+                            yield Static("[bold cyan]Harness Image Processing[/]")
+                            yield Static(
+                                "[dim]Applied before VIEW INJECT for all vision-capable models. "
+                                "Normalizes attachments and screenshots to a shared JPEG pipeline "
+                                "so context size stays predictable.[/]"
+                            )
                             yield Static("")
-                            yield Static("[cyan]SearXNG URL[/]")
-                            yield Input(value=searxng_url, placeholder="http://localhost:8888", id="input-searxng-url")
-
-                # ── Skills Registry (full width below grid, always visible) ──
-                yield Static("", classes="settings-divider")
-                skills_table = PaginatedDataTable(self._handle_skills_key, id="skills-registry-table")
-                yield skills_table
-                yield Static("[dim]Double-click or press Enter to view/edit/remove a skill · CLI: agictl skill list[/]")
-
-                # ── System Packages (full width below skills, always visible) ──
-                yield Static("", classes="settings-divider")
-                pkg_table = PaginatedDataTable(self._handle_packages_key, id="packages-table")
-                yield pkg_table
-                with Horizontal(id="packages-actions"):
-                    yield Button("Approve", variant="success", id="btn-pkg-approve")
-                    yield Button("Deny", variant="error", id="btn-pkg-deny")
-                    yield Button("Install", variant="warning", id="btn-pkg-install")
-                    yield Button("Add/Request", variant="primary", id="btn-pkg-add")
-                    yield Button("Remove", variant="default", id="btn-pkg-remove")
-
-            with Vertical(id="settings-dialog-footer"):
-                yield Static("", classes="settings-divider")
-                with Horizontal(id="settings-dialog-actions"):
-                    yield Button("Save", variant="success", id="btn-save-settings")
-                    yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-settings-close")
+                            yield Checkbox("Enabled", id="chk-image-processing-enabled", value=img_enabled)
+                            yield Static("")
+                            yield Static("[cyan]Output Format[/]")
+                            yield Select(
+                                [("JPEG", "jpeg")],
+                                value=img_format if img_format == "jpeg" else "jpeg",
+                                id="select-image-format",
+                                allow_blank=False,
+                            )
+                            yield Static("[dim]Additional formats will be added here when supported.[/]")
+                            yield Static("")
+                            with Horizontal(classes="task-field-row"):
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[cyan]JPEG Quality (1–100)[/]")
+                                    yield Input(
+                                        value=img_quality, placeholder="80",
+                                        id="input-jpeg-quality", type="integer",
+                                    )
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[cyan]JPEG DPI (metadata)[/]")
+                                    yield Input(
+                                        value=img_dpi, placeholder="72",
+                                        id="input-jpeg-dpi", type="integer",
+                                    )
+                            yield Static(
+                                "[dim]Quality controls compression. DPI is written into JPEG metadata only "
+                                "— it does not change pixel dimensions.[/]"
+                            )
+                            yield Static("")
+                            yield Static("[bold cyan]Resolution (all formats)[/]")
+                            yield Static("[dim]Downscale larger images before inject, preserving aspect ratio.[/]")
+                            with Horizontal(classes="task-field-row"):
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[cyan]Max Width (px)[/]")
+                                    yield Input(
+                                        value=img_max_w, placeholder="2048",
+                                        id="input-image-max-width", type="integer",
+                                    )
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[cyan]Max Height (px)[/]")
+                                    yield Input(
+                                        value=img_max_h, placeholder="2048",
+                                        id="input-image-max-height", type="integer",
+                                    )
+                        with Horizontal(classes="settings-tab-actions"):
+                            yield Button("Save", variant="success", id="btn-save-settings-image")
+                            yield Button(
+                                "Close", variant="default", id="btn-settings-close-image",
+                                classes="dismiss-btn",
+                            )
 
     def on_mount(self) -> None:
         """Populate the skills and packages DataTables after mount."""
@@ -968,6 +1166,104 @@ class SystemSettingsModal(ModalScreen):
         except Exception:
             pass
 
+        try:
+            mem_table = self.query_one("#settings-sys-memory-table", DataTable)
+            mem_table.add_column("Updated", width=20)
+            mem_table.add_column("Stored By", width=12)
+            mem_table.add_column("Key", width=30)
+            mem_table.add_column("Value")
+            self._refresh_system_memory()
+        except Exception:
+            pass
+
+    def _refresh_system_memory(self) -> None:
+        table = self.query_one("#settings-sys-memory-table", DataTable)
+        table.clear()
+        self.selected_memory_key = None
+        self.query_one("#btn-settings-edit-mem", Button).disabled = True
+        self.query_one("#btn-settings-delete-mem", Button).disabled = True
+        self.query_one("#settings-sys-memory-hint", Static).update(
+            "[dim]Select a row to edit or delete.[/]"
+        )
+
+        tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
+        offset = self._memory_page * _SYS_MEMORY_PAGE_SIZE
+        try:
+            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn.row_factory = sqlite3.Row
+            total = conn.execute("SELECT COUNT(*) FROM agent_memory_system").fetchone()[0]
+            total_pages = max(1, (total + _SYS_MEMORY_PAGE_SIZE - 1) // _SYS_MEMORY_PAGE_SIZE)
+            current_page = self._memory_page + 1
+
+            rows = conn.execute(
+                "SELECT * FROM agent_memory_system ORDER BY updated_at ASC LIMIT ? OFFSET ?",
+                (_SYS_MEMORY_PAGE_SIZE, offset),
+            ).fetchall()
+            for r in rows:
+                val = r["value"]
+                if val and len(val) > 80:
+                    val = val[:77] + "..."
+                table.add_row(
+                    str(r["updated_at"] or "--"),
+                    str(r["agent_name"] or "?"),
+                    r["key"],
+                    val,
+                    key=r["key"],
+                )
+            conn.close()
+
+            if total_pages > 1:
+                table.border_title = (
+                    f"System Memory ({total} entries)  │  "
+                    f"Page {current_page}/{total_pages}  │  PgUp/PgDn to navigate"
+                )
+            else:
+                table.border_title = f"System Memory ({total} entries)"
+        except Exception:
+            table.border_title = "System Memory"
+
+    def refresh_table(self) -> None:
+        """Called by system memory edit/delete modals after changes."""
+        self._refresh_system_memory()
+
+    @on(DataTable.RowHighlighted, "#settings-sys-memory-table")
+    def on_memory_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is None:
+            return
+        self.selected_memory_key = event.row_key.value
+        self.query_one("#btn-settings-edit-mem", Button).disabled = False
+        self.query_one("#btn-settings-delete-mem", Button).disabled = False
+        self.query_one("#settings-sys-memory-hint", Static).update(
+            f"[bold cyan]Selected:[/] {self.selected_memory_key}"
+        )
+
+    @on(DataTable.RowSelected, "#settings-sys-memory-table")
+    def on_memory_selected(self, event: DataTable.RowSelected) -> None:
+        self.selected_memory_key = event.row_key.value
+        if self.selected_memory_key:
+            from agitop.panels.system_memory_editor import EditMemoryRowModal
+            self.app.push_screen(EditMemoryRowModal(self.selected_memory_key, self))
+
+    def on_key(self, event) -> None:
+        focused = self.app.focused
+        if event.key == "pagedown":
+            if isinstance(focused, DataTable) and focused.id == "settings-sys-memory-table":
+                try:
+                    db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
+                    conn = sqlite3.connect(db, timeout=5)
+                    total = conn.execute("SELECT COUNT(*) FROM agent_memory_system").fetchone()[0]
+                    conn.close()
+                    max_page = max(0, (total - 1) // _SYS_MEMORY_PAGE_SIZE)
+                    if self._memory_page < max_page:
+                        self._memory_page += 1
+                        self._refresh_system_memory()
+                except Exception:
+                    pass
+        elif event.key == "pageup":
+            if isinstance(focused, DataTable) and focused.id == "settings-sys-memory-table":
+                if self._memory_page > 0:
+                    self._memory_page -= 1
+                    self._refresh_system_memory()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Also open viewer on double-click/Enter."""
@@ -984,7 +1280,7 @@ class SystemSettingsModal(ModalScreen):
         """Refresh the skills table after an edit or removal."""
         if changed:
             self._skills_rows = _get_skills_rows()
-            max_page = max(0, (len(self._skills_rows) - 1) // self._page_size)
+            max_page = max(0, (len(self._skills_rows) - 1) // self._skills_page_size)
             self._skills_page = min(self._skills_page, max_page)
             self._update_skills_table()
 
@@ -992,17 +1288,22 @@ class SystemSettingsModal(ModalScreen):
         if event.button.id == "btn-toggle-strategy":
             current = _read_ini_value("local_ai", "model_loading_strategy", "single")
             self.app.push_screen(RouterModeConfirmModal(current))
-        elif event.button.id == "btn-save-settings":
+        elif event.button.id in (
+            "btn-save-settings-general",
+            "btn-save-settings-image",
+        ):
             try:
-                # ── Circuit Breaker + Flood Guard ──
+                # ── Task Management + Circuit Breaker + Flood Guard ──
+                task_max_spawn = int(self.query_one("#input-task-max-spawn", Input).value)
                 cb_consecutive = int(self.query_one("#input-cb-consecutive", Input).value)
                 cb_hourly = int(self.query_one("#input-cb-hourly", Input).value)
                 flood_guard_hours = int(self.query_one("#input-flood-guard-hours", Input).value)
 
-                if cb_consecutive < 1 or cb_hourly < 1 or flood_guard_hours < 1:
+                if task_max_spawn < 1 or cb_consecutive < 1 or cb_hourly < 1 or flood_guard_hours < 1:
                     self.app.notify("Thresholds must be ≥ 1", severity="error")
                     return
 
+                ok0 = _write_ini_value("agent", "task_max_spawn_attempts", str(task_max_spawn))
                 ok1 = _write_ini_value("agent", "circuit_breaker_consecutive", str(cb_consecutive))
                 ok2 = _write_ini_value("agent", "circuit_breaker_hourly", str(cb_hourly))
                 ok3 = _write_ini_value("agent", "flood_guard_timeout_hours", str(flood_guard_hours))
@@ -1043,13 +1344,37 @@ class SystemSettingsModal(ModalScreen):
                     return
                 ok7 = _write_ini_value("browser", "timeout", str(browser_timeout))
 
-                if all([ok1, ok2, ok3, ok4, ok5, ok6, ok7]):
+                img_enabled = self.query_one("#chk-image-processing-enabled", Checkbox).value
+                img_format = self.query_one("#select-image-format", Select).value or "jpeg"
+                jpeg_quality = int(self.query_one("#input-jpeg-quality", Input).value)
+                jpeg_dpi = int(self.query_one("#input-jpeg-dpi", Input).value)
+                max_width = int(self.query_one("#input-image-max-width", Input).value)
+                max_height = int(self.query_one("#input-image-max-height", Input).value)
+                if not (1 <= jpeg_quality <= 100):
+                    self.app.notify("JPEG quality must be 1–100", severity="error")
+                    return
+                if not (1 <= jpeg_dpi <= 600):
+                    self.app.notify("JPEG DPI must be 1–600", severity="error")
+                    return
+                if max_width < 64 or max_height < 64:
+                    self.app.notify("Max width/height must be ≥ 64 px", severity="error")
+                    return
+                ok8 = _write_ini_value("image_processing", "enabled", "true" if img_enabled else "false")
+                ok9 = _write_ini_value("image_processing", "format", str(img_format))
+                ok10 = _write_ini_value("image_processing", "jpeg_quality", str(jpeg_quality))
+                ok11 = _write_ini_value("image_processing", "jpeg_dpi", str(jpeg_dpi))
+                ok12 = _write_ini_value("image_processing", "max_width", str(max_width))
+                ok13 = _write_ini_value("image_processing", "max_height", str(max_height))
+
+                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
                     summary_parts = [
+                        f"Task max spawn: {task_max_spawn}",
                         f"Circuit breaker: {cb_consecutive}/{cb_hourly}",
                         f"Flood guard: {flood_guard_hours}h",
                         f"Search: {'on' if search_enabled else 'off'}",
                         f"Browser timeout: {browser_timeout}s",
                         f"Autonomous: {'on' if coa_autonomous else 'off'}",
+                        f"Image: {'on' if img_enabled else 'off'} JPEG q={jpeg_quality} {max_width}x{max_height}",
                     ]
                     self.app.notify(
                         " · ".join(summary_parts) + " — active next CRON tick",
@@ -1060,7 +1385,13 @@ class SystemSettingsModal(ModalScreen):
             except ValueError:
                 self.app.notify("Invalid input — thresholds must be whole numbers", severity="error")
             self.app.pop_screen()
-        elif event.button.id == "btn-settings-close":
+        elif event.button.id in (
+            "btn-settings-close-general",
+            "btn-settings-close-image",
+            "btn-settings-close-skills",
+            "btn-settings-close-packages",
+            "btn-settings-close-memory",
+        ):
             self.app.pop_screen()
         elif event.button.id == "btn-browser-toggle":
             browser_enabled = _read_ini_value("browser", "enabled", "false").lower() == "true"
@@ -1086,13 +1417,22 @@ class SystemSettingsModal(ModalScreen):
             self._handle_pkg_action(event.button.id)
         elif event.button.id == "btn-pkg-add":
             self._handle_pkg_add()
+        elif event.button.id == "btn-settings-edit-mem":
+            if self.selected_memory_key:
+                from agitop.panels.system_memory_editor import EditMemoryRowModal
+                self.app.push_screen(EditMemoryRowModal(self.selected_memory_key, self))
+        elif event.button.id == "btn-settings-delete-mem":
+            if self.selected_memory_key:
+                from agitop.panels.system_memory_editor import DeleteMemoryConfirmModal
+                self.app.push_screen(DeleteMemoryConfirmModal(self.selected_memory_key, self))
+
     def _handle_skills_key(self, key: str) -> None:
         if key == "pageup":
             if self._skills_page > 0:
                 self._skills_page -= 1
                 self._update_skills_table()
         elif key == "pagedown":
-            max_page = max(0, (len(self._skills_rows) - 1) // self._page_size)
+            max_page = max(0, (len(self._skills_rows) - 1) // self._skills_page_size)
             if self._skills_page < max_page:
                 self._skills_page += 1
                 self._update_skills_table()
@@ -1103,7 +1443,7 @@ class SystemSettingsModal(ModalScreen):
                 self._pkg_page -= 1
                 self._update_packages_table()
         elif key == "pagedown":
-            max_page = max(0, (len(self._pkg_rows) - 1) // self._page_size)
+            max_page = max(0, (len(self._pkg_rows) - 1) // self._pkg_page_size)
             if self._pkg_page < max_page:
                 self._pkg_page += 1
                 self._update_packages_table()
@@ -1184,8 +1524,8 @@ class SystemSettingsModal(ModalScreen):
             table = self.query_one("#skills-registry-table", DataTable)
             table.clear()
 
-            start = self._skills_page * self._page_size
-            end = start + self._page_size
+            start = self._skills_page * self._skills_page_size
+            end = start + self._skills_page_size
             page_rows = self._skills_rows[start:end]
 
             for idx, r in enumerate(page_rows):
@@ -1202,7 +1542,7 @@ class SystemSettingsModal(ModalScreen):
                     key=str(abs_idx),
                 )
 
-            total_pages = max(1, (len(self._skills_rows) + self._page_size - 1) // self._page_size)
+            total_pages = max(1, (len(self._skills_rows) + self._skills_page_size - 1) // self._skills_page_size)
             current_page = self._skills_page + 1
             table.border_title = f"Skills Registry ({len(self._skills_rows)})  │  Page {current_page}/{total_pages}  │  PgUp/PgDn to navigate"
         except Exception:
@@ -1213,8 +1553,8 @@ class SystemSettingsModal(ModalScreen):
             pkg_table = self.query_one("#packages-table", DataTable)
             pkg_table.clear()
 
-            start = self._pkg_page * self._page_size
-            end = start + self._page_size
+            start = self._pkg_page * self._pkg_page_size
+            end = start + self._pkg_page_size
             page_rows = self._pkg_rows[start:end]
 
             for idx, r in enumerate(page_rows):
@@ -1232,7 +1572,7 @@ class SystemSettingsModal(ModalScreen):
                     key=str(abs_idx),
                 )
 
-            total_pages = max(1, (len(self._pkg_rows) + self._page_size - 1) // self._page_size)
+            total_pages = max(1, (len(self._pkg_rows) + self._pkg_page_size - 1) // self._pkg_page_size)
             current_page = self._pkg_page + 1
             pkg_table.border_title = f"Packages & Requests ({len(self._pkg_rows)})  │  Page {current_page}/{total_pages}  │  PgUp/PgDn to navigate"
         except Exception:
@@ -1383,7 +1723,7 @@ class PackageRequestModal(ModalScreen):
             yield Static("", id="lbl-request-pkg-error")
             with Horizontal(id="request-pkg-actions"):
                 yield Button("Submit Request", variant="success", id="btn-request-confirm")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-request-cancel")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-request-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-request-cancel":
@@ -1479,7 +1819,7 @@ class BrowserAutomationModal(ModalScreen):
             with Horizontal(id="browser-actions"):
                 confirm_variant = "success" if self.target_enabled else "error"
                 yield Button(f"Confirm {action}", variant=confirm_variant, id="btn-browser-confirm")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-browser-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-browser-close")
 
     def on_mount(self) -> None:
         self.query_one("#browser-terminal").display = False
@@ -1701,7 +2041,7 @@ class PackageInstallModal(ModalScreen):
             yield Static(f"[bold yellow]📦 Installing Package: {self.pkg_name}[/]\n", id="install-title")
             yield VerticalScroll(Static(id="install-terminal-text"), id="install-terminal")
             with Horizontal(id="install-actions"):
-                yield Button("Cancel/Close", classes="dismiss-btn", variant="default", id="btn-install-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-install-close")
 
     def on_mount(self) -> None:
         self.query_one("#btn-install-close", Button).disabled = True

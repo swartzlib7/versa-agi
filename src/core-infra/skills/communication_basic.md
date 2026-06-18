@@ -1,9 +1,8 @@
 # Communication — Essential Messaging Rules
 
-> **Always-injected core.** For full messaging rules (attachments, effort calibration, inter-agent protocol, voice formatting, context recovery), load:
-> ```bash
-> agictl execute bash "cat ~/.agent/skills/communication.md"
-> ```
+> **Always-injected core.** For full messaging rules (attachments, effort calibration, inter-agent protocol, voice formatting, context recovery), load via tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/communication.md"`**.
+
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
 
 ## How to Send Messages
 
@@ -19,6 +18,19 @@ agictl message send <RECIPIENT_UID> "Message text" --mode <MODE>
 agictl message get YOUR_SUB_ACCOUNT_ID --unread       # Unprocessed inbound
 agictl message mark-processed <id>                    # Mark as handled
 ```
+
+**Message vs task:** `mark-processed` means *this inbox item is handled* (you replied or acknowledged). It does **not** complete related work — keep the tracking task `in_progress` or `waiting` until the work is actually done. See task protocol for the full decision guide.
+
+### Inbound work message — do this
+
+1. **Read** — `agictl message get … --unread`
+2. **Acknowledge** — `agictl message send …` (what you understood + what you will do)
+3. **Track** — create or set a task `in_progress` (link with `--source-msg` when applicable)
+4. **Execute** — do the work across one or more cycles
+5. **Close the loop** — pick one:
+   - **Verified complete:** send results → `task done` → `mark-processed` → `cycle end`
+   - **Needs their confirmation:** send report → `mark-processed` → `task waiting` + `snooze` → `cycle end` (their reply wakes you)
+   - **Blocked:** `task blocked` + report blocker → `cycle end`
 
 ## Mode Selection
 

@@ -3,7 +3,7 @@
 # Versa AGi — OpenRouter Provider
 #
 # Configures OpenRouter API key and model registry in setup.ini.
-# Routes through the local LiteLLM Inference Server by default.
+# Keys are written to provider_keys.env for direct harness injection.
 #
 # Usage:
 #   sudo ./openrouter.sh              # Install/configure
@@ -15,7 +15,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 provider_require_root
 
 OPENROUTER_MODELS="moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-flash"
-INFERENCE_ENV="/etc/versa-agi/inference_endpoint.env"
+INFERENCE_ENV="/etc/versa-agi/provider_keys.env"
 
 _openrouter_write_attribution_env() {
   local env_file="$1"
@@ -145,7 +145,7 @@ else
   chown root:root "${INFERENCE_ENV}"
 fi
 _openrouter_write_attribution_env "${INFERENCE_ENV}"
-ok "inference_endpoint.env updated (OPENROUTER_API_KEY, OR_SITE_URL, OR_APP_NAME)"
+ok "provider_keys.env updated (OPENROUTER_API_KEY, OR_SITE_URL, OR_APP_NAME)"
 
 if [ -f "${PATHS_ENV}" ]; then
   PROVIDERS="$(provider_ini_get third_party providers 'xai,openai,anthropic,openrouter')"

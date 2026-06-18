@@ -1,5 +1,7 @@
 # Skill: Task Routing (Sub-Agent → COA Approval)
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## Trigger
 
 - A contact (any user, including the Primary User) sends you a **task request** — any message that asks you to perform work, execute an action, or make a change

@@ -266,13 +266,24 @@ class TasksReader:
     def update_task(self, task_id: int, updates: dict) -> bool:
         if not updates:
             return False
+
+        existing = self.get_task(task_id)
+        if existing and existing.get("status") == "frozen":
+            new_status = updates.get("status")
+            if new_status and new_status != "frozen":
+                updates["spawn_attempts"] = 0
+                updates["pre_freeze_status"] = None
         
+        # Manual due_date reschedule clears snooze gate so lifeline can wake immediately.
+        if "due_date" in updates and "wake_after" not in updates:
+            updates["wake_after"] = None
+
         set_clauses = []
         params = []
         for k, v in updates.items():
             set_clauses.append(f"{k} = ?")
             params.append(v)
-            
+
         set_clauses.append("updated_at = datetime('now')")
         
         query = f"UPDATE tasks SET {', '.join(set_clauses)} WHERE id = ?"
@@ -528,6 +539,24 @@ class TasksReader:
                               entry_type: str = None,
                               limit: int = 50, offset: int = 0) -> list[dict]:
         """Awareness entries with optional filters and pagination."""
+        entries, _total = self.get_awareness_page(
+            agent_name=agent_name,
+            status=status,
+            entry_type=entry_type,
+            limit=limit,
+            offset=offset,
+        )
+        return entries
+
+    def get_awareness_page(
+        self,
+        agent_name: str = None,
+        status: str = None,
+        entry_type: str = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Paginated awareness rows + total count in one DB round trip."""
         clauses, params = [], []
         if agent_name:
             clauses.append("agent_name = ?")
@@ -539,11 +568,26 @@ class TasksReader:
             clauses.append("type = ?")
             params.append(entry_type)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.extend([limit, offset])
-        return self._query(
-            f"SELECT * FROM agent_awareness {where} ORDER BY id ASC LIMIT ? OFFSET ?",
-            tuple(params)
+        list_sql = (
+            "SELECT id, agent_name, type, status, subject_type, subject_id, "
+            "content, created_at FROM agent_awareness "
+            f"{where} ORDER BY id ASC LIMIT ? OFFSET ?"
         )
+        count_sql = f"SELECT COUNT(*) as c FROM agent_awareness {where}"
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro",
+                uri=True,
+                timeout=2,
+            )
+            conn.row_factory = sqlite3.Row
+            total_row = conn.execute(count_sql, tuple(params)).fetchone()
+            total = int(total_row["c"]) if total_row else 0
+            rows = conn.execute(list_sql, tuple(params) + (limit, offset)).fetchall()
+            conn.close()
+            return [dict(row) for row in rows], total
+        except Exception:
+            return [], 0
 
     def get_awareness_entry(self, entry_id: int) -> Optional[dict]:
         """Full awareness entry by ID."""
@@ -555,9 +599,17 @@ class TasksReader:
         rows = self._query("SELECT COUNT(*) as c FROM agent_awareness WHERE status = 'active'")
         return rows[0]["c"] if rows else 0
 
-    def count_all_awareness(self, status: str = None, entry_type: str = None) -> int:
+    def count_all_awareness(
+        self,
+        status: str = None,
+        entry_type: str = None,
+        agent_name: str = None,
+    ) -> int:
         """Count awareness entries with optional filters for pagination."""
         clauses, params = [], []
+        if agent_name:
+            clauses.append("agent_name = ?")
+            params.append(agent_name)
         if status:
             clauses.append("status = ?")
             params.append(status)
@@ -567,6 +619,15 @@ class TasksReader:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._query(f"SELECT COUNT(*) as c FROM agent_awareness {where}", tuple(params))
         return rows[0]["c"] if rows else 0
+
+    def get_awareness_agent_names(self) -> list[str]:
+        """Distinct agent names with awareness entries, for filter picklists."""
+        rows = self._query(
+            "SELECT DISTINCT agent_name FROM agent_awareness "
+            "WHERE agent_name IS NOT NULL AND TRIM(agent_name) != '' "
+            "ORDER BY agent_name COLLATE NOCASE"
+        )
+        return [r["agent_name"] for r in rows]
 
     def count_active_games(self) -> int:
         """Count active games."""

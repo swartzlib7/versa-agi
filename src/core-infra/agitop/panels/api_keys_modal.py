@@ -5,7 +5,7 @@ import json
 import subprocess
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
-from textual.containers import Vertical, VerticalScroll, Horizontal
+from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, Button, Input
 
 
@@ -41,8 +41,10 @@ def _read_vv_token() -> str:
 
 
 def _read_env_key(env_var: str) -> str:
-    """Read an API key from inference_endpoint.env by variable name."""
-    env_path = "/etc/versa-agi/inference_endpoint.env"
+    """Read an API key from provider_keys.env by variable name."""
+    env_path = "/etc/versa-agi/provider_keys.env"
+    if not os.path.isfile(env_path):
+        env_path = "/etc/versa-agi/inference_endpoint.env"
     try:
         with open(env_path, "r") as f:
             for line in f:
@@ -54,22 +56,22 @@ def _read_env_key(env_var: str) -> str:
 
 
 def _read_xai_key() -> str:
-    """Read current xAI API key from inference_endpoint.env."""
+    """Read current xAI API key from provider_keys.env."""
     return _read_env_key("XAI_API_KEY")
 
 
 def _read_openai_key() -> str:
-    """Read current OpenAI API key from inference_endpoint.env."""
+    """Read current OpenAI API key from provider_keys.env."""
     return _read_env_key("OPENAI_API_KEY")
 
 
 def _read_anthropic_key() -> str:
-    """Read current Anthropic API key from inference_endpoint.env."""
+    """Read current Anthropic API key from provider_keys.env."""
     return _read_env_key("ANTHROPIC_API_KEY")
 
 
 def _read_openrouter_key() -> str:
-    """Read current OpenRouter API key from inference_endpoint.env."""
+    """Read current OpenRouter API key from provider_keys.env."""
     return _read_env_key("OPENROUTER_API_KEY")
 
 
@@ -86,50 +88,43 @@ def _is_proxy_enabled() -> bool:
     return False
 
 
+
 class ApiKeysModal(ModalScreen):
     """Modal for viewing and updating API keys."""
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="api-keys-dialog"):
+        with Vertical(id="api-keys-dialog"):
             yield Static("[bold]🔑 API Keys & Credentials[/]", id="msg-dialog-header")
             yield Static("", id="api-keys-status")
 
-            # Gemini API Key
-            yield Static("[b]Gemini API Key[/]  [dim](Google AI Studio / GCP)[/]")
-            yield Input(placeholder="Enter Gemini API Key...", password=True, id="input-gemini-key")
-            yield Static("", id="status-gemini")
+            with Container(id="api-keys-columns"):
+                with Vertical(classes="api-keys-col"):
+                    yield Static("[b]Gemini API Key[/]  [dim](Google AI Studio / GCP)[/]")
+                    yield Input(placeholder="Enter Gemini API Key...", password=True, id="input-gemini-key")
+                    yield Static("", id="status-gemini")
+                    yield Static("[b]xAI API Key[/]  [dim](Grok)[/]")
+                    yield Input(placeholder="Enter xAI API Key...", password=True, id="input-xai-key")
+                    yield Static("", id="status-xai")
+                    yield Static("[b]Anthropic API Key[/]  [dim](Claude Models)[/]")
+                    yield Input(placeholder="Enter Anthropic API Key...", password=True, id="input-anthropic-key")
+                    yield Static("", id="status-anthropic")
 
-            # VersaVoice Token
-            yield Static("[b]VersaVoice API Token[/]  [dim](Sponsor Token)[/]")
-            yield Input(placeholder="Enter VersaVoice API Token...", password=True, id="input-vv-token")
-            yield Static("", id="status-vv")
+                with Vertical(classes="api-keys-col"):
+                    yield Static("[b]VersaVoice API Token[/]  [dim](Sponsor Token)[/]")
+                    yield Input(placeholder="Enter VersaVoice API Token...", password=True, id="input-vv-token")
+                    yield Static("", id="status-vv")
+                    yield Static("[b]OpenAI API Key[/]  [dim](GPT Models)[/]")
+                    yield Input(placeholder="Enter OpenAI API Key...", password=True, id="input-openai-key")
+                    yield Static("", id="status-openai")
+                    yield Static("[b]OpenRouter API Key[/]  [dim](Multi-vendor aggregator)[/]")
+                    yield Input(placeholder="Enter OpenRouter API Key...", password=True, id="input-openrouter-key")
+                    yield Static("", id="status-openrouter")
 
-            # xAI API Key
-            yield Static("[b]xAI API Key[/]  [dim](Grok)[/]")
-            yield Input(placeholder="Enter xAI API Key...", password=True, id="input-xai-key")
-            yield Static("", id="status-xai")
-
-            # OpenAI API Key
-            yield Static("[b]OpenAI API Key[/]  [dim](GPT Models)[/]")
-            yield Input(placeholder="Enter OpenAI API Key...", password=True, id="input-openai-key")
-            yield Static("", id="status-openai")
-
-            # Anthropic API Key
-            yield Static("[b]Anthropic API Key[/]  [dim](Claude Models)[/]")
-            yield Input(placeholder="Enter Anthropic API Key...", password=True, id="input-anthropic-key")
-            yield Static("", id="status-anthropic")
-
-            # OpenRouter API Key
-            yield Static("[b]OpenRouter API Key[/]  [dim](Multi-vendor aggregator)[/]")
-            yield Input(placeholder="Enter OpenRouter API Key...", password=True, id="input-openrouter-key")
-            yield Static("", id="status-openrouter")
-
-            # Result feedback
             yield Static("", id="api-keys-feedback")
 
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("💾 Save Changes", variant="success", id="btn-api-save")
-                yield Button("Cancel", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
         """Load current key states and populate status indicators."""
@@ -141,7 +136,6 @@ class ApiKeysModal(ModalScreen):
         openrouter_key = _read_openrouter_key()
         proxy_enabled = _is_proxy_enabled()
 
-        # Status line
         g_status = f"[green]✅ Set[/] — {_mask_key(gemini_key)}" if gemini_key else "[red]❌ Not configured[/]"
         v_status = f"[green]✅ Set[/] — {_mask_key(vv_token)}" if vv_token else "[red]❌ Not configured[/]"
         x_status_prefix = f"[cyan]Enabled[/]" if proxy_enabled else "[dim]Disabled[/]"
@@ -161,7 +155,6 @@ class ApiKeysModal(ModalScreen):
             "[dim]Enter a new value to update. Leave blank to keep current.[/]"
         )
 
-        # Store originals for change detection
         self._original = {
             "gemini": gemini_key,
             "versavoice": vv_token,
@@ -232,5 +225,4 @@ class ApiKeysModal(ModalScreen):
 
         if results and not errors:
             self.app.notify(f"✅ {len(results)} key(s) updated successfully", severity="information")
-            # Refresh status indicators after save
             self.on_mount()

@@ -57,6 +57,18 @@ COA manages all skills for the team:
 4. **Update**: Modify the skill, then `agictl skill status <name> updated` → Lifeline re-syncs
 5. **Monitor**: `agictl skill list` → system posture at a glance
 
+## Agent-facing skills and harness tools
+
+Skills deployed to sub-agents show `agictl` commands in **shell notation** for readability. Agents invoke them through **harness tools** (`agictl_task`, `agictl_cycle`, …) with the subcommand only — see `cli_reference_agent.md` (*Harness tool invocation*).
+
+When authoring or editing any agent-facing skill, include this blockquote near the top (after the title or trigger line):
+
+```markdown
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+```
+
+COA-only skills (e.g. this file) may omit the blockquote if they are never distributed to sub-agents.
+
 ## Differentiation: Requirements Elicitation vs Solution Architect
 
 | Aspect | Requirements Elicitation | Solution Architect |

@@ -1,5 +1,7 @@
 # Git Operations Skill
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## Prerequisites
 - **Git identity** (user.name, user.email) and **credential.helper store** are auto-configured during provisioning — see `~/.gitconfig`
 - **SSH key** is auto-generated at provisioning — public key at `~/.ssh/versa_agi_ed25519.pub`
@@ -14,7 +16,7 @@
 - Requires PU to add the public key as a deploy key on the Git platform
 
 ### Access Token (for `https://` URLs)
-- When a project has an `access_token` set (via `agictl project update --access-token`), `project assign` auto-writes the credential to `~/.git-credentials`
+- When a project has an `access_token` set (via `agictl project update <id> --access-token`), `project assign` auto-writes the credential to `~/.git-credentials`
 - Format: `https://oauth2:{token}@{host}` — git resolves this automatically via `credential.helper store`
 - **No manual config needed** — credentials are injected before cloning
 - One `.git-credentials` file supports multiple hosts (one line per host)

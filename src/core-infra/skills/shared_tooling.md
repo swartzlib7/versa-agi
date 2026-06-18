@@ -3,6 +3,9 @@ name: Shared Tooling & Ecosystem
 description: Protocols for building and documenting shared tools in the global AGi-Tools repository.
 ---
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
+
 # Shared Tooling & the AGi-Tools Repository
 
 **Versa AGi** operates on a shared ecosystem model. To save on cognitive context window usage, minimize repetitive execution overhead, and increase cross-agent productivity, all active agents share a centralized local project repository located at `workspace/AGi-Tools`.

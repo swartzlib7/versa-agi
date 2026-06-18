@@ -48,6 +48,135 @@ def strip_emotion_tags(text: str) -> str:
     return result.strip()
 
 
+def _message_has_real_attachments(msg: dict) -> bool:
+    """True when the message has user attachments (media/markdown/url), not voice audio URLs."""
+    if msg.get("has_attachments"):
+        return True
+    attach_path = (msg.get("attachment_path") or "").strip()
+    if attach_path and not attach_path.startswith("http"):
+        return True
+    raw_payload = msg.get("raw_payload") or ""
+    if not raw_payload:
+        return False
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if isinstance(payload, list):
+        return bool(payload)
+    attachments = payload.get("attachments") if isinstance(payload, dict) else None
+    return isinstance(attachments, list) and bool(attachments)
+
+
+def _parse_message_attachments(msg: dict) -> tuple[list[str], list[dict]]:
+    """Return (label lines, markdown attachment dicts) from raw_payload."""
+    labels: list[str] = []
+    md_attachments: list[dict] = []
+    raw_payload = msg.get("raw_payload") or ""
+    if not raw_payload:
+        return labels, md_attachments
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return labels, md_attachments
+
+    attachments = payload if isinstance(payload, list) else payload.get("attachments")
+    if not isinstance(attachments, list):
+        return labels, md_attachments
+
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        att_type = att.get("type", "unknown")
+        meta = att.get("meta") or {}
+        if att_type == "markdown" and att.get("value"):
+            md_attachments.append({
+                "title": meta.get("title", "Untitled"),
+                "content": att["value"],
+            })
+        elif att_type == "media":
+            labels.append(f"📷 {meta.get('fileName', 'media')}")
+        elif att_type == "url":
+            labels.append(f"🔗 {att.get('value', 'url')}")
+        else:
+            labels.append(f"📎 {att_type}")
+    return labels, md_attachments
+
+
+def _is_pu_recipient(msg: dict, primary_uid: Optional[str]) -> bool:
+    return (
+        bool(primary_uid)
+        and msg.get("direction") == "received"
+        and msg.get("to_user_id") == primary_uid
+    )
+
+
+def _needs_attention(msg: dict, vv_enabled: bool, primary_uid: Optional[str]) -> bool:
+    """Highlight unprocessed inbox rows that still need agent pickup (not PU/VV read queue)."""
+    if msg.get("status") != "unprocessed" or msg.get("direction") != "received":
+        return False
+    if _is_pu_recipient(msg, primary_uid) and vv_enabled:
+        return False
+    return True
+
+
+def _display_status(msg: dict, vv_enabled: bool, primary_uid: Optional[str]) -> str:
+    status = msg.get("status") or "pending"
+    if _is_pu_recipient(msg, primary_uid) and vv_enabled and status == "unprocessed":
+        status = "processed"
+    if _needs_attention(msg, vv_enabled, primary_uid):
+        return "[yellow]⏳ unprocessed[/]"
+    if status == "processed":
+        return "[green]✓ processed[/]"
+    if status == "unprocessed":
+        return "[yellow]⏳ unprocessed[/]"
+    return status
+
+
+def _display_attach(has_attach: bool) -> str:
+    return "[cyan]📎 Yes[/]" if has_attach else "No"
+
+
+def _fetch_cycle_routing_summary(cycle_id: str) -> str:
+    """Load execution_model / routing_mode from cycles.db via agictl cycle get."""
+    cycle_id = (cycle_id or "").strip()
+    if not cycle_id or cycle_id == "--":
+        return ""
+    try:
+        proc = subprocess.run(
+            ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "cycle", "get", cycle_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        if not proc.stdout:
+            return ""
+        data = {}
+        for line in reversed(proc.stdout.strip().splitlines()):
+            if line.strip().startswith("{"):
+                data = json.loads(line)
+                break
+        if not data.get("success"):
+            return ""
+        cycle = data.get("cycle") or {}
+        exec_m = cycle.get("execution_model") or ""
+        assigned = cycle.get("assigned_model") or ""
+        mode = cycle.get("routing_mode") or ""
+        wm = cycle.get("routing_work_modality") or ""
+        if not exec_m and (not mode or mode == "none"):
+            return ""
+        parts = []
+        if exec_m:
+            parts.append(f"exec: {exec_m}")
+        if assigned and assigned != exec_m:
+            parts.append(f"assigned: {assigned}")
+        if mode and mode != "none":
+            parts.append(f"route: {mode}")
+        if wm:
+            parts.append(f"modality: {wm}")
+        return " · ".join(parts)
+    except Exception:
+        return ""
+
+
 class ComposeModal(ModalScreen):
     """Compose a local message to an agent."""
 
@@ -149,7 +278,10 @@ class MessageViewModal(ModalScreen):
                  primary_uid: str = None,
                  reply_agent: str = None,
                  from_display: str = None,
-                 to_display: str = None, **kwargs):
+                 to_display: str = None,
+                 vv_enabled: bool = True,
+                 message_reader: Optional[MessageReader] = None,
+                 **kwargs):
         super().__init__(**kwargs)
         self.msg = msg
         self.agent_name = agent_name
@@ -158,12 +290,13 @@ class MessageViewModal(ModalScreen):
         self.reply_agent = reply_agent
         self.from_display = from_display or "Unknown"
         self.to_display = to_display or "Unknown"
+        self.vv_enabled = vv_enabled
+        self.message_reader = message_reader
         self._confirm_delete = False
         status = msg.get("status", "")
         self._original_status = status if status else "processed"
 
     def compose(self) -> ComposeResult:
-        from textual.widgets import Select
         msg = self.msg
         direction = msg.get("direction", "sent")
         arrow = "→ SENT" if direction == "sent" else "← RECEIVED"
@@ -176,13 +309,10 @@ class MessageViewModal(ModalScreen):
         created = _utc_to_local(msg.get("created_at", ""))
         msg_id = msg.get("message_id", "")
         cycle = msg.get("cycle_id") or "--"
-        # Only show attachments for outbound (sent) messages — inbound VV messages
-        # flag has_attachments for audio transcription URLs which aren't useful.
-        is_sent = direction == "sent"
-        has_attach = "Yes" if (is_sent and msg.get("has_attachments")) else "No"
-
-        # Build header — direction line + 3-column metadata below
-        attach_display = has_attach if is_sent else "—"
+        routing_summary = _fetch_cycle_routing_summary(cycle) if cycle != "--" else ""
+        cycle_display = f"{cycle}\n[dim]{routing_summary}[/]" if routing_summary else cycle
+        has_attach = _message_has_real_attachments(msg)
+        attach_display = _display_attach(has_attach)
 
         # Prefer original_text (with emotion tags) for dashboard display
         raw_text = msg.get("original_text") or msg.get("text") or ""
@@ -191,35 +321,11 @@ class MessageViewModal(ModalScreen):
         # Store raw text for copy button
         self._raw_text = raw_text
 
-        # Parse attachments from raw_payload (single source of truth).
-        # raw_payload stores the full attachments JSON array for sent messages.
-        # Messages sent before this field was populated will show no attachment details.
-        self._md_attachments = []
-        attach_labels = []
-
-        if is_sent and has_attach == "Yes":
-            raw_payload = msg.get("raw_payload") or ""
-            if raw_payload:
-                try:
-                    attachments = json.loads(raw_payload)
-                    if not isinstance(attachments, list):
-                        raise ValueError(f"Expected list, got {type(attachments).__name__}")
-                    for att in attachments:
-                        att_type = att.get("type", "unknown")
-                        meta = att.get("meta") or {}
-                        if att_type == "markdown" and att.get("value"):
-                            self._md_attachments.append({
-                                "title": meta.get("title", "Untitled"),
-                                "content": att["value"]
-                            })
-                        elif att_type == "media":
-                            attach_labels.append(f"📷 {meta.get('fileName', 'media')}")
-                        elif att_type == "url":
-                            attach_labels.append(f"🔗 {att.get('value', 'url')}")
-                        else:
-                            attach_labels.append(f"📎 {att_type}")
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    attach_labels.append("[red]⚠ Failed to parse attachment data[/]")
+        attach_labels, self._md_attachments = _parse_message_attachments(msg)
+        if has_attach and not attach_labels and not self._md_attachments:
+            attach_path = (msg.get("attachment_path") or "").strip()
+            if attach_path and not attach_path.startswith("http"):
+                attach_labels.append(f"📁 {attach_path}")
 
         # Status selector options (must match messages.db CHECK constraint)
         status_options = [
@@ -235,6 +341,8 @@ class MessageViewModal(ModalScreen):
             if self._original_status in dict(status_options)
             else "processed"
         )
+        if _is_pu_recipient(msg, self.primary_uid) and self.vv_enabled and current_status == "unprocessed":
+            current_status = "processed"
 
         with Vertical(id="msg-dialog"):
             with Vertical(id="msg-dialog-top"):
@@ -245,7 +353,7 @@ class MessageViewModal(ModalScreen):
                     yield Static(f"[cyan]Mode:[/]\n{mode}", classes="msg-meta-col")
                 with Horizontal(classes="msg-dialog-meta"):
                     yield Static(f"[cyan]Message ID:[/]\n{msg_id}", classes="msg-meta-col")
-                    yield Static(f"[cyan]Cycle:[/]\n{cycle}", classes="msg-meta-col")
+                    yield Static(f"[cyan]Cycle:[/]\n{cycle_display}", classes="msg-meta-col")
                     yield Static(f"[cyan]Attachments:[/]\n{attach_display}", classes="msg-meta-col")
                 with Horizontal(id="msg-status-row"):
                     yield Static("[cyan]Status:[/]")
@@ -258,7 +366,6 @@ class MessageViewModal(ModalScreen):
             with VerticalScroll(id="msg-dialog-scroll"):
                 with Vertical(id="msg-body-pane"):
                     yield TextArea(raw_text, id="msg-dialog-body", read_only=True)
-                    # Attachment details (parsed from raw_payload)
                     if attach_labels or self._md_attachments:
                         with Vertical(id="msg-attachments"):
                             if attach_labels:
@@ -274,14 +381,34 @@ class MessageViewModal(ModalScreen):
                         yield Static(f"[cyan]Reply To:[/] {self.reply_agent}")
                         yield Static("[cyan]Reply:[/]")
                         yield TextArea("", id="msg-reply-body", classes="msg-input-paper")
-                with Horizontal(id="msg-dialog-actions"):
-                    if self.reply_agent:
-                        yield Button("💬 Reply", variant="warning", id="msg-reply", disabled=True)
-                    yield Button("Save Status", variant="success", id="msg-save-status", disabled=True)
-                    yield Button("📋 Copy Body", variant="primary", id="msg-copy-body")
-                    yield Button("Copy ID", variant="primary", id="msg-dialog-copy-id")
-                    yield Button("Delete", variant="error", id="msg-delete")
-                    yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+            with Horizontal(id="msg-dialog-footer"):
+                if self.reply_agent:
+                    yield Button("💬 Reply", variant="warning", id="msg-reply", disabled=True)
+                yield Button("Save Status", variant="success", id="msg-save-status", disabled=True)
+                yield Button("📋 Copy Body", variant="primary", id="msg-copy-body")
+                yield Button("Copy ID", variant="primary", id="msg-dialog-copy-id")
+                yield Button("Delete", variant="error", id="msg-delete")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+
+    def on_mount(self) -> None:
+        """Auto-mark PU inbox messages as processed when the dashboard viewer opens them."""
+        if not self.message_reader or not _is_pu_recipient(self.msg, self.primary_uid):
+            return
+        msg_id = self.msg.get("message_id") or ""
+        if not msg_id or self.msg.get("status") != "unprocessed":
+            return
+        if self.message_reader.update_message_status(msg_id, "processed"):
+            self._original_status = "processed"
+            self.msg["status"] = "processed"
+            try:
+                status_select = self.query_one("#select-msg-status", Select)
+                status_select.value = "processed"
+            except Exception:
+                pass
+            try:
+                self.app.query_one(MessagesPanel).refresh_data()
+            except Exception:
+                pass
 
     def _update_action_buttons(self) -> None:
         status_select = self.query_one("#select-msg-status", Select)
@@ -519,6 +646,8 @@ class MessagesPanel(Widget):
 
         agent_name = self._get_agent_name()
         primary_name = self._get_primary_name()
+        vv_enabled = self._is_vv_enabled()
+        pu_uid = self._get_primary_uid()
 
         # Build UID→agent name lookup (cached after first call)
         if not self._uid_to_agent and self.agent_reader:
@@ -545,9 +674,8 @@ class MessagesPanel(Widget):
             # Prefer original_text (with emotion tags) for dashboard display
             clean_text = msg.get("original_text") or msg.get("text") or ""
             mode = msg.get("mode", "typed")
-            status = msg.get("status", "pending")
-            # Only flag attachments for sent messages (inbound VV audio URLs aren't useful)
-            has_attach = "Yes" if (direction == "sent" and msg.get("has_attachments")) else "No"
+            status = _display_status(msg, vv_enabled, pu_uid)
+            has_attach = _display_attach(_message_has_real_attachments(msg))
             # Format: "YYYY-MM-DD HH:MM:SS" → "MM-DD HH:MM"
             raw_ts = _utc_to_local(msg.get("created_at", ""))
             if len(raw_ts) >= 16:
@@ -691,6 +819,8 @@ class MessagesPanel(Widget):
                 reply_agent=self._resolve_reply_agent(msg),
                 from_display=from_name,
                 to_display=to_name,
+                vv_enabled=self._is_vv_enabled(),
+                message_reader=self.message_reader,
             ))
 
     def _is_vv_enabled(self) -> bool:
@@ -721,6 +851,7 @@ class MessagesPanel(Widget):
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "chk-vv-enabled":
             self._set_vv_enabled(event.value)
+            self.refresh_data()
 
     def on_click(self, event) -> None:
         if event.widget and event.widget.id == "btn-fetch-inbox":

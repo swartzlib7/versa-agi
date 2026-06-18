@@ -55,8 +55,16 @@ class RegistrationModal(ModalScreen):
         min_supported = s.get("min_supported_version") or "—"
         submitted_raw = s.get("registration_submitted", "false")
         submitted = str(submitted_raw).lower() == "true"
-        message = s.get("message", "")
         last_error = s.get("registration_last_error", "")
+        reg_status = s.get("registration_status", "")
+        attempt_count = s.get("registration_attempt_count", "0")
+
+        if submitted:
+            reg_line = "Registered: [green]yes[/green]"
+        elif reg_status == "deferred":
+            reg_line = "Registered: [yellow]deferred[/yellow] (offline or endpoint unavailable)"
+        else:
+            reg_line = "Registered: [red]no[/red]"
 
         lines = [
             "[b]Versa AGi Registration[/b]",
@@ -64,8 +72,12 @@ class RegistrationModal(ModalScreen):
             f"Installed: [cyan]{installed}[/cyan]",
             f"Latest: {latest}",
             f"Minimum: {min_supported}",
-            f"Registered: {'yes' if submitted else 'no'}",
+            reg_line,
         ]
+
+        if not submitted:
+            lines.append(f"Attempts: {attempt_count}")
+            lines.append("[dim]Press [b]g[/b] anytime to reopen this panel.[/]")
 
         if s.get("update_available"):
             lines.extend([
@@ -82,9 +94,6 @@ class RegistrationModal(ModalScreen):
                 "[red]Below minimum supported release.[/red]",
                 "Install the latest Versa AGi to continue.",
             ])
-
-        if message and message not in lines:
-            lines.extend(["", message])
 
         if last_error and not submitted:
             lines.extend(["", f"Last error: {last_error}"])

@@ -3,6 +3,8 @@
 > **Purpose**: Register, list, approve, and remove agents in the Versa AGi system.
 > This skill is for COA primarily, but any agent with agictl access can query the registry.
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## Constraints
 
 - **Free tier limit**: Max 3 active agents (COA + 2)

@@ -2,6 +2,8 @@
 
 > **Trigger**: Use this skill when you need a system-level package (apt) installed on the server — e.g., a build tool, library, or runtime dependency. The package registry enforces an approval workflow: you request, the Primary User approves, and you install.
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## How It Works
 
 1. **You request** a package via `agictl pkg request <name> --reason "..."`.

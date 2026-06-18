@@ -29,6 +29,9 @@ agictl message get YOUR_SUB_ACCOUNT_ID --contact <uid> --last-n-count 10  # Cont
 
 ---
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
+
 ## Mode Selection
 
 Modes are **exclusive** — you select exactly one per message. Use the exact string value in `agictl message send --mode`.

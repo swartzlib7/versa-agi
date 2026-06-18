@@ -2,6 +2,8 @@
 
 > **Scope:** COA-exclusive — this skill is never deployed to sub-agents.
 
+> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
+
 ## Purpose
 
 This skill governs the skill lifecycle: creating, overriding, distributing, and withdrawing skills across the agent team. You (COA) are the sole custodian of the skills system.
@@ -23,7 +25,7 @@ draft → ready → synced → updated → synced (re-sync loop)
 
 ## Creating Skills
 
-Use `agictl skill new` to scaffold a new skill:
+Use `agictl skill new` to scaffold a new skill. Agent-facing skills must include the **Harness tools** blockquote (see `skills/README.md`). Command examples stay in shell form (`agictl task list`); agents translate to harness tools at runtime.
 
 ```bash
 agictl skill new my_skill --description "What this skill does" --scope all
@@ -95,12 +97,12 @@ agictl skill list -s draft     # Filter by status
 | Scope | Who gets it | Use case |
 |-------|-------------|----------|
 | `all` | COA + all sub-agents | General skills (communication, git, tasks) |
-| `coa_only` | COA only | Administrative skills (skill_authoring, cli_reference) |
+| `coa_only` | COA only (on disk) | Administrative skills — **`cli_reference.md`** (load on demand), **`skill_authoring.md`** (always injected for COA) |
 
 Sub-agents never see COA-only skills — they are excluded from:
 1. The triage catalog (sub-agents can't even request them).
 2. The rsync deploy (filtered via `--exclude`).
-3. The harness always-inject block.
+3. Auto-injection (`cli_reference.md` is never injected; COA loads it on demand).
 
 ## Key Commands
 
