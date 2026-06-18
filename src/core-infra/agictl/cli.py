@@ -6405,11 +6405,13 @@ def message_delete(message_id, channel):
         json_response(False, error="VersaVoice not configured")
         sys.exit(1)
 
-    from comms import api_request
+    from comms import api_request, delete_local_message, tombstone_message
     endpoint = f"/messages/{message_id}?subAccountId={sub_account_id}&channelId={channel}"
     result = api_request(endpoint, token, method="DELETE")
 
     if result and result.get("success"):
+        tombstone_message(message_id, messages_db)
+        delete_local_message(message_id, messages_db)
         json_response(True, message_id=message_id, channel=channel, status="deleted")
     else:
         error_msg = result.get("message", "API call failed") if result else "API call failed"
@@ -6421,9 +6423,10 @@ def message_delete(message_id, channel):
 @click.option("--agent-path", required=True)
 @click.option("--sub-account", required=True)
 @click.option("--token", required=True)
-def message_sync_inbox(agent_user, agent_path, sub_account, token):
+@click.option("--full", is_flag=True, help="Re-scan recent history (2h), not just unread")
+def message_sync_inbox(agent_user, agent_path, sub_account, token, full):
     """Pull messages from VersaVoice REST API and persist to SQLite."""
-    success = fetch_inbox(agent_user, agent_path, sub_account, token, messages_db)
+    success = fetch_inbox(agent_user, agent_path, sub_account, token, messages_db, full_sync=full)
     if not success:
         sys.exit(1)
 

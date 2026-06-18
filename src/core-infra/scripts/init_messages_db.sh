@@ -39,7 +39,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_direction ON messages(direction);
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 CREATE INDEX IF NOT EXISTS idx_messages_users ON messages(from_user_id, to_user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
+
+CREATE TABLE IF NOT EXISTS deleted_message_ids (
+  message_id  TEXT PRIMARY KEY,
+  deleted_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
 SQL
 
 echo "Messages database initialized: ${DB_PATH}"
-echo "Tables: messages"
+echo "Tables: messages, deleted_message_ids"

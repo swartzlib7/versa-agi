@@ -162,7 +162,7 @@ agictl model params set model:qwen3.6:35b --think-mode boolean \
 
 `[output_routing]` maps **one preferred catalog key per output delivery modality** (`image`, `audio`, `video`). Configure in **🔀 ROUTING** (lower section). Models must declare the matching `output_modalities` in the catalog.
 
-Consumed by utility runners / output drivers (not chat spawn triage). Resolver: `resolve_output_model()` in `harness/model_routing.py`.
+Consumed by Utility Model runners / output drivers (not chat spawn triage). Resolver: `resolve_output_model()` in `harness/model_routing.py`. See TD-UTIL-001 / `td_util_001_utility_models.plan.md`.
 
 ## Cost estimates (TD-COST-001 partial)
 

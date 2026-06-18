@@ -517,12 +517,23 @@ class MessageViewModal(ModalScreen):
                     channel_id = self.msg.get("channel_id") or ""
                     if channel == "vv" and channel_id and msg_id:
                         try:
-                            subprocess.run(
-                                ["vcoa", "message", "delete", msg_id, "--channel", channel_id],
-                                capture_output=True, timeout=15
+                            cloud = subprocess.run(
+                                ["sudo", "agictl", "message", "delete", msg_id, "--channel", channel_id],
+                                capture_output=True, timeout=15, text=True,
                             )
-                        except Exception:
-                            pass  # Cloud cleanup is best-effort
+                            if cloud.returncode != 0:
+                                err = (cloud.stderr or cloud.stdout or "cloud delete failed").strip()
+                                self.app.notify(
+                                    f"Local delete OK; cloud delete failed: {err[:80]}",
+                                    title="Partial Delete",
+                                    severity="warning",
+                                )
+                        except Exception as e:
+                            self.app.notify(
+                                f"Local delete OK; cloud delete failed: {e}",
+                                title="Partial Delete",
+                                severity="warning",
+                            )
                     self.app.notify(f"Deleted message {msg_id[:12]}...", title="Message Deleted")
                     messages_panel.refresh_data()
                 else:

@@ -88,17 +88,80 @@ def api_request(endpoint, token, method="GET", body=None):
         console.print(f"[bold red]Network Error ({endpoint}):[/bold red] {str(e)}")
         return None
 
-def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db):
+def _ensure_deleted_table(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deleted_message_ids ("
+        "message_id TEXT PRIMARY KEY, "
+        "deleted_at DATETIME NOT NULL DEFAULT (datetime('now'))"
+        ")"
+    )
+
+
+def tombstone_message(message_id, messages_db):
+    """Record a message ID so inbox sync never re-inserts it after local/cloud delete."""
+    if not message_id:
+        return False
+    try:
+        conn = sqlite3.connect(messages_db, timeout=5)
+        _ensure_deleted_table(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO deleted_message_ids (message_id) VALUES (?)",
+            (message_id,),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        console.print(f"[red]DB Error tombstoning message:[/red] {str(e)}")
+        return False
+
+
+def is_message_tombstoned(message_id, messages_db):
+    if not message_id:
+        return False
+    try:
+        conn = sqlite3.connect(messages_db, timeout=5)
+        _ensure_deleted_table(conn)
+        row = conn.execute(
+            "SELECT 1 FROM deleted_message_ids WHERE message_id = ? LIMIT 1",
+            (message_id,),
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def delete_local_message(message_id, messages_db):
+    try:
+        conn = sqlite3.connect(messages_db, timeout=5)
+        conn.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        console.print(f"[red]DB Error deleting local message:[/red] {str(e)}")
+        return False
+
+
+def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False):
     """Fetches messages from VersaVoice Cloud and persists them cleanly to messages.db.
-    
-    Uses unreadOnly=false with a rolling 2-hour window to prevent the race condition
-    where the user reads a message in the VV app before the CRON tick fires.
-    The existing dedup check (message_id) prevents double-inserts.
+
+    Default sync uses unreadOnly=true so lifeline only pulls new unread inbound messages.
+    markAsRead=true marks fetched particles viewed on VersaVoice (original lifeline
+    mailbox behaviour). Tombstoned message IDs (deleted locally or via agictl) are
+    never re-inserted even when the cloud particle still exists in the sub-account space.
+
+    full_sync=True uses unreadOnly=false with a 2-hour window (manual catch-up only).
     """
     from datetime import datetime, timedelta, timezone
-    since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    
-    endpoint = f"/messages/inbox?subAccountId={sub_account_id}&unreadOnly=false&since={since}"
+    since = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    unread_only = "false" if full_sync else "true"
+
+    endpoint = (
+        f"/messages/inbox?subAccountId={sub_account_id}"
+        f"&unreadOnly={unread_only}&markAsRead=true&since={since}"
+    )
     response = api_request(endpoint, token)
     
     if isinstance(response, list):
@@ -114,11 +177,16 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db):
     inserted = 0
     try:
         conn = sqlite3.connect(messages_db, timeout=5)
+        _ensure_deleted_table(conn)
         c = conn.cursor()
         
         for msg in messages:
             msg_id = msg.get("messageId") or msg.get("id")
             if not msg_id:
+                continue
+
+            c.execute("SELECT 1 FROM deleted_message_ids WHERE message_id = ? LIMIT 1", (msg_id,))
+            if c.fetchone():
                 continue
                 
             # Sender is in the "from" object: {uid, displayName, senderId}

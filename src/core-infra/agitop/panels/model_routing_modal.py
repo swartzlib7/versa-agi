@@ -161,7 +161,7 @@ class ModelRoutingModal(ModalScreen):
                     with VerticalScroll(id="routing-output-scroll"):
                         yield Static("[bold]Output routing[/]")
                         yield Static(
-                            "[dim]Generation defaults for utility agents (Phase F) — one key per "
+                            "[dim]Generation defaults for Utility Models (Phase F) — one key per "
                             "image/audio/video. Catalog must declare matching output_modality. "
                             "Not used for chat spawn routing yet.[/]"
                         )

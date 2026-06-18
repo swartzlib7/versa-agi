@@ -261,11 +261,25 @@ class MessageReader:
         return [r["from_user_id"] for r in rows]
 
     def delete_message(self, message_id: str) -> bool:
-        """Delete a message by its message_id."""
-        return self._execute(
-            "DELETE FROM messages WHERE message_id = ?",
-            (message_id,)
-        )
+        """Delete a message by its message_id and tombstone it against inbox re-sync."""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS deleted_message_ids ("
+                "message_id TEXT PRIMARY KEY, "
+                "deleted_at DATETIME NOT NULL DEFAULT (datetime('now'))"
+                ")"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO deleted_message_ids (message_id) VALUES (?)",
+                (message_id,),
+            )
+            conn.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
 
     def update_message_status(self, message_id: str, new_status: str) -> bool:
         """Update the status of a message."""

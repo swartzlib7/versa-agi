@@ -44,6 +44,23 @@ Use this order every cycle that involves a message and/or task:
 - **`task done`** — only in the "verified complete" or "confirmation arrived" rows above.
 - **`waiting` + snooze** — whenever external confirmation is the next step; Lifeline wakes you on the **next inbound message**, not because you polled.
 
+### Scheduled CLI tasks (TD-UTIL-001 — planned)
+
+Tasks may include a **`cli_command`** field. When due, lifeline executes:
+
+```bash
+sudo -u {assigned_to} agictl {cli_command}
+```
+
+This path does **not** spawn the LangGraph harness. Use for **Utility Model** runs, maintenance scripts, or agent-authored wrappers. Example:
+
+```bash
+agictl task add "Weekly brand hero" --assignee coa --due-date "2026-06-20 09:00:00" \
+  --cli-command 'utility run brand-hero-square --output-dir .agent/attachments/weekly --input-files brand/ref.jpg'
+```
+
+See `.cursor/plans/td_util_001_utility_models.plan.md` and Production Plan §2.6.
+
 ### Awaiting confirmation or feedback
 
 When you are in the **"need requester to confirm"** row above:
