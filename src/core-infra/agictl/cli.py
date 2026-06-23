@@ -5907,7 +5907,21 @@ def task_progress(task_id, note, last_n):
 @click.option("--source-msg", default=None, type=int, help="Source message ID")
 @click.option("--requested-by", default=None, help="UID of who originated the request")
 @click.option("--due-date", default=None, help="Due date (YYYY-MM-DD HH:MM:SS) — required for planned tasks")
-def task_add(title, desc, priority, assignee, project, callback, source_msg, requested_by, due_date):
+@click.option("--utility-task", is_flag=True, help="Create as Utility Task (links one Utility Model)")
+@click.option("--utility-model", default=None, help="utility_models.id (required with --utility-task)")
+@click.option("--utility-input-files", default=None, help="JSON array of input file paths")
+@click.option("--utility-output-override", default=None, help="Override UM output_path for this task")
+@click.option("--utility-start-alert", is_flag=True, help="VersaVoice alert to PU when run starts (utility or script)")
+@click.option("--utility-stop-alert", is_flag=True, help="VersaVoice alert to PU when run completes (utility or script)")
+@click.option("--utility-spawn-agent", default=None, help="Spawn this agent on successful UM completion")
+@click.option("--script-task", is_flag=True, help="Create as Script Task (runs a .sh from AGi-Tools — no agent spawn)")
+@click.option("--script-path", default=None, help="Path to the .sh inside AGi-Tools (required with --script-task)")
+@click.option("--script-parameters", default=None, help="Arguments passed to the script (argv-split)")
+@click.option("--script-interval", type=int, default=None, help="Recurrence interval in seconds (omit/0 = once-off)")
+def task_add(title, desc, priority, assignee, project, callback, source_msg, requested_by, due_date,
+             utility_task, utility_model, utility_input_files, utility_output_override,
+             utility_start_alert, utility_stop_alert, utility_spawn_agent,
+             script_task, script_path, script_parameters, script_interval):
     """Insert a new task. Returns JSON with created record."""
     # Dynamic assignee default: current agent, resolved robustly (env hint →
     # canonical resolver) rather than a hardcoded 'coa'.
@@ -5917,25 +5931,150 @@ def task_add(title, desc, priority, assignee, project, callback, source_msg, req
     if not due_date:
         json_response(False, error="--due-date is required for planned tasks")
         sys.exit(1)
-    # Project is mandatory — use 'agictl project list' to find the correct ID
-    if project is None:
-        json_response(False, error="--project is required. Use 'agictl project list' to find the correct project ID.")
+    # Utility and Script modes are mutually exclusive (they share alert columns).
+    if utility_task and script_task:
+        json_response(False, error="--utility-task and --script-task are mutually exclusive")
         sys.exit(1)
+    if utility_task:
+        if not utility_model:
+            json_response(False, error="--utility-model is required with --utility-task")
+            sys.exit(1)
+        from utility_store import get_utility_model
+        if not get_utility_model(utility_model):
+            json_response(False, error=f"Utility Model '{utility_model}' not found")
+            sys.exit(1)
+    elif script_task:
+        if not script_path:
+            json_response(False, error="--script-path is required with --script-task")
+            sys.exit(1)
+    else:
+        # Project is mandatory for standard tasks
+        if project is None:
+            json_response(False, error="--project is required. Use 'agictl project list' to find the correct project ID.")
+            sys.exit(1)
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         c = conn.cursor()
+        task_kind = "script" if script_task else ("utility" if utility_task else "standard")
+        is_special = utility_task or script_task
+        start_alert = 1 if utility_start_alert else 0
+        stop_alert = 1 if utility_stop_alert else (1 if is_special else 0)
         c.execute(
-            "INSERT INTO tasks (title, description, priority, assigned_to, project_id, callback_action, source_message_id, requested_by, due_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (title, desc, priority, assignee, project, callback, source_msg, requested_by, due_date)
+            "INSERT INTO tasks (title, description, priority, assigned_to, project_id, callback_action, "
+            "source_message_id, requested_by, due_date, task_kind, utility_model_id, utility_input_files, "
+            "utility_output_override, utility_start_alert, utility_stop_alert, utility_spawn_agent, "
+            "script_path, script_parameters, script_interval_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                title, desc, priority, assignee, project, callback, source_msg, requested_by, due_date,
+                task_kind, utility_model if utility_task else None, utility_input_files,
+                utility_output_override, start_alert, stop_alert, utility_spawn_agent,
+                script_path if script_task else None,
+                script_parameters if script_task else None,
+                script_interval if script_task else None,
+            ),
         )
         task_id = c.lastrowid
         conn.commit()
         conn.close()
-        json_response(True, task_id=task_id, title=title, priority=priority, assigned_to=assignee, project_id=project, due_date=due_date)
+        json_response(True, task_id=task_id, title=title, priority=priority, assigned_to=assignee,
+                      project_id=project, due_date=due_date, task_kind=task_kind,
+                      utility_model_id=utility_model if utility_task else None,
+                      script_path=script_path if script_task else None)
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
+
+@task.command("run-due-scripts", hidden=True)
+@click.option("--agent", "agent_name", required=True)
+@click.option("--agent-workspace", default=None, help="Agent workspace root (lifeline-supplied; unused today, reserved for parity with utility)")
+def task_run_due_scripts(agent_name, agent_workspace):
+    """Lifeline: execute due Script Tasks for an agent (TD-SCRIPT-001).
+
+    Deterministic — runs a .sh from AGi-Tools as the owning agent, captures the
+    return code, and drives done/blocked + rc-based VersaVoice alerts. No LLM,
+    no harness, no agent spawn.
+    """
+    from utility_store import list_due_script_tasks
+    from script_runner import ScriptRunError, resolve_agitools_path, run_script_task
+    from agictl.utility_cli import _vv_utility_alert
+
+    due = list_due_script_tasks(agent_name)
+    if not due:
+        json_response(True, agent=agent_name, count=0, runs=[])
+        return
+
+    agitools_root = resolve_agitools_path(tasks_db)
+    results = []
+    for t in due:
+        tid = t["id"]
+        title = t.get("title", "")
+        interval = t.get("script_interval_seconds") or 0
+        recurring = bool(interval and interval > 0)
+        basename = os.path.basename((t.get("script_path") or "").rstrip("/"))
+
+        if t.get("utility_start_alert"):
+            _vv_utility_alert(f"Script task #{tid} started — {title} ({basename}) on {agent_name}")
+
+        rc = None
+        try:
+            result = run_script_task(
+                t.get("script_path"),
+                agitools_root=agitools_root or "",
+                parameters=t.get("script_parameters"),
+                task_id=tid,
+            )
+            rc = result["returncode"]
+            success = result["success"]
+            tail = result.get("stderr_tail") or result.get("stdout_tail") or ""
+            status_word = "ok" if success else ("timeout" if result.get("timed_out") else "FAIL")
+            note = f"Script {basename} rc={rc} ({status_word})"
+            if tail:
+                note += "\n" + tail[:500]
+            ran_at = result.get("ran_at")
+        except ScriptRunError as e:
+            if e.code == "running":
+                # Lock held by a still-running invocation — leave due_date so the
+                # next tick retries; do not touch status.
+                results.append({"success": False, "task_id": tid, "code": e.code, "skipped": True})
+                continue
+            success = False
+            note = f"Script preflight failed ({e.code}): {e.message}"
+            ran_at = None
+
+        # Status routing (decision #3): once-off → done(rc==0)/blocked(rc!=0);
+        # recurring → stays 'planned', due_date re-armed by the interval.
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        sets = ["script_last_rc=?", "script_last_run_at=COALESCE(?, datetime('now'))", "updated_at=datetime('now')"]
+        params: list = [rc, ran_at]
+        if recurring:
+            sets.append("due_date=datetime('now', ?)")
+            params.append(f"+{int(interval)} seconds")
+        else:
+            if success:
+                sets.append("status='done'")
+                sets.append("completed_at=datetime('now')")
+            else:
+                sets.append("status='blocked'")
+        params.append(tid)
+        conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", params)
+        conn.execute(
+            "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
+            (tid, agent_name, note),
+        )
+        conn.commit()
+        conn.close()
+
+        if t.get("utility_stop_alert"):
+            outcome = "ok" if success else "FAILED"
+            _vv_utility_alert(f"Script task #{tid} finished — {title} ({basename}): rc={rc} {outcome}")
+
+        results.append({
+            "success": success, "task_id": tid, "returncode": rc,
+            "recurring": recurring, "title": title,
+        })
+
+    json_response(True, agent=agent_name, count=len(results), runs=results)
 
 @task.command("update")
 @click.argument("task_id", type=int)
@@ -5945,7 +6084,21 @@ def task_add(title, desc, priority, assignee, project, callback, source_msg, req
 @click.option("--assignee", help="Agent assigned")
 @click.option("--due-date", help="Next wake/due date (YYYY-MM-DD HH:MM:SS)")
 @click.option("--requested-by", help="UID of who originated the request")
-def task_update(task_id, task_status, desc, priority, assignee, due_date, requested_by):
+@click.option("--utility-model", default=None)
+@click.option("--utility-task/--no-utility-task", default=None)
+@click.option("--utility-input-files", default=None)
+@click.option("--utility-output-override", default=None)
+@click.option("--utility-start-alert/--no-utility-start-alert", default=None)
+@click.option("--utility-stop-alert/--no-utility-stop-alert", default=None)
+@click.option("--utility-spawn-agent", default=None)
+@click.option("--script-task/--no-script-task", default=None)
+@click.option("--script-path", default=None)
+@click.option("--script-parameters", default=None)
+@click.option("--script-interval", type=int, default=None)
+def task_update(task_id, task_status, desc, priority, assignee, due_date, requested_by,
+                utility_model, utility_task, utility_input_files, utility_output_override,
+                utility_start_alert, utility_stop_alert, utility_spawn_agent,
+                script_task, script_path, script_parameters, script_interval):
     """Update specific fields on an existing task. Returns JSON."""
     updates = {}
     if task_status is not None: updates["status"] = task_status
@@ -5954,6 +6107,17 @@ def task_update(task_id, task_status, desc, priority, assignee, due_date, reques
     if assignee is not None: updates["assigned_to"] = assignee
     if due_date is not None: updates["due_date"] = due_date
     if requested_by is not None: updates["requested_by"] = requested_by
+    if utility_task is not None: updates["task_kind"] = "utility" if utility_task else "standard"
+    if utility_model is not None: updates["utility_model_id"] = utility_model
+    if utility_input_files is not None: updates["utility_input_files"] = utility_input_files
+    if utility_output_override is not None: updates["utility_output_override"] = utility_output_override
+    if utility_start_alert is not None: updates["utility_start_alert"] = 1 if utility_start_alert else 0
+    if utility_stop_alert is not None: updates["utility_stop_alert"] = 1 if utility_stop_alert else 0
+    if utility_spawn_agent is not None: updates["utility_spawn_agent"] = utility_spawn_agent
+    if script_task is not None: updates["task_kind"] = "script" if script_task else "standard"
+    if script_path is not None: updates["script_path"] = script_path
+    if script_parameters is not None: updates["script_parameters"] = script_parameters
+    if script_interval is not None: updates["script_interval_seconds"] = script_interval
 
     if not updates:
         json_response(False, error="No updates provided")
@@ -7061,6 +7225,15 @@ def _get_project(conn, project_id):
     return proj
 
 
+# TD-SCRIPT-001: Reserved-name protection for shared system projects.
+# AGi-Tools (the Script Task source) and AGi-Knowledgebase are physically shared
+# and symlinked into every agent workspace (see SHARED_SYSTEM_PROJECTS in
+# agent_add). A reserved-name set is the simplest durable guard — no `protected`
+# column or migration needed — and it must reject BOTH archive and hard-delete so
+# a Script Task's scripts can never be pulled out from under it.
+RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+
+
 @project.command("list")
 def project_list():
     """List all projects as JSON."""
@@ -7244,6 +7417,11 @@ def project_archive(project_id, do_zip):
         conn.row_factory = sqlite3.Row
         row = _get_project(conn, project_id)
         name = row["name"]
+        # Reserved-name guard (TD-SCRIPT-001) — protected system projects cannot be archived.
+        if name in RESERVED_SYSTEM_PROJECTS:
+            conn.close()
+            json_response(False, error=f"'{name}' is a protected system project and cannot be archived")
+            sys.exit(1)
         workspace_path = row["workspace_path"]
         archive_path = None
         if do_zip and workspace_path and os.path.isdir(workspace_path):
@@ -10145,6 +10323,24 @@ def pkg_install(name):
         json_response(False, error=f"Package installation timed out after 300 seconds.")
     except Exception as e:
         json_response(False, error=f"Installation error: {e}")
+
+
+from agictl import utility_cli
+
+utility_cli.register(
+    cli,
+    json_response=json_response,
+    tasks_reader=tasks_reader,
+    require_pu_or_coa=_require_pu_or_coa,
+    load_catalog=_load_catalog,
+    tasks_db=tasks_db,
+)
+utility_cli.register_modality_map_commands(
+    model,
+    json_response=json_response,
+    require_pu_or_coa=_require_pu_or_coa,
+    load_catalog=_load_catalog,
+)
 
 
 if __name__ == "__main__":

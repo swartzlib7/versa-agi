@@ -15,6 +15,7 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 |---|---|---|
 | `system` | `agictl_system` | `system whoami` |
 | `model` | `agictl_model` | `model list` |
+| `utility` | `agictl_utility` | `utility run <um-id> --input-files a.jpg` |
 | `agent` | `agictl_agent` | `agent list` |
 | `task` | `agictl_task` | `task snooze 43 1440` |
 | `message` | `agictl_message` | `message send UID "Hello" --mode typed` |
@@ -110,6 +111,8 @@ agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 **task update options**: `--status planned|in_progress|waiting|blocked|cancelled|done`, `--desc`, `--priority`, `--assignee`, `--due-date "YYYY-MM-DD HH:MM:SS"`, `--requested-by`
 
 > `--due-date` is **mandatory** when creating tasks and when setting status back to `planned`. If a task cannot be completed by its due date, **roll the due date forward** — do not leave it in the past.
+
+> **SCRIPT TASKS**: For deterministic, scheduled `.sh` jobs (no reasoning cycle), add `--script-task --script-path <name.sh> [--script-parameters "<args>"] [--script-interval <seconds>]`. The script must be a top-level `.sh` in **AGi-Tools** (idempotent, exits non-zero on failure). Blank/0 interval = once-off; positive = recurring. Optional `--utility-start-alert` / `--utility-stop-alert` send PU alerts. See skill `script_tasks.md`.
 
 > **TASK PROGRESS**: You have no memory between cycles. Before ending any cycle with unfinished work, leave a breadcrumb: `agictl task progress <id> "DONE: ... NEXT: ... BLOCKERS: ..."`. Entries are append-only, timestamped, and automatically injected into your wake context while the task is active. Use `task progress` for journaling; reserve `task update --desc` for changing the task's actual description.
 

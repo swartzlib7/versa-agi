@@ -11,6 +11,7 @@ from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.widgets import DataTable, Static, Button, Input, Select, TabbedContent, TabPane, TextArea
+from textual.widget import Widget
 
 from agitop.data import TasksReader
 
@@ -196,6 +197,53 @@ class ProjectUnassignAgentModal(ModalScreen[bool]):
         self.dismiss(event.button.id == "btn-project-unassign-confirm")
 
 
+class ProjectSaveFirstModal(ModalScreen):
+    """Explain that Members/Memory tabs require saving the project first."""
+
+    CSS = """
+    ProjectSaveFirstModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #project-save-first-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $surface-lighten-2;
+        background: $surface;
+    }
+    #project-save-first-actions {
+        margin-top: 1;
+        height: auto;
+    }
+    #project-save-first-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        height: 3;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="project-save-first-dialog"):
+            yield Static(
+                "[bold]Save Project First[/]\n\n"
+                "Members and Project Memory are available after the project is created.\n\n"
+                "Complete the [bold]General[/] tab and press [bold]Save[/], then reopen this project to "
+                "assign agents or edit memory."
+            )
+            with Horizontal(id="project-save-first-actions"):
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-project-save-first-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+
+
 class ProjectMembersModal(ModalScreen):
     """Modal showing project details, members, and per-agent project memory."""
 
@@ -203,6 +251,7 @@ class ProjectMembersModal(ModalScreen):
         super().__init__(**kwargs)
         self._project = project
         self._tasks_reader = tasks_reader
+        self._is_new = not project.get("id")
         self._member_rows: dict[str, dict] = {}
         self._memory_rows: dict[str, dict] = {}
         self.selected_memory_agent: Optional[str] = None
@@ -229,7 +278,8 @@ class ProjectMembersModal(ModalScreen):
                 game_label = f"  │  🎯 {game_name}"
 
             yield Static(
-                f"[bold]#{pid}[/]  [{color}]{status}[/]{game_label}",
+                f"[bold]{'New Project' if self._is_new else f'#{pid}'}[/]  "
+                + (f"[{color}]{status}[/]{game_label}" if not self._is_new else "[green]new[/]"),
                 id="project-dialog-title",
             )
 
@@ -314,8 +364,14 @@ class ProjectMembersModal(ModalScreen):
                             yield DataTable(id="members-table", cursor_type="row")
                         yield Static("", id="project-members-hint")
                         with Horizontal(classes="project-members-actions"):
-                            yield Button("Assign agent", variant="primary", id="project-member-assign")
-                            yield Button("Unassign agent", variant="warning", id="project-member-remove")
+                            yield Button(
+                                "Assign agent", variant="primary",
+                                id="project-member-assign", disabled=self._is_new,
+                            )
+                            yield Button(
+                                "Unassign agent", variant="warning",
+                                id="project-member-remove", disabled=self._is_new,
+                            )
                             yield Button(
                                 "Close", variant="default",
                                 id="project-members-close", classes="dismiss-btn",
@@ -349,6 +405,8 @@ class ProjectMembersModal(ModalScreen):
                             )
 
     def on_mount(self) -> None:
+        if self._is_new:
+            self.query_one("#project-tabs").add_class("project-new-mode")
         self._sync_platform_visibility()
         self._refresh_members_table()
         mem_table = self.query_one("#project-memory-table", DataTable)
@@ -368,6 +426,14 @@ class ProjectMembersModal(ModalScreen):
     @on(Select.Changed, "#project-edit-type")
     def on_type_changed(self, event: Select.Changed) -> None:
         self._sync_platform_visibility()
+
+    @on(TabbedContent.TabActivated, "#project-tabs")
+    def _on_project_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if not self._is_new:
+            return
+        if event.tab.id in ("project-members-tab", "project-memory-tab"):
+            self.query_one("#project-tabs", TabbedContent).active = "project-general-tab"
+            self.app.push_screen(ProjectSaveFirstModal())
 
     def _refresh_members_table(self) -> None:
         table = self.query_one("#members-table", DataTable)
@@ -501,7 +567,7 @@ class ProjectMembersModal(ModalScreen):
         options = [
             (name, name)
             for name in self._tasks_reader.get_agent_names()
-            if name not in assigned
+            if name not in assigned and name.lower() != "watchdog"
         ]
 
         def _on_pick(agent_name: Optional[str]) -> None:
@@ -620,6 +686,37 @@ class ProjectMembersModal(ModalScreen):
 
         if not new_name:
             error_label.update("[bold red]Project name cannot be empty[/]")
+            return
+
+        if not pid:
+            args = ["project", "add", new_name]
+            if new_desc:
+                args.extend(["--desc", new_desc])
+            if new_remote:
+                args.extend(["--remote", new_remote])
+            elif new_type == "git":
+                args.append("--git-init")
+            ok, data, err = _run_agictl(args, timeout=150)
+            if not ok:
+                error_label.update(f"[bold red]{err}[/]")
+                return
+            new_id = data.get("project_id")
+            if new_id and self._tasks_reader:
+                post: dict = {}
+                if new_branch:
+                    post["branch"] = new_branch
+                if new_platform:
+                    post["platform"] = new_platform
+                if new_token:
+                    post["access_token"] = new_token
+                if post:
+                    self._tasks_reader.update_project(int(new_id), post)
+            self.app.notify(f"Project '{new_name}' created", severity="information")
+            try:
+                self.app.query_one(ProjectsPanel).refresh_data()
+            except Exception:
+                pass
+            self.app.pop_screen()
             return
 
         updates = {}
@@ -872,32 +969,80 @@ class DeleteProjectModal(ModalScreen):
             self.app.pop_screen()
 
 
-class ProjectsPanel(DataTable):
-    """Displays projects from tasks.db with member info."""
+class ProjectsPanel(Widget):
+    """Projects list with extending table and New/Edit/Delete actions."""
 
     def __init__(self, tasks_reader: Optional[TasksReader], **kwargs):
         super().__init__(**kwargs)
         self.tasks_reader = tasks_reader
         self._project_data: dict[str, dict] = {}
+        self.table = DataTable(id="projects-table")
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="projects-panel-body", classes="work-tab-body"):
+            yield self.table
+            with Horizontal(classes="work-tab-actions"):
+                yield Button("New", variant="success", id="btn-projects-new")
+                yield Button("Edit", variant="primary", id="btn-projects-edit", disabled=True)
+                yield Button("Delete", variant="error", id="btn-projects-delete", disabled=True)
 
     def on_mount(self) -> None:
-        self.cursor_type = "row"
-        self.border_title = "Projects  │  ENTER for details  │  DEL to delete archived"
-        self.add_column("ID", width=5)
-        self.add_column("Name", width=24)
-        self.add_column("Desc", width=80)
-        self.add_column("Status", width=10)
-        self.add_column("Type", width=8)
-        self.add_column("Platform", width=10)
-        self.add_column("Branch", width=12)
-        self.add_column("Game", width=16)
-        self.add_column("Members", width=12)
+        self.table.cursor_type = "row"
+        self._update_title()
+        self.table.add_column("ID", width=5)
+        self.table.add_column("Name", width=24)
+        self.table.add_column("Desc", width=80)
+        self.table.add_column("Status", width=10)
+        self.table.add_column("Type", width=8)
+        self.table.add_column("Platform", width=10)
+        self.table.add_column("Branch", width=12)
+        self.table.add_column("Game", width=16)
+        self.table.add_column("Members", width=12)
         self.refresh_data()
+
+    def _update_title(self) -> None:
+        count = len(self._project_data)
+        self.table.border_title = (
+            f"Projects ({count})  │  ENTER for details  │  DEL to delete archived"
+        )
+
+    def _selected_project_id(self) -> str | None:
+        try:
+            row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+            if row_key and row_key.value:
+                return str(row_key.value)
+        except Exception:
+            pass
+        return None
+
+    def _update_action_buttons(self) -> None:
+        has_row = bool(self._selected_project_id())
+        try:
+            self.query_one("#btn-projects-edit", Button).disabled = not has_row
+            self.query_one("#btn-projects-delete", Button).disabled = not has_row
+        except Exception:
+            pass
+
+    @on(DataTable.RowHighlighted, "#projects-table")
+    def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self._update_action_buttons()
+
+    @on(Button.Pressed)
+    def _on_action_button(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-projects-new":
+            self.app.push_screen(ProjectMembersModal({}, self.tasks_reader))
+        elif event.button.id == "btn-projects-edit":
+            pid = self._selected_project_id()
+            proj = self._project_data.get(pid or "", {})
+            if proj:
+                self.app.push_screen(ProjectMembersModal(proj, self.tasks_reader))
+        elif event.button.id == "btn-projects-delete":
+            self._try_delete_selected()
 
     def refresh_data(self) -> None:
         """Refresh project data from SQLite."""
         projects = self.tasks_reader.get_all_projects() if self.tasks_reader else []
-        self.clear()
+        self.table.clear()
         self._project_data.clear()
 
         for proj in projects:
@@ -908,12 +1053,10 @@ class ProjectsPanel(DataTable):
 
             self._project_data[pid] = proj
 
-            # Members summary
             members_summary = "--"
             if self.tasks_reader and pid:
                 members_summary = self.tasks_reader.get_project_member_summary(int(pid))
 
-            # Game name resolution
             game_name = "--"
             game_id = proj.get("game_id")
             if game_id and self.tasks_reader:
@@ -922,7 +1065,7 @@ class ProjectsPanel(DataTable):
             desc = str(proj.get("description") or "--")
             desc_truncated = desc[:300] + "..." if len(desc) > 303 else desc
 
-            self.add_row(
+            self.table.add_row(
                 pid,
                 str(proj.get("name") or "Unnamed"),
                 desc_truncated,
@@ -932,8 +1075,10 @@ class ProjectsPanel(DataTable):
                 str(proj.get("branch") or "--"),
                 game_name,
                 members_summary,
-                key=pid
+                key=pid,
             )
+        self._update_title()
+        self._update_action_buttons()
 
     def on_key(self, event) -> None:
         if event.key in ("delete", "backspace"):
@@ -943,7 +1088,7 @@ class ProjectsPanel(DataTable):
         """Attempt to delete the currently selected project row."""
         if not self.tasks_reader:
             return
-        row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
+        row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
         pid = str(row_key.value) if row_key else None
         if not pid or pid not in self._project_data:
             return
@@ -953,12 +1098,16 @@ class ProjectsPanel(DataTable):
         name = proj.get("name", "?")
 
         if status != "archived":
-            self.app.notify(f"Only archived projects can be deleted ('{name}' is {status}) - Ask COA to archive or use agictl in the CLI.", severity="warning")
+            self.app.notify(
+                f"Only archived projects can be deleted ('{name}' is {status}) — "
+                "archive via agictl or COA first.",
+                severity="warning",
+            )
             return
 
         self.app.push_screen(DeleteProjectModal(pid, name, self.tasks_reader))
 
-    @on(DataTable.RowSelected)
+    @on(DataTable.RowSelected, "#projects-table")
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         """Launch project members modal on row select."""
         row_key = event.row_key.value

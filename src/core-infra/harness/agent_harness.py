@@ -496,6 +496,31 @@ def agictl_agent(command: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════
+# 3b. UTILITY — One-shot Utility Model runs
+# ═══════════════════════════════════════════════════════
+
+class UtilityInput(BaseModel):
+    command: str = Field(description=(
+        "The agictl utility subcommand only. "
+        "Examples: 'utility model list', 'utility run brand-hero-square "
+        "--input-files brand/ref.jpg', "
+        "'utility run weekly-summary --task-id 42'."
+    ))
+
+@tool("agictl_utility", args_schema=UtilityInput)
+def agictl_utility(command: str) -> str:
+    """Run Utility Model profiles — one-shot generation without a full agent cycle.
+    Use for: listing UM profiles, manual runs with --input-files, dry-run validation.
+    Examples:
+      - 'utility model list' — enabled Utility Model profiles
+      - 'utility run <um-id>' — run using UM defaults (run-as-agent context)
+      - 'utility run <um-id> --input-files path/a.jpg,path/b.pdf'
+      - 'utility run <um-id> --dry-run' — validate maps and paths only
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
 # 4. TASK — Task lifecycle management
 # ═══════════════════════════════════════════════════════
 
@@ -818,6 +843,7 @@ ALL_TOOLS = [
     agictl_system,
     agictl_model,
     agictl_agent,
+    agictl_utility,
     agictl_task,
     agictl_message,
     agictl_cycle,

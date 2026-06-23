@@ -135,6 +135,35 @@ done
 # ─── Projects: game_id FK migration (for existing databases) ───
 sqlite3 "${DB_PATH}" "ALTER TABLE projects ADD COLUMN game_id INTEGER;" 2>/dev/null || true
 
+# ─── TD-UTIL-001: Utility Task columns ───
+for col_def in \
+  "task_kind TEXT DEFAULT 'standard'" \
+  "utility_model_id TEXT" \
+  "utility_input_files TEXT" \
+  "utility_output_override TEXT" \
+  "utility_start_alert INTEGER DEFAULT 0" \
+  "utility_stop_alert INTEGER DEFAULT 1" \
+  "utility_spawn_agent TEXT" \
+; do
+  sqlite3 "${DB_PATH}" "ALTER TABLE tasks ADD COLUMN ${col_def};" 2>/dev/null || true
+done
+
+# ─── TD-SCRIPT-001: Script Task columns ───
+# Script Tasks (task_kind='script') run a deterministic .sh from AGi-Tools on a
+# schedule/once-off via lifeline — no agent spawn, no LLM. They REUSE the
+# Utility alert columns (utility_start_alert / utility_stop_alert) and the
+# existing due_date for "next run" (Utility and Script modes are mutually
+# exclusive on a task, so the alert columns never collide).
+for col_def in \
+  "script_path TEXT" \
+  "script_parameters TEXT" \
+  "script_interval_seconds INTEGER" \
+  "script_last_rc INTEGER" \
+  "script_last_run_at DATETIME" \
+; do
+  sqlite3 "${DB_PATH}" "ALTER TABLE tasks ADD COLUMN ${col_def};" 2>/dev/null || true
+done
+
 # ─── Connections: comm_preferences migration ───
 sqlite3 "${DB_PATH}" "ALTER TABLE connections ADD COLUMN comm_preferences TEXT;" 2>/dev/null || true
 

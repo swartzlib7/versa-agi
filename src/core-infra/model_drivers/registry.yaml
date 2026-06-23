@@ -1,0 +1,19 @@
+# Output driver registry (TD-UTIL-001) — human-readable manifest.
+# The RUNTIME loader is model_drivers/output/__init__.py:get_output_driver()
+# (a plain Python map, so no YAML parser is needed in the agictl/harness path).
+# Keep this file in sync with that map.
+# Drivers translate catalog API responses into on-disk artifacts per output_modality.
+
+drivers:
+  text:
+    module: model_drivers.output.text
+    callable: write_text_artifact
+  image:
+    module: model_drivers.output.image
+    callable: write_image_artifact
+  audio:
+    module: model_drivers.output.audio
+    callable: write_audio_artifact
+  video:
+    module: model_drivers.output.stub
+    callable: not_implemented

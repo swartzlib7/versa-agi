@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
-from textual.widgets import Header, Footer, TabbedContent, TabPane
+from textual.containers import VerticalScroll, Vertical
+from textual.widgets import Header, Footer, TabbedContent, TabPane, Collapsible
 from textual.binding import Binding
 
 from agitop.data import AgentReader, MessageReader, TasksReader
@@ -57,17 +57,38 @@ class AgitopApp(App):
         """Create the dashboard layout."""
         yield Header()
 
-        with VerticalScroll(id="dashboard"):
-            yield SystemPanel(self.system, self.config, self.status, self.agent_reader, id="system-panel")
-            yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
-            yield FooterStatsPanel(self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel")
-            with TabbedContent(initial="projects-tab", id="work-tabs"):
-                with TabPane("◆  Projects", id="projects-tab"):
-                    yield ProjectsPanel(self.tasks_reader, id="projects-panel")
-                with TabPane("◎  Tasks", id="tasks-tab"):
-                    yield TasksPanel(self.tasks_reader, message_reader=self.message_reader, id="tasks-panel")
-                with TabPane("✉  Messages", id="messages-tab"):
-                    yield MessagesPanel(self.message_reader, config=self.config, agent_reader=self.agent_reader, id="messages-panel")
+        with VerticalScroll(id="dashboard-scroll", can_focus=False):
+            with Vertical(id="dashboard"):
+                with Collapsible(
+                    title="System & Controls",
+                    id="system-controls-collapse",
+                    collapsed=False,
+                ):
+                    yield SystemPanel(
+                        self.system, self.config, self.status, self.agent_reader,
+                        id="system-panel",
+                    )
+                yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
+                yield FooterStatsPanel(
+                    self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel",
+                )
+                with TabbedContent(initial="messages-tab", id="work-tabs"):
+                    with TabPane("✉  Messages", id="messages-tab"):
+                        yield MessagesPanel(
+                            self.message_reader,
+                            config=self.config,
+                            agent_reader=self.agent_reader,
+                            id="messages-panel",
+                        )
+                    with TabPane("◎  Tasks", id="tasks-tab"):
+                        yield TasksPanel(
+                            self.tasks_reader,
+                            message_reader=self.message_reader,
+                            status_reader=self.status,
+                            id="tasks-panel",
+                        )
+                    with TabPane("◆  Projects", id="projects-tab"):
+                        yield ProjectsPanel(self.tasks_reader, id="projects-panel")
 
         yield Footer()
 
@@ -139,6 +160,8 @@ class AgitopApp(App):
 
     def _refresh_all_data(self) -> None:
         """Unified refresh — all panels on one timer."""
+        if len(self.screen_stack) > 1:
+            return
         self.query_one("#system-panel", SystemPanel).refresh_data()
         self.query_one("#agents-panel", AgentsPanel).refresh_data()
         self.query_one("#projects-panel", ProjectsPanel).refresh_data()

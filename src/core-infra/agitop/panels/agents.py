@@ -219,6 +219,11 @@ class AgentsPanel(DataTable):
             elif agent_status == "invalid_config":
                 status_msg = agent.get("status_message") or ""
                 status_display = f"[bold yellow]⚠ {agent_status}[/]"
+            elif agent_status == "active":
+                status_msg = agent.get("status_message") or ""
+                status_display = "[cyan]running[/]"
+                if status_msg:
+                    status_display += f" [dim]— {status_msg}[/]"
             elif agent_status:
                 status_display = f"[bold]{agent_status}[/]"
             else:

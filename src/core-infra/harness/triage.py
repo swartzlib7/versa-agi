@@ -182,6 +182,7 @@ _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and resp
 - "agent_management.md" — Managing sub-agents
 - "agent_onboarding.md" — Onboarding new agents
 - "shared_tooling.md" — Using the shared AGi-Tools workspace
+- "script_tasks.md" — Scheduling deterministic .sh scripts from AGi-Tools (no LLM)
 - "security_protocol.md" — Security-sensitive operations
 - "reminder_management.md" — Creating and managing reminders
 - "self_introduction.md" — Introducing the agent to new contacts

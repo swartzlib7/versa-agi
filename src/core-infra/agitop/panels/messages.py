@@ -9,7 +9,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Vertical, Horizontal, VerticalScroll
-from textual.widgets import DataTable, Static, Button, Checkbox, Select, TextArea, Markdown
+from textual.widgets import DataTable, Static, Button, Select, TextArea, Markdown
 from textual.widget import Widget
 import subprocess
 
@@ -391,7 +391,7 @@ class MessageViewModal(ModalScreen):
                 yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
     def on_mount(self) -> None:
-        """Auto-mark PU inbox messages as processed when the dashboard viewer opens them."""
+        """Auto-mark Primary User (PU) inbox messages as processed when the dashboard viewer opens them."""
         if not self.message_reader or not _is_pu_recipient(self.msg, self.primary_uid):
             return
         msg_id = self.msg.get("message_id") or ""
@@ -540,6 +540,108 @@ class MessageViewModal(ModalScreen):
                     self.app.notify("Failed to delete message", title="Error", severity="error")
                 self.app.pop_screen()
 
+class DeleteMessageConfirmModal(ModalScreen):
+    """Confirmation modal for deleting a message (local tombstone + optional VV cloud)."""
+
+    CSS = """
+    DeleteMessageConfirmModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #message-delete-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $error;
+        background: $surface;
+    }
+    #message-delete-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #message-delete-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(self, msg: dict, message_reader: MessageReader, **kwargs):
+        super().__init__(**kwargs)
+        self.msg = msg
+        self.message_reader = message_reader
+
+    def compose(self) -> ComposeResult:
+        msg_id = self.msg.get("message_id") or "(unknown)"
+        preview = (self.msg.get("original_text") or self.msg.get("text") or "").strip()
+        if len(preview) > 120:
+            preview = preview[:117] + "..."
+        channel = self.msg.get("channel", "vv")
+        cloud_note = ""
+        if channel == "vv" and (self.msg.get("channel_id") or ""):
+            cloud_note = "\n\nAlso removes the message from VersaVoice cloud when applicable."
+        with Vertical(id="message-delete-dialog"):
+            yield Static(f"[bold red]⚠ Delete Message[/]\n")
+            yield Static(f"[dim]ID: {msg_id}[/]")
+            if preview:
+                yield Static(f"[dim]{preview}[/]\n")
+            yield Static(
+                "Marks the message deleted locally (tombstone)."
+                f"{cloud_note}\n\n[bold]This cannot be undone.[/]"
+            )
+            with Horizontal(id="message-delete-actions"):
+                yield Button("Delete", variant="error", id="btn-message-delete-confirm")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-message-delete-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id != "btn-message-delete-confirm":
+            self.dismiss(None)
+            return
+
+        msg_id = self.msg.get("message_id") or ""
+        ok = self.message_reader.delete_message(msg_id) if msg_id else False
+        self.dismiss(None)
+        if not ok:
+            self.app.notify("Failed to delete message", title="Error", severity="error")
+            return
+
+        channel = self.msg.get("channel", "vv")
+        channel_id = self.msg.get("channel_id") or ""
+        if channel == "vv" and channel_id and msg_id:
+            try:
+                cloud = subprocess.run(
+                    ["sudo", "agictl", "message", "delete", msg_id, "--channel", channel_id],
+                    capture_output=True, timeout=15, text=True,
+                )
+                if cloud.returncode != 0:
+                    err = (cloud.stderr or cloud.stdout or "cloud delete failed").strip()
+                    self.app.notify(
+                        f"Local delete OK; cloud delete failed: {err[:80]}",
+                        title="Partial Delete",
+                        severity="warning",
+                    )
+            except Exception as e:
+                self.app.notify(
+                    f"Local delete OK; cloud delete failed: {e}",
+                    title="Partial Delete",
+                    severity="warning",
+                )
+
+        self.app.notify(f"Deleted message {msg_id[:12]}...", title="Message Deleted")
+        try:
+            self.app.query_one(MessagesPanel).refresh_data()
+        except Exception:
+            pass
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+
+
 class MessagesPanel(Widget):
     """Displays recent messages from SQLite with interactive triggers."""
 
@@ -586,28 +688,28 @@ class MessagesPanel(Widget):
         return self._primary_uid
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="messages-panel-body"):
+        with Vertical(id="messages-panel-body", classes="work-tab-body"):
             with Horizontal(classes="panel-header"):
                 with Horizontal(id="channel-filters"):
-                    yield Static("Channel: ", classes="filter-label")
-                    yield Button("All", id="btn-ch-all", variant="success", classes="panel-btn-sm")
-                    yield Button("VV", id="btn-ch-vv", variant="default", classes="panel-btn-sm")
-                    yield Button("Internal", id="btn-ch-internal", variant="default", classes="panel-btn-sm")
-                yield Static(" | ", classes="header-sep")
-                yield Static("✉ New Message", id="btn-new-message", classes="action-link-green")
-                yield Static(" | ", classes="header-sep")
-                yield Static("Fetch REST Inbox (All)", id="btn-fetch-inbox", classes="action-link-green")
-                yield Static(" | ", classes="header-sep")
-                yield Checkbox("Use VersaVoice API", id="chk-vv-enabled", value=self._is_vv_enabled())
+                    yield Static("All", id="btn-ch-all", classes="action-link-filter")
+                    yield Static(" | ", classes="header-sep")
+                    yield Static("VV", id="btn-ch-vv", classes="action-link-filter")
+                    yield Static(" | ", classes="header-sep")
+                    yield Static("Internal", id="btn-ch-internal", classes="action-link-filter")
 
             yield self.table
+            with Horizontal(classes="work-tab-actions"):
+                yield Button("Retrieve Messages Now", variant="warning", id="btn-messages-fetch")
+                yield Button("New", variant="success", id="btn-messages-new")
+                yield Button("Edit", variant="primary", id="btn-messages-edit", disabled=True)
+                yield Button("Delete", variant="error", id="btn-messages-delete", disabled=True)
 
     def on_mount(self) -> None:
         self._update_title()
         self.table.cursor_type = "row"
         # Compact metadata cols; Text is the primary readable field.
         self.table.add_column("ID", width=6)
-        self.table.add_column("Agent Ch", width=10)
+        self.table.add_column("Channel", width=10)
         self.table.add_column("Msg Src", width=8)
         self.table.add_column("Dir", width=4)
         self.table.add_column("From", width=12)
@@ -618,23 +720,48 @@ class MessagesPanel(Widget):
         self.table.add_column("Attach", width=6)
         self.table.add_column(f"Date/Time ({_TZ})", width=14)
         self.table.add_column("Cycle", width=8)
+        self._update_filter_links()
         self.refresh_data()
 
     def _update_title(self) -> None:
         total_pages = max(1, (self._total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
         current_page = self._page + 1
-        self.border_title = (
+        self.table.border_title = (
             f"Messages ({self._total})  │  Page {current_page}/{total_pages}  │  "
             f"PgUp/PgDn to navigate"
         )
 
-    def _update_filter_buttons(self) -> None:
-        """Visually highlight active channel filter button."""
-        btn_map = {"btn-ch-all": None, "btn-ch-vv": "vv", "btn-ch-internal": "internal"}
-        for btn_id, channel in btn_map.items():
+    def _selected_row_key(self) -> str | None:
+        try:
+            row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+            if row_key and row_key.value:
+                return str(row_key.value)
+        except Exception:
+            pass
+        return None
+
+    def _update_action_buttons(self) -> None:
+        has_row = bool(self._selected_row_key())
+        try:
+            self.query_one("#btn-messages-edit", Button).disabled = not has_row
+            self.query_one("#btn-messages-delete", Button).disabled = not has_row
+        except Exception:
+            pass
+
+    @on(DataTable.RowHighlighted, "#messages-table")
+    def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self._update_action_buttons()
+
+    def _update_filter_links(self) -> None:
+        """Visually highlight active channel filter link."""
+        link_map = {"btn-ch-all": None, "btn-ch-vv": "vv", "btn-ch-internal": "internal"}
+        for link_id, channel in link_map.items():
             try:
-                btn = self.query_one(f"#{btn_id}", Button)
-                btn.variant = "success" if self._channel_filter == channel else "default"
+                link = self.query_one(f"#{link_id}", Static)
+                if self._channel_filter == channel:
+                    link.add_class("action-link-filter-active")
+                else:
+                    link.remove_class("action-link-filter-active")
             except Exception:
                 pass
 
@@ -723,6 +850,47 @@ class MessagesPanel(Widget):
                 cycle,
                 key=row_key
             )
+        self._update_action_buttons()
+
+    def _open_compose_modal(self) -> None:
+        agents = []
+        if self.agent_reader:
+            try:
+                all_agents = self.agent_reader.get_all_agents()
+                agents = [a["name"] for a in all_agents
+                          if a.get("name") not in ("watchdog",) and not a.get("inactive")]
+            except Exception:
+                pass
+        if not agents:
+            self.app.notify("No agents found", severity="warning")
+            return
+        self.app.push_screen(ComposeModal(agents=sorted(agents)))
+
+    def _open_message_modal(self, msg: dict) -> None:
+        if not msg:
+            return
+        if not self._uid_to_agent and self.agent_reader:
+            self._uid_to_agent = self.agent_reader.build_uid_to_agent_map()
+        from_name, to_name = self._resolve_from_to_names(msg)
+        self.app.push_screen(MessageViewModal(
+            msg,
+            agent_name=self._get_agent_name(),
+            primary_name=self._get_primary_name(),
+            primary_uid=self._get_primary_uid(),
+            reply_agent=self._resolve_reply_agent(msg),
+            from_display=from_name,
+            to_display=to_name,
+            vv_enabled=self._is_vv_enabled(),
+            message_reader=self.message_reader,
+        ))
+
+    def _try_delete_selected(self) -> None:
+        row_key = self._selected_row_key()
+        if not row_key or not self.message_reader:
+            return
+        msg = self._msg_data.get(row_key, {})
+        if msg:
+            self.app.push_screen(DeleteMessageConfirmModal(msg, self.message_reader))
 
     def _lookup_uid_display_name(self, uid: str, cache: dict[str, str]) -> str:
         """Resolve a UID to a short display name via agent map or message history."""
@@ -813,26 +981,11 @@ class MessagesPanel(Widget):
             return None
         return agent_name
 
-    @on(DataTable.RowSelected)
+    @on(DataTable.RowSelected, "#messages-table")
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         """Launch message viewer modal on row selection."""
-        row_key = event.row_key.value
-        msg = self._msg_data.get(row_key, {})
-        if msg:
-            if not self._uid_to_agent and self.agent_reader:
-                self._uid_to_agent = self.agent_reader.build_uid_to_agent_map()
-            from_name, to_name = self._resolve_from_to_names(msg)
-            self.app.push_screen(MessageViewModal(
-                msg,
-                agent_name=self._get_agent_name(),
-                primary_name=self._get_primary_name(),
-                primary_uid=self._get_primary_uid(),
-                reply_agent=self._resolve_reply_agent(msg),
-                from_display=from_name,
-                to_display=to_name,
-                vv_enabled=self._is_vv_enabled(),
-                message_reader=self.message_reader,
-            ))
+        msg = self._msg_data.get(event.row_key.value, {})
+        self._open_message_modal(msg)
 
     def _is_vv_enabled(self) -> bool:
         """Read VV enabled state from setup.ini."""
@@ -844,68 +997,47 @@ class MessagesPanel(Widget):
         except Exception:
             return True
 
-    def _set_vv_enabled(self, enabled: bool) -> None:
-        """Write VV enabled state to setup.ini (scoped to [versavoice] section)."""
-        val = "true" if enabled else "false"
+    def _trigger_fetch_inbox(self) -> None:
+        command = ["sudo", "-u", "watchdog", "/home/watchdog/core-infra/lifeline.sh", "--force"]
         try:
-            result = subprocess.run(
-                ["agictl", "system", "config", "set-ini", "versavoice", "enabled", val],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0:
-                self.app.notify(f"VersaVoice {'enabled' if enabled else 'disabled'}", title="Settings")
-                return
-        except Exception:
-            pass
-        self.app.notify("Failed to toggle VersaVoice — check permissions", severity="error")
-
-    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        if event.checkbox.id == "chk-vv-enabled":
-            self._set_vv_enabled(event.value)
-            self.refresh_data()
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.app.notify("Cloud Firehose Activated! Polling Data Gateway...", title="Versa AGi")
+        except Exception as e:
+            self.app.notify(f"Failed to trigger Lifeline: {e}", title="Error", severity="error")
 
     def on_click(self, event) -> None:
-        if event.widget and event.widget.id == "btn-fetch-inbox":
-            command = ["sudo", "-u", "watchdog", "/home/watchdog/core-infra/lifeline.sh", "--force"]
-            try:
-                subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self.app.notify("Cloud Firehose Activated! Polling Data Gateway...", title="Versa AGi")
-            except Exception as e:
-                self.app.notify(f"Failed to trigger Lifeline: {e}", title="Error", severity="error")
-        elif event.widget and event.widget.id == "btn-new-message":
-            # Launch compose modal with agent list
-            agents = []
-            if self.agent_reader:
-                try:
-                    all_agents = self.agent_reader.get_all_agents()
-                    agents = [a["name"] for a in all_agents
-                              if a.get("name") not in ("watchdog",) and not a.get("inactive")]
-                except Exception:
-                    pass
-            if not agents:
-                self.app.notify("No agents found", severity="warning")
-                return
-            self.app.push_screen(ComposeModal(agents=sorted(agents)))
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-ch-all":
+        widget_id = getattr(event.widget, "id", None)
+        if widget_id == "btn-ch-all":
             self._channel_filter = None
             self._page = 0
-            self._update_filter_buttons()
+            self._update_filter_links()
             self.refresh_data()
-        elif event.button.id == "btn-ch-vv":
+        elif widget_id == "btn-ch-vv":
             self._channel_filter = "vv"
             self._page = 0
-            self._update_filter_buttons()
+            self._update_filter_links()
             self.refresh_data()
-        elif event.button.id == "btn-ch-internal":
+        elif widget_id == "btn-ch-internal":
             self._channel_filter = "internal"
             self._page = 0
-            self._update_filter_buttons()
+            self._update_filter_links()
             self.refresh_data()
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-messages-fetch":
+            self._trigger_fetch_inbox()
+        elif event.button.id == "btn-messages-new":
+            self._open_compose_modal()
+        elif event.button.id == "btn-messages-edit":
+            msg = self._msg_data.get(self._selected_row_key() or "", {})
+            self._open_message_modal(msg)
+        elif event.button.id == "btn-messages-delete":
+            self._try_delete_selected()
+
     def on_key(self, event) -> None:
-        if event.key == "pagedown":
+        if event.key in ("delete", "backspace"):
+            self._try_delete_selected()
+        elif event.key == "pagedown":
             max_page = max(0, (self._total - 1) // self.PAGE_SIZE)
             if self._page < max_page:
                 self._page += 1

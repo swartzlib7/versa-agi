@@ -1,6 +1,7 @@
 """System Settings Modal — configure Task Management, Circuit Breaker, Web Search, COA Autonomous Mode via agitop."""
 """Includes read-only Skill Viewer modal for inspecting skill file contents."""
 
+import json
 import os
 import re
 import subprocess
@@ -10,9 +11,10 @@ from textual import on
 from textual.screen import ModalScreen
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
-from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, TextArea, TabbedContent, TabPane, Select
+from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, TextArea, TabbedContent, TabPane, Select, RichLog
 
 from agitop.widgets import PaginatedDataTable
+from agitop.feature_flags import UTILITY_MODELS_UI_VISIBLE
 
 
 _SETUP_INI_PATHS = [
@@ -468,6 +470,32 @@ class PackageRemoveConfirmModal(ModalScreen):
         self.dismiss(event.button.id == "btn-pkg-remove-confirm")
 
 
+class UtilityModelRemoveConfirmModal(ModalScreen):
+    """Confirmation dialog for removing a Utility Model profile."""
+
+    def __init__(self, um_id: str, um_label: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self.um_id = um_id
+        self.um_label = um_label or um_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="um-remove-dialog"):
+            yield Static(f"[bold red]⚠ Remove Utility Model: {self.um_id}[/]\n")
+            yield Static(
+                f"[dim]{self.um_label}[/]\n\n"
+                "This permanently deletes the profile from utility_models.\n"
+                "Utility Tasks referencing this ID will fail until reassigned.\n\n"
+                "[bold]This cannot be undone.[/]"
+            )
+            with Horizontal(id="um-remove-actions"):
+                yield Button("Remove Permanently", variant="error", id="btn-um-remove-confirm")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-um-remove-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "btn-um-remove-confirm")
+
+
 class SkillViewModal(ModalScreen):
     """Skill modal — view, edit (with source write-back), and remove."""
 
@@ -838,6 +866,123 @@ class RouterModeConfirmModal(ModalScreen):
             self.app.pop_screen()
 
 
+class RunsLogModal(ModalScreen):
+    """Read-only viewer for the Utility runs log.
+
+    Mirrors the cycle-log viewer pattern (``#msg-dialog`` + ``RichLog``) so the
+    log-viewing UX is consistent across the dashboard. Each line in
+    ``/var/lib/versa-agi/utility-runs/runs.log`` is one JSON record (one per run,
+    success or failure); the tail is shown newest-first with a status glyph.
+    """
+
+    CSS = """
+    RunsLogModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    """
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+    _RUNS_LOG = "/var/lib/versa-agi/utility-runs/runs.log"
+    _TAIL_LINES = 500
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="msg-dialog"):
+            yield Static("[bold cyan]\U0001f4c4 Utility Runs Log[/]", id="cycle-log-header")
+            yield RichLog(id="cycle-log-body", wrap=False, highlight=True, markup=True)
+            with Horizontal(id="msg-dialog-actions"):
+                yield Button("\U0001f9f9 Drain", variant="error", id="runs-log-drain")
+                yield Button("\U0001f4cb Copy All", variant="default", id="runs-log-copy")
+                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+
+    def on_mount(self) -> None:
+        self._load()
+
+    def _read_lines(self) -> list[str]:
+        try:
+            with open(self._RUNS_LOG, encoding="utf-8", errors="replace") as f:
+                return f.read().splitlines()
+        except OSError:
+            return []
+
+    def _load(self) -> None:
+        body = self.query_one("#cycle-log-body", RichLog)
+        body.clear()
+        lines = [ln.strip() for ln in self._read_lines() if ln.strip()]
+        if not lines:
+            body.write("[dim]No utility runs recorded yet (runs.log is empty or missing).[/]")
+            return
+        tail = lines[-self._TAIL_LINES:]
+        for raw in reversed(tail):  # newest first
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                body.write(raw)
+                continue
+            ok = rec.get("ok")
+            mark = "[green]\u2713[/]" if ok else "[red]\u2717[/]"
+            ts = rec.get("ts", "")
+            um = rec.get("um_id", "")
+            model = rec.get("catalog_model", "")
+            agent = rec.get("agent", "")
+            tid = rec.get("task_id")
+            if ok:
+                arts = rec.get("artifacts") or []
+                tail_txt = f"[green]{len(arts)} artifact(s)[/]"
+            else:
+                tail_txt = f"[red]{rec.get('code', '')}: {rec.get('error', '')}[/]"
+            body.write(
+                f"{mark} [dim]{ts}[/] {um} [dim]({model})[/] \u00b7 {agent} \u00b7 task {tid} \u2014 {tail_txt}"
+            )
+
+    def _drain(self) -> None:
+        """Truncate runs.log via the watchdog-owned agictl (the file's owner)."""
+        try:
+            proc = subprocess.run(
+                ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl",
+                 "utility", "drain-runs-log"],
+                capture_output=True, text=True, timeout=20,
+            )
+            ok = False
+            for line in reversed((proc.stdout or "").strip().splitlines()):
+                if line.strip().startswith("{"):
+                    ok = bool(json.loads(line).get("success"))
+                    break
+            if ok:
+                self.app.notify("runs.log drained", title="Utility Runs Log")
+            else:
+                self.app.notify("Failed to drain runs.log", severity="error")
+        except Exception as e:
+            self.app.notify(str(e), severity="error")
+        self._load()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "msg-dialog-close":
+            self.app.pop_screen()
+        elif event.button.id == "runs-log-drain":
+            self._drain()
+        elif event.button.id == "runs-log-copy":
+            content = "\n".join(self._read_lines())
+            try:
+                subprocess.run(
+                    ["xclip", "-selection", "clipboard"],
+                    input=content.encode(), check=True,
+                )
+                self.app.notify("runs.log copied", title="Clipboard")
+            except Exception:
+                try:
+                    subprocess.run(
+                        ["xsel", "--clipboard", "--input"],
+                        input=content.encode(), check=True,
+                    )
+                    self.app.notify("runs.log copied", title="Clipboard")
+                except Exception:
+                    self.app.notify("Install xclip or xsel for clipboard support", severity="warning")
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
+
+
 class SystemSettingsModal(ModalScreen):
     """Modal for configuring system-level settings."""
 
@@ -849,6 +994,7 @@ class SystemSettingsModal(ModalScreen):
         self._pkg_page = 0
         self._memory_page = 0
         self.selected_memory_key = None
+        self.selected_utility_model_id = None
         self._skills_page_size = 52
         self._pkg_page_size = 39
 
@@ -887,6 +1033,14 @@ class SystemSettingsModal(ModalScreen):
         img_dpi = _read_ini_value("image_processing", "jpeg_dpi", "72")
         img_max_w = _read_ini_value("image_processing", "max_width", "2048")
         img_max_h = _read_ini_value("image_processing", "max_height", "2048")
+
+        aud_enabled = _read_ini_value("audio_processing", "enabled", "true").lower() == "true"
+        aud_format = _read_ini_value("audio_processing", "format", "wav").lower()
+        aud_voice = _read_ini_value("audio_processing", "voice", "alloy").lower()
+
+        um_enabled = _read_ini_value("utility_models", "enabled", "true").lower() == "true"
+        um_write_manifest = _read_ini_value("utility_models", "write_manifest", "true").lower() == "true"
+        vv_enabled = _read_ini_value("versavoice", "enabled", "true").lower() == "true"
 
         _browser_label = "Disable" if browser_enabled else "Enable"
         _browser_variant = "error" if browser_enabled else "success"
@@ -945,9 +1099,21 @@ class SystemSettingsModal(ModalScreen):
                                             yield Static(
                                                 "[dim]Overdue planned and repeatedly-waking waiting tasks retry "
                                                 "this many lifeline wake cycles before auto-freeze. Primary User "
-                                                "is notified; spawn_attempts resets only when the task is done "
-                                                "or cancelled.[/]"
+                                                "is notified; spawn_attempts resets on snooze, done, or cancelled.[/]"
                                             )
+
+                                    yield Static("")
+                                    with Vertical(classes="settings-section-box"):
+                                        yield Static("[bold cyan]VersaVoice API[/]")
+                                        yield Static(
+                                            "[dim]Turn off messages delivery to VersaVoice AI (API) - messages do "
+                                            "not leave the system and must be handled locally.[/]"
+                                        )
+                                        yield Checkbox(
+                                            "Use VersaVoice API",
+                                            id="chk-vv-enabled",
+                                            value=vv_enabled,
+                                        )
 
                                 with Vertical(classes="settings-general-col"):
                                     if self._show_strategy:
@@ -1086,67 +1252,239 @@ class SystemSettingsModal(ModalScreen):
                                 classes="dismiss-btn",
                             )
 
-                with TabPane("Image Processing", id="settings-image-processing-tab"):
-                    with Vertical(id="settings-image-processing-pane"):
-                        with VerticalScroll(id="settings-image-processing-scroll"):
+                if UTILITY_MODELS_UI_VISIBLE:
+                    with TabPane("Image Processing", id="settings-image-processing-tab"):
+                        with Vertical(id="settings-image-processing-pane"):
+                            with VerticalScroll(id="settings-image-processing-scroll"):
+                                yield Static("", classes="modal-tab-spacer")
+                                yield Static("[bold cyan]Harness Image Processing[/]")
+                                yield Static(
+                                    "[dim]Applied before VIEW INJECT for all vision-capable models. "
+                                    "Normalizes attachments and screenshots to a shared JPEG pipeline "
+                                    "so context size stays predictable.[/]"
+                                )
+                                yield Static("")
+                                yield Checkbox("Enabled", id="chk-image-processing-enabled", value=img_enabled)
+                                yield Static("")
+                                yield Static("[cyan]Output Format[/]")
+                                yield Select(
+                                    [("JPEG", "jpeg")],
+                                    value=img_format if img_format == "jpeg" else "jpeg",
+                                    id="select-image-format",
+                                    allow_blank=False,
+                                )
+                                yield Static("[dim]Additional formats will be added here when supported.[/]")
+                                yield Static("")
+                                with Horizontal(classes="task-field-row"):
+                                    with Vertical(classes="task-field-col"):
+                                        yield Static("[cyan]JPEG Quality (1–100)[/]")
+                                        yield Input(
+                                            value=img_quality, placeholder="80",
+                                            id="input-jpeg-quality", type="integer",
+                                        )
+                                    with Vertical(classes="task-field-col"):
+                                        yield Static("[cyan]JPEG DPI (metadata)[/]")
+                                        yield Input(
+                                            value=img_dpi, placeholder="72",
+                                            id="input-jpeg-dpi", type="integer",
+                                        )
+                                yield Static(
+                                    "[dim]Quality controls compression. DPI is written into JPEG metadata only "
+                                    "— it does not change pixel dimensions.[/]"
+                                )
+                                yield Static("")
+                                yield Static("[bold cyan]Resolution (all formats)[/]")
+                                yield Static("[dim]Downscale larger images before inject, preserving aspect ratio.[/]")
+                                with Horizontal(classes="task-field-row"):
+                                    with Vertical(classes="task-field-col"):
+                                        yield Static("[cyan]Max Width (px)[/]")
+                                        yield Input(
+                                            value=img_max_w, placeholder="2048",
+                                            id="input-image-max-width", type="integer",
+                                        )
+                                    with Vertical(classes="task-field-col"):
+                                        yield Static("[cyan]Max Height (px)[/]")
+                                        yield Input(
+                                            value=img_max_h, placeholder="2048",
+                                            id="input-image-max-height", type="integer",
+                                        )
+                            with Horizontal(classes="settings-tab-actions"):
+                                yield Button("Save", variant="success", id="btn-save-settings-image")
+                                yield Button(
+                                    "Close", variant="default", id="btn-settings-close-image",
+                                    classes="dismiss-btn",
+                                )
+
+                    with TabPane("Audio Processing", id="settings-audio-processing-tab"):
+                        with Vertical(id="settings-audio-processing-pane"):
+                            with VerticalScroll(id="settings-audio-processing-scroll"):
+                                yield Static("", classes="modal-tab-spacer")
+                                yield Static("[bold #a78bfa]Harness Audio Processing[/]")
+                                yield Static(
+                                    "[dim]Defaults for Utility Model audio generation. Streaming audio is "
+                                    "always received as PCM16 and packaged locally — WAV is native; OGG/MP3/"
+                                    "FLAC require ffmpeg (falls back to WAV). A Utility Model's config_json "
+                                    "may override these per-profile.[/]"
+                                )
+                                yield Static("")
+                                yield Checkbox("Enabled", id="chk-audio-processing-enabled", value=aud_enabled)
+                                yield Static("")
+                                with Horizontal(classes="task-field-row"):
+                                    with Vertical(classes="task-field-col"):
+                                        yield Static("[#a78bfa]Output Container[/]")
+                                        yield Select(
+                                            [
+                                                ("WAV (native, no ffmpeg)", "wav"),
+                                                ("OGG (Opus — ffmpeg)", "ogg"),
+                                                ("MP3 (ffmpeg)", "mp3"),
+                                                ("FLAC (ffmpeg)", "flac"),
+                                            ],
+                                            value=aud_format if aud_format in ("wav", "ogg", "mp3", "flac") else "wav",
+                                            id="select-audio-format",
+                                            allow_blank=False,
+                                        )
+                                    with Vertical(classes="task-field-col"):
+                                        yield Static("[#a78bfa]Voice[/] [dim](OpenAI-specific)[/]")
+                                        yield Select(
+                                            [
+                                                (v.title(), v) for v in (
+                                                    "alloy", "ash", "ballad", "coral", "echo",
+                                                    "fable", "nova", "onyx", "sage", "shimmer", "verse",
+                                                )
+                                            ],
+                                            value=aud_voice if aud_voice in (
+                                                "alloy", "ash", "ballad", "coral", "echo",
+                                                "fable", "nova", "onyx", "sage", "shimmer", "verse",
+                                            ) else "alloy",
+                                            id="select-audio-voice",
+                                            allow_blank=False,
+                                        )
+                                yield Static(
+                                    "[dim]Container sets the saved file extension. [b]Voice names above are "
+                                    "OpenAI-specific[/b] (alloy, verse, …) and apply to OpenAI TTS models "
+                                    "like openai/gpt-audio; other providers use different voice IDs. This "
+                                    "global default is why a single shared voice list is a stopgap — "
+                                    "per-model voice config is tracked as TD-MODALITY-CONFIG-001.[/]"
+                                )
+                            with Horizontal(classes="settings-tab-actions"):
+                                yield Button("Save", variant="success", id="btn-save-settings-audio")
+                                yield Button(
+                                    "Close", variant="default", id="btn-settings-close-audio",
+                                    classes="dismiss-btn",
+                                )
+
+                if UTILITY_MODELS_UI_VISIBLE:
+                    with TabPane("Utility Models", id="settings-utility-models-tab"):
+                        with Vertical(id="settings-utility-models-pane"):
                             yield Static("", classes="modal-tab-spacer")
-                            yield Static("[bold cyan]Harness Image Processing[/]")
+                            with Vertical(id="settings-utility-models-header"):
+                                yield Static("[bold cyan]Utility Models[/]")
+                                yield Static(
+                                    "[dim]One-shot generation profiles — catalog model + system prompt per row. "
+                                    "Invoke via agictl utility run or Utility Tasks.[/]"
+                                )
+                                with Horizontal(id="utility-models-enabled-row"):
+                                    with Vertical(classes="utility-models-row-col"):
+                                        yield Checkbox("Enabled", id="chk-utility-models-enabled", value=um_enabled)
+                                    with Vertical(classes="utility-models-row-col"):
+                                        yield Checkbox(
+                                            "Write Manifest", id="chk-utility-models-write-manifest",
+                                            value=um_write_manifest,
+                                        )
+                                    with Vertical(classes="utility-models-row-col utility-models-row-col-action"):
+                                        yield Button(
+                                            "View Log", variant="warning",
+                                            id="btn-utility-runs-log",
+                                        )
+                            um_table = PaginatedDataTable(
+                                self._handle_utility_models_key,
+                                id="utility-models-table",
+                                cursor_type="row",
+                            )
+                            yield um_table
                             yield Static(
-                                "[dim]Applied before VIEW INJECT for all vision-capable models. "
-                                "Normalizes attachments and screenshots to a shared JPEG pipeline "
-                                "so context size stays predictable.[/]"
+                                "[dim]Double-click or Enter to edit · select row for Edit/Delete · "
+                                "CLI: agictl utility model list[/]",
+                                id="utility-models-hint",
                             )
-                            yield Static("")
-                            yield Checkbox("Enabled", id="chk-image-processing-enabled", value=img_enabled)
-                            yield Static("")
-                            yield Static("[cyan]Output Format[/]")
-                            yield Select(
-                                [("JPEG", "jpeg")],
-                                value=img_format if img_format == "jpeg" else "jpeg",
-                                id="select-image-format",
-                                allow_blank=False,
-                            )
-                            yield Static("[dim]Additional formats will be added here when supported.[/]")
-                            yield Static("")
-                            with Horizontal(classes="task-field-row"):
-                                with Vertical(classes="task-field-col"):
-                                    yield Static("[cyan]JPEG Quality (1–100)[/]")
-                                    yield Input(
-                                        value=img_quality, placeholder="80",
-                                        id="input-jpeg-quality", type="integer",
-                                    )
-                                with Vertical(classes="task-field-col"):
-                                    yield Static("[cyan]JPEG DPI (metadata)[/]")
-                                    yield Input(
-                                        value=img_dpi, placeholder="72",
-                                        id="input-jpeg-dpi", type="integer",
-                                    )
-                            yield Static(
-                                "[dim]Quality controls compression. DPI is written into JPEG metadata only "
-                                "— it does not change pixel dimensions.[/]"
-                            )
-                            yield Static("")
-                            yield Static("[bold cyan]Resolution (all formats)[/]")
-                            yield Static("[dim]Downscale larger images before inject, preserving aspect ratio.[/]")
-                            with Horizontal(classes="task-field-row"):
-                                with Vertical(classes="task-field-col"):
-                                    yield Static("[cyan]Max Width (px)[/]")
-                                    yield Input(
-                                        value=img_max_w, placeholder="2048",
-                                        id="input-image-max-width", type="integer",
-                                    )
-                                with Vertical(classes="task-field-col"):
-                                    yield Static("[cyan]Max Height (px)[/]")
-                                    yield Input(
-                                        value=img_max_h, placeholder="2048",
-                                        id="input-image-max-height", type="integer",
-                                    )
-                        with Horizontal(classes="settings-tab-actions"):
-                            yield Button("Save", variant="success", id="btn-save-settings-image")
-                            yield Button(
-                                "Close", variant="default", id="btn-settings-close-image",
-                                classes="dismiss-btn",
-                            )
+                            with Horizontal(id="utility-models-actions", classes="settings-tab-actions"):
+                                yield Button("New", variant="success", id="btn-utility-model-new")
+                                yield Button("Edit", variant="primary", id="btn-utility-model-edit", disabled=True)
+                                yield Button("Delete", variant="error", id="btn-utility-model-delete", disabled=True)
+                                yield Button(
+                                    "Close", variant="default", id="btn-settings-close-utility-models",
+                                    classes="dismiss-btn",
+                                )
+
+    def _fetch_utility_models(self) -> list[dict]:
+        try:
+            proc = subprocess.run(
+                ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "utility", "model", "list"],
+                capture_output=True, text=True, timeout=20,
+            )
+            for line in reversed((proc.stdout or "").strip().splitlines()):
+                if line.strip().startswith("{"):
+                    data = json.loads(line)
+                    return data.get("utility_models", []) if data.get("success") else []
+        except Exception:
+            pass
+        return []
+
+    def _set_utility_model_action_state(self, um_id: str | None) -> None:
+        self.selected_utility_model_id = um_id
+        enabled = bool(um_id)
+        self.query_one("#btn-utility-model-edit", Button).disabled = not enabled
+        self.query_one("#btn-utility-model-delete", Button).disabled = not enabled
+
+    def _sync_utility_model_selection(self) -> None:
+        try:
+            table = self.query_one("#utility-models-table", PaginatedDataTable)
+        except Exception:
+            self._set_utility_model_action_state(None)
+            return
+        if table.row_count == 0:
+            self._set_utility_model_action_state(None)
+            return
+        try:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            um_id = row_key.value if row_key else None
+        except Exception:
+            um_id = None
+        self._set_utility_model_action_state(um_id)
+
+    def _refresh_utility_models_table(self) -> None:
+        try:
+            table = self.query_one("#utility-models-table", PaginatedDataTable)
+        except Exception:
+            return
+        table.clear(columns=True)
+        table.add_column("ID", width=20)
+        table.add_column("Label", width=18)
+        table.add_column("Model", width=26)
+        table.add_column("Out", width=6)
+        table.add_column("Output Path")
+        table.add_column("Run As", width=10)
+        table.add_column("On", width=4)
+        self._set_utility_model_action_state(None)
+        rows = self._fetch_utility_models()
+        for row in rows:
+            table.add_row(
+                row.get("id", ""),
+                row.get("label", ""),
+                row.get("catalog_model", ""),
+                row.get("output_modality", ""),
+                (row.get("output_path") or "")[:48],
+                row.get("run_as_agent", ""),
+                "Y" if row.get("enabled") else "N",
+                key=row.get("id"),
+            )
+        count = len(rows)
+        if count:
+            table.border_title = f"Utility Models ({count})"
+            table.move_cursor(row=0)
+            self._sync_utility_model_selection()
+        else:
+            table.border_title = "Utility Models (0) — select New to add a profile"
 
     def on_mount(self) -> None:
         """Populate the skills and packages DataTables after mount."""
@@ -1175,6 +1513,146 @@ class SystemSettingsModal(ModalScreen):
             self._refresh_system_memory()
         except Exception:
             pass
+
+        try:
+            um_table = self.query_one("#utility-models-table", PaginatedDataTable)
+            um_table.cursor_type = "row"
+            self._refresh_utility_models_table()
+        except Exception:
+            pass
+
+    @on(TabbedContent.TabActivated)
+    def _on_settings_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if event.pane.id == "settings-utility-models-tab":
+            self.call_after_refresh(self._sync_utility_model_selection)
+
+    @on(DataTable.RowHighlighted, "#utility-models-table")
+    def on_utility_model_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is None:
+            return
+        self._set_utility_model_action_state(event.row_key.value)
+
+    @on(DataTable.RowSelected, "#utility-models-table")
+    def on_utility_model_selected(self, event: DataTable.RowSelected) -> None:
+        if event.row_key is None:
+            return
+        self._set_utility_model_action_state(event.row_key.value)
+
+    def _open_utility_model_editor(self, um_id: str | None = None) -> None:
+        from agitop.panels.utility_model_editor_modal import UtilityModelEditorModal
+
+        record = None
+        if um_id:
+            for row in self._fetch_utility_models():
+                if row.get("id") == um_id:
+                    record = row
+                    break
+            try:
+                proc = subprocess.run(
+                    ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl",
+                     "utility", "model", "show", um_id],
+                    capture_output=True, text=True, timeout=15,
+                )
+                for line in reversed((proc.stdout or "").strip().splitlines()):
+                    if line.strip().startswith("{"):
+                        parsed = json.loads(line)
+                        if parsed.get("utility_model"):
+                            record = parsed["utility_model"]
+                        break
+            except Exception:
+                pass
+        self.app.push_screen(UtilityModelEditorModal(self, record=record))
+
+    def _delete_utility_model(self) -> None:
+        um_id = self.selected_utility_model_id
+        if not um_id:
+            self.app.notify("Select a Utility Model first", severity="warning")
+            return
+        um_label = um_id
+        for row in self._fetch_utility_models():
+            if row.get("id") == um_id:
+                um_label = row.get("label") or um_id
+                break
+        self.app.push_screen(
+            UtilityModelRemoveConfirmModal(um_id, um_label),
+            self._on_utility_remove_confirmed,
+        )
+
+    def _on_utility_remove_confirmed(self, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        um_id = self.selected_utility_model_id
+        if not um_id:
+            return
+        try:
+            proc = subprocess.run(
+                ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl",
+                 "utility", "model", "remove", um_id],
+                capture_output=True, text=True, timeout=15,
+            )
+            ok = proc.returncode == 0
+            for line in reversed((proc.stdout or "").strip().splitlines()):
+                if line.strip().startswith("{"):
+                    ok = json.loads(line).get("success", ok)
+                    break
+            if ok:
+                self.app.notify(f"Removed Utility Model '{um_id}'", title="Utility Models")
+                self._refresh_utility_models_table()
+            else:
+                self.app.notify("Failed to remove Utility Model", severity="error")
+        except Exception as e:
+            self.app.notify(str(e), severity="error")
+
+    def _save_audio_processing(self) -> None:
+        """Persist the [audio_processing] defaults (own Save button)."""
+        aud_enabled = self.query_one("#chk-audio-processing-enabled", Checkbox).value
+        aud_format = self.query_one("#select-audio-format", Select).value or "wav"
+        aud_voice = self.query_one("#select-audio-voice", Select).value or "alloy"
+        ok_a = _write_ini_value("audio_processing", "enabled", "true" if aud_enabled else "false")
+        ok_b = _write_ini_value("audio_processing", "format", str(aud_format))
+        ok_c = _write_ini_value("audio_processing", "voice", str(aud_voice))
+        if ok_a and ok_b and ok_c:
+            self.app.notify(
+                f"Audio: {'on' if aud_enabled else 'off'} · {aud_format} · {aud_voice}",
+                title="Settings Saved",
+            )
+        else:
+            self.app.notify("Failed to save audio_processing settings", severity="error")
+
+    def _save_utility_models_enabled(self) -> None:
+        was_enabled = _read_ini_value("utility_models", "enabled", "true").lower() == "true"
+        enabled = self.query_one("#chk-utility-models-enabled", Checkbox).value
+        write_manifest = self.query_one("#chk-utility-models-write-manifest", Checkbox).value
+        ok_enabled = _write_ini_value("utility_models", "enabled", "true" if enabled else "false")
+        ok_manifest = _write_ini_value(
+            "utility_models", "write_manifest", "true" if write_manifest else "false"
+        )
+        if ok_enabled and ok_manifest:
+            msg = f"Utility Models {'enabled' if enabled else 'disabled'}"
+            msg += f" · manifest {'on' if write_manifest else 'off'}"
+            if was_enabled and not enabled:
+                frozen = self._freeze_utility_tasks()
+                if frozen:
+                    msg += f" — froze {frozen} utility task(s)"
+            self.app.notify(msg, title="Utility Models")
+        else:
+            self.app.notify("Failed to save utility_models settings", severity="error")
+
+    def _freeze_utility_tasks(self) -> int:
+        try:
+            proc = subprocess.run(
+                ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl",
+                 "utility", "freeze-tasks"],
+                capture_output=True, text=True, timeout=20,
+            )
+            for line in reversed((proc.stdout or "").strip().splitlines()):
+                if line.strip().startswith("{"):
+                    data = json.loads(line)
+                    if data.get("success"):
+                        return int(data.get("frozen_count") or 0)
+        except Exception:
+            pass
+        return 0
 
     def _refresh_system_memory(self) -> None:
         table = self.query_one("#settings-sys-memory-table", DataTable)
@@ -1267,6 +1745,10 @@ class SystemSettingsModal(ModalScreen):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Also open viewer on double-click/Enter."""
+        if event.data_table.id == "utility-models-table":
+            if event.row_key and event.row_key.value:
+                self._open_utility_model_editor(event.row_key.value)
+            return
         if event.data_table.id != "skills-registry-table":
             return
         try:
@@ -1288,6 +1770,9 @@ class SystemSettingsModal(ModalScreen):
         if event.button.id == "btn-toggle-strategy":
             current = _read_ini_value("local_ai", "model_loading_strategy", "single")
             self.app.push_screen(RouterModeConfirmModal(current))
+        elif event.button.id == "btn-save-settings-audio":
+            self._save_audio_processing()
+            self.app.pop_screen()
         elif event.button.id in (
             "btn-save-settings-general",
             "btn-save-settings-image",
@@ -1313,6 +1798,9 @@ class SystemSettingsModal(ModalScreen):
                 searxng_url = self.query_one("#input-searxng-url", Input).value.strip()
                 ok4 = _write_ini_value("search", "enabled", "true" if search_enabled else "false")
                 ok5 = _write_ini_value("search", "searxng_url", searxng_url) if searxng_url else True
+
+                vv_enabled = self.query_one("#chk-vv-enabled", Checkbox).value
+                ok_vv = _write_ini_value("versavoice", "enabled", "true" if vv_enabled else "false")
 
                 # ── COA Autonomous ──
                 coa_autonomous = self.query_one("#chk-coa-autonomous", Checkbox).value
@@ -1344,42 +1832,57 @@ class SystemSettingsModal(ModalScreen):
                     return
                 ok7 = _write_ini_value("browser", "timeout", str(browser_timeout))
 
-                img_enabled = self.query_one("#chk-image-processing-enabled", Checkbox).value
-                img_format = self.query_one("#select-image-format", Select).value or "jpeg"
-                jpeg_quality = int(self.query_one("#input-jpeg-quality", Input).value)
-                jpeg_dpi = int(self.query_one("#input-jpeg-dpi", Input).value)
-                max_width = int(self.query_one("#input-image-max-width", Input).value)
-                max_height = int(self.query_one("#input-image-max-height", Input).value)
-                if not (1 <= jpeg_quality <= 100):
-                    self.app.notify("JPEG quality must be 1–100", severity="error")
-                    return
-                if not (1 <= jpeg_dpi <= 600):
-                    self.app.notify("JPEG DPI must be 1–600", severity="error")
-                    return
-                if max_width < 64 or max_height < 64:
-                    self.app.notify("Max width/height must be ≥ 64 px", severity="error")
-                    return
-                ok8 = _write_ini_value("image_processing", "enabled", "true" if img_enabled else "false")
-                ok9 = _write_ini_value("image_processing", "format", str(img_format))
-                ok10 = _write_ini_value("image_processing", "jpeg_quality", str(jpeg_quality))
-                ok11 = _write_ini_value("image_processing", "jpeg_dpi", str(jpeg_dpi))
-                ok12 = _write_ini_value("image_processing", "max_width", str(max_width))
-                ok13 = _write_ini_value("image_processing", "max_height", str(max_height))
+                # Image Processing widgets only exist when the Utility Models UI is
+                # visible (the tab is gated behind the same flag) — skip otherwise.
+                img_enabled = False
+                jpeg_quality = jpeg_dpi = max_width = max_height = 0
+                ok8 = ok9 = ok10 = ok11 = ok12 = ok13 = True
+                if UTILITY_MODELS_UI_VISIBLE:
+                    img_enabled = self.query_one("#chk-image-processing-enabled", Checkbox).value
+                    img_format = self.query_one("#select-image-format", Select).value or "jpeg"
+                    jpeg_quality = int(self.query_one("#input-jpeg-quality", Input).value)
+                    jpeg_dpi = int(self.query_one("#input-jpeg-dpi", Input).value)
+                    max_width = int(self.query_one("#input-image-max-width", Input).value)
+                    max_height = int(self.query_one("#input-image-max-height", Input).value)
+                    if not (1 <= jpeg_quality <= 100):
+                        self.app.notify("JPEG quality must be 1–100", severity="error")
+                        return
+                    if not (1 <= jpeg_dpi <= 600):
+                        self.app.notify("JPEG DPI must be 1–600", severity="error")
+                        return
+                    if max_width < 64 or max_height < 64:
+                        self.app.notify("Max width/height must be ≥ 64 px", severity="error")
+                        return
+                    ok8 = _write_ini_value("image_processing", "enabled", "true" if img_enabled else "false")
+                    ok9 = _write_ini_value("image_processing", "format", str(img_format))
+                    ok10 = _write_ini_value("image_processing", "jpeg_quality", str(jpeg_quality))
+                    ok11 = _write_ini_value("image_processing", "jpeg_dpi", str(jpeg_dpi))
+                    ok12 = _write_ini_value("image_processing", "max_width", str(max_width))
+                    ok13 = _write_ini_value("image_processing", "max_height", str(max_height))
 
-                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
+                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok_vv, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
                     summary_parts = [
                         f"Task max spawn: {task_max_spawn}",
                         f"Circuit breaker: {cb_consecutive}/{cb_hourly}",
                         f"Flood guard: {flood_guard_hours}h",
                         f"Search: {'on' if search_enabled else 'off'}",
+                        f"VersaVoice: {'on' if vv_enabled else 'off'}",
                         f"Browser timeout: {browser_timeout}s",
                         f"Autonomous: {'on' if coa_autonomous else 'off'}",
-                        f"Image: {'on' if img_enabled else 'off'} JPEG q={jpeg_quality} {max_width}x{max_height}",
                     ]
+                    if UTILITY_MODELS_UI_VISIBLE:
+                        summary_parts.append(
+                            f"Image: {'on' if img_enabled else 'off'} JPEG q={jpeg_quality} {max_width}x{max_height}"
+                        )
                     self.app.notify(
                         " · ".join(summary_parts) + " — active next CRON tick",
                         title="Settings Saved"
                     )
+                    try:
+                        from agitop.panels.messages import MessagesPanel
+                        self.app.query_one(MessagesPanel).refresh_data()
+                    except Exception:
+                        pass
                 else:
                     self.app.notify("Some settings failed to save — check permissions", severity="warning")
             except ValueError:
@@ -1388,11 +1891,26 @@ class SystemSettingsModal(ModalScreen):
         elif event.button.id in (
             "btn-settings-close-general",
             "btn-settings-close-image",
+            "btn-settings-close-audio",
             "btn-settings-close-skills",
             "btn-settings-close-packages",
             "btn-settings-close-memory",
+            "btn-settings-close-utility-models",
         ):
+            if event.button.id == "btn-settings-close-utility-models":
+                self._save_utility_models_enabled()
+            elif event.button.id == "btn-settings-close-audio":
+                self._save_audio_processing()
             self.app.pop_screen()
+        elif event.button.id == "btn-utility-model-new":
+            self._open_utility_model_editor()
+        elif event.button.id == "btn-utility-model-edit":
+            if self.selected_utility_model_id:
+                self._open_utility_model_editor(self.selected_utility_model_id)
+        elif event.button.id == "btn-utility-model-delete":
+            self._delete_utility_model()
+        elif event.button.id == "btn-utility-runs-log":
+            self.app.push_screen(RunsLogModal())
         elif event.button.id == "btn-browser-toggle":
             browser_enabled = _read_ini_value("browser", "enabled", "false").lower() == "true"
             new_val = 0 if browser_enabled else 1
@@ -1447,6 +1965,10 @@ class SystemSettingsModal(ModalScreen):
             if self._pkg_page < max_page:
                 self._pkg_page += 1
                 self._update_packages_table()
+
+    def _handle_utility_models_key(self, _key: str) -> None:
+        """PageUp/PageDown on utility models table (single-page list for now)."""
+        pass
 
     def _on_browser_modal_close(self, success: bool) -> None:
         if success:

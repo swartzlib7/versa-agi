@@ -162,7 +162,7 @@ agictl model params set model:qwen3.6:35b --think-mode boolean \
 
 `[output_routing]` maps **one preferred catalog key per output delivery modality** (`image`, `audio`, `video`). Configure in **🔀 ROUTING** (lower section). Models must declare the matching `output_modalities` in the catalog.
 
-Consumed by Utility Model runners / output drivers (not chat spawn triage). Resolver: `resolve_output_model()` in `harness/model_routing.py`. See TD-UTIL-001 / `td_util_001_utility_models.plan.md`.
+Consumed by Utility Model runners / output drivers (not chat spawn triage). Resolver: `resolve_output_model()` in `harness/model_routing.py`. See TD-UTIL-001 (Production Plan §2.6).
 
 ## Cost estimates (TD-COST-001 partial)
 
@@ -199,6 +199,10 @@ Or validate via CLI: `agictl view image <path>`. Cycle logs show `VIEW INJECT` a
 6. Next Lifeline tick spawns on the vision-capable model; call `agictl_view_image(path="...")` (or `agictl view image <path>` to validate).
 
 Do **not** expect a second model inside the same cycle. In-spawn inter-model handover is a separate architecture (not implemented).
+
+## Utility Models (one-shot generation)
+
+For fixed system-prompt + artifact output (not a full agent cycle), use **Utility Models** — see **`utility_models.md`**. Chat catalog keys can back a UM; lifeline runs Utility Tasks as `assigned_to`.
 
 ## Catalog fields (for reference)
 

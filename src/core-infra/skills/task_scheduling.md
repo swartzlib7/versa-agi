@@ -110,6 +110,7 @@ Use `agictl task snooze <id> <minutes>` to defer work:
 - **Minimum snooze: 5 minutes**
 - **Maximum snooze: 10080 minutes** (7 days — use 60–1440 for external waits)
 - Snoozing sets `wake_after` and rolls `due_date` forward — Lifeline skips the task until then
+- Snoozing also resets `spawn_attempts` to 0 (clears the overdue retry budget for that task)
 - **Mandatory before cycle end** when a `waiting` task has no new external input
 
 ---

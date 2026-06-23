@@ -10,7 +10,7 @@ You do NOT have direct access to your SQLite database or system configuration fi
 
 ## Command Groups
 
-agictl is organized into 19 data-model-driven command groups:
+agictl is organized into 20 data-model-driven command groups:
 
 | Group | Purpose |
 |---|---|
@@ -19,6 +19,7 @@ agictl is organized into 19 data-model-driven command groups:
 | `provider` | Model provider registry (xAI, OpenAI, Anthropic, …) (COA/operator only) |
 | `agent` | Agent registry, status, lifecycle |
 | `task` | Cognitive task queue |
+| `utility` | Utility Model profiles and one-shot runs |
 | `message` | VersaVoice communication |
 | `cycle` | Telemetry lifecycle |
 | `project` | Workspace project management |
@@ -154,9 +155,11 @@ agictl task snooze <id> <minutes>                     # Set wake_after (min 5 mi
 agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 ```
 
-**task add options**: `--desc`, `--priority low|normal|high|urgent`, `--assignee`, `--project <id>`, `--callback notify_sponsor|notify_connection|await_reply|check_connection|none`, `--source-msg <id>`, `--requested-by <uid>`, `--due-date "YYYY-MM-DD HH:MM:SS"`
+**task add options**: `--desc`, `--priority low|normal|high|urgent`, `--assignee`, `--project <id>`, `--callback notify_sponsor|notify_connection|await_reply|check_connection|none`, `--source-msg <id>`, `--requested-by <uid>`, `--due-date "YYYY-MM-DD HH:MM:SS"`, `--utility-task`, `--utility-model <id>`, `--utility-input-files '<json array>'`, `--utility-output-override <path>`, `--utility-start-alert`, `--utility-stop-alert`, `--utility-spawn-agent <name>`, `--script-task`, `--script-path <name.sh>`, `--script-parameters "<args>"`, `--script-interval <seconds>`
 
-**task update options**: `--status planned|in_progress|waiting|blocked|cancelled|done`, `--desc`, `--priority`, `--assignee`, `--due-date "YYYY-MM-DD HH:MM:SS"`, `--requested-by`
+**task update options**: `--status planned|in_progress|waiting|blocked|cancelled|done`, `--desc`, `--priority`, `--assignee`, `--due-date "YYYY-MM-DD HH:MM:SS"`, `--requested-by`, `--utility-task` / `--no-utility-task`, `--utility-model`, `--utility-input-files`, `--utility-output-override`, `--utility-start-alert` / `--no-utility-start-alert`, `--utility-stop-alert` / `--no-utility-stop-alert`, `--utility-spawn-agent`, `--script-task` / `--no-script-task`, `--script-path`, `--script-parameters`, `--script-interval`
+
+> **CONSTRAINT**: `--utility-task` and `--script-task` are **mutually exclusive** — a task is a Utility Task **or** a Script Task, never both. Both reuse the shared Start/Stop alert columns.
 
 > **CONSTRAINT**: `--due-date` is **mandatory** when creating tasks (default status is `planned`) and when setting status back to `planned`. The Lifeline will automatically wake you when a planned task's due date is reached — this is how you schedule future work. If a task cannot be completed by its due date, **roll the due date forward** — do not leave it in the past.
 
@@ -176,7 +179,59 @@ agictl task freeze-all <agent_name>                   # Freeze all non-terminal 
 agictl task unfreeze <task_id>                        # Restore one frozen task (resets spawn_attempts)
 agictl task unfreeze-all <agent_name>                 # Restore all frozen tasks to their prior status
 agictl task count-frozen <agent_name>                 # Count frozen tasks
+agictl task run-due-scripts --agent <name> --agent-workspace <path>   # Run due Script Tasks (lifeline; hidden)
 ```
+
+## 3b. utility — Utility Models (TD-UTIL-001)
+
+```bash
+agictl utility model list [--table] [--enabled-only]
+agictl utility model show <id>
+agictl utility model add --id <slug> --label "..." --catalog-model <key> \
+  --output-modality text|image|audio|video --output-path <dir> \
+  --system-prompt-file <path> [--run-as-agent coa] [--disabled]
+agictl utility model update <id> [...]
+agictl utility model remove <id>
+
+agictl utility run <um-id> [--output-dir <path>] [--input-files a.jpg,b.pdf] \
+  [--vars '<json>'] [--task-id <id>] [--context-agent <name>] [--dry-run]
+
+agictl model modality-map show <catalog-key>
+agictl model modality-map set <catalog-key> --json-file map.json
+agictl model modality-map reset <catalog-key>
+agictl model modality-map seed
+```
+
+**agitop:** System Settings → **Utility Models** tab. Task modal → **Utility Task** tab.
+
+See skill **`utility_models.md`** for mental model, Utility Task callbacks, and artifact handling.
+
+## 3c. Script Tasks (TD-SCRIPT-001)
+
+Deterministic scheduled execution of a top-level `.sh` from the shared **AGi-Tools** repo — **no agent spawn, no LLM**. Configured through the standard `task add` / `task update` script flags above.
+
+```bash
+agictl task add "Nightly export sync" --assignee coa --due-date "2026-06-22 02:00:00" \
+  --script-task --script-path nightly_export.sh \
+  --script-parameters "--region us --full" \
+  --script-interval 86400 \
+  --utility-start-alert --utility-stop-alert
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--script-task` | Sets `task_kind=script` (mutually exclusive with `--utility-task`) |
+| `--script-path` | Top-level `.sh` filename in AGi-Tools (required; realpath-contained, `.sh` only) |
+| `--script-parameters` | Args passed verbatim to the script (argv, `shell=False`) |
+| `--script-interval` | Recurrence seconds — **blank/0 = once-off**; positive = reschedule `due_date` each run |
+
+- **Once-off** → task `done` (rc `0`) / `blocked` (rc ≠ 0). **Recurring** → stays `planned`, `due_date += interval`.
+- Each run records `script_last_rc` / `script_last_run_at` and appends a `task progress` journal entry (rc + output tail). Timeout = rc `124` (`[script_tasks] max_runtime_seconds`).
+- Lifeline runs due Script Tasks via `agictl task run-due-scripts` each tick (hidden command — not for manual use).
+- **agitop:** Task modal → **Utility / Script** tab → **Script** mode (gated by `SCRIPT_TASKS_UI_VISIBLE`).
+- Feature toggle: `setup.ini [script_tasks] enabled`. Reserved projects `AGi-Tools` / `AGi-Knowledgebase` cannot be archived or deleted.
+
+See skill **`script_tasks.md`** for authoring rules, scheduling behavior, and containment.
 
 ## 4. message — Communication
 

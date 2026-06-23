@@ -9,6 +9,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Select, Static, TabbedContent, TabPane
 
+from agitop.feature_flags import OUTPUT_ROUTING_UI_VISIBLE
 from agitop.panels.system_settings_modal import (
     _read_ini_value,
     _write_ini_value_err,
@@ -157,30 +158,31 @@ class ModelRoutingModal(ModalScreen):
                                             allow_blank=False,
                                         )
 
-                with TabPane("Output Routing", id="routing-output-tab"):
-                    with VerticalScroll(id="routing-output-scroll"):
-                        yield Static("[bold]Output routing[/]")
-                        yield Static(
-                            "[dim]Generation defaults for Utility Models (Phase F) — one key per "
-                            "image/audio/video. Catalog must declare matching output_modality. "
-                            "Not used for chat spawn routing yet.[/]"
-                        )
-                        out_mid = (len(_OUTPUT_MODALITIES) + 1) // 2
-                        with Container(id="routing-output-columns"):
-                            for col_mods in (
-                                _OUTPUT_MODALITIES[:out_mid],
-                                _OUTPUT_MODALITIES[out_mid:],
-                            ):
-                                with Vertical(classes="routing-col"):
-                                    for om in col_mods:
-                                        current = _read_ini_value("output_routing", om, "")
-                                        yield Static(f"[cyan]{_OUTPUT_LABELS[om]}[/]")
-                                        yield Select(
-                                            _load_output_model_choices(om, current),
-                                            value=current if current else "",
-                                            id=f"select-output-pref-{om}",
-                                            allow_blank=False,
-                                        )
+                if OUTPUT_ROUTING_UI_VISIBLE:
+                    with TabPane("Output Routing", id="routing-output-tab"):
+                        with VerticalScroll(id="routing-output-scroll"):
+                            yield Static("[bold]Output routing[/]")
+                            yield Static(
+                                "[dim]Generation defaults for Utility Models (Phase F) — one key per "
+                                "image/audio/video. Catalog must declare matching output_modality. "
+                                "Not used for chat spawn routing yet.[/]"
+                            )
+                            out_mid = (len(_OUTPUT_MODALITIES) + 1) // 2
+                            with Container(id="routing-output-columns"):
+                                for col_mods in (
+                                    _OUTPUT_MODALITIES[:out_mid],
+                                    _OUTPUT_MODALITIES[out_mid:],
+                                ):
+                                    with Vertical(classes="routing-col"):
+                                        for om in col_mods:
+                                            current = _read_ini_value("output_routing", om, "")
+                                            yield Static(f"[cyan]{_OUTPUT_LABELS[om]}[/]")
+                                            yield Select(
+                                                _load_output_model_choices(om, current),
+                                                value=current if current else "",
+                                                id=f"select-output-pref-{om}",
+                                                allow_blank=False,
+                                            )
 
             with Horizontal(id="model-routing-actions"):
                 yield Button("Save", variant="success", id="btn-routing-save")
@@ -217,9 +219,10 @@ class ModelRoutingModal(ModalScreen):
         for wm in _WORK_MODALITIES:
             _save("model_routing", wm, _select_value(f"#select-routing-pref-{wm}"),
                   f"{wm} preferred model")
-        for om in _OUTPUT_MODALITIES:
-            _save("output_routing", om, _select_value(f"#select-output-pref-{om}"),
-                  f"{om} output model")
+        if OUTPUT_ROUTING_UI_VISIBLE:
+            for om in _OUTPUT_MODALITIES:
+                _save("output_routing", om, _select_value(f"#select-output-pref-{om}"),
+                      f"{om} output model")
 
         if not failures:
             self.app.notify(

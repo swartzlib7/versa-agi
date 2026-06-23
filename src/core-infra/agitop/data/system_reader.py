@@ -418,6 +418,48 @@ class SystemReader:
         """
         return self._read_paths_env("VERSA_MODEL_LOADING_STRATEGY", "single")
 
+    @staticmethod
+    def _count_lock_files(lock_dir: str) -> int:
+        """Count active ``.lock`` files in a deterministic-run lock directory.
+
+        Utility and Script runners drop a ``<key>.lock`` file while a job is in
+        flight (``/var/lib/versa-agi/utility-runs`` and ``.../script-runs``) and
+        remove it on completion. The dirs are world-readable, so the dashboard
+        (running as the PU) can count them without elevation. Missing dir → 0.
+        """
+        try:
+            return sum(1 for n in os.listdir(lock_dir) if n.endswith(".lock"))
+        except OSError:
+            return 0
+
+    def get_deterministic_run_counts(self) -> tuple[int, int]:
+        """Return (utility_running, script_running) — in-flight headless task runs."""
+        return (
+            self._count_lock_files("/var/lib/versa-agi/utility-runs"),
+            self._count_lock_files("/var/lib/versa-agi/script-runs"),
+        )
+
+    @staticmethod
+    def _read_last_run(lock_dir: str) -> Optional[str]:
+        """Return the UTC-ISO completion time of the last run, or None.
+
+        The runners write a world-readable ``.last`` marker on completion. Returns
+        the raw stored ISO string (UTC); callers handle local-time formatting.
+        """
+        try:
+            with open(os.path.join(lock_dir, ".last"), encoding="utf-8") as f:
+                val = f.read().strip()
+            return val or None
+        except OSError:
+            return None
+
+    def get_deterministic_last_runs(self) -> tuple[Optional[str], Optional[str]]:
+        """Return (utility_last_run_utc, script_last_run_utc) ISO strings or None."""
+        return (
+            self._read_last_run("/var/lib/versa-agi/utility-runs"),
+            self._read_last_run("/var/lib/versa-agi/script-runs"),
+        )
+
     def get_active_local_model(self) -> str:
         """Get the single active (VRAM-resident) local model from paths.env.
 

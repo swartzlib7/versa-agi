@@ -72,17 +72,48 @@ Checkbox.-on > .toggle--button {
     color: $text;
 }
 
+#dashboard-scroll {
+    height: 1fr;
+    min-height: 0;
+    scrollbar-size: 1 1;
+}
+
 #dashboard {
+    layout: vertical;
     height: auto;
-    min-height: 1fr;
-    overflow-y: auto;
+    min-height: 100%;
     padding: 0 1;
+}
+
+#system-controls-collapse {
+    height: auto;
+    margin-bottom: 1;
+    border: solid $primary;
+    background: $surface-darken-1;
+}
+
+#system-controls-collapse > CollapsibleTitle {
+    background: $surface-darken-1;
+    color: $primary-lighten-2;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#system-controls-collapse > Contents {
+    height: auto;
+    padding: 0;
+}
+
+#system-controls-collapse #system-panel {
+    border: none;
+    margin: 0;
+    padding: 1;
 }
 
 .panel-header {
     height: auto;
     max-height: 5;
-    margin-bottom: 0;
+    margin-bottom: 1;
 }
 
 #channel-filters {
@@ -131,7 +162,7 @@ Checkbox.-on > .toggle--button {
 
 #system-panel {
     height: auto;
-    min-height: 15;
+    min-height: 0;
     border: solid $primary;
     border-title-color: $text;
     padding: 1;
@@ -336,8 +367,54 @@ Checkbox.-on > .toggle--button {
 
 #work-tabs {
     width: 100%;
-    height: 28;
+    height: 1fr;
+    min-height: 0;
     margin-top: 1;
+}
+
+.work-tab-body {
+    height: 100%;
+    min-height: 0;
+    layout: vertical;
+}
+
+.work-tab-actions {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    width: 100%;
+}
+
+.work-tab-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+#tasks-table,
+#projects-table,
+#messages-table {
+    height: 1fr;
+    min-height: 10;
+}
+
+#tasks-table {
+    border: solid $warning;
+}
+
+#projects-table {
+    border: solid $success;
+}
+
+#messages-table {
+    border: solid $primary;
+}
+
+#tasks-panel-body,
+#projects-panel-body,
+#messages-panel-body {
+    height: 100%;
+    min-height: 0;
 }
 
 #work-tabs Tabs {
@@ -401,38 +478,16 @@ Checkbox.-on > .toggle--button {
 
 #work-tabs TabPane {
     height: 100%;
+    min-height: 0;
     padding: 0;
 }
 
-#tasks-panel {
-    width: 1fr;
-    height: 100%;
-    border: solid $warning;
-    padding: 0 1;
-    background: $surface-darken-1;
-}
-
-#messages-panel {
-    width: 1fr;
-    height: 100%;
-    border: solid $primary;
-    padding: 0 1;
-    background: $surface-darken-1;
-}
-
-#messages-panel-body {
-    height: 100%;
-}
-
-#messages-table {
-    height: 1fr;
-    min-height: 0;
-}
-
+#tasks-panel,
+#messages-panel,
 #projects-panel {
     width: 1fr;
     height: 100%;
-    border: solid $success;
+    min-height: 0;
     padding: 0 1;
     background: $surface-darken-1;
 }
@@ -540,9 +595,14 @@ TaskEditModal {
 }
 
 #task-dialog-title {
-    margin-bottom: 1;
+    margin-bottom: 0;
     border-bottom: solid $accent;
     content-align: center middle;
+}
+
+#task-dialog-title-spacer {
+    height: 1;
+    width: 100%;
 }
 
 #task-edit-desc {
@@ -564,6 +624,11 @@ TaskEditModal {
 .task-field-col .modal-form-label,
 .project-field-col .modal-form-label {
     margin-top: 0;
+}
+
+.task-field-hint {
+    margin-top: 0;
+    margin-bottom: 1;
 }
 
 .task-due-time-row {
@@ -744,6 +809,155 @@ TaskEditModal {
     layout: vertical;
 }
 
+#task-utility-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#task-utility-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#task-utility-status-msg {
+    width: 100%;
+    height: auto;
+    color: $text;
+    text-align: center;
+    content-align: center middle;
+    margin-bottom: 1;
+    padding: 0 2;
+}
+
+#task-utility-header {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: solid $accent;
+}
+
+#task-utility-header Static {
+    height: auto;
+}
+
+#task-utility-enabled-row,
+#utility-models-enabled-row,
+#um-enabled-row {
+    height: 3;
+    width: 100%;
+    align: left middle;
+}
+
+#task-edit-mode {
+    width: 100%;
+    height: auto;
+    layout: horizontal;
+    border: none;
+    background: transparent;
+    margin-bottom: 1;
+}
+
+#task-edit-mode > RadioButton {
+    width: auto;
+    min-width: 16;
+    height: 3;
+    margin-right: 1;
+    content-align: left middle;
+}
+
+#chk-utility-models-enabled,
+#chk-utility-models-write-manifest,
+#um-enabled {
+    width: auto;
+    min-width: 15;
+    height: 3;
+    margin-right: 1;
+}
+
+.utility-models-row-col {
+    width: 1fr;
+    height: 3;
+    align: center middle;
+    content-align: center middle;
+}
+
+.utility-models-row-col Checkbox {
+    width: auto;
+    margin: 0;
+}
+
+.utility-models-row-col-action {
+    align: center middle;
+}
+
+#btn-utility-runs-log {
+    width: auto;
+    height: 3;
+}
+
+#task-utility-enabled-note,
+#utility-models-enabled-note,
+#um-enabled-note {
+    width: 1fr;
+    height: 3;
+    margin: 0;
+    content-align: left middle;
+}
+
+#task-utility-scroll Select,
+#utility-model-editor-scroll Select {
+    height: auto;
+    min-height: 3;
+    width: 100%;
+}
+
+#task-utility-scroll Select > SelectCurrent,
+#utility-model-editor-scroll Select > SelectCurrent {
+    height: 3;
+    min-height: 3;
+    color: $text;
+    background: $surface-lighten-2;
+    content-align: left middle;
+}
+
+#task-utility-scroll Select > SelectOverlay,
+#utility-model-editor-scroll Select > SelectOverlay {
+    max-height: 18;
+}
+
+#task-utility-scroll Select > SelectOverlay > .option-list--option,
+#utility-model-editor-scroll Select > SelectOverlay > .option-list--option {
+    height: 3;
+    min-height: 3;
+    padding: 0 1;
+    color: $text;
+    content-align: left middle;
+}
+
+#task-utility-alert-row {
+    height: 3;
+    width: 100%;
+}
+
+.task-vv-alert-col {
+    align-horizontal: center;
+    height: 3;
+}
+
+.task-vv-alert-label {
+    content-align: center middle;
+    width: 100%;
+}
+
+#task-edit-utility-start-alert,
+#task-edit-utility-stop-alert {
+    width: auto;
+    min-width: 14;
+    height: 3;
+    margin-right: 1;
+}
+
 #task-progress-hint {
     height: auto;
     margin-bottom: 1;
@@ -858,6 +1072,20 @@ SystemSettingsModal {
     border-bottom: solid $surface-lighten-1;
 }
 
+/* Let the tab strip scroll horizontally when the tabs overflow the modal width.
+   Textual already auto-scrolls the active tab into view on keyboard nav; this
+   adds mouse-wheel + a thin scrollbar so every tab stays reachable. */
+#settings-tabs Tabs > #tabs-scroll,
+#strategy-tabs Tabs > #tabs-scroll,
+#model-manager-tabs Tabs > #tabs-scroll,
+#model-routing-tabs Tabs > #tabs-scroll,
+#project-tabs Tabs > #tabs-scroll,
+#task-tabs Tabs > #tabs-scroll,
+#agent-tabs Tabs > #tabs-scroll {
+    overflow-x: auto;
+    scrollbar-size-horizontal: 1;
+}
+
 #settings-tabs Tab,
 #strategy-tabs Tab,
 #model-manager-tabs Tab,
@@ -961,7 +1189,33 @@ SystemSettingsModal {
     text-style: bold;
 }
 
+#settings-tabs #--content-tab-settings-audio-processing-tab {
+    border-top: heavy #8b5cf6;
+}
+
+#settings-tabs #--content-tab-settings-audio-processing-tab.-active {
+    background: #8b5cf6 25%;
+    color: #c4b5fd;
+    border: heavy #8b5cf6;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-utility-models-tab {
+    border-top: heavy #06b6d4;
+}
+
+#settings-tabs #--content-tab-settings-utility-models-tab.-active {
+    background: #06b6d4 25%;
+    color: #a5f3fc;
+    border: heavy #06b6d4;
+    text-style: bold;
+}
+
 #settings-image-processing-scroll {
+    height: 100%;
+}
+
+#settings-audio-processing-scroll {
     height: 100%;
 }
 
@@ -1100,14 +1354,17 @@ SystemSettingsModal {
 
 #settings-general-pane,
 #settings-image-processing-pane,
+#settings-audio-processing-pane,
 #settings-skills-pane,
 #settings-packages-pane,
-#settings-system-memory-pane {
+#settings-system-memory-pane,
+#settings-utility-models-pane {
     height: 100%;
     layout: vertical;
 }
 
 #settings-general-scroll,
+#settings-audio-processing-scroll,
 #settings-image-processing-scroll {
     height: 1fr;
     min-height: 0;
@@ -1274,6 +1531,135 @@ SystemSettingsModal {
     height: auto;
     margin-top: 1;
     margin-bottom: 0;
+}
+
+#settings-utility-models-header {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: solid #06b6d4;
+}
+
+#settings-utility-models-header Static {
+    height: auto;
+}
+
+#utility-models-table {
+    height: 1fr;
+    min-height: 0;
+    width: 100%;
+    border: solid #06b6d4;
+}
+
+#utility-models-hint {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+#utility-models-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#utility-models-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
+}
+
+/* ── Utility Model editor / remove confirm ── */
+
+UtilityModelEditorModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#utility-model-editor-dialog {
+    width: 52%;
+    height: 74%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #06b6d4;
+    layout: vertical;
+}
+
+#utility-model-editor-header {
+    margin-bottom: 1;
+    border-bottom: solid #06b6d4;
+    padding-bottom: 1;
+}
+
+#utility-model-editor-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#utility-model-editor-scroll Input {
+    margin-bottom: 0;
+}
+
+#utility-model-editor-scroll .task-field-col {
+    height: auto;
+}
+
+#utility-model-editor-scroll .task-field-col Select {
+    width: 100%;
+}
+
+#um-enabled-row {
+    margin-top: 1;
+}
+
+#utility-model-editor-scroll TextArea {
+    height: 12;
+    min-height: 8;
+    margin-top: 0;
+    border: solid $surface-lighten-1;
+}
+
+#utility-model-editor-actions {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    border-top: solid #06b6d4;
+    padding-top: 1;
+    align: center middle;
+}
+
+#utility-model-editor-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+UtilityModelRemoveConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#um-remove-dialog {
+    width: 64;
+    height: auto;
+    padding: 1 2;
+    border: heavy $error;
+    background: $surface;
+}
+
+#um-remove-actions {
+    margin-top: 1;
+    height: auto;
+    align: center middle;
+}
+
+#um-remove-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 16;
+    height: 3;
 }
 
 /* ── Router Mode Confirm Modal ─────────────── */
@@ -1545,6 +1931,26 @@ TextArea.msg-input-paper:focus {
     text-style: underline;
 }
 
+.action-link-filter {
+    width: auto;
+    color: $text-muted;
+    padding-top: 0;
+}
+
+.action-link-filter:hover {
+    color: $text;
+    text-style: underline;
+}
+
+.action-link-filter-active {
+    color: $success;
+    text-style: bold;
+}
+
+.action-link-filter-active:hover {
+    color: $success-lighten-2;
+}
+
 .dimmed {
     opacity: 40%;
 }
@@ -1552,7 +1958,7 @@ TextArea.msg-input-paper:focus {
 .header-sep {
     width: auto;
     color: $text-muted;
-    padding-top: 1;
+    padding-top: 0;
 }
 
 #chk-vv-enabled {
@@ -2046,8 +2452,7 @@ ModelFeedbackModal {
 #openrouter-pick-dialog,
 #provider-pick-dialog {
     width: 64%;
-    height: auto;
-    max-height: 85%;
+    height: 60%;
     padding: 1 2;
     background: $surface;
     border: thick $accent;
@@ -2236,18 +2641,34 @@ ModelFeedbackModal {
     text-align: center;
 }
 
+#provider-pick-loading {
+    width: 100%;
+    height: 1fr;
+    min-height: 12;
+    margin: 1 0;
+    text-align: center;
+    content-align: center middle;
+}
+
+.provider-pick-hidden {
+    display: none;
+}
+
 #or-pick-scroll,
 #provider-pick-scroll {
-    height: auto;
-    min-height: 12;
-    max-height: 32;
+    height: 1fr;
     margin: 1 0;
 }
 
+/* Fill the modal down to the action buttons; page info rides the border title.
+   height == min-height (both 100% of the 1fr scroll) keeps the viewport fixed
+   and avoids DataTable re-measurement thrash on hover/refresh. */
 #or-pick-scroll DataTable,
 #provider-pick-scroll DataTable {
-    height: auto;
-    max-height: 28;
+    height: 100%;
+    min-height: 100%;
+    border: solid $accent;
+    border-title-color: $text;
 }
 
 #or-pick-actions,
@@ -2914,6 +3335,43 @@ AgentPromptMenu {
     background: $primary 25%;
     color: $primary-lighten-2;
     border: heavy $primary;
+    text-style: bold;
+}
+
+#task-tabs #--content-tab-task-utility-tab {
+    border-top: heavy #06b6d4;
+}
+
+#task-tabs.utility-feature-disabled #--content-tab-task-utility-tab {
+    border-top: heavy $surface-lighten-2;
+    color: $text-muted;
+}
+
+#task-tabs #--content-tab-task-utility-tab.-active {
+    background: #06b6d4 25%;
+    color: #a5f3fc;
+    border: heavy #06b6d4;
+    text-style: bold;
+}
+
+#task-tabs.utility-feature-disabled #--content-tab-task-utility-tab.-active {
+    background: $surface-lighten-1;
+    color: $text-muted;
+    border: heavy $surface-lighten-2;
+    text-style: bold;
+}
+
+#project-tabs.project-new-mode #--content-tab-project-members-tab,
+#project-tabs.project-new-mode #--content-tab-project-memory-tab {
+    border-top: heavy $surface-lighten-2;
+    color: $text-muted;
+}
+
+#project-tabs.project-new-mode #--content-tab-project-members-tab.-active,
+#project-tabs.project-new-mode #--content-tab-project-memory-tab.-active {
+    background: $surface-lighten-1;
+    color: $text-muted;
+    border: heavy $surface-lighten-2;
     text-style: bold;
 }
 

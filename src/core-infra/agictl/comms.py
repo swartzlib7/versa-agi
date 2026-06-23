@@ -149,8 +149,9 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
 
     Default sync uses unreadOnly=true so lifeline only pulls new unread inbound messages.
     markAsRead=true marks fetched particles viewed on VersaVoice (original lifeline
-    mailbox behaviour). Tombstoned message IDs (deleted locally or via agictl) are
-    never re-inserted even when the cloud particle still exists in the sub-account space.
+    mailbox behaviour). Inserts are deduplicated by message_id. Deletes should go
+    through agictl message delete (cloud + local) so the sub-account particle is
+    removed and will not be returned by the inbox API.
 
     full_sync=True uses unreadOnly=false with a 2-hour window (manual catch-up only).
     """

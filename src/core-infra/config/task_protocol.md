@@ -42,24 +42,69 @@ Use this order every cycle that involves a message and/or task:
 - **`mark-processed`** — right after you have meaningfully handled that specific inbound message (replied, acknowledged, or determined no reply is needed).
 - **`task progress`** — before every `cycle end` where the task is not yet `done`.
 - **`task done`** — only in the "verified complete" or "confirmation arrived" rows above.
-- **`waiting` + snooze** — whenever external confirmation is the next step; Lifeline wakes you on the **next inbound message**, not because you polled.
+- **`waiting` + snooze`** — whenever external confirmation is the next step; Lifeline wakes you on the **next inbound message**, not because you polled.
 
-### Scheduled CLI tasks (TD-UTIL-001 — planned)
+### Utility Tasks
 
-Tasks may include a **`cli_command`** field. When due, lifeline executes:
-
-```bash
-sudo -u {assigned_to} agictl {cli_command}
-```
-
-This path does **not** spawn the LangGraph harness. Use for **Utility Model** runs, maintenance scripts, or agent-authored wrappers. Example:
+A **Utility Task** (`task_kind=utility`) links **exactly one** Utility Model via `utility_model_id`. When due, lifeline runs the UM **as the task's `assigned_to` agent** — no LangGraph harness spawn.
 
 ```bash
 agictl task add "Weekly brand hero" --assignee coa --due-date "2026-06-20 09:00:00" \
-  --cli-command 'utility run brand-hero-square --output-dir .agent/attachments/weekly --input-files brand/ref.jpg'
+  --utility-task --utility-model brand-hero-square \
+  --utility-input-files '["brand/ref.jpg"]' \
+  --utility-start-alert --utility-stop-alert \
+  --utility-spawn-agent coa
 ```
 
-See `.cursor/plans/td_util_001_utility_models.plan.md` and Production Plan §2.6.
+| Flag | Meaning |
+|-------|---------|
+| `--utility-task` | Sets `task_kind=utility` |
+| `--utility-model` | FK to `utility_models.id` (required) |
+| `--utility-input-files` | JSON array of paths (validated against catalog mime map) |
+| `--utility-start-alert` | VersaVoice short message to PU when run starts |
+| `--utility-stop-alert` | VV message to PU on completion (success or error) |
+| `--utility-spawn-agent` | Optional — spawn named agent on success with artifact paths in wake |
+
+**Manual invoke (no task):** PU or agent runs `agictl utility run <id>` — uses UM `run_as_agent` and UM `output_path`.
+
+**After UM completes:** Use `agictl view image` / `agictl listen audio` on artifact paths in a **later Normal Agent spawn** if you need to reason about output.
+
+See Production Plan §2.6 (Utility Models).
+
+| Use Utility Task when | Use Normal task when |
+|-------------------------|----------------------|
+| One-shot generation to files (image, audio, video, text artifact) | Multi-step conversational work across spawns |
+| Due-date scheduled render / batch | Agent must use tools, memory, messaging |
+| PU wants Start/Stop VV alerts | PU wants agent judgment mid-workflow |
+
+### Script Tasks
+
+A **Script Task** (`task_kind=script`) runs a top-level `.sh` from the shared **AGi-Tools** repo on the due date — **as the task's `assigned_to` agent, with no harness spawn and no model**. For deterministic, repeatable work (syncs, exports, housekeeping) where a reasoning cycle is wasteful.
+
+```bash
+agictl task add "Nightly export sync" --assignee coa --due-date "2026-06-22 02:00:00" \
+  --script-task --script-path nightly_export.sh \
+  --script-parameters "--region us --full" \
+  --script-interval 86400 \
+  --utility-start-alert --utility-stop-alert
+```
+
+| Flag | Meaning |
+|-------|---------|
+| `--script-task` | Sets `task_kind=script` (mutually exclusive with `--utility-task`) |
+| `--script-path` | Top-level `.sh` filename in AGi-Tools (required) |
+| `--script-parameters` | Args passed verbatim to the script (argv, no shell) |
+| `--script-interval` | Recurrence seconds — **blank/0 = once-off**; positive = reschedule each run |
+| `--utility-start-alert` / `--utility-stop-alert` | VV alerts on run start / finish (rc + output tail) |
+
+**Authoring:** the script must already live in **AGi-Tools** — executable, idempotent, exit non-zero on failure, own its logs. See `shared_tooling.md` and skill `script_tasks.md`.
+
+**Outcome:** once-off → `done` (rc `0`) / `blocked` (rc ≠ 0). Recurring → stays `planned`, `due_date` advances by the interval. Each run records `script_last_rc` and appends a `task progress` entry. A timeout reports rc `124`.
+
+| Use Script Task when | Use Utility Task when | Use Normal task when |
+|-----------------------|------------------------|----------------------|
+| Deterministic `.sh` job, no LLM needed | One-shot generation to files via a model | Multi-step conversational work |
+| Recurring/scheduled housekeeping | Due-date render / batch | Agent must use tools, memory, messaging |
 
 ### Awaiting confirmation or feedback
 

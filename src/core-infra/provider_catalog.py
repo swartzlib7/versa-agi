@@ -13,7 +13,8 @@ Metadata richness differs per provider (verified against current docs, 2026-06):
   Provider      Endpoint                    Modality   Context    Pricing
   ============  ==========================  =========  =========  =======
   openrouter    /api/v1/models              in+out     yes        yes
-  xai           /v1/language-models         in+out     ~          yes
+  xai           /v1/language-models +        in+out     ~          yes
+                /v1/image-generation-models
   anthropic     /v1/models (capabilities)   image_in   yes        no
   google        /v1beta/models              infer      yes        no
   openai        /v1/models                  infer      no         no
@@ -21,8 +22,9 @@ Metadata richness differs per provider (verified against current docs, 2026-06):
 
 For providers whose native listing is sparse (OpenAI: id-only; Google: no
 modality flag), modalities are *inferred* from the model family and may be
-cross-filled / priced via OpenRouter at add/refresh time. Every source emits the
-same summary dict shape as :func:`openrouter_catalog.or_model_summary`.
+cross-filled / priced via OpenRouter at add/refresh time. xAI's image
+generators are listed separately and merged in. Every source emits the same
+summary dict shape as :func:`openrouter_catalog.or_model_summary`.
 """
 
 from __future__ import annotations
@@ -184,11 +186,30 @@ def _mk_summary(
 
 # ── xAI — /v1/language-models (modalities + pricing) ────────────────────────
 _XAI_URL = "https://api.x.ai/v1/language-models"
+_XAI_IMAGE_URL = "https://api.x.ai/v1/image-generation-models"
 
 
 def _fetch_xai(key: str) -> dict[str, dict]:
-    data = _http_get_json(_XAI_URL, {"Authorization": f"Bearer {key}"})
-    return {m["id"]: m for m in data.get("models", []) if m.get("id")}
+    headers = {"Authorization": f"Bearer {key}"}
+    out: dict[str, dict] = {m["id"]: m for m in
+                            _http_get_json(_XAI_URL, headers).get("models", [])
+                            if m.get("id")}
+    # Image-generation models live on a separate listing (not in
+    # /v1/language-models) — merge them so the catalog isn't language-only.
+    # Degrade gracefully if the endpoint is unavailable.
+    try:
+        img = _http_get_json(_XAI_IMAGE_URL, headers)
+    except (urllib.error.URLError, OSError, ValueError):
+        img = {}
+    for m in img.get("models", []):
+        mid = m.get("id")
+        if not mid or mid in out:
+            continue
+        # These listings may omit modality fields; default to text→image.
+        m.setdefault("input_modalities", ["text"])
+        m.setdefault("output_modalities", ["image"])
+        out[mid] = m
+    return out
 
 
 def _xai_pricing(m: dict) -> dict[str, float]:
@@ -289,17 +310,48 @@ def _fetch_google(key: str) -> dict[str, dict]:
     return out
 
 
+def _google_input_modalities(name: str) -> str:
+    """Infer input modalities from the model family (list API has no flag)."""
+    n = name.lower()
+    if n.startswith("imagen") or n.startswith("veo"):
+        return "text"  # text-to-image / text-to-video generators take text only
+    if n.startswith("gemini"):
+        # Gemini families are natively multimodal on input (text+image+audio+video).
+        return "text,image,audio,video"
+    return "text"
+
+
+def _google_output_modalities(name: str) -> str:
+    """Infer output modalities — the list API reports none, so derive from family.
+
+    Gemini image models (``…-image…``) return text+image; Imagen returns image
+    only; native TTS models return audio; Veo returns video; everything else is
+    text. Cross-filled / corrected via OpenRouter at add/refresh time.
+    """
+    n = name.lower()
+    if n.startswith("imagen"):
+        return "image"
+    if "image" in n:  # e.g. gemini-2.5-flash-image (returns prose + image)
+        return "text,image"
+    if n.startswith("veo"):
+        return "video"
+    if "-tts" in n or n.endswith("tts") or "native-audio" in n:
+        return "audio"
+    return "text"
+
+
 def _summary_google(m: dict) -> dict:
     name = (m.get("name") or "").split("/")[-1]
     in_ctx = m.get("inputTokenLimit")
     out_ctx = m.get("outputTokenLimit")
     in_n = int(in_ctx) if isinstance(in_ctx, (int, float)) and in_ctx > 0 else None
     out_n = int(out_ctx) if isinstance(out_ctx, (int, float)) and out_ctx > 0 else None
-    # The list API exposes no modality flag; Gemini families are multimodal input.
-    in_mods = "text,image" if name.startswith("gemini") else "text"
+    # The list API exposes no modality flag; infer both directions from family.
+    in_mods = _google_input_modalities(name)
+    out_mods = _google_output_modalities(name)
     return _mk_summary(
         "google", name, m.get("displayName") or name,
-        in_n, in_mods, "text", dict(_ZERO_PRICING),
+        in_n, in_mods, out_mods, dict(_ZERO_PRICING),
         chat_capable=_chat_google(m),
         input_context_limit=in_n, output_context_limit=out_n,
     )

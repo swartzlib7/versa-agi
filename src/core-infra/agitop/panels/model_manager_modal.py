@@ -446,7 +446,10 @@ class ModelManagerModal(ModalScreen):
                            else f"[red]❌ {err}[/]")
         elif bid == "mm-model-add":
             self.app.push_screen(
-                CatalogFormModal(list(self._providers_by_slug.keys())),
+                CatalogFormModal(
+                    list(self._providers_by_slug.keys()),
+                    source_providers=_configured_source_providers(),
+                ),
                 callback=self._on_model_form,
             )
         elif bid == "mm-model-edit":
@@ -612,12 +615,13 @@ class ModelManagerModal(ModalScreen):
 class CatalogFormModal(ModalScreen):
     """Add or edit a single catalog model (writes [catalog_custom])."""
 
-    def __init__(self, providers, existing=None, **kwargs):
+    def __init__(self, providers, existing=None, source_providers=None, **kwargs):
         super().__init__(**kwargs)
         self._providers = providers or []
         self._existing = existing
         self._edit = existing is not None
         self._had_custom_params = False
+        self._source_providers = source_providers
 
     def compose(self) -> ComposeResult:
         e = self._existing or {}
@@ -641,7 +645,7 @@ class CatalogFormModal(ModalScreen):
                 yield Static("[bold]Add Model[/]", id="catalog-form-title")
                 yield Static("[dim]Import from provider API:[/]", id="catalog-form-import-label")
                 with Horizontal(id="catalog-form-header"):
-                    for prov in _configured_source_providers():
+                    for prov in (self._source_providers or []):
                         slug = prov["slug"]
                         brand = provider_brand_class(slug)
                         yield Button(
@@ -809,7 +813,7 @@ class CatalogFormModal(ModalScreen):
 
             slug = event.button.id[len("f-import-"):]
             label = next(
-                (p["label"] for p in _configured_source_providers() if p["slug"] == slug),
+                (p["label"] for p in (self._source_providers or []) if p["slug"] == slug),
                 slug,
             )
 

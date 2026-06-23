@@ -6,6 +6,13 @@ Provides data for the Tasks Panel and agictl.
 import sqlite3
 from typing import Optional
 
+# TD-SCRIPT-001: Reserved-name protection for shared system projects (mirrors
+# RESERVED_SYSTEM_PROJECTS in agictl/cli.py). AGi-Tools (the Script Task source)
+# and AGi-Knowledgebase must never be hard-deleted — a reserved-name set is the
+# simplest durable guard (no `protected` column / migration required).
+RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+
+
 class TasksReader:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -26,14 +33,18 @@ class TasksReader:
             return []
 
     def _execute(self, sql: str, params: tuple = ()) -> bool:
+        return self._insert(sql, params) is not None
+
+    def _insert(self, sql: str, params: tuple = ()) -> Optional[int]:
         try:
             conn = sqlite3.connect(self.db_path, timeout=5)
-            conn.execute(sql, params)
+            cur = conn.execute(sql, params)
+            rowid = cur.lastrowid
             conn.commit()
             conn.close()
-            return True
-        except Exception as e:
-            return False
+            return int(rowid) if rowid is not None else None
+        except Exception:
+            return None
 
     def get_active_tasks(self, limit: int = 15) -> list[dict]:
         """Get active tasks from v_active_tasks."""
@@ -252,15 +263,17 @@ class TasksReader:
             return 0
 
     def add_task(self, title: str, assigned_to: str = 'coa', project_id: Optional[int] = None,
-                 description: Optional[str] = None, priority: str = 'normal') -> bool:
+                 description: Optional[str] = None, priority: str = 'normal') -> Optional[int]:
         if project_id is not None:
-            return self._execute(
-                "INSERT INTO tasks (title, status, assigned_to, project_id, description, priority) VALUES (?, 'planned', ?, ?, ?, ?)",
-                (title, assigned_to, project_id, description, priority)
+            return self._insert(
+                "INSERT INTO tasks (title, status, assigned_to, project_id, description, priority, created_at, updated_at) "
+                "VALUES (?, 'planned', ?, ?, ?, ?, datetime('now'), datetime('now'))",
+                (title, assigned_to, project_id, description, priority),
             )
-        return self._execute(
-            "INSERT INTO tasks (title, status, assigned_to, description, priority) VALUES (?, 'planned', ?, ?, ?)",
-            (title, assigned_to, description, priority)
+        return self._insert(
+            "INSERT INTO tasks (title, status, assigned_to, description, priority, created_at, updated_at) "
+            "VALUES (?, 'planned', ?, ?, ?, datetime('now'), datetime('now'))",
+            (title, assigned_to, description, priority),
         )
 
     def update_task(self, task_id: int, updates: dict) -> bool:
@@ -334,12 +347,16 @@ class TasksReader:
         return rows[0]["c"] if rows else 0
 
     def snooze_task(self, task_id: int, minutes: int) -> bool:
-        """Defer a task by setting wake_after and due_date forward (status unchanged)."""
+        """Defer a task by setting wake_after and due_date forward (status unchanged).
+
+        Resets spawn_attempts so a proper snooze clears the overdue retry budget.
+        """
         return self._execute(
             "UPDATE tasks SET "
             "wake_after = datetime('now', '+' || ? || ' minutes'), "
             "due_date = datetime('now', '+' || ? || ' minutes'), "
             "wake_cycle_count = COALESCE(wake_cycle_count, 0) + 1, "
+            "spawn_attempts = 0, "
             "updated_at = datetime('now') "
             "WHERE id = ?",
             (str(minutes), str(minutes), task_id)
@@ -364,7 +381,11 @@ class TasksReader:
         count only when due_date has arrived AND wake_after is unset or elapsed.
 
         Note: Lifeline auto-freezes overdue *planned* and repeatedly-waking *waiting*
-        tasks after MAX_SPAWN_ATTEMPTS (3). Blocked tasks rely on snooze (wake_after)."""
+        tasks after MAX_SPAWN_ATTEMPTS (3). Blocked tasks rely on snooze (wake_after).
+
+        Deterministic task kinds (utility — TD-UTIL-001, script — TD-SCRIPT-001) are
+        excluded: they run via their own lifeline runners and must never spawn the
+        LLM agent."""
         rows = self._query(
             "SELECT COUNT(*) as c FROM tasks "
             "WHERE ("
@@ -374,6 +395,7 @@ class TasksReader:
             "      AND due_date <= datetime('now') "
             "      AND (wake_after IS NULL OR wake_after <= datetime('now')))"
             ") "
+            "AND (task_kind IS NULL OR task_kind NOT IN ('utility', 'script')) "
             "AND (assigned_to = ? OR assigned_to IS NULL)",
             (agent,)
         )
@@ -448,6 +470,10 @@ class TasksReader:
                 conn.close()
                 return False, f"Project '{row['name']}' must be archived before deletion (current: {row['status']})"
             name = row["name"]
+            # Reserved-name guard (TD-SCRIPT-001) — protected system projects cannot be deleted.
+            if name in RESERVED_SYSTEM_PROJECTS:
+                conn.close()
+                return False, f"'{name}' is a protected system project and cannot be deleted"
             
             # 1. Unlink tasks referencing this project
             conn.execute("UPDATE tasks SET project_id = NULL WHERE project_id = ?", (project_id,))
@@ -483,10 +509,11 @@ class TasksReader:
                 conn.close()
                 return False, f"Task '{row['title']}' must be done or cancelled before deletion (current: {row['status']})"
             title = row["title"]
+            conn.execute("DELETE FROM task_progress WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             conn.commit()
             conn.close()
-            return True, f"Deleted task #{task_id}: '{title}'"
+            return True, f"Deleted task #{task_id}: '{title}' (progress journal removed)"
         except Exception as e:
             return False, str(e)
 

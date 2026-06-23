@@ -142,7 +142,10 @@ if [ -n "${SKILLS_TO_SYNC}" ]; then
 
   while IFS= read -r SUB_AGENT; do
     [ -z "${SUB_AGENT}" ] && continue
-    /usr/local/bin/agictl agent deploy-skills "${SUB_AGENT}" 2>/dev/null || \
+    # deploy-skills mirrors into another agent's home (cross-user chown/rsync -a),
+    # which requires root. Lifeline runs as watchdog, so elevate via the
+    # NOPASSWD agictl-as-root sudoers grant (see /etc/sudoers.d/versa_agi_watchdog_root).
+    sudo -n /usr/local/bin/agictl agent deploy-skills "${SUB_AGENT}" 2>/dev/null || \
       log "WARN: Failed to deploy skills to ${SUB_AGENT}"
   done <<< "${SUB_AGENTS}"
 
@@ -156,7 +159,9 @@ if [ -n "${SKILLS_TO_SYNC}" ]; then
     [ -z "${SKILL_NAME}" ] && continue
     SKILL_SRC="${COA_WS}/.agent/skills/${SKILL_NAME}.md"
     if [ -f "${SKILL_SRC}" ]; then
-      if /usr/local/bin/agictl agent share-skill "${SKILL_SRC}" >/dev/null 2>&1; then
+      # share-skill writes into sub-agents' homes (cross-user chown), requiring
+      # root — elevate via the same NOPASSWD agictl-as-root grant.
+      if sudo -n /usr/local/bin/agictl agent share-skill "${SKILL_SRC}" >/dev/null 2>&1; then
         sqlite3 "${AGENTS_DB}" \
           "UPDATE skills SET status='synced', updated_at=datetime('now') WHERE name='${SKILL_NAME}';" 2>/dev/null || true
       else
@@ -564,6 +569,38 @@ ${AGENT_REGISTRY_CONTENT}"
 
   fi
 
+  # ─── Utility Tasks (TD-UTIL-001) — run due UM jobs without harness spawn ───
+  UM_ENABLED=$(sed -n '/^\[utility_models\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null | head -1)
+  if [ "${UM_ENABLED:-true}" = "true" ]; then
+    # Capture stderr too (2>&1) so a Python traceback is logged, not swallowed.
+    UM_RESULT=$(sudo -u "${AGENT_USER}" AGICTL_CONFIG="${SYSTEM_CONFIG}" AGICTL_TASKS_DB="${TASKS_DB}" \
+      /usr/local/bin/agictl utility run-due-tasks --agent "${AGENT_NAME}" --agent-workspace "${AGENT_PATH}" 2>&1 || true)
+    # Log when a run was attempted (count>=1, success or per-task failure) — note the
+    # optional space after the colon: agictl emits "count": N (json.dumps default).
+    if echo "${UM_RESULT}" | grep -qE '"count": *[1-9]'; then
+      log "UTILITY: ${AGENT_NAME} — ran due Utility Task(s): ${UM_RESULT}"
+    elif echo "${UM_RESULT}" | grep -qiE 'traceback|exception|"success": *false'; then
+      # Abnormal output (crash/error) that produced no run count — surface it.
+      log "UTILITY ERROR: ${AGENT_NAME} — ${UM_RESULT}"
+    fi
+  fi
+
+  # ─── Script Tasks (TD-SCRIPT-001) — run due .sh jobs without harness spawn ───
+  # Deterministic AGi-Tools scripts on a schedule/once-off. Runs as the owning
+  # agent (Ownership Principle §1.2 #4) so the return code and any files the
+  # script writes stay agent-owned (no chown). No LLM, no agent wake; the runner
+  # captures the rc and sends rc-driven VersaVoice alerts to the PU.
+  ST_ENABLED=$(sed -n '/^\[script_tasks\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null | head -1)
+  if [ "${ST_ENABLED:-true}" = "true" ]; then
+    ST_RESULT=$(sudo -u "${AGENT_USER}" AGICTL_CONFIG="${SYSTEM_CONFIG}" AGICTL_TASKS_DB="${TASKS_DB}" \
+      /usr/local/bin/agictl task run-due-scripts --agent "${AGENT_NAME}" --agent-workspace "${AGENT_PATH}" 2>&1 || true)
+    if echo "${ST_RESULT}" | grep -qE '"count": *[1-9]'; then
+      log "SCRIPT: ${AGENT_NAME} — ran due Script Task(s): ${ST_RESULT}"
+    elif echo "${ST_RESULT}" | grep -qiE 'traceback|exception|"success": *false'; then
+      log "SCRIPT ERROR: ${AGENT_NAME} — ${ST_RESULT}"
+    fi
+  fi
+
   # ─── Rate Limit File ─────────────────────────────────
   # Used only for API rate-limit (429) backoff — NOT for general cooldown.
   # The lockfile + pgrep at L142-159 prevents overlapping runs.
@@ -586,6 +623,24 @@ ${AGENT_REGISTRY_CONTENT}"
   SHOULD_WAKE="false"
   WAKE_REASON=""
   OVERDUE_RETRYABLE=0
+
+  # Utility Task completion wake (queued by agictl utility run-due-tasks)
+  UTILITY_WAKE_FILE="/var/lib/versa-agi/${AGENT_NAME}/utility_wake.json"
+  UTILITY_WAKE_CONTEXT=""
+  if [ -f "${UTILITY_WAKE_FILE}" ]; then
+    UTILITY_WAKE_CONTEXT=$(jq -r '
+      "## ── UTILITY TASK COMPLETED (review artifacts this cycle) ──\n" +
+      "Task #" + (.task_id|tostring) + " · run " + (.run_id // "?") + " · UM " + (.utility_model_id // "?") + "\n" +
+      "Output dir: " + (.output_dir // "?") + "\n" +
+      (if (.artifacts|length) > 0 then
+        "Artifacts:\n" + ([.artifacts[] | "- " + (.path // "?") + " (" + (.modality // "?") + ")"] | join("\n"))
+      else "No artifacts listed." end) + "\n" +
+      "[!] Use view/listen tools on artifact paths as needed. Append task progress when done.\n"
+    ' "${UTILITY_WAKE_FILE}" 2>/dev/null || true)
+    SHOULD_WAKE="true"
+    WAKE_REASON="utility task completed — review artifacts"
+    rm -f "${UTILITY_WAKE_FILE}" 2>/dev/null || true
+  fi
 
   # Check for work — unprocessed messages (VV + internal)
   # Internal messages use agent name as to_user_id, VV messages use sub_account_id
@@ -649,7 +704,13 @@ ${AGENT_REGISTRY_CONTENT}"
     # waking waiting tasks are retried up to TASK_MAX_SPAWN_ATTEMPTS times. After that,
     # tasks are auto-frozen and the Primary User is notified via VersaVoice.
     MAX_SPAWN_ATTEMPTS="${TASK_MAX_SPAWN_ATTEMPTS}"
-    OVERDUE_SPAWN_SQL="assigned_to='${AGENT_NAME}' AND ("
+    OVERDUE_SPAWN_SQL="assigned_to='${AGENT_NAME}'"
+    # Deterministic task kinds (utility — TD-UTIL-001, script — TD-SCRIPT-001) have
+    # their own runners and lifecycle. They must NEVER be subject to the agent-spawn
+    # overdue retry/auto-freeze (which is about waking the LLM agent): a long-running
+    # or in-progress deterministic run must not be frozen or trigger a spurious wake.
+    OVERDUE_SPAWN_SQL+=" AND (task_kind IS NULL OR task_kind NOT IN ('utility','script'))"
+    OVERDUE_SPAWN_SQL+=" AND ("
     OVERDUE_SPAWN_SQL+="(status='planned' AND due_date IS NOT NULL AND due_date <= datetime('now'))"
     OVERDUE_SPAWN_SQL+=" OR (status='waiting' AND due_date IS NOT NULL AND due_date <= datetime('now')"
     OVERDUE_SPAWN_SQL+=" AND (wake_after IS NULL OR wake_after <= datetime('now')))"
@@ -1335,6 +1396,7 @@ ${AWARENESS_TABLE}${AW_HIDDEN_HINT}"
       DUTIES_CONTEXT="${DUTIES_CONTEXT//&/\\&}"
       TASK_SUMMARY="${TASK_SUMMARY//&/\\&}"
       OVERDUE_CONTEXT="${OVERDUE_CONTEXT//&/\\&}"
+      UTILITY_WAKE_CONTEXT="${UTILITY_WAKE_CONTEXT//&/\\&}"
       CONTEXT_SUMMARY="${CONTEXT_SUMMARY//&/\\&}"
       CONVERSATION_CONTEXT="${CONVERSATION_CONTEXT//&/\\&}"
       SECURITY_WARNING="${SECURITY_WARNING//&/\\&}"
@@ -1354,6 +1416,7 @@ ${AWARENESS_TABLE}${AW_HIDDEN_HINT}"
       SYSTEM_PROMPT="${SYSTEM_PROMPT//\{DUTIES_CONTEXT\}/${DUTIES_CONTEXT}}"
       SYSTEM_PROMPT="${SYSTEM_PROMPT//\{TASK_SUMMARY\}/${TASK_SUMMARY}}"
       SYSTEM_PROMPT="${SYSTEM_PROMPT//\{OVERDUE_CONTEXT\}/${OVERDUE_CONTEXT}}"
+      SYSTEM_PROMPT="${SYSTEM_PROMPT//\{UTILITY_WAKE_CONTEXT\}/${UTILITY_WAKE_CONTEXT}}"
       SYSTEM_PROMPT="${SYSTEM_PROMPT//\{CONTEXT_SUMMARY\}/${CONTEXT_SUMMARY}}"
       SYSTEM_PROMPT="${SYSTEM_PROMPT//\{CONVERSATION_CONTEXT\}/${CONVERSATION_CONTEXT}}"
       SYSTEM_PROMPT="${SYSTEM_PROMPT//\{SECURITY_WARNING\}/${SECURITY_WARNING}}"
@@ -1386,7 +1449,7 @@ ${MERGED_CONTENT}
 
 ---
 
-${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
+${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${UTILITY_WAKE_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 
 ---
 
@@ -1405,7 +1468,7 @@ ${PRIMARY_USER_CONTEXT}
 
 ---
 
-${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
+${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${UTILITY_WAKE_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 
 ---
 

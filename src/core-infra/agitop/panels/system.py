@@ -14,6 +14,10 @@ from agitop.data.config_reader import ConfigReader
 from agitop.data.status_reader import StatusReader
 from agitop.data.agent_reader import AgentReader
 from agitop.widgets.atrium_display import AtriumPanel
+from agitop.widgets.braille_spinner import DOTS2_INTERVAL_S, dots2_markup, parse_cycle_agent
+from agitop.feature_flags import UTILITY_MODELS_UI_VISIBLE, SCRIPT_TASKS_UI_VISIBLE
+
+_DETERMINISTIC_UI_VISIBLE = UTILITY_MODELS_UI_VISIBLE or SCRIPT_TASKS_UI_VISIBLE
 
 
 class MetricLabel(Static):
@@ -40,6 +44,7 @@ class SystemPanel(Static):
         self.agent_reader = agent
         self._refresh_idx = 3  # Default 5m
         self._blink_until = 0.0
+        self._spinner_tick = 0
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="system-columns"):
@@ -66,6 +71,9 @@ class SystemPanel(Static):
                         yield MetricLabel(id="m-running")
                         yield MetricLabel(id="m-count")
                         yield MetricLabel(id="m-timer")
+                        if _DETERMINISTIC_UI_VISIBLE:
+                            yield MetricLabel(id="m-util-running")
+                            yield MetricLabel(id="m-util-lastrun")
                 yield AtriumPanel(id="sys-atrium", classes="sys-atrium-panel")
             with Vertical(classes="sys-col controls-col"):
                 yield Static(" [b]Controls[/b]", classes="col-header")
@@ -89,6 +97,7 @@ class SystemPanel(Static):
 
     def on_mount(self) -> None:
         self._clock_timer = self.set_interval(1, self._tick_clock)
+        self.set_interval(DOTS2_INTERVAL_S, self._tick_running_spinner)
         self._update_refresh_label()
         self.refresh_data()
 
@@ -104,7 +113,7 @@ class SystemPanel(Static):
             pass
 
     def _tick_clock(self) -> None:
-        """Update clock every second — blink at :00."""
+        """Update clock every second — blink at :00; refresh spawn timer when harness is up."""
         from datetime import timezone
         now = datetime.now()
         utc_now = datetime.now(timezone.utc)
@@ -124,6 +133,34 @@ class SystemPanel(Static):
             self.query_one("#m-clock").update(clock_markup)
         except Exception:
             pass
+
+        agent_running = self.system_reader.is_agent_process_running()
+        cycle_id = self.status_reader.get_current_cycle_id()
+        timer_str = "--:--"
+        if cycle_id and agent_running:
+            try:
+                epoch = int(cycle_id.rsplit("-", 1)[-1])
+                elapsed = int(time.time() - epoch)
+                if elapsed >= 3600:
+                    timer_str = f"{elapsed // 3600}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
+                else:
+                    timer_str = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+            except (ValueError, IndexError):
+                pass
+        self._update_spawn_label(agent_running, cycle_id, timer_str)
+
+    def _tick_running_spinner(self) -> None:
+        if not self.agent_reader:
+            return
+        running_count = sum(
+            1 for a in self.agent_reader.get_all_agents() if a.get("status") == "active"
+        )
+        self._spinner_tick += 1
+        self._update_util_running_label()
+        self._update_util_lastrun_label()
+        if running_count <= 0:
+            return
+        self._update_running_label(running_count)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -235,6 +272,11 @@ class SystemPanel(Static):
             except (ValueError, IndexError):
                 pass
 
+        self._update_running_label(running_count)
+        self._update_spawn_label(agent_running, cycle_id, timer_str)
+        self.query_one("#m-count").update(f" AGENTS: [bold]{total_agents}[/]")
+        self._update_util_running_label()
+        self._update_util_lastrun_label()
         self.query_one("#m-cpu").update(f" CPU:  [bold]{cpu}[/]")
         self.query_one("#m-disk").update(f" DISK: [bold]{disk}[/]")
         self.query_one("#m-mem").update(f" MEM:  [bold]{mem}[/]")
@@ -327,10 +369,90 @@ class SystemPanel(Static):
         else:
             self.query_one("#m-config-error").update("")
 
-        self.query_one("#m-running").update(
-            f" RUNNING: [bold]{running_count}[/]"
-        )
-        self.query_one("#m-count").update(f" AGENTS: [bold]{total_agents}[/]")
-        timer_color = "yellow" if agent_running else "dim"
-        self.query_one("#m-timer").update(f" SPAWN: [{timer_color}]{timer_str}[/{timer_color}]")
         self._update_control_labels()
+
+    def _update_running_label(self, running_count: int) -> None:
+        if running_count > 0:
+            self.query_one("#m-running").update(
+                dots2_markup(self._spinner_tick, f"RUNNING: [bold]{running_count}[/]", "cyan")
+            )
+        else:
+            self.query_one("#m-running").update(" RUNNING: [bold]0[/]")
+
+    def _update_util_running_label(self) -> None:
+        """Show in-flight headless Utility/Script task runs (lock-file count)."""
+        if not _DETERMINISTIC_UI_VISIBLE:
+            return
+        try:
+            util_n, script_n = self.system_reader.get_deterministic_run_counts()
+        except Exception:
+            util_n, script_n = 0, 0
+        total = util_n + script_n
+        try:
+            label = self.query_one("#m-util-running")
+        except Exception:
+            return
+        if total <= 0:
+            label.update(" TASKS: [bold]0[/]")
+            return
+        parts = []
+        if util_n:
+            parts.append(f"U:{util_n}")
+        if script_n:
+            parts.append(f"S:{script_n}")
+        detail = " ".join(parts)
+        label.update(
+            dots2_markup(self._spinner_tick, f"TASKS: [bold]{total}[/] [dim]({detail})[/]", "magenta")
+        )
+
+    @staticmethod
+    def _fmt_local_ts(utc_iso: str | None) -> str:
+        """Render a stored UTC-ISO timestamp as a compact user-local string."""
+        if not utc_iso:
+            return "—"
+        try:
+            from datetime import timezone
+            dt = datetime.fromisoformat(utc_iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local = dt.astimezone()
+            if local.date() == datetime.now().astimezone().date():
+                return local.strftime("%H:%M")
+            return local.strftime("%m-%d %H:%M")
+        except (ValueError, TypeError):
+            return "—"
+
+    def _update_util_lastrun_label(self) -> None:
+        """Show the last completed Utility/Script run times (user-local)."""
+        if not _DETERMINISTIC_UI_VISIBLE:
+            return
+        try:
+            util_ts, script_ts = self.system_reader.get_deterministic_last_runs()
+        except Exception:
+            util_ts, script_ts = None, None
+        try:
+            label = self.query_one("#m-util-lastrun")
+        except Exception:
+            return
+        label.update(
+            f" LAST: [cyan]U[/] {self._fmt_local_ts(util_ts)} · "
+            f"[cyan]S[/] {self._fmt_local_ts(script_ts)}"
+        )
+
+    def _update_spawn_label(
+        self,
+        agent_running: bool,
+        cycle_id: str | None,
+        timer_str: str,
+    ) -> None:
+        timer_color = "yellow" if agent_running else "dim"
+        if agent_running and cycle_id:
+            agent_name = parse_cycle_agent(cycle_id) or "agent"
+            label = f"{agent_name}  {timer_str}"
+            self.query_one("#m-timer").update(
+                f" SPAWN: [{timer_color}]{label}[/{timer_color}]"
+            )
+        else:
+            self.query_one("#m-timer").update(
+                f" SPAWN: [{timer_color}]{timer_str}[/{timer_color}]"
+            )

@@ -204,4 +204,44 @@ ORDER BY protected DESC, name ASC;
 VIEWS
 
 echo "Registry database initialized: ${DB_PATH}"
-echo "Tables: agents, skills, system_packages, model_feedback"
+echo "Tables: agents, skills, system_packages, model_feedback, catalog_modality_maps, utility_models"
+
+# ─── TD-UTIL-001: Utility Models + modality maps ───
+sqlite3 "${DB_PATH}" <<'UTIL'
+CREATE TABLE IF NOT EXISTS catalog_modality_maps (
+  catalog_key   TEXT PRIMARY KEY,
+  map_json      TEXT NOT NULL,
+  updated_at    DATETIME DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS utility_models (
+  id              TEXT PRIMARY KEY,
+  label           TEXT NOT NULL,
+  catalog_model   TEXT NOT NULL,
+  system_prompt   TEXT NOT NULL,
+  output_modality TEXT NOT NULL DEFAULT 'text',
+  output_path     TEXT,
+  run_as_agent    TEXT NOT NULL DEFAULT 'coa',
+  config_json     TEXT,
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  created_at      DATETIME DEFAULT (datetime('now')),
+  updated_at      DATETIME DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_utility_models_enabled ON utility_models(enabled);
+UTIL
+
+# Seed per-catalog modality maps (idempotent)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/../modality_maps.py" ]; then
+  python3 -c "
+import sys
+sys.path.insert(0, '${SCRIPT_DIR}/..')
+from modality_maps import seed_all_modality_maps
+n = seed_all_modality_maps(agents_db='${DB_PATH}')
+print(f'Modality maps seeded: {n} new row(s)')
+" 2>/dev/null || echo "WARN: modality map seed skipped"
+fi
+
+# TD-UTIL-001: agitop → agictl system-prompt staging (§IX /var/lib/versa-agi/)
+UM_STAGING="/var/lib/versa-agi/utility-models/staging"
+mkdir -p "${UM_STAGING}"

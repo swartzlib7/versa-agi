@@ -1123,6 +1123,11 @@ CYCLES_DB="/var/lib/versa-agi/coa/cycles.db"
 mkdir -p "/var/lib/versa-agi/coa"
 chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa"
 chmod 750 "/var/lib/versa-agi/coa"
+mkdir -p "/var/lib/versa-agi/utility-models/staging"
+chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/utility-models"
+chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/utility-models/staging"
+chmod 750 "/var/lib/versa-agi/utility-models"
+chmod 770 "/var/lib/versa-agi/utility-models/staging"
 
 # -- 6a. agents.db (Global Registry) --
 AGENTS_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_agents_db.sh"
@@ -1292,6 +1297,23 @@ chmod +x "${DEPLOYED_CORE_INFRA}/lifeline.sh"
 chmod +x "${DEPLOYED_CORE_INFRA}/watchdog.sh"
 chmod +x "${DEPLOYED_CORE_INFRA}/scripts/"*.sh 2>/dev/null || true
 ok "Scripts marked executable"
+
+# ─── ffmpeg — audio container encoding for Utility Models ───
+# Streaming audio output (OpenAI/OpenRouter) only supports raw PCM16; ffmpeg
+# transcodes the WAV we build from it into ogg/mp3/flac when a UM requests those
+# containers. WAV always works without ffmpeg, so this is best-effort, not fatal.
+if command -v ffmpeg &>/dev/null; then
+  ok "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1)"
+elif command -v apt-get &>/dev/null; then
+  info "Installing ffmpeg (audio container encoding)..."
+  if apt-get install -y -qq ffmpeg 2>/dev/null && command -v ffmpeg &>/dev/null; then
+    ok "ffmpeg installed"
+  else
+    warn "ffmpeg install failed — audio Utility Models will fall back to WAV output"
+  fi
+else
+  warn "ffmpeg not found and apt-get unavailable — audio Utility Models will output WAV only"
+fi
 
 # ─── Provision Global Python Virtual Environment (Harness) ───
 LIB_DIR="/usr/local/lib/versa-agi"
@@ -1689,6 +1711,17 @@ for item in inbox outbox; do
     chmod 750 "${DEPLOYED_COA_ENV}/.agent/${item}"
   fi
 done
+
+# Utility artifacts: coa:agi_agents 2775 — the default Utility Model output dir.
+# Utility runs execute as watchdog (the agictl wrapper elevates the agent caller
+# so the watchdog-owned provider-key file is readable for key injection), so the
+# dir MUST be group-writable by agi_agents (watchdog's group) or the artifact
+# write fails with EACCES. setgid makes generated artifacts inherit the
+# agi_agents group so the owning agent (also in agi_agents) can read/manage them.
+UTILITY_DEST="${DEPLOYED_COA_ENV}/.agent/utility"
+mkdir -p "${UTILITY_DEST}"
+chown "${COA_USER}:agi_agents" "${UTILITY_DEST}"
+chmod 2775 "${UTILITY_DEST}"
 
 # Skills: deploy shipped system skills from core-infra, then lock read-only
 SKILLS_SOURCE="${DEPLOYED_CORE_INFRA}/skills"
@@ -2414,9 +2447,14 @@ if [ "${UPDATE_MODE}" = true ]; then
     # with init_agents_db.sh (includes tool_output_token_budget, model_routing_enabled, etc.)
     if [ -f "${AGENTS_INIT}" ]; then
       bash "${AGENTS_INIT}" "${AGENTS_DB}" >/dev/null 2>&1 && \
-        ok "agents.db views refreshed (init_agents_db.sh)" || \
+        ok "agents.db views refreshed (init_agents_db.sh — utility_models + modality maps)" || \
         warn "agents.db view refresh failed"
     fi
+  fi
+  if [ -f "${TASKS_INIT}" ] && [ -f "${TASKS_DB}" ]; then
+    bash "${TASKS_INIT}" "${TASKS_DB}" >/dev/null 2>&1 && \
+      ok "tasks.db schema refreshed (init_tasks_db.sh — Utility Task columns)" || \
+      warn "tasks.db schema refresh failed"
   fi
   if [ -f "${CYCLES_INIT}" ] && [ -f "${CYCLES_DB}" ]; then
     bash "${CYCLES_INIT}" "${CYCLES_DB}" >/dev/null 2>&1 && \
@@ -2940,6 +2978,9 @@ apply_system_permissions() {
   mkdir -p "/var/lib/versa-agi/coa/view-cache"
   chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/view-cache && chmod 770 /var/lib/versa-agi/coa/view-cache
   [ -f "/var/lib/versa-agi/coa/agent_memory.db" ] && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/agent_memory.db && chmod 660 /var/lib/versa-agi/coa/agent_memory.db
+  mkdir -p "/var/lib/versa-agi/utility-models/staging"
+  chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/utility-models && chmod 750 /var/lib/versa-agi/utility-models
+  chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/utility-models/staging && chmod 770 /var/lib/versa-agi/utility-models/staging
   
   # ──────────────────────────────────────────────────────
   # §1. /var/log/ — Log Files

@@ -1,1 +1,1 @@
-"""Provider input/output drivers for multimodal harness messages."""
+"""Output drivers for Utility Model runs."""
