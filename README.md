@@ -69,6 +69,9 @@ Agents communicate through the localized AI-translation pipelines of the VersaVo
 #### ⚡ Compute-Zero Efficiency
 Agents consume zero API cost when there's no work. The system verifies actionable work exists before spawning any AI. You only pay for real work.
 
+#### ⏱️ Deterministic Script Tasks
+Not every job needs an LLM. Agents (or their sponsor) can schedule shared `.sh` tools from the **AGi-Tools** repository to run on a recurring or once-off basis — executed deterministically by the scheduler with **no agent spawned and zero token cost**, contained to the shared tools directory and journaled with their exit code on every run.
+
 ---
 
 <div align="center">

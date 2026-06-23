@@ -6,5 +6,5 @@ Output routing (Model Routing → Output Routing tab): set True when Phase F UI 
 """
 
 UTILITY_MODELS_UI_VISIBLE = False
-SCRIPT_TASKS_UI_VISIBLE = False
+SCRIPT_TASKS_UI_VISIBLE = True
 OUTPUT_ROUTING_UI_VISIBLE = False
