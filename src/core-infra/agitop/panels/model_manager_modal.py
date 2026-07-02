@@ -18,7 +18,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.containers import VerticalScroll, Horizontal, Vertical
-from textual.widgets import Static, Button, Input, DataTable, Select, Checkbox, TabbedContent, TabPane
+from textual.widgets import Static, Button, Input, Label, DataTable, Select, Checkbox, TabbedContent, TabPane
 
 from agitop.panels.modality_format import format_io_modalities
 from agitop.widgets.provider_brand_icon import provider_brand_class, provider_import_button_label
@@ -339,7 +339,6 @@ class ModelManagerModal(ModalScreen):
                 yield Button("↩ Reset", id="mm-reset", variant="warning")
                 yield Button("✖ Remove", id="mm-remove", variant="error")
                 yield Button("＋ Add", id="mm-add", variant="success")
-                yield Button("🔄 Sync", id="mm-sync", variant="primary")
                 yield Button("Close", classes="dismiss-btn", variant="default", id="mm-close")
 
     def on_mount(self) -> None:
@@ -433,11 +432,6 @@ class ModelManagerModal(ModalScreen):
         bid = event.button.id
         if bid == "mm-close":
             self._close()
-        elif bid == "mm-sync":
-            ok, _data, err = _run_agictl(["model", "sync"])
-            self._dirty = self._dirty or ok
-            self._feedback("[green]✅ Synced derived config + paths.env[/]" if ok
-                           else f"[red]❌ {err}[/]")
         # ── Context-sensitive actions (based on active tab) ──
         elif bid in ("mm-add", "mm-edit", "mm-reset", "mm-remove"):
             tabs = self.query_one("#model-manager-tabs", TabbedContent)
@@ -906,6 +900,37 @@ class ProviderFormModal(ModalScreen):
     edits the existing row. The slug is immutable once set.
     """
 
+    CSS = """
+    ProviderFormModal { align: center middle; background: $surface 80%; }
+    #pf-dialog {
+        width: 105;
+        height: 40%;
+        padding: 1 2;
+        border: thick $accent;
+        background: $surface;
+    }
+    #pf-title { height: auto; margin-bottom: 1; border-bottom: solid $accent; padding-bottom: 1; }
+    .pf-grid-row {
+        height: auto;
+        layout: grid;
+        grid-size: 2;
+        grid-gutter: 0 3;
+        grid-rows: auto;
+    }
+    .pf-field { height: auto; padding: 0; }
+    .pf-field Input, .pf-field Select, .pf-field Checkbox { width: 100%; }
+    .pf-label { margin-top: 1; color: $text-muted; }
+    .pf-full { height: auto; margin-top: 1; }
+    #pf-error { height: auto; }
+    .pf-actions {
+        dock: bottom;
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+    .pf-actions Button { width: 1fr; height: 3; margin: 0 1; }
+    """
+
     def __init__(self, existing=None, **kwargs):
         super().__init__(**kwargs)
         self._existing = existing
@@ -918,21 +943,32 @@ class ProviderFormModal(ModalScreen):
         cls_opts = list(_COMMON_LC_CLASSES)
         if cls_val not in [v for _, v in cls_opts]:
             cls_opts.append((cls_val, cls_val))
-        with VerticalScroll(id="msg-dialog"):
-            yield Static(f"[bold]{title}[/]", id="msg-dialog-header")
-            yield Static("[b]Slug[/]  [dim](e.g. mistral, deepseek)[/]")
-            yield Input(value=e.get("slug", ""), placeholder="provider slug", id="p-slug",
-                        disabled=self._edit)
-            yield Static("[b]Display name[/]")
-            yield Input(value=e.get("label", ""), placeholder="e.g. Mistral", id="p-label")
-            yield Static("[b]LangChain class[/]")
-            yield Select(cls_opts, value=cls_val, allow_blank=False, id="p-class")
-            yield Checkbox("Enabled", value=e.get("enabled", False), id="p-enabled")
-            yield Static(
-                "[dim]Set the API key afterwards via the 🔑 API Keys modal "
-                "(agictl system set-key).[/]")
-            yield Static("", id="p-error")
-            with Horizontal(id="msg-dialog-actions"):
+        with Vertical(id="pf-dialog"):
+            yield Static(f"[bold]{title}[/]", id="pf-title")
+            # Row 1: Slug | Display Name
+            with Horizontal(classes="pf-grid-row"):
+                with Vertical(classes="pf-field"):
+                    yield Label("[b]Slug[/]  [dim](e.g. mistral)[/]", classes="pf-label")
+                    yield Input(value=e.get("slug", ""), placeholder="provider slug",
+                                id="p-slug", disabled=self._edit)
+                with Vertical(classes="pf-field"):
+                    yield Label("[b]Display Name[/]", classes="pf-label")
+                    yield Input(value=e.get("label", ""), placeholder="e.g. Mistral",
+                                id="p-label")
+            # Row 2: LangChain Class | Enabled
+            with Horizontal(classes="pf-grid-row"):
+                with Vertical(classes="pf-field"):
+                    yield Label("[b]LangChain Class[/]", classes="pf-label")
+                    yield Select(cls_opts, value=cls_val, allow_blank=False, id="p-class")
+                with Vertical(classes="pf-field"):
+                    yield Label("", classes="pf-label")  # spacer to align
+                    yield Checkbox("Enabled", value=e.get("enabled", False), id="p-enabled")
+            with Vertical(classes="pf-full"):
+                yield Static(
+                    "[dim]Set the API key afterwards via the 🔑 API Keys modal "
+                    "(agictl system set-key).[/]")
+            yield Static("", id="pf-error")
+            with Horizontal(classes="pf-actions"):
                 yield Button("Save", variant="success", id="p-save")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="p-cancel")
 
@@ -943,7 +979,7 @@ class ProviderFormModal(ModalScreen):
             slug = self.query_one("#p-slug", Input).value.strip()
             label = self.query_one("#p-label", Input).value.strip()
             if not slug or not label:
-                self.query_one("#p-error", Static).update(
+                self.query_one("#pf-error", Static).update(
                     "[red]Slug and display name are required.[/]")
                 return
             self.dismiss({

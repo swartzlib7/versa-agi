@@ -2534,6 +2534,7 @@ ModelManagerModal {
 #model-manager-shell {
     width: 59%;
     height: 74%;
+    min-width: 60;
     padding: 1 2;
     background: $surface;
     border: thick #1a73e8;
@@ -2555,12 +2556,12 @@ ModelManagerModal {
     height: auto;
     margin-top: 1;
     align: center middle;
-    overflow-x: hidden;
+    overflow-x: auto;
 }
 
 #model-manager-footer Button {
     width: 1fr;
-    min-width: 0;
+    min-width: 10;
     margin: 0 0 0 1;
     height: 3;
 }
