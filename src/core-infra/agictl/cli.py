@@ -2668,10 +2668,14 @@ def openrouter_status_cmd():
 @click.option("--addable-only/--all", "addable_only", default=True,
               help="Default: chat-capable models not already in catalog")
 @click.option("--table", "as_table", is_flag=True)
-def openrouter_list_cmd(addable_only, as_table):
+@click.option("--refresh", is_flag=True, help="Bypass the cache and repull live")
+def openrouter_list_cmd(addable_only, as_table, refresh):
     """List models from the OpenRouter API (public listing; no API key required)."""
+    import provider_model_cache
+    if refresh:
+        provider_model_cache.clear("openrouter")
     try:
-        index = fetch_openrouter_index_with_fallback()
+        index = fetch_openrouter_index_with_fallback(use_cache=True)
     except Exception as e:
         json_response(False, error=f"OpenRouter API unavailable: {e}")
         sys.exit(1)
@@ -2872,14 +2876,18 @@ def source_status_cmd(provider):
 @click.option("--addable-only/--all", "addable_only", default=True,
               help="Default: chat-capable models not already in catalog")
 @click.option("--table", "as_table", is_flag=True)
-def source_list_cmd(provider, addable_only, as_table):
+@click.option("--refresh", is_flag=True, help="Bypass the cache and repull live")
+def source_list_cmd(provider, addable_only, as_table, refresh):
     """List models from a provider's Models API."""
     ok, reason = _pc.provider_configured(provider)
     if not ok:
         json_response(False, error=reason)
         sys.exit(1)
+    import provider_model_cache
+    if refresh:
+        provider_model_cache.clear(provider)
     try:
-        index = _pc.fetch_index(provider)
+        index = _pc.fetch_index(provider, use_cache=True)
     except Exception as e:
         json_response(False, error=f"{_pc.PROVIDER_LABEL.get(provider, provider)} API unavailable: {e}")
         sys.exit(1)
@@ -5999,6 +6007,24 @@ def task_run_due_scripts(agent_name, agent_workspace):
     from script_runner import ScriptRunError, resolve_agitools_path, run_script_task
     from agictl.utility_cli import _vv_utility_alert
 
+    def _queue_script_spawn_wake(spawn_agent: str, task_id: int, title: str, script: str, rc: int) -> None:
+        """Queue a lifeline wake for an agent after a successful Script Task."""
+        agent = (spawn_agent or "").strip()
+        if not agent:
+            return
+        wake_dir = f"/var/lib/versa-agi/{agent}"
+        os.makedirs(wake_dir, exist_ok=True)
+        wake_path = os.path.join(wake_dir, "utility_wake.json")
+        payload = {
+            "task_id": task_id,
+            "task_kind": "script",
+            "title": title,
+            "script": script,
+            "returncode": rc,
+        }
+        with open(wake_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
     due = list_due_script_tasks(agent_name)
     if not due:
         json_response(True, agent=agent_name, count=0, runs=[])
@@ -6069,10 +6095,19 @@ def task_run_due_scripts(agent_name, agent_workspace):
             outcome = "ok" if success else "FAILED"
             _vv_utility_alert(f"Script task #{tid} finished — {title} ({basename}): rc={rc} {outcome}")
 
-        results.append({
+        # Spawn agent on successful, non-recurring completion (mirrors Utility Tasks).
+        spawn_agent = (t.get("utility_spawn_agent") or "").strip()
+        if spawn_agent and success and not recurring:
+            _queue_script_spawn_wake(spawn_agent, tid, title, basename, rc)
+
+        result_entry = {
             "success": success, "task_id": tid, "returncode": rc,
             "recurring": recurring, "title": title,
-        })
+        }
+        if spawn_agent and success and not recurring:
+            result_entry["spawn_agent"] = spawn_agent
+            result_entry["spawn_queued"] = True
+        results.append(result_entry)
 
     json_response(True, agent=agent_name, count=len(results), runs=results)
 
@@ -10340,6 +10375,13 @@ utility_cli.register_modality_map_commands(
     json_response=json_response,
     require_pu_or_coa=_require_pu_or_coa,
     load_catalog=_load_catalog,
+)
+
+from agictl import organization_cli
+
+organization_cli.register(
+    cli,
+    json_response=json_response,
 )
 
 

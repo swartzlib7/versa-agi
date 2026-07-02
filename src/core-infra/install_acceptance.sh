@@ -243,7 +243,182 @@ install_acceptance_welcome() {
   install_acceptance_email_prompt
 }
 
-# ─── Below-min version block messaging ──────────────
+# ─── Feature flags (setup.ini [features]) ───────────
+# The optional dashboard surfaces are prompted here (right after the license /
+# update acceptance, D34). Each defaults DISABLED. Answers are captured into
+# VERSA_FEATURE_* env vars now (near the license, where the Organization
+# disclaimer belongs) and written to the deployed setup.ini [features] later by
+# install_acceptance_persist_features (after the file is deployed + reconciled).
+
+# Read one [features] key from the deployed setup.ini (default when absent).
+_install_acceptance_features_get() {
+  local key="$1" default="${2:-false}"
+  local ini="${INSTALL_ACCEPTANCE_SETUP_INI}"
+  [ -f "${ini}" ] || { echo "${default}"; return; }
+  awk -F= -v section="features" -v key="${key}" -v def="${default}" '
+    /^\[/ { gsub(/[][]/, "", $0); current=$0 }
+    current == section && $1 == key { v=substr($0, index($0, "=") + 1); gsub(/[ \t]/,"",v); print v; found=1; exit }
+    END { if (!found) print def }
+  ' "${ini}" 2>/dev/null || echo "${default}"
+}
+
+# yes/true → "true", else "false". Whitespace/newline tolerant (the value may
+# arrive with a stray newline from a command-substituted prompt).
+_install_acceptance_norm_bool() {
+  case "$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|y) echo "true" ;;
+    *) echo "false" ;;
+  esac
+}
+
+# Prompt [y/N] (or [Y/n] when current is enabled). Echoes true/false.
+_install_acceptance_feature_ask() {
+  local prompt="$1" current="$2" reply hint default_yes=false
+  if [ "${current}" = "true" ]; then
+    hint="[Y/n]"; default_yes=true
+  else
+    hint="[y/N]"
+  fi
+  read -p "  ${prompt} ${hint} " -n 1 -r reply
+  # Cosmetic line break after the single keypress — MUST go to stderr, not
+  # stdout, or it pollutes the command-substituted return value (a leading
+  # newline would make every "y" answer normalize to false).
+  echo "" >&2
+  if [ -z "${reply}" ]; then
+    [ "${default_yes}" = true ] && echo "true" || echo "false"
+    return
+  fi
+  [[ ${reply} =~ ^[Yy]$ ]] && echo "true" || echo "false"
+}
+
+# The Organization EXPERIMENTAL + sudo-power disclaimer (second confirmation).
+_install_acceptance_org_disclaimer() {
+  if declare -F text_box >/dev/null 2>&1; then
+    text_box "EXPERIMENTAL FEATURE — ORGANIZATION" \
+      "Would you like to enable the Organization surface? It's a" \
+      "read-write business/accounting workspace in agitop." \
+      "" \
+      "Heads-up:" \
+      "  • This feature is EXPERIMENTAL and evolving." \
+      "  • agitop runs as root, and the Organization writes" \
+      "    go through the same tools your agents use." \
+      "  • Anyone with \`sudo\` on this machine can therefore" \
+      "    read and change this data — and, more broadly," \
+      "    control Versa AGi, its agents, and all features." \
+      "" \
+      "Keep \`sudo\` access to people you trust. You can turn" \
+      "this off any time by re-running setup."
+  else
+    echo ""
+    echo "  EXPERIMENTAL FEATURE — ORGANIZATION"
+    echo "  Would you like to enable the Organization surface? It's an"
+    echo "  experimental read-write business/accounting workspace."
+    echo "  agitop runs as root and Organization writes use the same tools your"
+    echo "  agents use, so anyone with sudo on this machine can read/change this"
+    echo "  data and control Versa AGi. Keep sudo access to people you trust."
+    echo ""
+  fi
+}
+
+# A short explanatory note shown above a plain feature prompt (matches the
+# Organization pattern: explain what it is, then ask). First line gets a brand
+# bullet; continuation lines are passed plainly and printed aligned underneath.
+_install_acceptance_feature_note() {
+  : "${BCYAN:=}"
+  : "${RESET:=}"
+  echo -e "  ${BCYAN}•${RESET} $1"
+}
+
+_install_acceptance_feature_cont() {
+  echo -e "    $1"
+}
+
+# Prompt for every feature, capturing answers to VERSA_FEATURE_* env vars.
+install_acceptance_feature_prompts() {
+  if [ "${DRY_RUN:-false}" = true ]; then
+    info "[DRY-RUN] Would prompt for optional feature flags"
+    return 0
+  fi
+
+  if declare -F text_box >/dev/null 2>&1; then
+    text_box "OPTIONAL FEATURES" \
+      "Enable optional dashboard surfaces. Each defaults to OFF." \
+      "You can change these any time by re-running setup."
+  else
+    echo ""
+    echo "Optional features (each defaults to OFF; re-run setup to change):"
+    echo ""
+  fi
+
+  # Organization — disclaimer first, then the gated prompt.
+  local org_current
+  org_current="$(_install_acceptance_features_get organization_ui false)"
+  _install_acceptance_org_disclaimer
+  export VERSA_FEATURE_ORGANIZATION_UI="$(_install_acceptance_feature_ask \
+    "Would you like to enable the Organization surface?" "${org_current}")"
+
+  # Plain features — a short note explaining each, then the prompt.
+  echo ""
+  _install_acceptance_feature_note \
+    "Utility Models — run fixed-prompt AI models that produce artifacts (text,"
+  _install_acceptance_feature_cont \
+    "image, audio) on a schedule or on demand, without a full agent cycle."
+  export VERSA_FEATURE_UTILITY_MODELS_UI="$(_install_acceptance_feature_ask \
+    "Enable Utility Models UI?" "$(_install_acceptance_features_get utility_models_ui false)")"
+
+  echo ""
+  _install_acceptance_feature_note \
+    "Script Tasks — schedule deterministic shell scripts from your AGi-Tools"
+  _install_acceptance_feature_cont \
+    "repo, run by lifeline on a cadence (no agent spawn, no LLM)."
+  export VERSA_FEATURE_SCRIPT_TASKS_UI="$(_install_acceptance_feature_ask \
+    "Enable Script Tasks UI?" "$(_install_acceptance_features_get script_tasks_ui false)")"
+
+  echo ""
+  _install_acceptance_feature_note \
+    "Output Routing — route an agent's output generation (e.g. image/audio) to"
+  _install_acceptance_feature_cont \
+    "a chosen model per cycle (the Output Routing tab in Model Routing)."
+  export VERSA_FEATURE_OUTPUT_ROUTING_UI="$(_install_acceptance_feature_ask \
+    "Enable Output Routing UI?" "$(_install_acceptance_features_get output_routing_ui false)")"
+}
+
+# Write a single [features] key into the deployed setup.ini (create section if
+# absent), then sync to source. Used by install_acceptance_persist_features.
+_install_acceptance_features_set() {
+  local key="$1" value="$2"
+  local ini="${INSTALL_ACCEPTANCE_SETUP_INI}"
+  [ -f "${ini}" ] || return 1
+  if ! grep -q '^\[features\]' "${ini}" 2>/dev/null; then
+    printf '\n[features]\n' >> "${ini}"
+  fi
+  if awk -v k="${key}" '
+      /^\[/ { gsub(/[][]/,"",$0); sec=$0 }
+      sec=="features" && $0 ~ "^"k"=" { found=1 }
+      END { exit(found?0:1) }' "${ini}" 2>/dev/null; then
+    sed -i "/^\[features\]/,/^\[/ s|^${key}=.*|${key}=${value}|" "${ini}"
+  else
+    sed -i "/^\[features\]/a ${key}=${value}" "${ini}"
+  fi
+}
+
+# Persist the captured feature choices to the deployed setup.ini [features].
+# Called AFTER setup.ini is deployed + reconciled, so the values are the final
+# word (and the next --update reconcile carries them forward — they are not
+# stock-owned keys).
+install_acceptance_persist_features() {
+  if [ "${DRY_RUN:-false}" = true ]; then
+    info "[DRY-RUN] Would persist feature flags to setup.ini"
+    return 0
+  fi
+  [ -n "${VERSA_FEATURE_ORGANIZATION_UI:-}" ] || return 0   # prompts never ran
+  _install_acceptance_features_set organization_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_ORGANIZATION_UI:-false}")"
+  _install_acceptance_features_set utility_models_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_UTILITY_MODELS_UI:-false}")"
+  _install_acceptance_features_set script_tasks_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_SCRIPT_TASKS_UI:-false}")"
+  _install_acceptance_features_set output_routing_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_OUTPUT_ROUTING_UI:-false}")"
+  _install_acceptance_sync_source_ini
+  ok "Feature flags saved to setup.ini [features]"
+}
 _install_acceptance_emit_version_block() {
   local result="$1"
   local line first=true
@@ -504,10 +679,20 @@ _install_acceptance_write_json() {
     ip_value=""
   fi
 
+  # Feature set — the operator's enabled/disabled choices ride along with the
+  # registration data (D34). Prefer the just-captured VERSA_FEATURE_* answers;
+  # fall back to the persisted setup.ini [features] values.
+  local feat_org feat_util feat_script feat_output
+  feat_org="$(_install_acceptance_norm_bool "${VERSA_FEATURE_ORGANIZATION_UI:-$(_install_acceptance_features_get organization_ui false)}")"
+  feat_util="$(_install_acceptance_norm_bool "${VERSA_FEATURE_UTILITY_MODELS_UI:-$(_install_acceptance_features_get utility_models_ui false)}")"
+  feat_script="$(_install_acceptance_norm_bool "${VERSA_FEATURE_SCRIPT_TASKS_UI:-$(_install_acceptance_features_get script_tasks_ui false)}")"
+  feat_output="$(_install_acceptance_norm_bool "${VERSA_FEATURE_OUTPUT_ROUTING_UI:-$(_install_acceptance_features_get output_routing_ui false)}")"
+
   mkdir -p /etc/versa-agi
-  python3 - "${INSTALL_ACCEPTANCE_JSON}" <<'PY' "${event}" "${install_mode}" "${accepted_at}" "${email}" "${versavoice_enabled}" "${version}" "${platform}" "${hostname_hash}" "${ip_value}"
+  python3 - "${INSTALL_ACCEPTANCE_JSON}" <<'PY' "${event}" "${install_mode}" "${accepted_at}" "${email}" "${versavoice_enabled}" "${version}" "${platform}" "${hostname_hash}" "${ip_value}" "${feat_org}" "${feat_util}" "${feat_script}" "${feat_output}"
 import json, sys
-out, event, install_mode, accepted_at, email, vv, version, platform, hostname_hash, ip_value = sys.argv[1:11]
+(out, event, install_mode, accepted_at, email, vv, version, platform,
+ hostname_hash, ip_value, feat_org, feat_util, feat_script, feat_output) = sys.argv[1:15]
 payload = {
     "event": event,
     "product": "versa-agi",
@@ -522,6 +707,12 @@ payload = {
     "platform": platform,
     "hostname_hash": hostname_hash,
     "versavoice_enabled": vv == "true",
+    "features": {
+        "organization_ui": feat_org == "true",
+        "utility_models_ui": feat_util == "true",
+        "script_tasks_ui": feat_script == "true",
+        "output_routing_ui": feat_output == "true",
+    },
 }
 with open(out, "w", encoding="utf-8") as f:
     json.dump(payload, f, indent=2)
@@ -640,8 +831,8 @@ install_acceptance_record_update() {
 
   _install_acceptance_ini_set acceptance_file "${INSTALL_ACCEPTANCE_JSON}"
 
-  # Already registered — preserve submitted flag; heartbeat only when >7 days stale
-  if [ "${already_submitted}" = "true" ]; then
+  # Already registered (and not an update event) — preserve submitted flag; heartbeat only when >7 days stale
+  if [ "${already_submitted}" = "true" ] && [ "${event}" != "update_acceptance" ]; then
     last_heartbeat="$(_install_acceptance_ini_get registration_last_heartbeat_at "")"
     if [ -z "${last_heartbeat}" ]; then
       heartbeat_needed=true

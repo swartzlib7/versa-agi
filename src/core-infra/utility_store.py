@@ -206,7 +206,8 @@ def list_due_script_tasks(assignee: str) -> list[dict[str, Any]]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT id, title, assigned_to, script_path, script_parameters,
-                  script_interval_seconds, utility_start_alert, utility_stop_alert
+                  script_interval_seconds, utility_start_alert, utility_stop_alert,
+                  utility_spawn_agent
            FROM tasks
            WHERE task_kind='script'
              AND assigned_to=?

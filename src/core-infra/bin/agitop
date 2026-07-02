@@ -45,7 +45,7 @@ TASKS_DB_PATH="/var/lib/versa-agi/coa/tasks.db"
 CYCLES_DB_PATH="/var/lib/versa-agi/coa/cycles.db"
 CONFIG_PATH="/etc/versa-agi/coa_config.json"
 CYCLE_ID_PATH="/var/lib/versa-agi/coa/.current_cycle_id"
-
+ORGANIZATION_DB_PATH="/var/lib/versa-agi/organization.db"
 # ─── Check Python + Textual ──────────────────────
 PYTHON=""
 if [ -x "/opt/versa-agi/venv/bin/python3" ]; then
@@ -75,4 +75,5 @@ exec ${PYTHON} -m agitop.app \
     --cycles-db "${CYCLES_DB_PATH}" \
     --config "${CONFIG_PATH}" \
     --cycle-id "${CYCLE_ID_PATH}" \
+    --organization-db "${ORGANIZATION_DB_PATH}" \
     "$@"

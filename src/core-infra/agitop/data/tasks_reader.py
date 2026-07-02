@@ -363,9 +363,9 @@ class TasksReader:
         )
 
     def get_connections(self) -> list[dict]:
-        """Get known connections."""
+        """Get known connections (including date_of_birth for org-staff display)."""
         return self._query(
-            "SELECT uid, display_name, spoken_lang, relationship "
+            "SELECT uid, display_name, spoken_lang, relationship, date_of_birth "
             "FROM connections ORDER BY display_name"
         )
         

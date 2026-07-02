@@ -52,10 +52,10 @@ def _queue_utility_spawn_wake(spawn_agent: str, result: dict) -> None:
 
 def _vv_utility_alert(message: str) -> None:
     """Best-effort VersaVoice message to Primary User."""
-    system_config = "/etc/versa-agi/system_config.json"
+    config_path = os.environ.get("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
     sponsor_uid = ""
     try:
-        with open(system_config, encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             sponsor_uid = json.load(f).get("primary_user", {}).get("uid", "")
     except Exception:
         pass

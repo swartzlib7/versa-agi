@@ -218,7 +218,20 @@ def submit_registration(
     infra = read_registration_conf(reg_conf)
     installed_version = read_product_version()
 
-    if runtime.get("registration_submitted", "false").lower() == "true":
+    # Parse the local acceptance event type to identify update events
+    acceptance_path = Path(
+        runtime.get("acceptance_file", str(DEFAULT_ACCEPTANCE_FILE))
+    )
+    is_update = False
+    if acceptance_path.is_file():
+        try:
+            data = json.loads(acceptance_path.read_text(encoding="utf-8"))
+            if data.get("event") == "update_acceptance":
+                is_update = True
+        except Exception:
+            pass
+
+    if runtime.get("registration_submitted", "false").lower() == "true" and not is_update:
         cached = load_status()
         if cached.get("latest_version"):
             return _merge_status(
@@ -374,7 +387,7 @@ def submit_registration(
 def build_heartbeat_payload() -> dict:
     """Minimal weekly activity payload for lifeline heartbeat."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return {
+    payload = {
         "event": "heartbeat",
         "product": "versa-agi",
         "version": read_product_version(),
@@ -383,6 +396,21 @@ def build_heartbeat_payload() -> dict:
         "accepted_at_utc": now,
         "platform": _platform_id(),
     }
+    # Safely load the email from the install-acceptance.json if present
+    try:
+        runtime = read_runtime_state(SETUP_INI)
+        acceptance_path = Path(
+            runtime.get("acceptance_file", str(DEFAULT_ACCEPTANCE_FILE))
+        )
+        if acceptance_path.is_file():
+            data = json.loads(acceptance_path.read_text(encoding="utf-8"))
+            email = data.get("email")
+            if email:
+                payload["email"] = email
+                payload["email_provided"] = True
+    except Exception:
+        pass
+    return payload
 
 
 def send_heartbeat(

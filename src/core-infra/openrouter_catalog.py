@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+import provider_model_cache
 from model_catalog import (
     SETUP_INI_CANONICAL,
     catalog_row_to_value,
@@ -108,15 +109,27 @@ def fetch_openrouter_index(api_key: str = "") -> dict[str, dict]:
     return {m["id"]: m for m in data.get("data", []) if m.get("id")}
 
 
-def fetch_openrouter_index_with_fallback() -> dict[str, dict]:
-    """Try unauthenticated listing first; retry with stored API key on failure."""
+def fetch_openrouter_index_with_fallback(use_cache: bool = False) -> dict[str, dict]:
+    """Try unauthenticated listing first; retry with stored API key on failure.
+
+    When ``use_cache`` is set, a fresh on-disk cache entry (within the TTL) is
+    returned without any network call, and live results are written back to the
+    cache for subsequent reads.
+    """
+    if use_cache:
+        cached = provider_model_cache.load("openrouter")
+        if cached is not None:
+            return cached
     try:
-        return fetch_openrouter_index("")
+        index = fetch_openrouter_index("")
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
         key = resolve_openrouter_api_key()
-        if key:
-            return fetch_openrouter_index(key)
-        raise
+        if not key:
+            raise
+        index = fetch_openrouter_index(key)
+    if use_cache:
+        provider_model_cache.store("openrouter", index)
+    return index
 
 
 def enrich_catalog_dict(row: dict, or_model: dict, *, preserve_label: bool = True) -> dict:

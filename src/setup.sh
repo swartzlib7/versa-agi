@@ -26,6 +26,16 @@
 
 set -euo pipefail
 
+# ─── Failure diagnostics ─────────────────────────────
+# `set -e` aborts on the first uncaught non-zero command but prints NOTHING by
+# default, so a failed step looks like the script silently "died". This ERR trap
+# (with `set -E` so it is inherited by functions/subshells) reports the exact
+# line and command that failed, turning a silent abort into an actionable error.
+# It only fires for commands that actually trip `set -e` (not those guarded by
+# if/while/||/&&), so it never changes control flow — it just adds a message.
+set -E
+trap '_setup_rc=$?; printf "\n\033[0;31m  ✗ Setup aborted (exit %s)\033[0m at line %s: %s\n" "${_setup_rc}" "${LINENO}" "${BASH_COMMAND}" >&2' ERR
+
 # ─── UI Library ──────────────────────────────────────
 SCRIPT_DIR_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UI_LIB="${SCRIPT_DIR_EARLY}/core-infra/ui_lib.sh"
@@ -432,6 +442,14 @@ else
     install_acceptance_version_gate
     echo ""
   fi
+fi
+
+# ─── Feature Flags Prompt (D34) — right after acceptance ─
+# Prompts the optional dashboard surfaces (Organization shows the EXPERIMENTAL +
+# sudo-power disclaimer as a second confirmation here, by the license). Answers
+# are captured to VERSA_FEATURE_* now and persisted to setup.ini after reconcile.
+if declare -F install_acceptance_feature_prompts >/dev/null 2>&1; then
+  install_acceptance_feature_prompts
 fi
 
 # ─── CRON Pause (--update only, after acceptance gate) ─
@@ -1118,16 +1136,19 @@ section "Step 6 — SQLite Databases"
 MESSAGES_DB="/var/lib/versa-agi/messages.db"
 TASKS_DB="/var/lib/versa-agi/coa/tasks.db"
 CYCLES_DB="/var/lib/versa-agi/coa/cycles.db"
+ORGANIZATION_DB="/var/lib/versa-agi/organization.db"
 
 # Create Database Directories
 mkdir -p "/var/lib/versa-agi/coa"
 chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa"
 chmod 750 "/var/lib/versa-agi/coa"
+# Utility Models config/staging — group agi_agents (fleet-wide; runner elevates to
+# watchdog). Re-asserted authoritatively in apply_system_permissions (FS manifest).
 mkdir -p "/var/lib/versa-agi/utility-models/staging"
-chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/utility-models"
-chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/utility-models/staging"
+chown "${WATCHDOG_USER}:agi_agents" "/var/lib/versa-agi/utility-models"
+chown "${WATCHDOG_USER}:agi_agents" "/var/lib/versa-agi/utility-models/staging"
 chmod 750 "/var/lib/versa-agi/utility-models"
-chmod 770 "/var/lib/versa-agi/utility-models/staging"
+chmod 2770 "/var/lib/versa-agi/utility-models/staging"
 
 # -- 6a. agents.db (Global Registry) --
 AGENTS_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_agents_db.sh"
@@ -1183,6 +1204,27 @@ if [ -f "${CYCLES_INIT}" ]; then
   ok "cycles.db initialized at ${CYCLES_DB} (${WATCHDOG_USER}:${COA_USER} 660)"
 else
   error "cycles.db init script not found at ${CYCLES_INIT}"
+fi
+
+# -- 6e. organization.db (Wave Integration — shared by COA + STEWART) --
+# Single-file organization-domain DB (SQLite FKs cannot span files). Idempotent
+# init runs on both install and update; STRICT tables + WAL + FK-enforced schema.
+ORGANIZATION_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_organization_db.sh"
+if [ -f "${ORGANIZATION_INIT}" ]; then
+  chmod +x "${ORGANIZATION_INIT}"
+  bash "${ORGANIZATION_INIT}" "${ORGANIZATION_DB}"
+  # Shared by COA (sync) and STEWART (ops), same pattern as messages.db.
+  chown "${WATCHDOG_USER}:${COA_USER}" "${ORGANIZATION_DB}"
+  chmod 660 "${ORGANIZATION_DB}"
+  # WAL sidecars, if present after init, inherit the same owner/mode.
+  for _sfx in -wal -shm; do
+    [ -f "${ORGANIZATION_DB}${_sfx}" ] && \
+      chown "${WATCHDOG_USER}:${COA_USER}" "${ORGANIZATION_DB}${_sfx}" && \
+      chmod 660 "${ORGANIZATION_DB}${_sfx}" || true
+  done
+  ok "organization.db initialized at ${ORGANIZATION_DB} (${WATCHDOG_USER}:${COA_USER} 660)"
+else
+  error "organization.db init script not found at ${ORGANIZATION_INIT}"
 fi
 
 # ─── Step 6c: Generate paths.env ─────────────────────
@@ -1634,7 +1676,10 @@ chmod 440 "${SUDOERS_PKG_INSTALLER}"
 ok "Sudoers: ${WATCHDOG_USER} can run apt-get install as root (NOPASSWD)"
 
 # COA Autonomous Mode — full sudo access for gifted/dedicated hardware
-COA_AUTONOMOUS=$(grep -Po '^\s*autonomous\s*=\s*\K\S+' "${INI_FILE}" 2>/dev/null | head -1)
+# `|| true`: a `grep | head` pipeline can return non-zero under `set -o pipefail`
+# (no match → grep exits 1; or head closing the pipe early → grep SIGPIPE 141),
+# which would abort the script. The empty/absent result is handled below.
+COA_AUTONOMOUS=$(grep -Po '^\s*autonomous\s*=\s*\K\S+' "${INI_FILE}" 2>/dev/null | head -1 || true)
 SUDOERS_COA_AUTONOMOUS="/etc/sudoers.d/versa_agi_coa_autonomous"
 if [ "${COA_AUTONOMOUS}" = "true" ]; then
   echo "${COA_USER} ALL=(ALL) NOPASSWD: ALL" > "${SUDOERS_COA_AUTONOMOUS}"
@@ -1658,11 +1703,18 @@ if [ -f "${SYSCONFIG_SOURCE}" ]; then
     EXISTING_ID=$(jq -c '.identity // empty' "${SYSCONFIG_DEST}" 2>/dev/null || echo "")
     
     cp "${SYSCONFIG_SOURCE}" "${SYSCONFIG_DEST}.tmp"
+    # Best-effort merge of preserved keys. Use `if jq …; then mv; fi` (not
+    # `jq … && mv`) so a jq failure does not abort the script under `set -e` —
+    # a malformed value just means that key is not carried forward.
     if [ -n "${EXISTING_VV}" ]; then
-      jq --argjson vv "${EXISTING_VV}" '.versavoice = $vv' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2" && mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+      if jq --argjson vv "${EXISTING_VV}" '.versavoice = $vv' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2"; then
+        mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+      fi
     fi
     if [ -n "${EXISTING_ID}" ]; then
-      jq --argjson id "${EXISTING_ID}" '.identity = $id' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2" && mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+      if jq --argjson id "${EXISTING_ID}" '.identity = $id' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2"; then
+        mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+      fi
     fi
     mv "${SYSCONFIG_DEST}.tmp" "${SYSCONFIG_DEST}"
   else
@@ -2869,6 +2921,15 @@ fi  # end UPDATE_MODE post-deploy steps
   echo ""
 fi
 
+# ─── Feature flags persistence (D34) — after reconcile ──
+# reconcile-config has just (re)written the deployed setup.ini from the template
+# (carrying user values forward). Write the operator's captured feature choices
+# now so they are the final word; the next --update's reconcile preserves them
+# ([features] keys are not stock-owned).
+if declare -F install_acceptance_persist_features >/dev/null 2>&1; then
+  install_acceptance_persist_features
+fi
+
 # ─── Step 11: Sentinel Service (reactive file watcher) ──
 section "Step 11 — Sentinel Service"
 
@@ -2978,9 +3039,20 @@ apply_system_permissions() {
   mkdir -p "/var/lib/versa-agi/coa/view-cache"
   chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/view-cache && chmod 770 /var/lib/versa-agi/coa/view-cache
   [ -f "/var/lib/versa-agi/coa/agent_memory.db" ] && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/agent_memory.db && chmod 660 /var/lib/versa-agi/coa/agent_memory.db
+  # Utility Models — config/staging. The runner elevates to watchdog (provider-key
+  # injection), so watchdog owns; group is agi_agents (a Utility Task may be
+  # assigned to ANY agent), so the whole fleet is consistent — coa keeps access
+  # (coa ∈ agi_agents). setgid on staging so intermediate artifacts inherit the
+  # shared group.
   mkdir -p "/var/lib/versa-agi/utility-models/staging"
-  chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/utility-models && chmod 750 /var/lib/versa-agi/utility-models
-  chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/utility-models/staging && chmod 770 /var/lib/versa-agi/utility-models/staging
+  chown "${WATCHDOG_USER}:agi_agents" /var/lib/versa-agi/utility-models && chmod 750 /var/lib/versa-agi/utility-models
+  chown "${WATCHDOG_USER}:agi_agents" /var/lib/versa-agi/utility-models/staging && chmod 2770 /var/lib/versa-agi/utility-models/staging
+  # Utility Runs — run locks + runs.log/.last. Declared HERE (the FS manifest) so
+  # perms are deterministic rather than an accident of the runner's first mkdir.
+  # Runner writes as watchdog (owner); world-readable so the PU/dashboard can read
+  # the run log without elevation.
+  mkdir -p "/var/lib/versa-agi/utility-runs"
+  chown "${WATCHDOG_USER}:agi_agents" /var/lib/versa-agi/utility-runs && chmod 755 /var/lib/versa-agi/utility-runs
   
   # ──────────────────────────────────────────────────────
   # §1. /var/log/ — Log Files

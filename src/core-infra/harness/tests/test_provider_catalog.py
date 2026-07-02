@@ -143,5 +143,109 @@ class XaiImageMerge(unittest.TestCase):
         self.assertFalse(s["chat_capable"])
 
 
+import tempfile  # noqa: E402
+
+import provider_model_cache as pmc  # noqa: E402
+
+
+class ProviderModelCache(unittest.TestCase):
+    """The dated-file cache that lets the Models modal open instantly on repeat."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._prev_dir = os.environ.get("VERSA_MODEL_CACHE_DIR")
+        self._prev_ttl = os.environ.get("VERSA_MODEL_CACHE_TTL")
+        os.environ["VERSA_MODEL_CACHE_DIR"] = self._tmp.name
+        os.environ.pop("VERSA_MODEL_CACHE_TTL", None)
+
+    def tearDown(self):
+        for key, prev in (("VERSA_MODEL_CACHE_DIR", self._prev_dir),
+                          ("VERSA_MODEL_CACHE_TTL", self._prev_ttl)):
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
+        self._tmp.cleanup()
+
+    def test_miss_when_empty(self):
+        self.assertIsNone(pmc.load("openrouter"))
+
+    def test_store_then_load_roundtrip(self):
+        index = {"gpt-x": {"id": "gpt-x"}, "gpt-y": {"id": "gpt-y"}}
+        pmc.store("openrouter", index)
+        self.assertEqual(pmc.load("openrouter"), index)
+
+    def test_expired_entry_is_ignored(self):
+        pmc.store("google", {"gemini": {"id": "gemini"}})
+        # Zero-second TTL makes any stored entry instantly stale.
+        self.assertIsNone(pmc.load("google", ttl=0))
+
+    def test_ttl_from_env(self):
+        os.environ["VERSA_MODEL_CACHE_TTL"] = "0"
+        pmc.store("xai", {"grok": {"id": "grok"}})
+        self.assertIsNone(pmc.load("xai"))
+
+    def test_providers_are_isolated(self):
+        pmc.store("google", {"gemini": {"id": "gemini"}})
+        self.assertIsNone(pmc.load("openai"))
+
+    def test_clear_one_provider(self):
+        pmc.store("google", {"gemini": {"id": "gemini"}})
+        pmc.store("openai", {"gpt": {"id": "gpt"}})
+        pmc.clear("google")
+        self.assertIsNone(pmc.load("google"))
+        self.assertIsNotNone(pmc.load("openai"))
+
+    def test_clear_all(self):
+        pmc.store("google", {"gemini": {"id": "gemini"}})
+        pmc.store("openai", {"gpt": {"id": "gpt"}})
+        pmc.clear()
+        self.assertIsNone(pmc.load("google"))
+        self.assertIsNone(pmc.load("openai"))
+
+    def test_corrupt_file_is_a_miss(self):
+        os.makedirs(self._tmp.name, exist_ok=True)
+        with open(os.path.join(self._tmp.name, "openrouter.json"), "w") as fh:
+            fh.write("{not json")
+        self.assertIsNone(pmc.load("openrouter"))
+
+
+class FetchIndexUsesCache(unittest.TestCase):
+    """``fetch_index(slug, use_cache=True)`` short-circuits the network on a hit."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._prev_dir = os.environ.get("VERSA_MODEL_CACHE_DIR")
+        os.environ["VERSA_MODEL_CACHE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        if self._prev_dir is None:
+            os.environ.pop("VERSA_MODEL_CACHE_DIR", None)
+        else:
+            os.environ["VERSA_MODEL_CACHE_DIR"] = self._prev_dir
+        self._tmp.cleanup()
+
+    def test_live_fetch_is_cached_and_reused(self):
+        import dataclasses
+        calls = {"n": 0}
+        orig_src = pc._SOURCES["google"]
+
+        def counting_fetch(key):
+            calls["n"] += 1
+            return {"gemini-2.5-pro": {"name": "models/gemini-2.5-pro"}}
+
+        pc._SOURCES["google"] = dataclasses.replace(orig_src, fetch=counting_fetch)
+        prev_key = pc.resolve_provider_api_key
+        pc.resolve_provider_api_key = lambda slug: "dummy-key"
+        try:
+            first = pc.fetch_index("google", use_cache=True)
+            second = pc.fetch_index("google", use_cache=True)
+        finally:
+            pc._SOURCES["google"] = orig_src
+            pc.resolve_provider_api_key = prev_key
+        self.assertEqual(first, second)
+        self.assertEqual(calls["n"], 1)  # second call served from cache
+
+
 if __name__ == "__main__":
     unittest.main()

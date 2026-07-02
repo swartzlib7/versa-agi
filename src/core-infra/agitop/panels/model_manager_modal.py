@@ -327,25 +327,19 @@ class ModelManagerModal(ModalScreen):
                 with TabPane("Models", id="mm-models-tab"):
                     with Vertical(id="mm-models-pane"):
                         yield DataTable(id="mm-models-table")
-                        with Horizontal(id="mm-models-actions"):
-                            yield Button("✎ Edit", id="mm-model-edit", variant="primary")
-                            yield Button("↩ Reset", id="mm-model-reset", variant="warning")
-                            yield Button("✖ Remove", id="mm-model-remove", variant="error")
-                            yield Button("＋ Add Model", id="mm-model-add", variant="success")
 
                 with TabPane("Providers", id="mm-providers-tab"):
                     with Vertical(id="mm-providers-pane"):
                         yield DataTable(id="mm-providers-table")
-                        with Horizontal(id="mm-providers-actions"):
-                            yield Button("✎ Edit", id="mm-prov-edit", variant="primary")
-                            yield Button("↩ Reset", id="mm-prov-reset", variant="warning")
-                            yield Button("✖ Remove", id="mm-prov-remove", variant="error")
-                            yield Button("＋ Add Provider", id="mm-prov-add", variant="success")
 
             yield Static("", id="mm-feedback")
 
             with Horizontal(id="model-manager-footer"):
-                yield Button("🔄 Sync now", id="mm-sync", variant="primary")
+                yield Button("✎ Edit", id="mm-edit", variant="primary")
+                yield Button("↩ Reset", id="mm-reset", variant="warning")
+                yield Button("✖ Remove", id="mm-remove", variant="error")
+                yield Button("＋ Add", id="mm-add", variant="success")
+                yield Button("🔄 Sync", id="mm-sync", variant="primary")
                 yield Button("Close", classes="dismiss-btn", variant="default", id="mm-close")
 
     def on_mount(self) -> None:
@@ -444,60 +438,68 @@ class ModelManagerModal(ModalScreen):
             self._dirty = self._dirty or ok
             self._feedback("[green]✅ Synced derived config + paths.env[/]" if ok
                            else f"[red]❌ {err}[/]")
-        elif bid == "mm-model-add":
-            self.app.push_screen(
-                CatalogFormModal(
-                    list(self._providers_by_slug.keys()),
-                    source_providers=_configured_source_providers(),
-                ),
-                callback=self._on_model_form,
-            )
-        elif bid == "mm-model-edit":
-            self._edit_selected_model()
-        elif bid == "mm-model-reset":
-            key = self._selected_key("#mm-models-table")
-            if not key:
-                self._feedback("[yellow]Select a model row first.[/]")
-                return
-            m = self._models_by_key.get(key) or {}
-            if m.get("origin") == "custom":
-                self._feedback("[yellow]Custom models have no baseline — use Remove.[/]")
-                return
-            self._apply(["model", "catalog", "reset", key], f"Reset '{key}' to baseline")
-        elif bid == "mm-model-remove":
-            key = self._selected_key("#mm-models-table")
-            if not key:
-                self._feedback("[yellow]Select a model row first.[/]")
-                return
-            m = self._models_by_key.get(key) or {}
-            self.app.push_screen(
-                ModelRemoveConfirmModal(key, m.get("label", ""), m.get("origin", "")),
-                callback=lambda confirmed: self._on_model_remove_confirmed(confirmed, key),
-            )
-        elif bid == "mm-prov-add":
-            self.app.push_screen(ProviderFormModal(), callback=self._on_provider_form)
-        elif bid == "mm-prov-edit":
-            self._edit_selected_provider()
-        elif bid == "mm-prov-reset":
-            slug = self._selected_key("#mm-providers-table")
-            if not slug:
-                self._feedback("[yellow]Select a provider row first.[/]")
-                return
-            p = self._providers_by_slug.get(slug) or {}
-            if p.get("origin") == "custom":
-                self._feedback("[yellow]Custom providers have no baseline — use Remove.[/]")
-                return
-            self._apply(["provider", "reset", slug], f"Reset provider '{slug}' to baseline")
-        elif bid == "mm-prov-remove":
-            slug = self._selected_key("#mm-providers-table")
-            if not slug:
-                self._feedback("[yellow]Select a provider row first.[/]")
-                return
-            p = self._providers_by_slug.get(slug) or {}
-            self.app.push_screen(
-                ProviderRemoveConfirmModal(slug, p.get("label", ""), p.get("origin", "")),
-                callback=lambda confirmed: self._on_provider_remove_confirmed(confirmed, slug),
-            )
+        # ── Context-sensitive actions (based on active tab) ──
+        elif bid in ("mm-add", "mm-edit", "mm-reset", "mm-remove"):
+            tabs = self.query_one("#model-manager-tabs", TabbedContent)
+            on_models = tabs.active == "mm-models-tab"
+            if bid == "mm-add":
+                if on_models:
+                    self.app.push_screen(
+                        CatalogFormModal(
+                            list(self._providers_by_slug.keys()),
+                            source_providers=_configured_source_providers(),
+                        ),
+                        callback=self._on_model_form,
+                    )
+                else:
+                    self.app.push_screen(ProviderFormModal(), callback=self._on_provider_form)
+            elif bid == "mm-edit":
+                if on_models:
+                    self._edit_selected_model()
+                else:
+                    self._edit_selected_provider()
+            elif bid == "mm-reset":
+                if on_models:
+                    key = self._selected_key("#mm-models-table")
+                    if not key:
+                        self._feedback("[yellow]Select a model row first.[/]")
+                        return
+                    m = self._models_by_key.get(key) or {}
+                    if m.get("origin") == "custom":
+                        self._feedback("[yellow]Custom models have no baseline — use Remove.[/]")
+                        return
+                    self._apply(["model", "catalog", "reset", key], f"Reset '{key}' to baseline")
+                else:
+                    slug = self._selected_key("#mm-providers-table")
+                    if not slug:
+                        self._feedback("[yellow]Select a provider row first.[/]")
+                        return
+                    p = self._providers_by_slug.get(slug) or {}
+                    if p.get("origin") == "custom":
+                        self._feedback("[yellow]Custom providers have no baseline — use Remove.[/]")
+                        return
+                    self._apply(["provider", "reset", slug], f"Reset provider '{slug}' to baseline")
+            elif bid == "mm-remove":
+                if on_models:
+                    key = self._selected_key("#mm-models-table")
+                    if not key:
+                        self._feedback("[yellow]Select a model row first.[/]")
+                        return
+                    m = self._models_by_key.get(key) or {}
+                    self.app.push_screen(
+                        ModelRemoveConfirmModal(key, m.get("label", ""), m.get("origin", "")),
+                        callback=lambda confirmed: self._on_model_remove_confirmed(confirmed, key),
+                    )
+                else:
+                    slug = self._selected_key("#mm-providers-table")
+                    if not slug:
+                        self._feedback("[yellow]Select a provider row first.[/]")
+                        return
+                    p = self._providers_by_slug.get(slug) or {}
+                    self.app.push_screen(
+                        ProviderRemoveConfirmModal(slug, p.get("label", ""), p.get("origin", "")),
+                        callback=lambda confirmed: self._on_provider_remove_confirmed(confirmed, slug),
+                    )
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Clicking / Enter on a row opens its Edit form (codebase convention)."""

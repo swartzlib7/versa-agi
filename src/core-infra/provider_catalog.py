@@ -413,18 +413,31 @@ def supported_providers() -> tuple[str, ...]:
     return ALL_PROVIDERS
 
 
-def fetch_index(slug: str) -> dict[str, dict]:
-    """Return ``{model_id: raw provider dict}`` for a provider."""
+def fetch_index(slug: str, use_cache: bool = False) -> dict[str, dict]:
+    """Return ``{model_id: raw provider dict}`` for a provider.
+
+    With ``use_cache``, a fresh on-disk cache entry (within the TTL)
+    short-circuits the network call and live results are cached for reuse.
+    """
     if slug == "openrouter":
         from openrouter_catalog import fetch_openrouter_index_with_fallback
-        return fetch_openrouter_index_with_fallback()
+        return fetch_openrouter_index_with_fallback(use_cache=use_cache)
+    if use_cache:
+        import provider_model_cache
+        cached = provider_model_cache.load(slug)
+        if cached is not None:
+            return cached
     src = _SOURCES.get(slug)
     if not src:
         raise ValueError(f"Unsupported provider '{slug}'")
     key = resolve_provider_api_key(slug)
     if not key:
         raise RuntimeError(f"{PROVIDER_LABEL.get(slug, slug)} API key not set")
-    return src.fetch(key)
+    index = src.fetch(key)
+    if use_cache:
+        import provider_model_cache
+        provider_model_cache.store(slug, index)
+    return index
 
 
 def model_summary(slug: str, raw: dict) -> dict:

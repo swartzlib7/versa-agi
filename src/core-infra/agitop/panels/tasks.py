@@ -108,6 +108,19 @@ def _format_task_status(status: str) -> str:
     return f"[{color}]{icon} {key}[/]"
 
 
+TASK_KIND_DISPLAY = {
+    "standard": ("📋", "std", "dim"),
+    "utility": ("🤖", "util", "cyan"),
+    "script": ("📜", "scrp", "yellow"),
+}
+
+
+def _format_task_kind(kind: str | None) -> str:
+    key = (kind or "standard").strip().lower()
+    icon, label, color = TASK_KIND_DISPLAY.get(key, ("•", key[:4], "white"))
+    return f"[{color}]{icon} {label}[/]"
+
+
 class UtilityModelsDisabledModal(ModalScreen):
     """Explain that Utility Models must be enabled in System Settings."""
 
@@ -883,9 +896,10 @@ class TaskEditModal(ModalScreen):
                                                 id="task-edit-script-parameters",
                                             )
                                 # Row 4: Spawn agent on completion (left) | VV alerts (right, spaced)
+                                # Shared by Utility and Script — both support spawn + alerts.
                                 with Horizontal(classes="task-field-row"):
                                     with Vertical(classes="task-field-col"):
-                                        if UTILITY_MODELS_UI_VISIBLE:
+                                        if UTILITY_MODELS_UI_VISIBLE or SCRIPT_TASKS_UI_VISIBLE:
                                             yield Static("[b]Spawn agent on completion[/b]", classes="modal-form-label")
                                             yield Select(
                                                 spawn_options,
@@ -894,7 +908,7 @@ class TaskEditModal(ModalScreen):
                                                 allow_blank=False,
                                             )
                                     with Vertical(classes="task-field-col"):
-                                        if UTILITY_MODELS_UI_VISIBLE:
+                                        if UTILITY_MODELS_UI_VISIBLE or SCRIPT_TASKS_UI_VISIBLE:
                                             yield Static("[b]VV alerts[/b]", classes="modal-form-label")
                                             with Horizontal(id="task-utility-alert-row"):
                                                 with Vertical(classes="task-field-col task-vv-alert-col"):
@@ -955,7 +969,7 @@ class TaskEditModal(ModalScreen):
         _set("#task-edit-utility-model", um_on)
         _set("#task-edit-utility-input-files", um_on)
         _set("#task-edit-utility-output-override", um_on)
-        _set("#task-edit-utility-spawn-agent", um_on)
+        _set("#task-edit-utility-spawn-agent", special)
         _set("#task-edit-script-path", sc_on)
         _set("#task-edit-script-parameters", sc_on)
         _set("#task-edit-script-interval", sc_on)
@@ -1323,7 +1337,6 @@ class TaskEditModal(ModalScreen):
                 updates["utility_model_id"] = None
                 updates["utility_input_files"] = None
                 updates["utility_output_override"] = None
-                updates["utility_spawn_agent"] = None
 
             def _clear_script() -> None:
                 updates["script_path"] = None
@@ -1368,6 +1381,10 @@ class TaskEditModal(ModalScreen):
                 updates["script_interval_seconds"] = int(sc_interval_raw) if sc_interval_raw else None
                 updates["utility_start_alert"] = 1 if um_start else 0
                 updates["utility_stop_alert"] = 1 if um_stop else 0
+                sc_spawn = self.query_one("#task-edit-utility-spawn-agent", Select).value
+                updates["utility_spawn_agent"] = (
+                    sc_spawn if sc_spawn and sc_spawn != _SELECT_NONE else None
+                )
                 _clear_utility()
             elif mode == "standard":
                 # Only convert away from a deterministic kind whose UI is actually
@@ -1377,11 +1394,13 @@ class TaskEditModal(ModalScreen):
                     _clear_utility()
                     updates["utility_start_alert"] = 0
                     updates["utility_stop_alert"] = 0
+                    updates["utility_spawn_agent"] = None
                 elif prev_kind == "script" and SCRIPT_TASKS_UI_VISIBLE and self._script_feature_enabled:
                     updates["task_kind"] = "standard"
                     _clear_script()
                     updates["utility_start_alert"] = 0
                     updates["utility_stop_alert"] = 0
+                    updates["utility_spawn_agent"] = None
 
         if not updates:
             self.app.pop_screen()
@@ -1507,7 +1526,8 @@ class TasksPanel(Widget):
         self._update_title()
         self.table.cursor_type = "row"
         self.table.add_column("ID", width=5)
-        self.table.add_column("Title", width=50)
+        self.table.add_column("Type", width=8)
+        self.table.add_column("Title", width=48)
         self.table.add_column("Desc", width=40)
         self.table.add_column("Status", width=14)
         self.table.add_column("Spawns", width=7)
@@ -1631,6 +1651,7 @@ class TasksPanel(Widget):
 
             self.table.add_row(
                 task_id,
+                _format_task_kind(task.get("task_kind")),
                 str(task.get("title") or "Untitled"),
                 desc_truncated,
                 _format_task_status(str(task.get("status") or "planned")),

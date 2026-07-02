@@ -332,6 +332,17 @@ Checkbox.-on > .toggle--button {
     color: #222222;
 }
 
+/* Org "Lines" action button — paper tone, matching the LOG toggle. */
+.org-lines-btn {
+    background: #F5F5DC;
+    color: #333333;
+}
+
+.org-lines-btn:hover {
+    background: #EFEFD0;
+    color: #222222;
+}
+
 .ctrl-vacuum {
     background: #C0C0C0;
     color: #333333;
@@ -349,15 +360,38 @@ Checkbox.-on > .toggle--button {
 }
 
 /* ─── Agents Panel ─────────────────────────────── */
+/* Collapsible mirrors #system-controls-collapse: the border + dark background
+   live on the Collapsible itself so the COLLAPSED state still shows a bordered
+   dark box; the inner DataTable is borderless (the collapse provides the box). */
 
-#agents-panel {
+#agents-collapse {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    border: solid $accent;
+    background: $surface-darken-1;
+}
+
+#agents-collapse > CollapsibleTitle {
+    background: $surface-darken-1;
+    color: $accent-lighten-2;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#agents-collapse > Contents {
+    height: auto;
+    padding: 0;
+}
+
+#agents-collapse #agents-panel {
     width: 1fr;
     height: auto;
     min-height: 5;
     max-height: 10;
-    margin-top: 1;
-    border: solid $accent;
-    padding: 0 1;
+    border: none;
+    margin: 0;
+    padding: 1;
     background: $surface-darken-1;
 }
 
@@ -391,6 +425,58 @@ Checkbox.-on > .toggle--button {
     height: 3;
 }
 
+/* Organization entity action bar (New / Edit / Delete / Refresh) */
+.org-action-bar {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    width: 100%;
+    align: center middle;
+}
+
+.org-action-bar Button {
+    width: 1fr;
+    min-width: 12;
+    margin: 0 1;
+    height: 3;
+}
+
+/* Organization per-tab picklist filter bar */
+.org-filter-bar {
+    height: auto;
+    margin-bottom: 1;
+    width: 100%;
+}
+
+.org-filter-bar Select {
+    width: 1fr;
+    margin: 0 1;
+}
+
+/* Organization entity tables — styled like the Tasks/Projects/Messages tables,
+   each bordered in its tab's accent colour. */
+#org-organizations-table,
+#org-products-table,
+#org-estimates-table,
+#org-invoices-table,
+#org-transactions-table,
+#org-exchange-table,
+#org-emails-table,
+#org-addresses-table,
+#org-credentials-table {
+    height: 1fr;
+    min-height: 10;
+}
+#org-organizations-table { border: solid $accent; }
+#org-products-table      { border: solid $success; }
+#org-estimates-table     { border: solid $warning; }
+#org-invoices-table      { border: solid magenta; }
+#org-transactions-table  { border: solid $primary; }
+#org-exchange-table      { border: solid darkorange; }
+#org-emails-table        { border: solid magenta; }
+#org-addresses-table     { border: solid darkorange; }
+#org-credentials-table   { border: solid $primary; }
+
 #tasks-table,
 #projects-table,
 #messages-table {
@@ -412,7 +498,17 @@ Checkbox.-on > .toggle--button {
 
 #tasks-panel-body,
 #projects-panel-body,
-#messages-panel-body {
+#messages-panel-body,
+#org-organizations-panel-body,
+#org-products-panel-body,
+#org-estimates-panel-body,
+#org-invoices-panel-body,
+#org-transactions-panel-body,
+#org-exchange-panel-body,
+#org-emails-panel-body,
+#org-addresses-panel-body,
+#org-credentials-panel-body,
+#org-explorer-panel-body {
     height: 100%;
     min-height: 0;
 }
@@ -471,6 +567,182 @@ Checkbox.-on > .toggle--button {
     text-style: bold;
 }
 
+/* ─── Organizations tab button (launcher next to Projects on dashboard) ─── */
+/* Styled distinctly from content tabs: dashed border + muted tint signals
+   "click to open modal" rather than "active content pane". */
+#work-tabs #--content-tab-org-tab {
+    border: dashed #E5E5E5;
+    background: $surface;
+    color: #E5E5E5;
+    text-style: italic;
+}
+
+#work-tabs #--content-tab-org-tab:hover {
+    background: $accent 30%;
+    text-style: bold;
+}
+
+/* ─── Organization Modal ─── */
+OrganizationModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#org-modal-shell {
+    width: 85%;
+    height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#org-modal-header {
+    margin-bottom: 1;
+}
+
+#org-modal-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#org-modal-tabs Tabs {
+    height: 4;
+    overflow: auto hidden;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+#org-modal-tabs Tabs > #tabs-scroll {
+    overflow: auto hidden;
+}
+
+#org-modal-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#org-modal-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+#org-modal-tabs #--content-tab-org-modal-organizations-tab { border-top: heavy $accent; }
+#org-modal-tabs #--content-tab-org-modal-organizations-tab.-active {
+    background: $accent 25%;
+    color: $accent;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-products-tab { border-top: heavy $success; }
+#org-modal-tabs #--content-tab-org-modal-products-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-estimates-tab { border-top: heavy $warning; }
+#org-modal-tabs #--content-tab-org-modal-estimates-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-invoices-tab { border-top: heavy magenta; }
+#org-modal-tabs #--content-tab-org-modal-invoices-tab.-active {
+    background: magenta 25%;
+    color: magenta;
+    border: heavy magenta;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-transactions-tab { border-top: heavy $primary; }
+#org-modal-tabs #--content-tab-org-modal-transactions-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-exchange-tab { border-top: heavy darkorange; }
+#org-modal-tabs #--content-tab-org-modal-exchange-tab.-active {
+    background: darkorange 25%;
+    color: darkorange;
+    border: heavy darkorange;
+    text-style: bold;
+}
+
+/* staff-tab removed — staff management is now inside the per-org record modal */
+
+#org-modal-tabs #--content-tab-org-modal-emails-tab { border-top: heavy magenta; }
+#org-modal-tabs #--content-tab-org-modal-emails-tab.-active {
+    background: magenta 25%;
+    color: magenta;
+    border: heavy magenta;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-addresses-tab { border-top: heavy darkorange; }
+#org-modal-tabs #--content-tab-org-modal-addresses-tab.-active {
+    background: darkorange 25%;
+    color: darkorange;
+    border: heavy darkorange;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-credentials-tab { border-top: heavy $primary; }
+#org-modal-tabs #--content-tab-org-modal-credentials-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-explorer-tab { border-top: heavy $accent; }
+#org-modal-tabs #--content-tab-org-modal-explorer-tab.-active {
+    background: $accent 25%;
+    color: $accent;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#org-modal-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#org-modal-tabs TabPane {
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+}
+
+#org-modal-footer {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#org-modal-footer Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+#org-tree {
+    height: 1fr;
+    min-height: 10;
+    border: solid $accent;
+    padding: 0 1;
+}
+
 #work-tabs ContentSwitcher {
     height: 1fr;
     min-height: 0;
@@ -484,7 +756,14 @@ Checkbox.-on > .toggle--button {
 
 #tasks-panel,
 #messages-panel,
-#projects-panel {
+#projects-panel,
+#org-organizations-panel,
+#org-products-panel,
+#org-estimates-panel,
+#org-invoices-panel,
+#org-transactions-panel,
+#org-exchange-panel,
+#org-explorer-panel {
     width: 1fr;
     height: 100%;
     min-height: 0;
@@ -2272,16 +2551,17 @@ ModelManagerModal {
 }
 
 #model-manager-footer {
+    dock: bottom;
     height: auto;
     margin-top: 1;
-    border-top: solid #1a73e8;
-    padding-top: 1;
     align: center middle;
+    overflow-x: hidden;
 }
 
 #model-manager-footer Button {
     width: 1fr;
-    margin: 0 1;
+    min-width: 0;
+    margin: 0 0 0 1;
     height: 3;
 }
 
@@ -2295,13 +2575,13 @@ ModelManagerModal {
 
 #mm-models-table {
     height: 1fr;
-    min-height: 26;
+    min-height: 10;
     border: solid $primary;
 }
 
 #mm-providers-table {
     height: 1fr;
-    min-height: 13;
+    min-height: 8;
     border: solid $primary;
 }
 

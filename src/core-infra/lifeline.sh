@@ -418,6 +418,26 @@ agictl agent list for full details — you and your agentic team:
 ${AGENT_REGISTRY_FOR_SYSTEM}"
     fi
 
+    # Feature availability (setup.ini [features], D34): when an optional feature
+    # is OFF, tell the agent so it does not reach for that feature's agictl
+    # command group. Only features that gate an agent-facing command group are
+    # listed (the others are dashboard-only surfaces).
+    FEATURE_AVAILABILITY_CONTENT=""
+    if [ -f "${SETUP_INI}" ]; then
+      _org_ui=$(sed -n '/^\[features\]/,/^\[/{s/^organization_ui=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+      _features_off=""
+      case "${_org_ui}" in
+        1|true|yes|on) ;;  # enabled — no warning
+        *) _features_off="${_features_off}
+- Organization (accounting/business) is OFF — do not use \`agictl organization …\`." ;;
+      esac
+      if [ -n "${_features_off}" ]; then
+        FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
+
+Some optional features are OFF on this system. Do not use their commands:${_features_off}"
+      fi
+    fi
+
     # Duties content (sub-agent only — COA never has a duties.md)
     # Injected for sub-agents via the legacy path; COA template omits {DUTIES_CONTEXT}.
     # Stock placeholder detection: 'agictl agent approve' seeds duties.md with an
@@ -469,6 +489,14 @@ ${CYCLE_PARAMS_CONTENT}"
 ---
 
 ${AGENT_REGISTRY_CONTENT}"
+      fi
+
+      if [ -n "${FEATURE_AVAILABILITY_CONTENT}" ]; then
+        MERGED_CONTENT="${MERGED_CONTENT}
+
+---
+
+${FEATURE_AVAILABILITY_CONTENT}"
       fi
 
       # ── VV Communication Override for sub-agents with external comms ──

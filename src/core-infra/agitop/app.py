@@ -6,12 +6,13 @@ Main Textual application with live data panels.
 import json
 from pathlib import Path
 
+from textual import on
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll, Vertical
-from textual.widgets import Header, Footer, TabbedContent, TabPane, Collapsible
+from textual.containers import VerticalScroll, Vertical, Horizontal
+from textual.widgets import Header, Footer, TabbedContent, TabPane, Collapsible, Static
 from textual.binding import Binding
 
-from agitop.data import AgentReader, MessageReader, TasksReader
+from agitop.data import AgentReader, MessageReader, TasksReader, OrganizationReader, OrganizationWriter
 from agitop.data.status_reader import StatusReader
 from agitop.data.system_reader import SystemReader
 from agitop.data.config_reader import ConfigReader
@@ -21,9 +22,37 @@ from agitop.panels.tasks import TasksPanel
 from agitop.panels.messages import MessagesPanel
 from agitop.panels.projects import ProjectsPanel
 from agitop.panels.footer_stats import FooterStatsPanel
+from agitop.panels.organization import (
+    OrganizationEntityPanel, OrganizationTreePanel, ORGANIZATION_TABS,
+)
+from agitop.panels.organization_modal import OrganizationModal
+from agitop.feature_flags import ORGANIZATION_UI_VISIBLE
 from agitop.version import read_product_version
 
 VERSION = read_product_version()
+
+# Persisted UI state (collapsed regions, etc.) — survives agitop restarts. agitop
+# runs as root; /var/lib/versa-agi is the standard writable state dir.
+_UI_STATE_PATH = Path("/var/lib/versa-agi/agitop_ui_state.json")
+
+
+def _load_ui_state() -> dict:
+    """Best-effort read of the persisted UI state; never raises."""
+    try:
+        data = json.loads(_UI_STATE_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_ui_state(state: dict) -> None:
+    """Best-effort write of the persisted UI state; never raises."""
+    try:
+        _UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _UI_STATE_PATH.write_text(json.dumps(state))
+    except OSError:
+        pass
+
 
 class AgitopApp(App):
     """Versa AGi Mission Control Dashboard."""
@@ -41,20 +70,33 @@ class AgitopApp(App):
 
     def __init__(self, agents_db_path: str = "", messages_db_path: str = "",
                  tasks_db_path: str = "", cycles_db_path: str = "",
-                 config_path: str = "", cycle_id_path: str = ""):
+                 config_path: str = "", cycle_id_path: str = "",
+                 organization_db_path: str = ""):
         super().__init__()
         self.config_path = config_path
         # Initialize data readers
         self.agent_reader = AgentReader(agents_db_path, cycles_db_path, messages_db_path, tasks_db_path) if agents_db_path and cycles_db_path else None
         self.message_reader = MessageReader(messages_db_path) if messages_db_path else None
         self.tasks_reader = TasksReader(tasks_db_path) if tasks_db_path else None
-        
+        # Organization domain (Wave integration) — gated by feature flag. Reads
+        # via OrganizationReader; writes via OrganizationWriter (shared store
+        # path, same as agictl) so the UI can author without an agent.
+        self.organization_reader = (
+            OrganizationReader(organization_db_path) if organization_db_path
+            else OrganizationReader()
+        )
+        self.organization_writer = OrganizationWriter(
+            self.organization_reader.db_path
+        )
+
         self.status = StatusReader(cycle_id_path)
         self.system = SystemReader()
         self.config = ConfigReader(config_path) if config_path else None
+        self._prev_tab = "messages-tab"
 
     def compose(self) -> ComposeResult:
         """Create the dashboard layout."""
+        ui_state = _load_ui_state()
         yield Header()
 
         with VerticalScroll(id="dashboard-scroll", can_focus=False):
@@ -62,13 +104,18 @@ class AgitopApp(App):
                 with Collapsible(
                     title="System & Controls",
                     id="system-controls-collapse",
-                    collapsed=False,
+                    collapsed=ui_state.get("system_controls_collapsed", False),
                 ):
                     yield SystemPanel(
                         self.system, self.config, self.status, self.agent_reader,
                         id="system-panel",
                     )
-                yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
+                with Collapsible(
+                    title="Agents",
+                    id="agents-collapse",
+                    collapsed=ui_state.get("agents_collapsed", False),
+                ):
+                    yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
                 yield FooterStatsPanel(
                     self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel",
                 )
@@ -89,8 +136,43 @@ class AgitopApp(App):
                         )
                     with TabPane("◆  Projects", id="projects-tab"):
                         yield ProjectsPanel(self.tasks_reader, id="projects-panel")
+                    if ORGANIZATION_UI_VISIBLE:
+                        with TabPane("◉ Organizations", id="org-tab"):
+                            yield Static("Launching Organizations...", id="org-launch-status")
 
         yield Footer()
+
+    def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
+        """Remember the collapsed state of the top-level regions across restarts."""
+        cid = event.collapsible.id
+        if cid not in ("system-controls-collapse", "agents-collapse"):
+            return
+        key = ("system_controls_collapsed" if cid == "system-controls-collapse"
+               else "agents_collapsed")
+        state = _load_ui_state()
+        state[key] = event.collapsible.collapsed
+        _save_ui_state(state)
+
+    @on(TabbedContent.TabActivated)
+    def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Open the Organization modal when clicking the Organizations tab."""
+        tabbed_content = self.query_one("#work-tabs", TabbedContent)
+        # Only handle events originating from the dashboard's work-tabs,
+        # not from nested TabbedContent inside modals (OrgRecordModal, etc.)
+        if event.tabbed_content is not tabbed_content:
+            return
+        if event.pane.id == "org-tab":
+            # Revert to the previously active tab so the dummy pane isn't shown
+            tabbed_content.active = self._prev_tab
+            self.push_screen(
+                OrganizationModal(
+                    self.organization_reader,
+                    self.organization_writer,
+                    tasks_reader=self.tasks_reader,
+                ),
+            )
+        else:
+            self._prev_tab = event.pane.id
 
     def on_mount(self) -> None:
         """Start periodic refresh timer and background install registration tripwire."""
@@ -226,6 +308,10 @@ def main():
         "--cycle-id", default="/var/lib/versa-agi/coa/.current_cycle_id",
         help="Path to .current_cycle_id file"
     )
+    parser.add_argument(
+        "--organization-db", default="/var/lib/versa-agi/organization.db",
+        help="Path to organization.db (Organization domain / Wave integration)"
+    )
 
     args = parser.parse_args()
 
@@ -236,6 +322,7 @@ def main():
         cycles_db_path=args.cycles_db,
         config_path=args.config,
         cycle_id_path=args.cycle_id,
+        organization_db_path=args.organization_db,
     )
     app.run()
 

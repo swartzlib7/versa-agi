@@ -41,7 +41,8 @@ CREATE TABLE tasks (
   script_interval_seconds INTEGER,
   utility_model_id        TEXT,
   utility_start_alert     INTEGER DEFAULT 0,
-  utility_stop_alert      INTEGER DEFAULT 0
+  utility_stop_alert      INTEGER DEFAULT 0,
+  utility_spawn_agent     TEXT
 );
 """
 

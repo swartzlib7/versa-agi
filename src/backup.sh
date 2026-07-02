@@ -32,6 +32,17 @@ VERSION="2.0"
 # These patterns are excluded from ALL home directory captures.
 GLOBAL_EXCLUDES=".ollama .gemini .cache .npm node_modules __pycache__ .local venv .vagrant .vagrant.d VirtualBox VMs"
 
+# ─── Extra Excludes ─────────────────────────────────
+# Operator-supplied paths/patterns to omit from the backup, seeded via
+# repeatable --exclude flags and/or chosen interactively at the size gate.
+# Merged with GLOBAL_EXCLUDES for both size calculation and capture.
+EXTRA_EXCLUDES=""
+
+# Echoes the effective exclude list (global + operator extras).
+effective_excludes() {
+  echo "${GLOBAL_EXCLUDES}${EXTRA_EXCLUDES:+ ${EXTRA_EXCLUDES}}"
+}
+
 # ─── Size Gate Threshold ────────────────────────────
 SIZE_GATE_MB=200
 
@@ -72,13 +83,18 @@ DRY_RUN=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --output|-o) OUTPUT_PATH="$2"; shift 2 ;;
-    --dry-run)   DRY_RUN=true; shift ;;
+    --output|-o)  OUTPUT_PATH="$2"; shift 2 ;;
+    --exclude|-x)
+      if [ -z "${2:-}" ]; then echo "--exclude requires a path or pattern"; exit 1; fi
+      EXTRA_EXCLUDES="${EXTRA_EXCLUDES:+${EXTRA_EXCLUDES} }$2"; shift 2 ;;
+    --dry-run)    DRY_RUN=true; shift ;;
     --help|-h)
-      echo "Usage: sudo versa-agi-backup [--output /path/backup.tar.gz] [--dry-run]"
+      echo "Usage: sudo versa-agi-backup [--output /path/backup.tar.gz] [--exclude PATTERN]... [--dry-run]"
       echo ""
-      echo "  --output, -o   Output archive path (default: ~/versa-agi-backup-TIMESTAMP.tar.gz)"
-      echo "  --dry-run      Preview what would be captured without creating archive"
+      echo "  --output, -o    Output archive path (default: ~/versa-agi-backup-TIMESTAMP.tar.gz)"
+      echo "  --exclude, -x   Path or pattern to omit from the backup (repeatable). Applied to both"
+      echo "                  the size-gate calculation and the captured archive. e.g. -x Downloads -x '*.iso'"
+      echo "  --dry-run       Preview what would be captured without creating archive"
       exit 0
       ;;
     *) echo "Unknown option: $1. Use --help for usage."; exit 1 ;;
@@ -290,32 +306,40 @@ capture() {
   return 0
 }
 
-# Helper: size gate — warns and aborts if a home directory is too large
-# Usage: size_gate "/home/coa" "coa" "exclude1 exclude2"
+# Helper: size gate — warns and aborts if a home directory is too large.
+# Uses the effective exclude list (global + operator extras), so paths omitted
+# via --exclude or the interactive prompt are reflected in the reported size.
+# Usage: size_gate "/home/coa" "coa"
 size_gate() {
   local dir_path="$1"
   local user_label="$2"
-  local excludes="$3"
 
   if [ ! -d "${dir_path}" ]; then
     return 0
   fi
 
-  # Build rsync-compatible du with excludes
-  local du_excludes=()
-  for _exc in ${excludes}; do
-    du_excludes+=(--exclude="${_exc}")
-  done
+  while true; do
+    # Build du excludes from the current effective list (recomputed each pass
+    # so interactive omits take effect immediately).
+    local du_excludes=()
+    local _exc
+    for _exc in $(effective_excludes); do
+      du_excludes+=(--exclude="${_exc}")
+    done
 
-  local size_bytes
-  size_bytes=$(du -sb "${du_excludes[@]+${du_excludes[@]}}" "${dir_path}" 2>/dev/null | tail -1 | cut -f1)
-  size_bytes=${size_bytes:-0}
+    local size_bytes
+    size_bytes=$(du -sb "${du_excludes[@]+${du_excludes[@]}}" "${dir_path}" 2>/dev/null | tail -1 | cut -f1)
+    size_bytes=${size_bytes:-0}
 
-  local size_mb=$(( size_bytes / 1048576 ))
-  local size_human
-  size_human=$(numfmt --to=iec "${size_bytes}" 2>/dev/null || echo "${size_mb}MB")
+    local size_mb=$(( size_bytes / 1048576 ))
+    local size_human
+    size_human=$(numfmt --to=iec "${size_bytes}" 2>/dev/null || echo "${size_mb}MB")
 
-  if [ "${size_mb}" -gt "${SIZE_GATE_MB}" ]; then
+    if [ "${size_mb}" -le "${SIZE_GATE_MB}" ]; then
+      ok "${user_label} home: ${size_human} (within ${SIZE_GATE_MB}MB threshold)"
+      return 0
+    fi
+
     echo ""
     warn "${user_label} home is ${size_human} (after excludes) — exceeds ${SIZE_GATE_MB}MB threshold"
     info "Top 5 largest subdirectories:"
@@ -330,15 +354,31 @@ size_gate() {
       return 0
     fi
 
-    read -p "  Continue with backup? [y/N]: " -n 1 -r
+    info "[y] continue   [n] abort   [o] omit a path from the backup and recheck"
+    read -p "  Your choice? [y/N/o]: " -n 1 -r
     echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      echo ""
-      error "Backup ABORTED. Please investigate and free space in ${dir_path}, then re-run the backup."
-    fi
-  else
-    ok "${user_label} home: ${size_human} (within ${SIZE_GATE_MB}MB threshold)"
-  fi
+    case "${REPLY}" in
+      [Yy])
+        return 0
+        ;;
+      [Oo])
+        local _omit
+        read -r -p "  Path or pattern to omit (e.g. Downloads or '*.iso'): " _omit
+        _omit="$(echo "${_omit}" | xargs)"  # trim surrounding whitespace
+        if [ -n "${_omit}" ]; then
+          EXTRA_EXCLUDES="${EXTRA_EXCLUDES:+${EXTRA_EXCLUDES} }${_omit}"
+          ok "Omitting '${_omit}' from the backup — rechecking size..."
+        else
+          warn "No path entered; nothing omitted."
+        fi
+        # Loop re-evaluates with the updated exclude list.
+        ;;
+      *)
+        echo ""
+        error "Backup ABORTED. Please investigate and free space in ${dir_path}, then re-run the backup."
+        ;;
+    esac
+  done
 }
 
 # ── 3a: SQLite Databases ──
@@ -357,21 +397,21 @@ capture "/var/log/versa-agi-archive/" "Archived logs"
 
 # ── 3d: Watchdog home ──
 info "3d: Watchdog home..."
-size_gate "${WATCHDOG_HOME}" "Watchdog" "${GLOBAL_EXCLUDES}"
-capture "${WATCHDOG_HOME}/" "Watchdog home (${WATCHDOG_HOME}/)" "${GLOBAL_EXCLUDES}"
+size_gate "${WATCHDOG_HOME}" "Watchdog"
+capture "${WATCHDOG_HOME}/" "Watchdog home (${WATCHDOG_HOME}/)" "$(effective_excludes)"
 
 # ── 3e: COA home ──
 info "3e: COA home..."
-size_gate "${COA_HOME}" "COA" "${GLOBAL_EXCLUDES}"
-capture "${COA_HOME}/" "COA home (${COA_HOME}/)" "${GLOBAL_EXCLUDES}"
+size_gate "${COA_HOME}" "COA"
+capture "${COA_HOME}/" "COA home (${COA_HOME}/)" "$(effective_excludes)"
 
 # ── 3f: Sub-agent homes ──
 info "3f: Sub-agent homes..."
 for sa_user in "${SUB_AGENT_USERS[@]+${SUB_AGENT_USERS[@]}}"; do
   SA_HOME="/home/${sa_user}"
   [ -d "${SA_HOME}" ] || continue  # Skip if home doesn't exist
-  size_gate "${SA_HOME}" "Sub-agent ${sa_user}" "${GLOBAL_EXCLUDES}"
-  capture "${SA_HOME}/" "Sub-agent: ${sa_user} (${SA_HOME}/)" "${GLOBAL_EXCLUDES}"
+  size_gate "${SA_HOME}" "Sub-agent ${sa_user}"
+  capture "${SA_HOME}/" "Sub-agent: ${sa_user} (${SA_HOME}/)" "$(effective_excludes)"
 done
 
 # ── 3g: System binaries ──
@@ -386,7 +426,7 @@ for bin_path in \
   /usr/local/bin/versa-agi-rekey; do
   capture "${bin_path}"
 done
-capture "/usr/local/lib/versa-agi/" "Persisted lib (/usr/local/lib/versa-agi/)" "${GLOBAL_EXCLUDES}"
+capture "/usr/local/lib/versa-agi/" "Persisted lib (/usr/local/lib/versa-agi/)" "$(effective_excludes)"
 ok "System binaries captured"
 
 # ── 3h: Systemd units ──
@@ -503,6 +543,7 @@ else
     --arg primary_user "${PRIMARY_USER}" \
     --arg primary_user_home "$(eval echo "~${PRIMARY_USER}" 2>/dev/null || echo "")" \
     --arg topology "${TOPOLOGY}" \
+    --arg extra_excludes "${EXTRA_EXCLUDES}" \
     --argjson agents "${AGENT_LIST}" \
     --argjson users "${USER_ACCOUNTS}" \
     --argjson pu_symlinks "${PU_SYMLINKS}" \
@@ -517,6 +558,7 @@ else
       primary_user: $primary_user,
       primary_user_home: $primary_user_home,
       topology: $topology,
+      omitted_excludes: ($extra_excludes | if . == "" then [] else (. / " ") end),
       agents: $agents,
       os_users: $users,
       primary_user_symlinks: $pu_symlinks
