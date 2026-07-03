@@ -18,8 +18,10 @@ red = failed/overdue, dim(gray) = closed/inactive.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 from textual import on
@@ -145,6 +147,7 @@ EntityFormModal, ConfirmDeleteModal {
 }
 .form-full-width { height: auto; }
 .form-textarea { height: 7; width: 100%; }
+.form-textarea-tall { height: 14; width: 100%; }
 .form-field { height: auto; padding: 0; }
 .form-field Input, .form-field Select, .form-field Checkbox { width: 100%; }
 .form-label { margin-top: 1; color: $text-muted; }
@@ -220,6 +223,8 @@ class EntityFormModal(ModalScreen):
             yield Static("", id="form-error")
             with Horizontal(classes="form-actions"):
                 yield Button("Save", variant="success", id="form-save")
+                if self.entity == "credential":
+                    yield Button("📋 Copy Config", variant="default", id="form-copy-config")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="form-cancel")
 
     def _is_disabled(self, col: str) -> bool:
@@ -268,18 +273,29 @@ class EntityFormModal(ModalScreen):
         choices = _FIELD_CHOICES.get((self.entity, col))
         pick = _PICKLIST_FIELDS.get((self.entity, col))
         if as_textarea:
-            w = TextArea("" if val is None else str(val),
-                         id=f"f-{col}", classes="form-textarea")
+            raw = "" if val is None else str(val)
+            # Pretty-print JSON for the configuration field
+            if self.entity == "credential" and col == "configuration":
+                try:
+                    raw = json.dumps(json.loads(raw), indent=2)
+                except (ValueError, TypeError):
+                    pass
+                w = TextArea(raw, id=f"f-{col}", classes="form-textarea-tall")
+            else:
+                w = TextArea(raw, id=f"f-{col}", classes="form-textarea")
         elif col in s.get("bool", []):
             default = bool(val) if val is not None else _BOOL_NEW_DEFAULT.get(col, False)
             w = Checkbox("yes", value=default, disabled=disabled, id=f"f-{col}")
         elif ref or choices or pick:
+            nullable_fk = (self.entity, col) in _NULLABLE_FK
             if choices:
                 options = list(choices)
             elif pick:
                 options = self.reader.picklist_options(*pick)
             else:
                 options = _fk_options(self.reader, ref)
+            if nullable_fk:
+                options = [("\u2014 none \u2014", "\x00NONE"), *options]
             current = "" if val is None else str(val)
             option_values = [v for _lbl, v in options]
             if current and current not in option_values:
@@ -308,6 +324,25 @@ class EntityFormModal(ModalScreen):
         if event.button.id == "form-cancel":
             self.dismiss(None)
             return
+        if event.button.id == "form-copy-config":
+            w = self._widgets.get("configuration")
+            text = (w.text if isinstance(w, TextArea) else "") or ""
+            err_widget = self.query_one("#form-error", Static)
+            for cmd in (["xclip", "-selection", "clipboard"],
+                        ["xsel", "--clipboard", "--input"],
+                        ["pbcopy"]):
+                try:
+                    proc = subprocess.run(cmd, input=text.encode(),
+                                          capture_output=True, timeout=3)
+                    if proc.returncode == 0:
+                        err_widget.update("[green]✅ Copied to clipboard[/]")
+                        return
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    break
+            err_widget.update("[red]❌ Clipboard unavailable (install xclip or xsel)[/]")
+            return
         money = set(self.spec["money"])
         fields: dict = {}
         for col, w in self._widgets.items():
@@ -317,10 +352,14 @@ class EntityFormModal(ModalScreen):
                 fields[col] = 1 if w.value else 0
             elif isinstance(w, Select):
                 v = w.value
+                nullable = (self.entity, col) in _NULLABLE_FK
                 # Real option values are always strings; both unset sentinels
                 # (Select.BLANK / Select.NULL) are non-str, so this skips them.
-                if isinstance(v, str) and v:
+                if isinstance(v, str) and v and v != "\x00NONE":
                     fields[col] = v
+                elif nullable and (not isinstance(v, str) or v == "\x00NONE"):
+                    # Explicitly write NULL so the old FK value is cleared.
+                    fields[col] = None
             elif isinstance(w, TextArea):
                 v = w.text.strip()
                 if v:
@@ -904,7 +943,7 @@ _COLUMNS = {
     "addresses": [("ID", 5), ("Line 1", 18), ("City", 12), ("State", 8),
                   ("Postal", 10), ("Country", 10), ("Label", 10), ("Primary", 8),
                   ("Org", 16)],
-    "credentials": [("ID", 5), ("Auth Type", 16), ("Notes", 36),
+    "credentials": [("ID", 5), ("Name", 22), ("Auth Type", 16), ("Notes", 30),
                     ("Updated", 14)],
 }
 
@@ -986,6 +1025,13 @@ _CROSS_EXCLUDE = {
 # convert workflow, so re-pointing it in a form is not a practical operation.
 _FK_DISABLED = {
     ("estimate", "converted_to_invoice_id"),
+}
+
+# FK picklists where the column is nullable — a "— none —" option is prepended
+# so the user can explicitly clear the value. On save, a blank/sentinel resolves
+# to None (written as SQL NULL) instead of silently leaving the old value.
+_NULLABLE_FK = {
+    ("email", "credential_id"),
 }
 
 # New-record default for boolean checkboxes (matches schema DEFAULTs). Anything
@@ -1106,7 +1152,8 @@ _FIELD_LABEL: dict[str, str] = {
     "is_active": "Active",
     "is_primary": "Primary",
     "logo_path": "Logo Path",
-    "auth_type": "Auth Type",
+    "name":          "Name",
+    "auth_type":     "Auth Type",
     "unit_price_cents": "Unit Price",
     "amount_cents": "Amount",
     "subtotal_cents": "Subtotal",
@@ -1136,7 +1183,7 @@ _FIELD_LABEL: dict[str, str] = {
 _FORM_ORDER = {
     "product": ["org_id", "type", "name", "description", "currency",
                 "unit_price_cents", "sku", "external_id", "is_active"],
-    "credential": ["auth_type", "notes", "configuration"],
+    "credential": ["name", "auth_type", "notes", "configuration"],
 }
 
 # Fields that should render as a TextArea (multi-line) instead of Input.
@@ -1222,7 +1269,7 @@ def _fk_options(reader, ref: str) -> list[tuple[str, str]]:
                  f"{i.get('total_display', '')}", str(i["id"]))
                 for i in reader.list_invoices()]
     if ref == "credentials":
-        return [(f"{c.get('auth_type') or '—'}  (#{c['id']})", str(c["id"]))
+        return [(f"{c.get('name') or c.get('auth_type') or '—'}  (#{c['id']})", str(c["id"]))
                 for c in reader.list_credentials()]
     if ref == "emails_lookup":
         return [(f"{e.get('email') or '—'}  (#{e['id']})", str(e["id"]))
@@ -1465,7 +1512,7 @@ class OrganizationEntityPanel(Widget):
             n += 1
             primary = _c("green" if e.get("is_primary") else "gray",
                          _yn(e.get("is_primary")))
-            cred = e.get("credential_type") or "—"
+            cred = e.get("credential_name") or e.get("credential_type") or "—"
             self.table.add_row(rid, e.get("email") or "—",
                                e.get("label") or "—", primary,
                                e.get("usage_notes") or "—", cred,
@@ -1494,7 +1541,8 @@ class OrganizationEntityPanel(Widget):
             rid = str(c["id"])
             self._rows[rid] = c
             n += 1
-            self.table.add_row(rid, c.get("auth_type") or "—",
+            self.table.add_row(rid, c.get("name") or "—",
+                               c.get("auth_type") or "—",
                                c.get("notes") or "—",
                                _date(c.get("updated_at")), key=rid)
         return n

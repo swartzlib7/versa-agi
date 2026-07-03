@@ -1213,6 +1213,11 @@ ORGANIZATION_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_organization_db.sh"
 if [ -f "${ORGANIZATION_INIT}" ]; then
   chmod +x "${ORGANIZATION_INIT}"
   bash "${ORGANIZATION_INIT}" "${ORGANIZATION_DB}"
+  # ── organization.db column migrations (idempotent — errors suppressed) ──
+  # Idempotent — ALTER TABLE errors silently if column already exists.
+  sqlite3 "${ORGANIZATION_DB}" "ALTER TABLE credentials ADD COLUMN name TEXT NOT NULL DEFAULT '';" 2>/dev/null && \
+    ok "credentials.name column added" || \
+    info "credentials.name column already exists"
   # Shared by COA (sync) and STEWART (ops), same pattern as messages.db.
   chown "${WATCHDOG_USER}:${COA_USER}" "${ORGANIZATION_DB}"
   chmod 660 "${ORGANIZATION_DB}"

@@ -319,9 +319,9 @@ class OrganizationReader:
     # ── New entity list views (Staff / Emails / Addresses / Credentials) ──
 
     def list_credentials(self, limit: int = 200) -> list[dict]:
-        """All credential records with auth_type."""
+        """All credential records with name and auth_type."""
         return self._query(
-            "SELECT id, auth_type, configuration, notes, updated_at "
+            "SELECT id, name, auth_type, configuration, notes, updated_at "
             "FROM credentials ORDER BY id DESC LIMIT ?", (limit,))
 
     def list_emails(self, limit: int = 200) -> list[dict]:
@@ -329,7 +329,7 @@ class OrganizationReader:
         return self._query(
             "SELECT e.id, e.email, e.label, e.is_primary, "
             "       e.usage_notes, e.credential_id, "
-            "       c.auth_type AS credential_type, "
+            "       c.name AS credential_name, c.auth_type AS credential_type, "
             "       o.name AS org_name, oe.org_id "
             "FROM email_addresses e "
             "LEFT JOIN org_emails oe ON oe.email_id = e.id "
@@ -365,7 +365,7 @@ class OrganizationReader:
         return self._query(
             "SELECT e.id, e.email, e.label, e.is_primary, "
             "       e.usage_notes, e.credential_id, "
-            "       c.auth_type AS credential_type, "
+            "       c.name AS credential_name, c.auth_type AS credential_type, "
             "       oe.id AS bridge_id "
             "FROM org_emails oe "
             "JOIN email_addresses e ON e.id = oe.email_id "

@@ -93,6 +93,10 @@ class AgitopApp(App):
         self.system = SystemReader()
         self.config = ConfigReader(config_path) if config_path else None
         self._prev_tab = "messages-tab"
+        # Guard: the Collapsible reactive fires during initial mount. We only
+        # persist toggle events once the app is fully mounted, otherwise the
+        # init event overwrites the loaded state with the default value.
+        self._ui_ready = False
 
     def compose(self) -> ComposeResult:
         """Create the dashboard layout."""
@@ -144,6 +148,8 @@ class AgitopApp(App):
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
         """Remember the collapsed state of the top-level regions across restarts."""
+        if not self._ui_ready:
+            return   # ignore events fired during initial mount/compose
         cid = event.collapsible.id
         if cid not in ("system-controls-collapse", "agents-collapse"):
             return
@@ -152,6 +158,16 @@ class AgitopApp(App):
         state = _load_ui_state()
         state[key] = event.collapsible.collapsed
         _save_ui_state(state)
+
+    # Also handle the concrete subclasses explicitly — Textual posts Collapsed/
+    # Expanded (not the base Toggled) so we catch both names to be safe across
+    # Textual versions.
+    def on_collapsible_collapsed(self, event: Collapsible.Toggled) -> None:
+        self.on_collapsible_toggled(event)
+
+    def on_collapsible_expanded(self, event: Collapsible.Toggled) -> None:
+        self.on_collapsible_toggled(event)
+
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -174,8 +190,9 @@ class AgitopApp(App):
         else:
             self._prev_tab = event.pane.id
 
-    def on_mount(self) -> None:
+    def on_mount(self) -> None:  # type: ignore[override]
         """Start periodic refresh timer and background install registration tripwire."""
+        self._ui_ready = True  # allow toggle-state persistence from here on
         status = self._run_registration_tripwire()
         if self._should_prompt_registration(status):
             display_status = self._fetch_registration_status() or status

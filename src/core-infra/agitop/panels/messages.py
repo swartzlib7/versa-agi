@@ -703,6 +703,7 @@ class MessagesPanel(Widget):
                 yield Button("New", variant="success", id="btn-messages-new")
                 yield Button("Edit", variant="primary", id="btn-messages-edit", disabled=True)
                 yield Button("Delete", variant="error", id="btn-messages-delete", disabled=True)
+                yield Button("Quit", variant="default", id="btn-app-quit", classes="btn-quit")
 
     def on_mount(self) -> None:
         self._update_title()
@@ -1033,6 +1034,8 @@ class MessagesPanel(Widget):
             self._open_message_modal(msg)
         elif event.button.id == "btn-messages-delete":
             self._try_delete_selected()
+        elif event.button.id == "btn-app-quit":
+            self.app.exit()
 
     def on_key(self, event) -> None:
         if event.key in ("delete", "backspace"):

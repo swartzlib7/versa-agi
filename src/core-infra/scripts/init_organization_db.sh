@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS organizations (
 
 CREATE TABLE IF NOT EXISTS credentials (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,                     -- human-readable label (e.g. "Gmail IMAP")
   auth_type     TEXT NOT NULL,                     -- managed vocab: IMAP, MCP, API …
   configuration TEXT NOT NULL DEFAULT '{}',         -- JSON config based on type
   notes         TEXT,

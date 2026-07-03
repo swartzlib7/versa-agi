@@ -199,10 +199,15 @@ ENTITIES: dict[str, dict[str, Any]] = {
     # ── Credentials (agentic access) ──
     "credential": {
         "table": "credentials",
-        "columns": ["auth_type", "configuration", "notes"],
-        "required": ["auth_type"],
+        "columns": ["name", "auth_type", "configuration", "notes"],
+        "required": ["name", "auth_type"],
         "money": [], "real": [], "int": [], "bool": [],
         "external_id": False, "has_updated_at": True,
+        # picklist_fields: col → (table_name, field_name) in picklists table.
+        # _coerce() validates the submitted value against the live vocab.
+        "picklist_fields": {
+            "auth_type": ("credentials", "auth_type"),
+        },
     },
 
     # ── Universal managed-vocabulary lookup ──
@@ -236,10 +241,40 @@ def spec(entity: str) -> dict[str, Any]:
         )
 
 
+def _fetch_picklist_values(table_name: str, field_name: str) -> list[str]:
+    """Return the allowed ``value`` strings from the picklists table.
+
+    Returns an empty list when the DB is unreachable — callers treat an empty
+    list as "no constraint" (fail-open) so a missing/empty picklist never hard-
+    blocks writes on a fresh install.
+    """
+    try:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT value FROM picklists "
+                "WHERE (table_name = ? OR table_name = '') AND field_name = ? "
+                "ORDER BY position",
+                (table_name, field_name),
+            ).fetchall()
+            return [r[0] for r in rows if r[0] is not None]
+        finally:
+            conn.close()
+    except Exception:
+        return []  # fail-open: no picklist rows → no constraint applied
+
+
 def _coerce(entity: str, fields: dict[str, Any]) -> dict[str, Any]:
-    """Validate field names and coerce money/int/real values to native types."""
+    """Validate field names, enforce picklist constraints, and coerce values.
+
+    Raises :class:`OrganizationStoreError` for:
+    * ``unknown_field``         — column not in the entity spec
+    * ``invalid_picklist_value`` — value not in the managed vocabulary
+    * ``type_error``            — money/int/real/JSON coercion failure
+    """
     s = spec(entity)
     allowed = set(s["columns"])
+    picklist_fields: dict[str, tuple[str, str]] = s.get("picklist_fields", {})
     out: dict[str, Any] = {}
     for key, val in fields.items():
         if key not in allowed:
@@ -279,6 +314,16 @@ def _coerce(entity: str, fields: dict[str, Any]) -> dict[str, Any]:
             out[key] = sval
         else:
             out[key] = str(val)
+        # ── Picklist constraint check (after coercion, skips None already handled) ──
+        if key in picklist_fields and out[key] is not None:
+            tbl, fld = picklist_fields[key]
+            allowed_vals = _fetch_picklist_values(tbl, fld)
+            if allowed_vals and out[key] not in allowed_vals:
+                raise OrganizationStoreError(
+                    "invalid_picklist_value",
+                    f"'{key}' value {out[key]!r} is not in the managed vocabulary. "
+                    f"Allowed: {', '.join(allowed_vals)}",
+                )
     return out
 
 

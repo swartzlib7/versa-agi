@@ -72,6 +72,17 @@ Checkbox.-on > .toggle--button {
     color: $text;
 }
 
+.btn-quit {
+    background: #111111;
+    color: #ffffff;
+    border: solid #333333;
+}
+
+.btn-quit:hover {
+    background: #222222;
+    color: #ffffff;
+}
+
 #dashboard-scroll {
     height: 1fr;
     min-height: 0;
