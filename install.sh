@@ -175,6 +175,24 @@ auto_install() {
   fi
 }
 
+# On apt systems, refresh the package index exactly once before any install.
+# Fresh WSL instances have an empty cache — without this every apt install fails.
+if command -v apt &>/dev/null; then
+  _APT_UPDATED=0
+  _needs_update() {
+    # Return 0 (true) if any required command is missing
+    for _chk in git curl sqlite3 jq inotifywait; do
+      command -v "${_chk}" &>/dev/null || return 0
+    done
+    return 1
+  }
+  if _needs_update; then
+    echo -e "  ${DGRAY}Updating package index...${RESET}"
+    apt-get update -qq 2>/dev/null || apt update -qq 2>/dev/null || true
+    _APT_UPDATED=1
+  fi
+fi
+
 auto_install "git" "git"
 auto_install "curl" "curl"
 auto_install "sqlite3" "sqlite3"

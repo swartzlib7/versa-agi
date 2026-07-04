@@ -127,6 +127,78 @@ if [ "$(id -u)" -ne 0 ]; then
   error "This script must be run as root (sudo ./setup_local.sh)"
 fi
 
+# ─── WSL Detection ──────────────────────────────────
+# Returns 0 (true) if running inside WSL (any version).
+_is_wsl() {
+  grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null
+}
+
+# ─── Systemd Pre-flight for WSL ─────────────────────
+# Ollama's own install.sh calls systemctl without guards. On WSL without
+# systemd enabled this exits 2 and aborts the whole script under set -e.
+# We detect this early and offer to auto-configure, rather than letting
+# the user hit a cryptic exit 2 mid-install.
+_check_systemd_wsl() {
+  _is_wsl || return 0  # not WSL — nothing to do
+
+  # Check if systemd is actually PID 1 (i.e. properly enabled in WSL)
+  if [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]; then
+    ok "WSL systemd: active"
+    return 0
+  fi
+
+  # systemd not running — show clear guidance
+  echo ""
+  if declare -F warn &>/dev/null; then
+    warn "WSL detected — systemd is NOT enabled"
+  else
+    echo "  ! WSL detected — systemd is NOT enabled"
+  fi
+  echo ""
+  echo "  Ollama (and the Versa AGi inference service) requires systemd to"
+  echo "  run as a background service. Without it, the install will fail."
+  echo ""
+  echo "  To enable systemd in WSL, add this to /etc/wsl.conf:"
+  echo ""
+  echo "    [boot]"
+  echo "    systemd=true"
+  echo ""
+  echo "  Then restart WSL from PowerShell:  wsl --shutdown"
+  echo ""
+
+  read -p "  Auto-configure /etc/wsl.conf now and exit for WSL restart? [Y/n]: " _wsl_ans
+  _wsl_ans="${_wsl_ans:-Y}"
+
+  if [[ "${_wsl_ans}" =~ ^[Yy]$ ]]; then
+    # Idempotent write — only add the block if not already present
+    if grep -q '^\[boot\]' /etc/wsl.conf 2>/dev/null; then
+      if grep -q '^systemd=' /etc/wsl.conf 2>/dev/null; then
+        sed -i 's/^systemd=.*/systemd=true/' /etc/wsl.conf
+      else
+        sed -i '/^\[boot\]/a systemd=true' /etc/wsl.conf
+      fi
+    else
+      printf '\n[boot]\nsystemd=true\n' >> /etc/wsl.conf
+    fi
+    ok "/etc/wsl.conf updated — systemd=true"
+    echo ""
+    echo "  ► Next steps:"
+    echo "    1. Exit WSL"
+    echo "    2. In PowerShell run:  wsl --shutdown"
+    echo "    3. Reopen WSL and re-run this installer"
+    echo ""
+    exit 0
+  else
+    echo ""
+    if declare -F error &>/dev/null; then
+      error "Systemd is required. Enable it in /etc/wsl.conf and re-run after restarting WSL."
+    else
+      echo "  ✗ Systemd is required. Enable it in /etc/wsl.conf and re-run after restarting WSL."
+      exit 1
+    fi
+  fi
+}
+
 # ─── Default Values ─────────────────────────────────
 GPU_BACKEND="${GPU_BACKEND:-standard}"
 INTEL_CARD_COUNT="${INTEL_CARD_COUNT:-1}"
@@ -580,7 +652,7 @@ RestartSec=5
 WantedBy=multi-user.target
 TUNNELEOF
 
-    systemctl daemon-reload
+    systemctl daemon-reload 2>/dev/null || true
     systemctl enable "${_TUNNEL_SERVICE}" --quiet 2>/dev/null || true
     systemctl restart "${_TUNNEL_SERVICE}" 2>/dev/null || true
     sleep 2
@@ -696,6 +768,12 @@ CLIENTEOF
   echo ""
 fi
 
+# ─── WSL systemd Pre-flight ─────────────────────────
+# Must run before GPU backend install — Ollama's own installer calls
+# systemctl without guards and will abort under set -euo pipefail on
+# WSL instances where systemd is not enabled.
+_check_systemd_wsl
+
 # ─── GPU Backend Selection ──────────────────────────
 if declare -F section >/dev/null 2>&1; then
   section "GPU Backend"
@@ -752,7 +830,7 @@ if [ "${GPU_BACKEND}" = "standard" ]; then
     systemctl stop "${IPEX_SERVICE_NAME}" 2>/dev/null || true
     systemctl disable "${IPEX_SERVICE_NAME}" --quiet 2>/dev/null || true
     rm -f "${IPEX_SERVICE_FILE}"
-    systemctl daemon-reload
+    systemctl daemon-reload 2>/dev/null || true
     ok "Removed ${IPEX_SERVICE_NAME}.service"
   fi
   # Unmask stock Ollama so the standard flow can enable it
@@ -1050,7 +1128,7 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     systemctl stop "${IPEX_SERVICE_NAME}" 2>/dev/null || true
     systemctl disable "${IPEX_SERVICE_NAME}" --quiet 2>/dev/null || true
     rm -f "${IPEX_SERVICE_FILE}"
-    systemctl daemon-reload
+    systemctl daemon-reload 2>/dev/null || true
     ok "Removed legacy ${IPEX_SERVICE_NAME}.service"
   fi
 
