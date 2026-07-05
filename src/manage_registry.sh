@@ -416,9 +416,21 @@ _interactive_menu() {
     read -rp "  Action (a/e/d or Enter to continue): " choice
 
     case "${choice,,}" in
-      a) _interactive_add ;;
-      e) _interactive_edit ;;
-      d) _interactive_delete ;;
+      a) _interactive_add || true ;;
+      e)
+        if [ "${_REG_COUNT}" -eq 0 ]; then
+          echo "  ${_YELLOW}No models to edit. Use [a] to add one first.${_RESET}"
+        else
+          _interactive_edit || true
+        fi
+        ;;
+      d)
+        if [ "${_REG_COUNT}" -eq 0 ]; then
+          echo "  ${_YELLOW}No models to delete.${_RESET}"
+        else
+          _interactive_delete || true
+        fi
+        ;;
       "") break ;;
       *) echo "  ${_YELLOW}Invalid choice.${_RESET}" ;;
     esac
