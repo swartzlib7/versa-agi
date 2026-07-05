@@ -434,7 +434,7 @@ if [ "${TOPOLOGY}" = "server" ]; then
   fi
 
   # Ensure watchdog user has a login shell (required for SSH tunnel)
-  _WD_SHELL=$(getent passwd "${WATCHDOG_USER:-watchdog}" 2>/dev/null | cut -d: -f7)
+  _WD_SHELL=$(getent passwd "${WATCHDOG_USER:-watchdog}" 2>/dev/null | cut -d: -f7 || true)
   if [ "${_WD_SHELL}" = "/usr/sbin/nologin" ] || [ "${_WD_SHELL}" = "/bin/false" ]; then
     usermod -s /bin/bash "${WATCHDOG_USER:-watchdog}" 2>/dev/null || true
     ok "watchdog shell set to /bin/bash (SSH tunnel requires valid shell)"
