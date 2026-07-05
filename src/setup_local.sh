@@ -934,10 +934,7 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     # ── WSL2 path: no lspci, GPU is virtualised via /dev/dxg ──
     echo ""
     info "WSL2 detected — PCI enumeration unavailable (GPU accessed via /dev/dxg)"
-    echo ""
-    _default_id="${INTEL_DEVICE_ID:-wsl-dxg}"
-    read -p "  PCI device ID (informational only, e.g. 8086:e223) [${_default_id}]: " _manual_id
-    INTEL_DEVICE_ID="${_manual_id:-${_default_id}}"
+    INTEL_DEVICE_ID="wsl-dxg"
     ok "Device ID: ${INTEL_DEVICE_ID} (WSL2 — /dev/dxg bridge)"
 
     # Card count: WSL2 virtualises all physical GPUs behind a single /dev/dxg
