@@ -907,12 +907,22 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     fi
   fi
 
-  # ── DRI Check ──
-  if ! ls /dev/dri/render* &>/dev/null; then
-    warn "No /dev/dri/render* devices found. Intel GPU drivers may not be loaded."
-    warn "Ensure your GPU drivers are installed before proceeding."
+  # ── DRI / DXG Check ──
+  if _is_wsl; then
+    # WSL2 exposes GPU via /dev/dxg (DirectX Graphics), not /dev/dri
+    if [ -e /dev/dxg ]; then
+      ok "WSL2 GPU device: /dev/dxg (DirectX bridge)"
+    else
+      warn "/dev/dxg not found — Windows GPU driver may not be loaded."
+      warn "Ensure Intel ARC drivers are installed on the Windows host."
+    fi
   else
-    ok "DRI render devices detected: $(ls /dev/dri/render* 2>/dev/null | wc -l)"
+    if ! ls /dev/dri/render* &>/dev/null; then
+      warn "No /dev/dri/render* devices found. Intel GPU drivers may not be loaded."
+      warn "Ensure your GPU drivers are installed before proceeding."
+    else
+      ok "DRI render devices detected: $(ls /dev/dri/render* 2>/dev/null | wc -l)"
+    fi
   fi
 
   # ── GPU Auto-Detection ──
@@ -920,76 +930,93 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
   echo "  Intel ARC GPU Configuration"
   echo "  ─────────────────────────────────────────"
 
-  # Auto-detect Intel GPUs via lspci
-  _GPU_LIST=()
-  _GPU_IDS=()
-  while IFS= read -r line; do
-    [ -z "${line}" ] && continue
-    # Extract device ID [8086:xxxx] and description
-    _dev_id=$(echo "${line}" | grep -oP '\[8086:[0-9a-f]+\]' | tr -d '[]')
-    _desc=$(echo "${line}" | sed 's/ \[.*$//' | sed 's/^[0-9:.]\+ //')
-    if [ -n "${_dev_id}" ] && [ -n "${_desc}" ]; then
-      _GPU_LIST+=("${_desc} [${_dev_id}]")
-      _GPU_IDS+=("${_dev_id}")
-    fi
-  done < <(lspci -nn -d 8086::0300 2>/dev/null; lspci -nn -d 8086::0380 2>/dev/null)
-
-  if [ "${#_GPU_LIST[@]}" -gt 0 ]; then
+  if _is_wsl; then
+    # ── WSL2 path: no lspci, GPU is virtualised via /dev/dxg ──
     echo ""
-    echo "  Detected Intel GPUs:"
-    for i in "${!_GPU_LIST[@]}"; do
-      echo "    $((i + 1))) ${_GPU_LIST[$i]}"
-    done
-    echo "    $((${#_GPU_LIST[@]} + 1))) Enter manually"
+    info "WSL2 detected — PCI enumeration unavailable (GPU accessed via /dev/dxg)"
     echo ""
-
-    _DEFAULT_SEL=1
-    # If INTEL_DEVICE_ID is pre-set, try to find it in the list
-    if [ -n "${INTEL_DEVICE_ID}" ]; then
-      for i in "${!_GPU_IDS[@]}"; do
-        if [ "${_GPU_IDS[$i]}" = "${INTEL_DEVICE_ID}" ]; then
-          _DEFAULT_SEL=$((i + 1))
-          break
-        fi
-      done
-    fi
-
-    read -p "  Select GPU [${_DEFAULT_SEL}]: " _gpu_choice
-    _gpu_choice=${_gpu_choice:-${_DEFAULT_SEL}}
-
-    if [ "${_gpu_choice}" -le "${#_GPU_LIST[@]}" ] 2>/dev/null; then
-      INTEL_DEVICE_ID="${_GPU_IDS[$((_gpu_choice - 1))]}"
-    else
-      # Manual entry
-      read -p "  Enter PCI device ID (e.g. 8086:e223): " INTEL_DEVICE_ID
-    fi
-  else
-    echo ""
-    echo "  No Intel GPUs detected via lspci."
-    echo "  To find your GPU PCI device ID, run:"
-    echo "    lspci -nn | grep -i 'VGA\|Display'"
-    echo ""
-    _default_id="${INTEL_DEVICE_ID:-8086:e223}"
-    read -p "  Enter PCI device ID [${_default_id}]: " _manual_id
+    _default_id="${INTEL_DEVICE_ID:-wsl-dxg}"
+    read -p "  PCI device ID (informational only, e.g. 8086:e223) [${_default_id}]: " _manual_id
     INTEL_DEVICE_ID="${_manual_id:-${_default_id}}"
+    ok "Device ID: ${INTEL_DEVICE_ID} (WSL2 — /dev/dxg bridge)"
+
+    # Card count: WSL2 virtualises all physical GPUs behind a single /dev/dxg
+    INTEL_CARD_COUNT=1
+    ok "Card count: ${INTEL_CARD_COUNT} (WSL2 virtual GPU device)"
+
+  else
+    # ── Bare-metal path: full lspci detection ──
+    # Auto-detect Intel GPUs via lspci
+    _GPU_LIST=()
+    _GPU_IDS=()
+    while IFS= read -r line; do
+      [ -z "${line}" ] && continue
+      # Extract device ID [8086:xxxx] and description
+      _dev_id=$(echo "${line}" | grep -oP '\[8086:[0-9a-f]+\]' | tr -d '[]')
+      _desc=$(echo "${line}" | sed 's/ \[.*$//' | sed 's/^[0-9:.]\+ //')
+      if [ -n "${_dev_id}" ] && [ -n "${_desc}" ]; then
+        _GPU_LIST+=("${_desc} [${_dev_id}]")
+        _GPU_IDS+=("${_dev_id}")
+      fi
+    done < <(lspci -nn -d 8086::0300 2>/dev/null; lspci -nn -d 8086::0380 2>/dev/null)
+
+    if [ "${#_GPU_LIST[@]}" -gt 0 ]; then
+      echo ""
+      echo "  Detected Intel GPUs:"
+      for i in "${!_GPU_LIST[@]}"; do
+        echo "    $((i + 1))) ${_GPU_LIST[$i]}"
+      done
+      echo "    $((${#_GPU_LIST[@]} + 1))) Enter manually"
+      echo ""
+
+      _DEFAULT_SEL=1
+      # If INTEL_DEVICE_ID is pre-set, try to find it in the list
+      if [ -n "${INTEL_DEVICE_ID}" ]; then
+        for i in "${!_GPU_IDS[@]}"; do
+          if [ "${_GPU_IDS[$i]}" = "${INTEL_DEVICE_ID}" ]; then
+            _DEFAULT_SEL=$((i + 1))
+            break
+          fi
+        done
+      fi
+
+      read -p "  Select GPU [${_DEFAULT_SEL}]: " _gpu_choice
+      _gpu_choice=${_gpu_choice:-${_DEFAULT_SEL}}
+
+      if [ "${_gpu_choice}" -le "${#_GPU_LIST[@]}" ] 2>/dev/null; then
+        INTEL_DEVICE_ID="${_GPU_IDS[$((_gpu_choice - 1))]}"
+      else
+        # Manual entry
+        read -p "  Enter PCI device ID (e.g. 8086:e223): " INTEL_DEVICE_ID
+      fi
+    else
+      echo ""
+      echo "  No Intel GPUs detected via lspci."
+      echo "  To find your GPU PCI device ID, run:"
+      echo "    lspci -nn | grep -i 'VGA\|Display'"
+      echo ""
+      _default_id="${INTEL_DEVICE_ID:-8086:e223}"
+      read -p "  Enter PCI device ID [${_default_id}]: " _manual_id
+      INTEL_DEVICE_ID="${_manual_id:-${_default_id}}"
+    fi
+
+    if [ -z "${INTEL_DEVICE_ID}" ]; then
+      error "Device ID is required for Intel ARC setup."
+    fi
+    ok "Device ID: ${INTEL_DEVICE_ID}"
+
+    # ── Card Count ──
+    # Count how many cards match the selected device ID
+    _DETECTED_COUNT=$(lspci -nn -d "${INTEL_DEVICE_ID}" 2>/dev/null | wc -l)
+    [ "${_DETECTED_COUNT}" -lt 1 ] && _DETECTED_COUNT=1
+    INTEL_CARD_COUNT="${_DETECTED_COUNT}"
+
+    echo ""
+    echo "  Identical cards detected: ${_DETECTED_COUNT}"
+    read -p "  Card count [${INTEL_CARD_COUNT}]: " _card_input
+    INTEL_CARD_COUNT=${_card_input:-${INTEL_CARD_COUNT}}
+    ok "Card count: ${INTEL_CARD_COUNT}"
   fi
-
-  if [ -z "${INTEL_DEVICE_ID}" ]; then
-    error "Device ID is required for Intel ARC setup."
-  fi
-  ok "Device ID: ${INTEL_DEVICE_ID}"
-
-  # ── Card Count ──
-  # Count how many cards match the selected device ID
-  _DETECTED_COUNT=$(lspci -nn -d "${INTEL_DEVICE_ID}" 2>/dev/null | wc -l)
-  [ "${_DETECTED_COUNT}" -lt 1 ] && _DETECTED_COUNT=1
-  INTEL_CARD_COUNT="${_DETECTED_COUNT}"
-
-  echo ""
-  echo "  Identical cards detected: ${_DETECTED_COUNT}"
-  read -p "  Card count [${INTEL_CARD_COUNT}]: " _card_input
-  INTEL_CARD_COUNT=${_card_input:-${INTEL_CARD_COUNT}}
-  ok "Card count: ${INTEL_CARD_COUNT}"
 
   # ── VRAM ──
   echo ""
@@ -1247,13 +1274,31 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     docker rm "${SYCL_CONTAINER}" 2>/dev/null || true
   fi
 
-  # Build device flags from DRI devices
+  # Build device flags — WSL2 uses /dev/dxg, bare-metal uses /dev/dri
   DOCKER_DEVICES=""
-  for dev in /dev/dri/renderD* /dev/dri/card*; do
-    if [ -e "${dev}" ]; then
-      DOCKER_DEVICES="${DOCKER_DEVICES} --device ${dev}"
+  DOCKER_WSL_MOUNTS=""
+  DOCKER_WSL_ENV=""
+  if _is_wsl; then
+    # WSL2: Windows GPU driver bridge via DirectX Graphics kernel device
+    if [ -e /dev/dxg ]; then
+      DOCKER_DEVICES="--device /dev/dxg"
+    else
+      warn "/dev/dxg not found — Docker container may not have GPU access"
     fi
-  done
+    # Mount the WSL driver libraries so the container can talk to the host GPU
+    if [ -d /usr/lib/wsl ]; then
+      DOCKER_WSL_MOUNTS="-v /usr/lib/wsl:/usr/lib/wsl"
+    fi
+    DOCKER_WSL_ENV="-e LD_LIBRARY_PATH=/usr/lib/wsl/lib"
+    info "WSL2 Docker: /dev/dxg + /usr/lib/wsl driver bridge"
+  else
+    # Bare-metal: pass all DRI render/card devices
+    for dev in /dev/dri/renderD* /dev/dri/card*; do
+      if [ -e "${dev}" ]; then
+        DOCKER_DEVICES="${DOCKER_DEVICES} --device ${dev}"
+      fi
+    done
+  fi
 
   # llama-server --ctx-size is TOTAL context shared across all parallel slots.
   # sycl_ctx_size is per-slot → multiply by parallel for the Docker launch.
@@ -1266,6 +1311,8 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
   docker run -d --name "${SYCL_CONTAINER}" \
     --restart unless-stopped \
     ${DOCKER_DEVICES} \
+    ${DOCKER_WSL_MOUNTS} \
+    ${DOCKER_WSL_ENV} \
     -v "${SYCL_MODEL_DIR}:/models" \
     -p "${SYCL_PORT}:8080" \
     "${SYCL_IMAGE}" \
