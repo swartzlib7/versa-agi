@@ -616,6 +616,130 @@ if [ "${UPDATE_MODE}" = true ]; then
 
 fi  # end UPDATE_MODE preamble
 
+# ═══════════════════════════════════════════════════════
+# SERVER TOPOLOGY UPDATE — early exit
+# On server-only installs, the full client/COA agent stack
+# doesn't exist. Deploy core-infra + agictl, re-run
+# setup_local.sh for Docker image rebuild, and exit.
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
+  section "Server Update — Deploy Core Infrastructure"
+
+  # Ensure watchdog exists
+  if ! id "${WATCHDOG_USER}" &>/dev/null; then
+    useradd -r -m -s /bin/bash "${WATCHDOG_USER}" 2>/dev/null || true
+    ok "Created service user: ${WATCHDOG_USER}"
+  fi
+
+  # Ensure watchdog has GPU device access
+  for _grp in render video; do
+    if getent group "${_grp}" >/dev/null 2>&1; then
+      if ! id -nG "${WATCHDOG_USER}" 2>/dev/null | grep -qw "${_grp}"; then
+        usermod -aG "${_grp}" "${WATCHDOG_USER}" 2>/dev/null || true
+        ok "${WATCHDOG_USER} added to '${_grp}' group"
+      fi
+    fi
+  done
+
+  # Deploy core-infra (agictl, models.ini, etc.)
+  SOURCE_CORE_INFRA="${SCRIPT_DIR}/core-infra"
+  mkdir -p "${DEPLOYED_CORE_INFRA}/agictl" \
+           "${DEPLOYED_CORE_INFRA}/bin" \
+           "${DEPLOYED_CORE_INFRA}/config" \
+           "${DEPLOYED_CORE_INFRA}/harness"
+
+  if [ -d "${SOURCE_CORE_INFRA}/agictl" ]; then
+    cp -r "${SOURCE_CORE_INFRA}/agictl/"* "${DEPLOYED_CORE_INFRA}/agictl/"
+  fi
+  for f in agictl agictl-wrapper; do
+    if [ -f "${SOURCE_CORE_INFRA}/bin/${f}" ]; then
+      cp "${SOURCE_CORE_INFRA}/bin/${f}" "${DEPLOYED_CORE_INFRA}/bin/${f}"
+      chmod 755 "${DEPLOYED_CORE_INFRA}/bin/${f}"
+    fi
+  done
+  if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+    cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/models.ini" 2>/dev/null || true
+    chmod 640 "/etc/versa-agi/models.ini"
+    cp "${SCRIPT_DIR}/models.ini" "${DEPLOYED_CORE_INFRA}/config/"
+  fi
+  for hfile in model_context.py model_params.py; do
+    if [ -f "${SOURCE_CORE_INFRA}/harness/${hfile}" ]; then
+      cp "${SOURCE_CORE_INFRA}/harness/${hfile}" "${DEPLOYED_CORE_INFRA}/harness/"
+    fi
+  done
+  touch "${DEPLOYED_CORE_INFRA}/harness/__init__.py"
+  chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}"
+  ok "Core infrastructure updated"
+
+  # Install agictl globally
+  LIB_DIR="/usr/local/lib/versa-agi"
+  mkdir -p "${LIB_DIR}"
+  if [ -f "${DEPLOYED_CORE_INFRA}/bin/agictl" ]; then
+    cp "${DEPLOYED_CORE_INFRA}/bin/agictl" "${LIB_DIR}/agictl"
+    chmod 755 "${LIB_DIR}/agictl"
+  fi
+  if [ -f "${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper" ]; then
+    cp "${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper" /usr/local/bin/agictl
+    chmod 755 /usr/local/bin/agictl
+  fi
+  ok "agictl updated"
+
+  # Sync setup.ini
+  if [ -f "${INI_FILE}" ]; then
+    cp "${INI_FILE}" "/etc/versa-agi/setup.ini"
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/setup.ini" 2>/dev/null || true
+    chmod 640 "/etc/versa-agi/setup.ini"
+  fi
+
+  # Re-run setup_local.sh (rebuilds Docker image if Dockerfile changed)
+  section "Server Update — Local AI Engine"
+  SETUP_LOCAL_SCRIPT="${SCRIPT_DIR}/setup_local.sh"
+  if [ -f "${SETUP_LOCAL_SCRIPT}" ]; then
+    chmod +x "${SETUP_LOCAL_SCRIPT}"
+    bash "${SETUP_LOCAL_SCRIPT}" --topology server
+  fi
+
+  # Registration
+  if declare -F install_acceptance_record_full >/dev/null 2>&1; then
+    section "Registration Submit"
+    install_acceptance_record_full "false"
+    echo ""
+  fi
+
+  # Server-ready banner
+  _SRV_STATE="/etc/versa-agi/server_config.json"
+  if [ -f "${_SRV_STATE}" ]; then
+    _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+    _srv_model=$(jq -r '.active_model // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+    _srv_port=$(jq -r '.proxy_port // 8080' "${_SRV_STATE}" 2>/dev/null)
+    _srv_ip=$(jq -r '.lan_ip // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+    _srv_key=$(jq -r '.inference_master_key // ""' "${_SRV_STATE}" 2>/dev/null)
+
+    echo ""
+    echo "  ╭──────────────────────────────────────────────────────╮"
+    echo "  │  ✅ Inference Server Ready                          │"
+    echo "  ├──────────────────────────────────────────────────────┤"
+    echo "  │                                                      │"
+    echo "  │  GPU Backend:    ${_srv_backend}"
+    echo "  │  Active Model:   ${_srv_model}"
+    echo "  │  Inference Port: ${_srv_port}"
+    echo "  │  LAN URL:        http://${_srv_ip}:${_srv_port}"
+    echo "  │  Master Key:     ${_srv_key}"
+    echo "  │                                                      │"
+    if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+      echo "  │  Windows URL:    http://localhost:${_srv_port}"
+      echo "  │  (WSL auto-forwards ports to Windows localhost)     │"
+      echo "  │                                                      │"
+    fi
+    echo "  ╰──────────────────────────────────────────────────────╯"
+    echo ""
+  fi
+
+  ok "Server update complete."
+  exit 0
+fi
+
 
 # ── OS Compatibility Warning ──────────────────────────
 if command -v lsb_release &>/dev/null; then
@@ -1070,7 +1194,13 @@ deploy_repo() {
 }
 
 deploy_repo "${SRC_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}" "${WATCHDOG_USER}" "Core Infrastructure"
-deploy_repo "${SRC_COA_ENV}" "${DEPLOYED_COA_ENV}" "${COA_USER}" "COA Environment"
+
+# COA environment — only deploy if the COA user exists (server-only topology skips this)
+if id "${COA_USER}" &>/dev/null; then
+  deploy_repo "${SRC_COA_ENV}" "${DEPLOYED_COA_ENV}" "${COA_USER}" "COA Environment"
+else
+  info "COA user '${COA_USER}' does not exist — skipping COA environment deployment (server topology)"
+fi
 
 # Deploy models.ini to canonical location (alongside setup.ini)
 # Fresh box: seed the template here (early consumers need it). Existing box:
