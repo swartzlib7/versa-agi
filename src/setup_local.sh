@@ -1157,14 +1157,20 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
   fi
 
   # ── Step 5b: Ensure service user has GPU device access ──
-  for grp in render video; do
-    if getent group "${grp}" >/dev/null 2>&1; then
-      if ! id -nG "${WATCHDOG_USER}" 2>/dev/null | grep -qw "${grp}"; then
-        usermod -aG "${grp}" "${WATCHDOG_USER}"
-        ok "${WATCHDOG_USER} added to '${grp}' group (GPU device access)"
+  # In server mode the watchdog user may not exist yet (created by setup.sh
+  # after setup_local.sh returns) — skip gracefully if absent.
+  if id "${WATCHDOG_USER}" &>/dev/null; then
+    for grp in render video; do
+      if getent group "${grp}" >/dev/null 2>&1; then
+        if ! id -nG "${WATCHDOG_USER}" 2>/dev/null | grep -qw "${grp}"; then
+          usermod -aG "${grp}" "${WATCHDOG_USER}" 2>/dev/null || true
+          ok "${WATCHDOG_USER} added to '${grp}' group (GPU device access)"
+        fi
       fi
-    fi
-  done
+    done
+  else
+    info "User '${WATCHDOG_USER}' does not exist yet — GPU group membership will be set by setup.sh"
+  fi
 
   # ── Step 6: Model Registry & Selection ──
   info "Step 6: SYCL Model Registry & Selection"

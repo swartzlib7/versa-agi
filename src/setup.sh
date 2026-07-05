@@ -688,6 +688,17 @@ if [ "${UPDATE_MODE}" = false ]; then
         ok "Created service user: ${WATCHDOG_USER}"
       fi
 
+      # Ensure watchdog has GPU device access (render/video groups)
+      # setup_local.sh defers this to here when the user didn't exist yet.
+      for _grp in render video; do
+        if getent group "${_grp}" >/dev/null 2>&1; then
+          if ! id -nG "${WATCHDOG_USER}" 2>/dev/null | grep -qw "${_grp}"; then
+            usermod -aG "${_grp}" "${WATCHDOG_USER}" 2>/dev/null || true
+            ok "${WATCHDOG_USER} added to '${_grp}' group (GPU device access)"
+          fi
+        fi
+      done
+
       # Deploy core-infra subset needed for agictl
       SOURCE_CORE_INFRA="${SCRIPT_DIR}/core-infra"
       mkdir -p "${DEPLOYED_CORE_INFRA}/agictl" \
