@@ -1483,29 +1483,8 @@ SRVEOF
     fi
   done
 
-  # Print server-ready banner
-  echo ""
-  echo "  ╭──────────────────────────────────────────────────────╮"
-  echo "  │  ✅ Inference Server Ready                          │"
-  echo "  ├──────────────────────────────────────────────────────┤"
-  echo "  │                                                      │"
-  if [ "${GPU_BACKEND}" = "intel" ]; then
-    _INF_PORT="${SYCL_PORT}"
-  else
-    _INF_PORT="11434"
-  fi
-  echo "  │  GPU Backend:   ${GPU_BACKEND}"
-  echo "  │  Active Model:  ${_ACTIVE_MODEL}"
-  echo "  │  Inference Port:  ${_INF_PORT}"
-  echo "  │  LAN URL:       http://${_LAN_IP}:${_INF_PORT}"
-  echo "  │  Master Key:    ${INFERENCE_MASTER_KEY}"
-  echo "  │                                                      │"
-  echo "  │  On the client machine, run setup.sh and select:     │"
-  echo "  │    Option 2 (Client — Cloud + Local AI)              │"
-  echo "  │    Then: Remote server → paste URL + key above       │"
-  echo "  │                                                      │"
-  echo "  ╰──────────────────────────────────────────────────────╯"
-  echo ""
+  # Server-ready banner is printed by setup.sh AFTER all agictl deployment
+  # and registration steps complete — so it's the last visible output.
   exit 0
 fi
 

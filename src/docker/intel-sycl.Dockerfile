@@ -104,6 +104,7 @@ RUN apt-get update && \
     find /var/cache -type f -delete
 
 ENV PATH="/opt/venv/bin:$PATH"
+ENV LD_LIBRARY_PATH="/app:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH}"
 
 ENTRYPOINT ["/app/tools.sh"]
 
@@ -112,6 +113,8 @@ FROM base AS light
 
 COPY --from=build /app/lib/ /app
 COPY --from=build /app/full/llama-cli /app/full/llama-completion /app
+
+ENV LD_LIBRARY_PATH="/app:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH}"
 
 WORKDIR /app
 
@@ -124,6 +127,11 @@ ENV LLAMA_ARG_HOST=0.0.0.0
 
 COPY --from=build /app/lib/ /app
 COPY --from=build /app/full/llama-server /app
+
+# Intel oneAPI compiler runtime (libsvml.so, libintlc.so, etc.)
+# The binary is compiled with icx/icpx and dynamically links these at runtime.
+# Glob handles version differences (e.g. 2025.3, 2026.0).
+ENV LD_LIBRARY_PATH="/app:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH}"
 
 WORKDIR /app
 

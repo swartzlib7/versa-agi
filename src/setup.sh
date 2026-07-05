@@ -832,6 +832,45 @@ if [ "${UPDATE_MODE}" = false ]; then
         install_acceptance_record_full "false"
         echo ""
       fi
+
+      # ── Final: Inference Server Ready banner ──
+      # Printed last so it's always visible on screen.
+      _SRV_STATE="/etc/versa-agi/server_config.json"
+      if [ -f "${_SRV_STATE}" ]; then
+        _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+        _srv_model=$(jq -r '.active_model // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+        _srv_port=$(jq -r '.proxy_port // 8080' "${_SRV_STATE}" 2>/dev/null)
+        _srv_ip=$(jq -r '.lan_ip // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+        _srv_key=$(jq -r '.inference_master_key // ""' "${_SRV_STATE}" 2>/dev/null)
+
+        echo ""
+        echo "  ╭──────────────────────────────────────────────────────╮"
+        echo "  │  ✅ Inference Server Ready                          │"
+        echo "  ├──────────────────────────────────────────────────────┤"
+        echo "  │                                                      │"
+        echo "  │  GPU Backend:    ${_srv_backend}"
+        echo "  │  Active Model:   ${_srv_model}"
+        echo "  │  Inference Port: ${_srv_port}"
+        echo "  │  LAN URL:        http://${_srv_ip}:${_srv_port}"
+        echo "  │  Master Key:     ${_srv_key}"
+        echo "  │                                                      │"
+
+        # WSL: the internal IP (172.x) is not reachable from Windows.
+        # WSL2 auto-forwards listening ports to localhost on the host.
+        if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+          echo "  │  Windows URL:    http://localhost:${_srv_port}"
+          echo "  │  (WSL auto-forwards ports to Windows localhost)     │"
+          echo "  │                                                      │"
+        fi
+
+        echo "  │  On the client machine, run setup.sh and select:     │"
+        echo "  │    Option 2 (Client — Cloud + Local AI)              │"
+        echo "  │    Then: Remote server → paste URL + key above       │"
+        echo "  │                                                      │"
+        echo "  ╰──────────────────────────────────────────────────────╯"
+        echo ""
+      fi
+
       exit 0
     else
       error "setup_local.sh not found at ${SETUP_LOCAL_SCRIPT}"
