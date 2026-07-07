@@ -1292,7 +1292,9 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     if [ -d /usr/lib/wsl ]; then
       DOCKER_WSL_MOUNTS="-v /usr/lib/wsl:/usr/lib/wsl"
     fi
-    DOCKER_WSL_ENV="-e LD_LIBRARY_PATH=/usr/lib/wsl/lib"
+    # Docker -e completely replaces any ENV from the Dockerfile, so we must
+    # include ALL required oneAPI paths alongside the WSL driver bridge.
+    DOCKER_WSL_ENV="-e LD_LIBRARY_PATH=/app:/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/compiler/latest/linux/compiler/lib/intel64_lin:/opt/intel/oneapi/compiler/latest/linux/lib:/opt/intel/oneapi/umf/latest/lib:/opt/intel/oneapi/tcm/latest/lib:/opt/intel/oneapi/dnnl/latest/lib:/usr/lib/wsl/lib"
     info "WSL2 Docker: /dev/dxg + /usr/lib/wsl driver bridge"
   else
     # Bare-metal: pass all DRI render/card devices

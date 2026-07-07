@@ -1464,11 +1464,37 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
     subprocess.run(["docker", "stop", SYCL_CONTAINER], capture_output=True)
     subprocess.run(["docker", "rm", SYCL_CONTAINER], capture_output=True)
 
-    # Build device flags
+    # Check for WSL2
+    is_wsl = False
+    try:
+        with open("/proc/version", "r") as f:
+            if "microsoft" in f.read().lower():
+                is_wsl = True
+    except Exception:
+        pass
+
+    # Build device flags and environment overrides
     devices = []
-    import glob
-    for dev in glob.glob("/dev/dri/renderD*") + glob.glob("/dev/dri/card*"):
-        devices.extend(["--device", dev])
+    wsl_mounts = []
+    wsl_env = []
+
+    if is_wsl:
+        # WSL2 Windows driver translation bridge
+        if os.path.exists("/dev/dxg"):
+            devices.extend(["--device", "/dev/dxg"])
+        # WSL driver libraries mount
+        if os.path.isdir("/usr/lib/wsl"):
+            wsl_mounts.extend(["-v", "/usr/lib/wsl:/usr/lib/wsl"])
+        # WSL library path override (must include compiler libraries, app libs, and host drivers)
+        wsl_env.extend([
+            "-e",
+            "LD_LIBRARY_PATH=/app:/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/compiler/latest/linux/compiler/lib/intel64_lin:/opt/intel/oneapi/compiler/latest/linux/lib:/opt/intel/oneapi/umf/latest/lib:/opt/intel/oneapi/tcm/latest/lib:/opt/intel/oneapi/dnnl/latest/lib:/usr/lib/wsl/lib"
+        ])
+    else:
+        # Bare metal Linux setup
+        import glob
+        for dev in glob.glob("/dev/dri/renderD*") + glob.glob("/dev/dri/card*"):
+            devices.extend(["--device", dev])
 
     sycl_port = _resolve_sycl_port()
     sycl_image = "versa-agi-sycl"
@@ -1485,7 +1511,7 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
     cmd = [
         "docker", "run", "-d", "--name", SYCL_CONTAINER,
         "--restart", "unless-stopped",
-    ] + devices + [
+    ] + devices + wsl_mounts + wsl_env + [
         "-v", f"{SYCL_MODEL_DIR}:/models",
         "-p", f"{sycl_port}:8080",
         sycl_image,
