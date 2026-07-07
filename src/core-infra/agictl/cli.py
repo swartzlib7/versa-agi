@@ -10412,29 +10412,35 @@ def pkg_install(name):
         json_response(False, error=f"Installation error: {e}")
 
 
-from agictl import utility_cli
 
-utility_cli.register(
-    cli,
-    json_response=json_response,
-    tasks_reader=tasks_reader,
-    require_pu_or_coa=_require_pu_or_coa,
-    load_catalog=_load_catalog,
-    tasks_db=tasks_db,
-)
-utility_cli.register_modality_map_commands(
-    model,
-    json_response=json_response,
-    require_pu_or_coa=_require_pu_or_coa,
-    load_catalog=_load_catalog,
-)
 
-from agictl import organization_cli
+try:
+    from agictl import utility_cli
+    utility_cli.register(
+        cli,
+        json_response=json_response,
+        tasks_reader=tasks_reader,
+        require_pu_or_coa=_require_pu_or_coa,
+        load_catalog=_load_catalog,
+        tasks_db=tasks_db,
+    )
+    utility_cli.register_modality_map_commands(
+        model,
+        json_response=json_response,
+        require_pu_or_coa=_require_pu_or_coa,
+        load_catalog=_load_catalog,
+    )
+except ImportError:
+    pass  # utility commands unavailable on server-only topology
 
-organization_cli.register(
-    cli,
-    json_response=json_response,
-)
+try:
+    from agictl import organization_cli
+    organization_cli.register(
+        cli,
+        json_response=json_response,
+    )
+except ImportError:
+    pass  # organization commands unavailable on server-only topology
 
 
 if __name__ == "__main__":

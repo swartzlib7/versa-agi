@@ -474,7 +474,7 @@ if [ "${TOPOLOGY}" != "server" ]; then
       _cli_models=$(jq -r '.models // [] | join(",")' "${CLIENT_STATE_FILE}" 2>/dev/null)
       # Quick health check
       _cli_status="✗ Unreachable"
-      if curl -sf -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${_cli_url}/v1/models" 2>/dev/null; then
+      if curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${_cli_url}/v1/models" 2>/dev/null; then
         _cli_status="✓ Reachable"
       fi
       echo "  ╭─────────────────────────────────────────────╮"
@@ -523,7 +523,7 @@ if [ "${TOPOLOGY}" != "server" ]; then
     # Health check
     echo ""
     info "Testing connection to ${REMOTE_INFERENCE_URL}..."
-    if curl -sf -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null; then
+    if curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null; then
       ok "Remote server reachable (health: ok)"
     else
       warn "Remote server may not be reachable at ${REMOTE_INFERENCE_URL}"
@@ -534,7 +534,7 @@ if [ "${TOPOLOGY}" != "server" ]; then
     # but the rest of the system uses friendly keys (e.g. qwen3.6:35b).
     # We translate via the [sycl_models] registry in models.ini.
     _remote_models=""
-    _models_json=$(curl -sf -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null || echo "")
+    _models_json=$(curl -sf --connect-timeout 5 --max-time 10 -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "${REMOTE_INFERENCE_URL}/v1/models" 2>/dev/null || echo "")
     if [ -n "${_models_json}" ]; then
       _raw_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
       if [ -n "${_raw_models}" ]; then
@@ -664,7 +664,7 @@ TUNNELEOF
     fi
 
     # Step 5: Verify tunnel connectivity (pass master key — Inference Server requires auth)
-    if curl -sf -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "http://localhost:${_TUNNEL_PORT}/v1/models" 2>/dev/null; then
+    if curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -H "Authorization: Bearer ${INFERENCE_MASTER_KEY}" "http://localhost:${_TUNNEL_PORT}/v1/models" 2>/dev/null; then
       ok "Tunnel verified: localhost:${_TUNNEL_PORT} reachable"
     else
       warn "Could not reach localhost:${_TUNNEL_PORT} through tunnel — server may not be running"

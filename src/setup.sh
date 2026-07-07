@@ -444,13 +444,7 @@ else
   fi
 fi
 
-# ─── Feature Flags Prompt (D34) — right after acceptance ─
-# Prompts the optional dashboard surfaces (Organization shows the EXPERIMENTAL +
-# sudo-power disclaimer as a second confirmation here, by the license). Answers
-# are captured to VERSA_FEATURE_* now and persisted to setup.ini after reconcile.
-if declare -F install_acceptance_feature_prompts >/dev/null 2>&1; then
-  install_acceptance_feature_prompts
-fi
+# Feature flags prompt moved to after topology selection (see below).
 
 # ─── CRON Pause (--update only, after acceptance gate) ─
 # Disable lifeline CRON before deploy. Runs after setup.ini check and the
@@ -1001,6 +995,7 @@ if [ "${UPDATE_MODE}" = false ]; then
     fi
   fi
 
+
   # ── Client overrides: sync INI values to match installation type selection ──
   if [ "${INSTALL_TYPE}" = "1" ]; then
     # Cloud-only: no local AI, reset topology to default
@@ -1026,6 +1021,16 @@ if [ "${UPDATE_MODE}" = false ]; then
       sed -i '/^\[gemini\]/,/^\[/{s/^mode=.*/mode='"${INI_EXECUTION_MODE}"'/}' "${_ini_file}"
     fi
   done
+fi
+
+# ─── Feature Flags Prompt (D34) — after topology selection ─
+# Prompts the optional dashboard surfaces (Organization, Utility Models, etc.).
+# Placed after topology selection so:
+#   - Fresh install → Server: exits before reaching here
+#   - Update → Server: exits at early-exit block before reaching here
+#   - Fresh install / Update → Client/Local: prompts shown normally
+if declare -F install_acceptance_feature_prompts >/dev/null 2>&1; then
+  install_acceptance_feature_prompts
 fi
 
 # ═══════════════════════════════════════════════════════
@@ -2940,7 +2945,7 @@ if [ "${UPDATE_MODE}" = true ]; then
 
         # Query live models from the tunnel endpoint
         _repair_models=""
-        _models_json=$(curl -sf -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_TUNNEL_URL}/v1/models" 2>/dev/null || echo "")
+        _models_json=$(curl -sf --connect-timeout 5 --max-time 10 -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_TUNNEL_URL}/v1/models" 2>/dev/null || echo "")
         if [ -n "${_models_json}" ] && command -v jq &>/dev/null; then
           _raw_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
           if [ -n "${_raw_models}" ]; then
@@ -3010,7 +3015,7 @@ REPAIRCFG
       # Read tunnel URL from paths.env (set during initial setup or sync above)
       _REPAIR_INFERENCE=$(grep '^VERSA_INFERENCE_URL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
       if [ -n "${_REPAIR_INFERENCE}" ]; then
-        _active_json=$(curl -sf -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_INFERENCE}/v1/models" 2>/dev/null || echo "")
+        _active_json=$(curl -sf --connect-timeout 5 --max-time 10 -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_INFERENCE}/v1/models" 2>/dev/null || echo "")
         if [ -n "${_active_json}" ] && command -v jq &>/dev/null; then
           _active_gguf=$(echo "${_active_json}" | jq -r '.data[0].id' 2>/dev/null)
           if [ -n "${_active_gguf}" ] && [ "${_active_gguf}" != "null" ]; then
