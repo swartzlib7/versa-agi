@@ -84,57 +84,61 @@ Not every job needs an LLM. Agents (or their sponsor) can schedule shared `.sh` 
 
 The synthesis of localized Versa AGi execution mapped over the cross-lingual VersaVoice routing layer births a completely borderless framework for human and autonomous collaboration.
 
-```mermaid
-graph TD
-    classDef core fill:#0a0a0d,stroke:#00ffcc,color:#fff,stroke-width:2px;
-    classDef human fill:#1f0041,stroke:#a29bfe,color:#fff,stroke-width:2px;
-    classDef agent fill:#004635,stroke:#009f77,color:#fff,stroke-width:2px;
-    classDef work fill:#7c0606,stroke:#d35454,color:#fff,stroke-width:2px;
+<div align="center">
 
-    %% Routing Core
-    VVCore{{"🌍 VersaVoice Neural Translation Core<br/>(Cross-Lingual Routing Barrier)"}}:::core
+<h3>🌍 VersaVoice Neural Translation Core</h3>
+<p><em>Cross-Lingual Routing Barrier</em></p>
 
-    %% Nodes
-    subgraph uGPN ["Unified Global Production Network (uGPN)"]
-        direction LR
-        
-        subgraph Node1 ["🇯🇵 Tokyo Node"]
-            H1(("👤 Human Architect")):::human
-            A1["🤖 Versa AGi"]:::agent
-            H1 <-->|Local OS Bound| A1
-        end
+<code>──────────────── Sub-Account API ────────────────</code>
 
-        subgraph Node2 ["🇺🇸 New York Node"]
-            H2(("👤 Dev Lead")):::human
-            A2["🤖 Versa AGi"]:::agent
-            H2 <-->|Local OS Bound| A2
-        end
-        
-        subgraph Node3 ["🇧🇷 São Paulo Node"]
-            A3["🤖 Autonomous AGi<br/>(Unattended)"]:::agent
-        end
-        
-        %% API Communication Sync
-        A1 <-->|Sub-Account API| VVCore
-        A2 <-->|Sub-Account API| VVCore
-        A3 <-->|Sub-Account API| VVCore
-        
-        VVCore -.->|Translated Direct Comms| H1
-        VVCore -.->|Translated Direct Comms| H2
-    end
+<table>
+  <tr>
+    <td align="center" width="300">
+      <br>
+      <h4>🇯🇵 Tokyo Node</h4>
+      <br>
+      <code>&nbsp;👤 Human Architect&nbsp;</code>
+      <br><br>
+      <sub>↕ Local OS Bound</sub>
+      <br><br>
+      <code>&nbsp;🤖 Versa AGi&nbsp;</code>
+      <br><br>
+    </td>
+    <td align="center" width="300">
+      <br>
+      <h4>🇺🇸 New York Node</h4>
+      <br>
+      <code>&nbsp;👤 Dev Lead&nbsp;</code>
+      <br><br>
+      <sub>↕ Local OS Bound</sub>
+      <br><br>
+      <code>&nbsp;🤖 Versa AGi&nbsp;</code>
+      <br><br>
+    </td>
+    <td align="center" width="300">
+      <br>
+      <h4>🇿🇦 South African Node</h4>
+      <br>
+      <code>&nbsp;🤖 Autonomous AGi&nbsp;</code>
+      <br><br>
+      <sub>(Unattended)</sub>
+      <br><br><br>
+    </td>
+  </tr>
+</table>
 
-    %% Execution Layer
-    Intent{{"🎯 Shared Human Intent<br/>(Manifested Locally via Communication)"}}:::work
-    A1 ==>|Synchronize towards| Intent
-    A2 ==>|Synchronize towards| Intent
-    A3 ==>|Synchronize towards| Intent
+<br>
 
-    %% Styling 
-    style uGPN fill:#13151a,stroke:#333,stroke-width:2px,color:#fff;
-    style Node1 fill:#1e1e24,stroke:#444,stroke-width:1px,color:#fff;
-    style Node2 fill:#1e1e24,stroke:#444,stroke-width:1px,color:#fff;
-    style Node3 fill:#1e1e24,stroke:#444,stroke-width:1px,color:#fff;
-```
+<sub>▼ &nbsp; Synchronize towards &nbsp; ▼</sub>
+
+<br>
+
+<h3>🎯 Shared Human Intent</h3>
+<p><em>(Manifested Locally via Communication)</em></p>
+
+<br>
+
+</div>
 
 ## Architecture
 
