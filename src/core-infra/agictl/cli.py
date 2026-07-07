@@ -18,27 +18,49 @@ from rich.table import Table
 
 # Add core-infra to path for data readers
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from agitop.data import AgentReader, MessageReader, TasksReader
+
+# These modules are only available on full (client/local) installs.
+# Server-only topology deploys a minimal agictl subset (model commands only).
+try:
+    from agitop.data import AgentReader, MessageReader, TasksReader
+except ImportError:
+    AgentReader = MessageReader = TasksReader = None
+
 from identity import provision_identity
 from comms import fetch_inbox, send_message, mark_message_processed, build_attachments
-from model_catalog import (
-    WORK_MODALITIES,
-    OUTPUT_DELIVERY_MODALITIES,
-    catalog_row_to_value,
-    load_catalog as _mc_load_catalog,
-    parse_catalog_row,
-    validate_model_routing_prefs,
-    validate_preferred_model_key,
-    validate_preferred_output_key,
-)
-from openrouter_catalog import (
-    enrich_catalog_dict,
-    fetch_openrouter_index_with_fallback,
-    list_addable_models,
-    openrouter_configured,
-    or_model_summary,
-)
-import provider_catalog as _pc
+
+try:
+    from model_catalog import (
+        WORK_MODALITIES,
+        OUTPUT_DELIVERY_MODALITIES,
+        catalog_row_to_value,
+        load_catalog as _mc_load_catalog,
+        parse_catalog_row,
+        validate_model_routing_prefs,
+        validate_preferred_model_key,
+        validate_preferred_output_key,
+    )
+except ImportError:
+    WORK_MODALITIES = OUTPUT_DELIVERY_MODALITIES = None
+    catalog_row_to_value = _mc_load_catalog = parse_catalog_row = None
+    validate_model_routing_prefs = validate_preferred_model_key = validate_preferred_output_key = None
+
+try:
+    from openrouter_catalog import (
+        enrich_catalog_dict,
+        fetch_openrouter_index_with_fallback,
+        list_addable_models,
+        openrouter_configured,
+        or_model_summary,
+    )
+except ImportError:
+    enrich_catalog_dict = fetch_openrouter_index_with_fallback = None
+    list_addable_models = openrouter_configured = or_model_summary = None
+
+try:
+    import provider_catalog as _pc
+except ImportError:
+    _pc = None
 
 # ─── Configuration ────────────────────────────────────
 def get_config():
@@ -105,9 +127,13 @@ messages_db = os.getenv("AGICTL_MESSAGES_DB", "/var/lib/versa-agi/messages.db")
 tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
 cycles_db = os.getenv("AGICTL_CYCLES_DB", "/var/lib/versa-agi/coa/cycles.db")
 
-agent_reader = AgentReader(agents_db, cycles_db, messages_db, tasks_db)
-message_reader = MessageReader(messages_db)
-tasks_reader = TasksReader(tasks_db)
+# Data readers — only available on full installs (not server-only topology)
+if AgentReader is not None:
+    agent_reader = AgentReader(agents_db, cycles_db, messages_db, tasks_db)
+    message_reader = MessageReader(messages_db)
+    tasks_reader = TasksReader(tasks_db)
+else:
+    agent_reader = message_reader = tasks_reader = None
 
 console = Console()
 
