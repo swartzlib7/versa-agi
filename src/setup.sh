@@ -722,8 +722,26 @@ if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
     echo "  │  Master Key:     ${_srv_key}"
     echo "  │                                                      │"
     if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
-      echo "  │  Windows URL:    http://localhost:${_srv_port}"
-      echo "  │  (WSL auto-forwards ports to Windows localhost)     │"
+      _win_ip=$(ip route show default 2>/dev/null | awk '{print $3}' || echo "<Windows-IP>")
+      echo "  │  Windows Host:   ${_win_ip} (use this IP from LAN clients)"
+      echo "  │                                                      │"
+      echo "  │  ⚠  WSL2 requires Windows host-level configuration:  │"
+      echo "  │                                                      │"
+      echo "  │  1. Enable mirrored networking in .wslconfig:         │"
+      echo "  │     [wsl2]                                            │"
+      echo "  │     networkingMode=mirrored                           │"
+      echo "  │                                                      │"
+      echo "  │  2. Windows Firewall (PowerShell as Admin):           │"
+      echo "  │     New-NetFirewallRule -DisplayName 'SSH (WSL)'      │"
+      echo "  │       -Direction Inbound -Protocol TCP                │"
+      echo "  │       -LocalPort 22 -Action Allow                     │"
+      echo "  │     New-NetFirewallRule -DisplayName                  │"
+      echo "  │       'Versa AGi Inference (WSL)'                     │"
+      echo "  │       -Direction Inbound -Protocol TCP                │"
+      echo "  │       -LocalPort ${_srv_port} -Action Allow                   │"
+      echo "  │                                                      │"
+      echo "  │  3. Ensure SSH server is running inside WSL:          │"
+      echo "  │     sudo service ssh start                            │"
       echo "  │                                                      │"
     fi
     echo "  ╰──────────────────────────────────────────────────────╯"
@@ -976,8 +994,26 @@ if [ "${UPDATE_MODE}" = false ]; then
         # WSL: the internal IP (172.x) is not reachable from Windows.
         # WSL2 auto-forwards listening ports to localhost on the host.
         if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
-          echo "  │  Windows URL:    http://localhost:${_srv_port}"
-          echo "  │  (WSL auto-forwards ports to Windows localhost)     │"
+          _win_ip=$(ip route show default 2>/dev/null | awk '{print $3}' || echo "<Windows-IP>")
+          echo "  │  Windows Host:   ${_win_ip} (use this IP from LAN clients)"
+          echo "  │                                                      │"
+          echo "  │  ⚠  WSL2 requires Windows host-level configuration:  │"
+          echo "  │                                                      │"
+          echo "  │  1. Enable mirrored networking in .wslconfig:         │"
+          echo "  │     [wsl2]                                            │"
+          echo "  │     networkingMode=mirrored                           │"
+          echo "  │                                                      │"
+          echo "  │  2. Windows Firewall (PowerShell as Admin):           │"
+          echo "  │     New-NetFirewallRule -DisplayName 'SSH (WSL)'      │"
+          echo "  │       -Direction Inbound -Protocol TCP                │"
+          echo "  │       -LocalPort 22 -Action Allow                     │"
+          echo "  │     New-NetFirewallRule -DisplayName                  │"
+          echo "  │       'Versa AGi Inference (WSL)'                     │"
+          echo "  │       -Direction Inbound -Protocol TCP                │"
+          echo "  │       -LocalPort ${_srv_port} -Action Allow                   │"
+          echo "  │                                                      │"
+          echo "  │  3. Ensure SSH server is running inside WSL:          │"
+          echo "  │     sudo service ssh start                            │"
           echo "  │                                                      │"
         fi
 

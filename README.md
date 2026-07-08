@@ -186,6 +186,96 @@ After installation, the system spans five isolation boundaries:
 | Centralized Data | `/var/lib/versa-agi/` | SQLite databases, model config |
 | Security Config | `/etc/versa-agi/` | setup.ini (deployed copy), poise, vault, credentials |
 
+### Server Topology on Windows (WSL2)
+
+When running the **Server (inference only)** topology on a Windows 11 machine via WSL2, additional host-level configuration is required to allow LAN clients to reach the inference server and SSH tunnel.
+
+#### Prerequisites
+
+- **Windows 11 23H2 or later** (for mirrored networking support)
+- **WSL2** with Ubuntu installed (`wsl --install`)
+- **Administrator access** to Windows (PowerShell as Admin)
+
+#### Step 1 — Enable WSL2 Mirrored Networking
+
+WSL2 defaults to NAT networking, meaning ports inside WSL are **not reachable** from other LAN machines. Enable mirrored mode so WSL shares the Windows host's network stack.
+
+Create or edit `%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Then restart WSL from PowerShell:
+
+```powershell
+wsl --shutdown
+```
+
+After restarting, ports bound inside WSL (e.g., SSH on 22, inference on 8080) are directly reachable at the Windows machine's LAN IP.
+
+#### Step 2 — Windows Firewall Rules
+
+Open **PowerShell as Administrator** and create inbound rules for SSH and the inference server:
+
+```powershell
+# Allow SSH (TCP 22) — required for client tunnel setup
+New-NetFirewallRule -DisplayName "SSH (WSL)" -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow
+
+# Allow Inference API (TCP 8080) — direct access to the inference server
+New-NetFirewallRule -DisplayName "Versa AGi Inference (WSL)" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow
+```
+
+To verify the rules were created:
+
+```powershell
+Get-NetFirewallRule -DisplayName "*WSL*" | Format-Table DisplayName, Enabled, Direction, Action -Auto
+```
+
+#### Step 3 — SSH Server Inside WSL
+
+Ensure the SSH server is installed and running inside your WSL instance:
+
+```bash
+sudo apt update && sudo apt install -y openssh-server
+sudo service ssh start
+```
+
+To make SSH start automatically on WSL boot, add to your `.bashrc` or create a startup script:
+
+```bash
+# Auto-start SSH if not running
+if ! pgrep -x sshd > /dev/null; then
+  sudo service ssh start
+fi
+```
+
+#### Step 4 — Client Connection
+
+On the **client machine** (where agents run), set up the SSH key and test connectivity:
+
+```bash
+# Replace with your Windows machine's LAN IP
+WIN_IP="192.168.x.x"
+
+# Copy your SSH key to the server (one-time setup)
+ssh-copy-id -i ~/.ssh/id_ed25519.pub s7@$WIN_IP
+
+# Test the connection
+ssh -o ConnectTimeout=5 s7@$WIN_IP echo "SSH works"
+
+# Test inference tunnel manually
+ssh -N -L 8080:localhost:8080 s7@$WIN_IP &
+curl -sf --connect-timeout 5 -H "Authorization: Bearer versa-sk" http://localhost:8080/v1/models
+```
+
+> [!TIP]
+> If you see **"Too many authentication failures"**, SSH is trying all your loaded keys. Fix by specifying exactly which key to use: `ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 s7@$WIN_IP`
+
+> [!NOTE]
+> If the Windows machine previously ran Linux natively on the same IP, you will need to clear the stale host key: `ssh-keygen -R 192.168.x.x`
+
 ### Uninstall
 
 After installation, uninstall tooling is available system-wide:
