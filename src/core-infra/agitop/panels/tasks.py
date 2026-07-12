@@ -1521,6 +1521,7 @@ class TasksPanel(Widget):
                 yield Button("New", variant="success", id="btn-tasks-new")
                 yield Button("Edit", variant="primary", id="btn-tasks-edit", disabled=True)
                 yield Button("Delete", variant="error", id="btn-tasks-delete", disabled=True)
+                yield Button("Quit", variant="default", id="btn-tasks-quit", classes="btn-quit")
 
     def on_mount(self) -> None:
         self._update_title()
@@ -1572,6 +1573,8 @@ class TasksPanel(Widget):
                 self.app.push_screen(TaskEditModal(task, self.tasks_reader))
         elif event.button.id == "btn-tasks-delete":
             self._try_delete_selected()
+        elif event.button.id == "btn-tasks-quit":
+            self.app.exit()
 
     def _update_title(self) -> None:
         total_pages = max(1, (self._total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)

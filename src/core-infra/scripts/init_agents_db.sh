@@ -13,6 +13,25 @@ DB_PATH="${1:-/var/lib/versa-agi/agents.db}"
 
 echo "Initializing agent registry database: ${DB_PATH}"
 
+# Fail early with an actionable hint when another process (usually agitop) holds the DB.
+if pgrep -af '[a]gitop(\.app|/app\.py)|python3 -m agitop' >/dev/null 2>&1; then
+  echo "ERROR: Cannot refresh ${DB_PATH} while agitop is running — it holds the database open." >&2
+  echo "HINT: Quit agitop, then re-run: sudo ./setup.sh --update" >&2
+  exit 1
+fi
+if [ -e "${DB_PATH}" ]; then
+  if ! _lock_err="$(sqlite3 "${DB_PATH}" "PRAGMA busy_timeout=0; BEGIN EXCLUSIVE; ROLLBACK;" 2>&1)"; then
+    if printf '%s' "${_lock_err}" | grep -qiE 'locked|busy'; then
+      echo "ERROR: ${DB_PATH} is locked (another process holds it open)." >&2
+      echo "HINT: Stop the process holding the DB, then re-run setup." >&2
+      if command -v lsof >/dev/null 2>&1; then
+        lsof "${DB_PATH}" 2>/dev/null | head -20 >&2 || true
+      fi
+      exit 1
+    fi
+  fi
+fi
+
 sqlite3 "${DB_PATH}" <<'SQL'
 CREATE TABLE IF NOT EXISTS agents (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,

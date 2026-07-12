@@ -15,6 +15,37 @@ from textual.widget import Widget
 
 from agitop.data import TasksReader
 
+try:
+    from project_workspace import (
+        COA_WORKSPACE_BASE,
+        allocate_project_dir,
+        collect_taken_project_dirs,
+        is_reserved_system_project,
+        project_dir_from_workspace_path,
+        slugify_project_dir,
+    )
+except ImportError:
+    COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
+    RESERVED = {"AGi-Tools", "AGi-Knowledgebase"}
+
+    def is_reserved_system_project(name: str) -> bool:
+        return name in RESERVED
+
+    def project_dir_from_workspace_path(workspace_path: Optional[str]) -> str:
+        return os.path.basename((workspace_path or "").rstrip(os.sep))
+
+    def slugify_project_dir(name: str) -> str:
+        import re
+        s = (name or "").strip().lower()
+        s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+        return s or "project"
+
+    def allocate_project_dir(preferred, taken, *, allow_increment=True):
+        return preferred
+
+    def collect_taken_project_dirs(conn, workspace_base=COA_WORKSPACE_BASE):
+        return set()
+
 
 _TZ = time.strftime("%Z")
 
@@ -32,6 +63,20 @@ MEMBER_TYPE_ICONS = {
 
 def _tasks_db() -> str:
     return os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
+
+
+def _preview_directory(display_name: str) -> tuple[str, str]:
+    """Return (directory_slug, full_coa_workspace_path) for Create preview."""
+    base = slugify_project_dir(display_name)
+    try:
+        conn = sqlite3.connect(_tasks_db(), timeout=2)
+        conn.row_factory = sqlite3.Row
+        taken = collect_taken_project_dirs(conn, COA_WORKSPACE_BASE)
+        conn.close()
+        slug = allocate_project_dir(base, taken, allow_increment=True)
+    except Exception:
+        slug = base
+    return slug, os.path.join(COA_WORKSPACE_BASE, slug)
 
 
 def _utc_to_local(utc_str: str) -> str:
@@ -252,6 +297,7 @@ class ProjectMembersModal(ModalScreen):
         self._project = project
         self._tasks_reader = tasks_reader
         self._is_new = not project.get("id")
+        self._name_locked = False
         self._member_rows: dict[str, dict] = {}
         self._memory_rows: dict[str, dict] = {}
         self.selected_memory_agent: Optional[str] = None
@@ -259,11 +305,16 @@ class ProjectMembersModal(ModalScreen):
     def compose(self) -> ComposeResult:
         proj = self._project
         pid = proj.get("id", "?")
-        name = proj.get("name", "Unnamed")
+        name = proj.get("name", "Unnamed") if not self._is_new else ""
         desc = proj.get("description") or ""
         status = proj.get("status", "active")
         workspace = proj.get("workspace_path") or "--"
         proj_type = proj.get("type") or "local"
+        self._name_locked = (not self._is_new) and is_reserved_system_project(name)
+        if self._is_new:
+            dir_slug, workspace = _preview_directory(name)
+        else:
+            dir_slug = project_dir_from_workspace_path(workspace) or "--"
 
         color = STATUS_COLORS.get(status, "white")
 
@@ -293,7 +344,26 @@ class ProjectMembersModal(ModalScreen):
                                 value=name,
                                 placeholder="Project name",
                                 id="project-edit-name",
+                                disabled=self._name_locked,
                             )
+                            if self._name_locked:
+                                yield Static(
+                                    "[dim]System project — name cannot be changed.[/]",
+                                    id="project-name-lock-hint",
+                                )
+                            yield Static(
+                                "[b]Directory Name[/]",
+                                classes="modal-form-label modal-form-label-spaced",
+                            )
+                            yield Static(
+                                f"[dim]{dir_slug}[/]",
+                                id="project-directory-name",
+                            )
+                            if self._is_new:
+                                yield Static(
+                                    "[dim]Auto-generated from Name (unique, filesystem-safe).[/]",
+                                    id="project-directory-hint",
+                                )
                             yield Static("[b]Description[/b]", classes="modal-form-label modal-form-label-spaced")
                             yield Input(
                                 value=desc,
@@ -414,6 +484,21 @@ class ProjectMembersModal(ModalScreen):
             "Agent", "Phase", "Decisions", "Blockers", "Next Steps", f"Updated ({_TZ})",
         )
         self.refresh_project_memory_table()
+
+    def _refresh_directory_preview(self) -> None:
+        if not self._is_new:
+            return
+        try:
+            name = self.query_one("#project-edit-name", Input).value
+            slug, path = _preview_directory(name)
+            self.query_one("#project-directory-name", Static).update(f"[dim]{slug}[/]")
+            self.query_one("#project-coa-workspace", Static).update(f"[dim]{path}[/]")
+        except Exception:
+            pass
+
+    @on(Input.Changed, "#project-edit-name")
+    def on_name_changed(self, event: Input.Changed) -> None:
+        self._refresh_directory_preview()
 
     def _sync_platform_visibility(self) -> None:
         try:
@@ -689,7 +774,7 @@ class ProjectMembersModal(ModalScreen):
             return
 
         if not pid:
-            args = ["project", "add", new_name]
+            args = ["project", "add", "--name", new_name]
             if new_desc:
                 args.extend(["--desc", new_desc])
             if new_remote:
@@ -719,8 +804,14 @@ class ProjectMembersModal(ModalScreen):
             self.app.pop_screen()
             return
 
-        updates = {}
         old_name = self._project.get("name") or ""
+        if getattr(self, "_name_locked", False) and new_name != old_name:
+            error_label.update(
+                f"[bold red]'{old_name}' is a protected system project and cannot be renamed[/]"
+            )
+            return
+
+        updates = {}
         old_remote = self._project.get("remote_url") or ""
         old_branch = self._project.get("branch") or ""
         old_desc = self._project.get("description") or ""
@@ -758,7 +849,12 @@ class ProjectMembersModal(ModalScreen):
                 pass
             self.app.pop_screen()
         else:
-            error_label.update("[bold red]Failed to save changes[/]")
+            if "name" in updates:
+                error_label.update(
+                    "[bold red]Failed to save — name may be reserved, empty, or already in use[/]"
+                )
+            else:
+                error_label.update("[bold red]Failed to save changes[/]")
 
     def on_key(self, event) -> None:
         if event.key == "escape":
@@ -985,6 +1081,7 @@ class ProjectsPanel(Widget):
                 yield Button("New", variant="success", id="btn-projects-new")
                 yield Button("Edit", variant="primary", id="btn-projects-edit", disabled=True)
                 yield Button("Delete", variant="error", id="btn-projects-delete", disabled=True)
+                yield Button("Quit", variant="default", id="btn-projects-quit", classes="btn-quit")
 
     def on_mount(self) -> None:
         self.table.cursor_type = "row"
@@ -1038,6 +1135,8 @@ class ProjectsPanel(Widget):
                 self.app.push_screen(ProjectMembersModal(proj, self.tasks_reader))
         elif event.button.id == "btn-projects-delete":
             self._try_delete_selected()
+        elif event.button.id == "btn-projects-quit":
+            self.app.exit()
 
     def refresh_data(self) -> None:
         """Refresh project data from SQLite."""

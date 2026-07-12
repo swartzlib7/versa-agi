@@ -2354,6 +2354,17 @@ ProjectMembersModal {
     margin-bottom: 1;
 }
 
+#project-directory-name {
+    height: auto;
+    margin-bottom: 0;
+}
+
+#project-directory-hint,
+#project-name-lock-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
 #members-table {
     height: auto;
     min-height: 0;

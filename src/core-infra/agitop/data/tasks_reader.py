@@ -6,11 +6,17 @@ Provides data for the Tasks Panel and agictl.
 import sqlite3
 from typing import Optional
 
-# TD-SCRIPT-001: Reserved-name protection for shared system projects (mirrors
-# RESERVED_SYSTEM_PROJECTS in agictl/cli.py). AGi-Tools (the Script Task source)
-# and AGi-Knowledgebase must never be hard-deleted — a reserved-name set is the
-# simplest durable guard (no `protected` column / migration required).
-RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+try:
+    from project_workspace import (
+        RESERVED_SYSTEM_PROJECTS,
+        is_reserved_system_project,
+    )
+except ImportError:
+    # TD-SCRIPT-001: Reserved-name protection for shared system projects.
+    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+
+    def is_reserved_system_project(name: str) -> bool:
+        return name in RESERVED_SYSTEM_PROJECTS
 
 
 class TasksReader:
@@ -110,9 +116,37 @@ class TasksReader:
         return f"{len(names)}: {', '.join(names[:3])}{'…' if len(names) > 3 else ''}"
 
     def update_project(self, project_id: int, updates: dict) -> bool:
-        """Update mutable fields on a project."""
+        """Update mutable fields on a project.
+
+        Rejects workspace_path / directory changes. Display ``name`` may change
+        except for reserved system projects; uniqueness is enforced.
+        """
         if not updates:
             return False
+        # Directory / path is immutable after create.
+        blocked = {"workspace_path", "directory", "dir"}
+        if blocked & set(updates):
+            return False
+
+        if "name" in updates:
+            new_name = (updates.get("name") or "").strip()
+            if not new_name:
+                return False
+            rows = self._query("SELECT name FROM projects WHERE id=?", (project_id,))
+            if not rows:
+                return False
+            old_name = rows[0]["name"]
+            if new_name != old_name:
+                if is_reserved_system_project(old_name) or is_reserved_system_project(new_name):
+                    return False
+                clash = self._query(
+                    "SELECT id FROM projects WHERE name=? AND id!=?",
+                    (new_name, project_id),
+                )
+                if clash:
+                    return False
+            updates = {**updates, "name": new_name}
+
         set_clauses = []
         params = []
         for k, v in updates.items():

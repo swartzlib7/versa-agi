@@ -519,15 +519,14 @@ def system_whoami():
 @system.command("workspace-link")
 @click.argument("path")
 def system_workspace_link(path):
-    """Create symlink from agent's .agent/workspace/ to user-accessible path."""
+    """Create symlink from agent's workspace/ to user-accessible path."""
     config = get_config()
-    # Resolve workspace source — COA env workspace directory
+    # Resolve workspace source — canonical COA layout: coa-env/workspace
     workspace_src = config.get("workspace_path", "")
     if not workspace_src:
-        # Derive from agent's home
         os_user = os.getenv("USER", "coa")
         home = os.path.expanduser(f"~{os_user}")
-        workspace_src = os.path.join(home, "coa-env", ".agent", "workspace")
+        workspace_src = os.path.join(home, "coa-env", "workspace")
     try:
         if os.path.islink(path):
             json_response(True, action="workspace_link", path=path, note="Symlink already exists", target=os.readlink(path))
@@ -4786,7 +4785,8 @@ def agent_approve(name, force):
                     continue
                 shared_path = shared_proj["workspace_path"]
                 shared_id = shared_proj["id"]
-                agent_shared_link = os.path.join(agent_root, "workspace", shared_name)
+                shared_dir = os.path.basename((shared_path or "").rstrip(os.sep)) or shared_name
+                agent_shared_link = os.path.join(agent_root, "workspace", shared_dir)
                 if os.path.exists(shared_path) and not os.path.exists(agent_shared_link):
                     os.symlink(shared_path, agent_shared_link)
                     subprocess.run(["chown", "-h", f"{os_user}:agi_agents", agent_shared_link], check=False)
@@ -7318,7 +7318,32 @@ def _get_project(conn, project_id):
 # agent_add). A reserved-name set is the simplest durable guard — no `protected`
 # column or migration needed — and it must reject BOTH archive and hard-delete so
 # a Script Task's scripts can never be pulled out from under it.
-RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+# Display name may be renamed later; directory slug (basename of workspace_path)
+# is immutable. See project_workspace.py.
+try:
+    from project_workspace import (
+        COA_WORKSPACE_BASE,
+        RESERVED_SYSTEM_PROJECTS,
+        collect_taken_project_dirs,
+        is_reserved_system_project,
+        project_dir_from_workspace_path,
+        resolve_project_dir,
+    )
+except ImportError:
+    COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
+    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+
+    def is_reserved_system_project(name):
+        return name in RESERVED_SYSTEM_PROJECTS
+
+    def project_dir_from_workspace_path(workspace_path):
+        return os.path.basename((workspace_path or "").rstrip(os.sep))
+
+    def collect_taken_project_dirs(conn, workspace_base=COA_WORKSPACE_BASE):
+        raise RuntimeError("project_workspace module required")
+
+    def resolve_project_dir(display_name, dir_override, taken):
+        raise RuntimeError("project_workspace module required")
 
 
 @project.command("list")
@@ -7334,25 +7359,43 @@ def project_list():
         json_response(False, error=str(e))
 
 @project.command("add")
-@click.argument("name")
+@click.argument("name_arg", required=False, metavar="NAME")
+@click.option("--name", "name_opt", default=None, help="Display name (unique; preferred over positional NAME)")
+@click.option("--dir", "dir_name", default=None, help="Directory slug under COA workspace (optional; auto-derived from name)")
 @click.option("--desc", default=None, help="Project description")
 @click.option("--remote", default=None, help="Git SSH remote URL")
 @click.option("--git-init", is_flag=True, help="Initialize a local git repo")
 @click.option("--agent", "agent_name", default=None, help="Agent to assign (creates branch)")
-def project_add(name, desc, remote, git_init, agent_name):
-    """Register a new project. Creates directory, optional git clone, DB entry."""
+def project_add(name_arg, name_opt, dir_name, desc, remote, git_init, agent_name):
+    """Register a new project. Creates directory, optional git clone, DB entry.
+
+    Display --name (or positional NAME) is unique and may be renamed later.
+    --dir sets the immutable filesystem slug; omit to auto-slugify from the name
+    (with -2, -3, … on collision). Directory rename is not supported.
+    """
     try:
+        name = (name_opt or name_arg or "").strip()
+        if not name:
+            json_response(False, error="Project name is required (use --name or positional NAME)")
+            sys.exit(1)
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        # Check uniqueness
+        # Check display-name uniqueness
         existing = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
         if existing:
             conn.close()
             json_response(False, error=f"Project '{name}' already exists (id={existing['id']})")
             sys.exit(1)
-        # Resolve workspace path natively to COA
-        workspace_base = "/home/coa/coa-env/workspace"
-        project_path = os.path.join(workspace_base, name)
+        # Resolve workspace path: display name ≠ directory slug
+        workspace_base = COA_WORKSPACE_BASE
+        try:
+            taken = collect_taken_project_dirs(conn, workspace_base)
+            dir_slug = resolve_project_dir(name, dir_name, taken)
+        except ValueError as e:
+            conn.close()
+            json_response(False, error=str(e))
+            sys.exit(1)
+        project_path = os.path.join(workspace_base, dir_slug)
         # Determine project type and platform
         project_type = "local"
         platform = None
@@ -7442,7 +7485,7 @@ def project_add(name, desc, remote, git_init, agent_name):
         conn.commit()
         conn.close()
         json_response(True, project=name, project_id=project_id, type=project_type, platform=platform,
-                      branch=branch, workspace_path=project_path, owner=agent_name)
+                      branch=branch, directory=dir_slug, workspace_path=project_path, owner=agent_name)
     except subprocess.TimeoutExpired:
         json_response(False, error="Git operation timed out")
         sys.exit(1)
@@ -7551,20 +7594,59 @@ def project_archive(project_id, do_zip):
 
 @project.command("update")
 @click.argument("project_id", type=int)
+@click.option("--name", "new_name", default=None, help="Display name (does not rename the workspace directory)")
 @click.option("--remote", "remote_url", default=None, help="Git remote URL")
 @click.option("--branch", default=None, help="Default branch")
 @click.option("--desc", default=None, help="Project description")
 @click.option("--platform", default=None, type=click.Choice(["github", "gitlab"]), help="Git platform")
 @click.option("--access-token", "access_token", default=None, help="Git platform access token")
 @click.option("--type", "proj_type", default=None, type=click.Choice(["git", "local"]), help="Project type")
-def project_update(project_id, remote_url, branch, desc, platform, access_token, proj_type):
-    """Update mutable fields on an existing project (by ID from project list)."""
+def project_update(project_id, new_name, remote_url, branch, desc, platform, access_token, proj_type):
+    """Update mutable fields on an existing project (by ID from project list).
+
+    Display --name may change; workspace directory / --dir is intentionally unsupported.
+    """
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         proj = _get_project(conn, project_id)
         updates = []
         params = []
+        if new_name is not None:
+            name_clean = new_name.strip()
+            if not name_clean:
+                conn.close()
+                json_response(False, error="Project name cannot be empty")
+                sys.exit(1)
+            old_name = proj["name"]
+            if name_clean != old_name:
+                if is_reserved_system_project(old_name):
+                    conn.close()
+                    json_response(
+                        False,
+                        error=f"'{old_name}' is a protected system project and cannot be renamed",
+                    )
+                    sys.exit(1)
+                if is_reserved_system_project(name_clean):
+                    conn.close()
+                    json_response(
+                        False,
+                        error=f"'{name_clean}' is reserved for a system project",
+                    )
+                    sys.exit(1)
+                clash = conn.execute(
+                    "SELECT id FROM projects WHERE name=? AND id!=?",
+                    (name_clean, project_id),
+                ).fetchone()
+                if clash:
+                    conn.close()
+                    json_response(
+                        False,
+                        error=f"Project '{name_clean}' already exists (id={clash['id']})",
+                    )
+                    sys.exit(1)
+                updates.append("name = ?")
+                params.append(name_clean)
         if remote_url is not None:
             updates.append("remote_url = ?")
             params.append(remote_url)
@@ -7588,7 +7670,10 @@ def project_update(project_id, remote_url, branch, desc, platform, access_token,
             params.append(proj_type)
         if not updates:
             conn.close()
-            json_response(False, error="No fields to update. Use --remote, --branch, --desc, --platform, --access-token, or --type.")
+            json_response(
+                False,
+                error="No fields to update. Use --name, --remote, --branch, --desc, --platform, --access-token, or --type.",
+            )
             sys.exit(1)
         updates.append("updated_at = datetime('now')")
         params.append(project_id)
@@ -7600,6 +7685,8 @@ def project_update(project_id, remote_url, branch, desc, platform, access_token,
         updated = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         conn.close()
         json_response(True, project_id=project_id, project=updated["name"],
+                      directory=project_dir_from_workspace_path(updated["workspace_path"]),
+                      workspace_path=updated["workspace_path"],
                       remote_url=updated["remote_url"], branch=updated["branch"],
                       type=updated["type"], platform=updated["platform"],
                       description=updated["description"])
@@ -7632,6 +7719,8 @@ def project_assign(project_id, agent_name, connection_uid, roles, branch):
         proj_branch = proj["branch"] or "main"
         proj_workspace = proj["workspace_path"]
         access_token = proj["access_token"]
+        # Agent-side folder follows the immutable directory slug, not display name.
+        dir_slug = project_dir_from_workspace_path(proj_workspace) or name
 
         if agent_name:
             # ── Agent assignment ──
@@ -7657,7 +7746,7 @@ def project_assign(project_id, agent_name, connection_uid, roles, branch):
             agent_os_user = agent_row["os_user"]
             agent_workspace_root = agent_row["workspace"]  # e.g. /home/agi-sylvie
             agent_workspace_base = os.path.join(agent_workspace_root, "workspace")
-            agent_project_path = os.path.join(agent_workspace_base, name)
+            agent_project_path = os.path.join(agent_workspace_base, dir_slug)
             agent_branch = branch or f"agent/{agent_name}"
 
             if proj_type == "git" and remote_url:

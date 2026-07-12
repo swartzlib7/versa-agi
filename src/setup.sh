@@ -1359,6 +1359,60 @@ TASKS_DB="/var/lib/versa-agi/coa/tasks.db"
 CYCLES_DB="/var/lib/versa-agi/coa/cycles.db"
 ORGANIZATION_DB="/var/lib/versa-agi/organization.db"
 
+# Preflight: schema init needs a write lock. agitop keeps these DBs open —
+# fail early with an actionable message instead of sqlite's opaque
+# "database is locked (5)".
+require_versa_sqlite_writable() {
+  local db err holders pid cmd locked=() agitop_running=false
+
+  if pgrep -af '[a]gitop(\.app|/app\.py)|python3 -m agitop' >/dev/null 2>&1; then
+    agitop_running=true
+  fi
+
+  # agitop holds the fleet DBs open for the whole session — schema refresh
+  # cannot proceed safely while it is running.
+  if [ "${agitop_running}" = true ]; then
+    error $'Cannot refresh SQLite schema while agitop is running — it holds these databases open.\n\nQuit agitop, then re-run:\n  sudo ./setup.sh --update'
+  fi
+
+  for db in "$@"; do
+    [ -e "${db}" ] || continue
+    # EXCLUSIVE matches DDL (CREATE VIEW / ALTER) better than IMMEDIATE.
+    err="$(sqlite3 "${db}" "PRAGMA busy_timeout=0; BEGIN EXCLUSIVE; ROLLBACK;" 2>&1)" && continue
+    if ! printf '%s' "${err}" | grep -qiE 'locked|busy'; then
+      continue  # other sqlite issues are handled by the init scripts
+    fi
+    locked+=("${db}")
+  done
+  [ "${#locked[@]}" -eq 0 ] && return 0
+
+  echo ""
+  local error_msg="Cannot refresh SQLite schema — database locked:"
+  for db in "${locked[@]}"; do
+    error_msg+=$'\n'"  · ${db}"
+    holders=""
+    if command -v lsof >/dev/null 2>&1; then
+      while read -r pid; do
+        [ -n "${pid}" ] || continue
+        cmd="$(ps -p "${pid}" -o args= 2>/dev/null | head -c 140 || true)"
+        holders+="      pid ${pid}: ${cmd:-unknown}"$'\n'
+      done < <(lsof -t "${db}" 2>/dev/null || true)
+    fi
+    if [ -n "${holders}" ]; then
+      error_msg+=$'\n'"${holders%$'\n'}"
+    fi
+  done
+  error_msg+=$'\n\n'"Stop the process holding the DB open (see pids above), then re-run setup."
+  error "${error_msg}"
+}
+
+require_versa_sqlite_writable \
+  "${AGENTS_DB}" \
+  "${MESSAGES_DB}" \
+  "${TASKS_DB}" \
+  "${CYCLES_DB}" \
+  "${ORGANIZATION_DB}"
+
 # Create Database Directories
 mkdir -p "/var/lib/versa-agi/coa"
 chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa"
@@ -2724,20 +2778,32 @@ if [ "${UPDATE_MODE}" = true ]; then
     # Recreate views via init script — keeps v_active_agents / v_agent_registry in sync
     # with init_agents_db.sh (includes tool_output_token_budget, model_routing_enabled, etc.)
     if [ -f "${AGENTS_INIT}" ]; then
-      bash "${AGENTS_INIT}" "${AGENTS_DB}" >/dev/null 2>&1 && \
-        ok "agents.db views refreshed (init_agents_db.sh — utility_models + modality maps)" || \
+      if _agents_init_out="$(bash "${AGENTS_INIT}" "${AGENTS_DB}" 2>&1)"; then
+        ok "agents.db views refreshed (init_agents_db.sh — utility_models + modality maps)"
+      elif printf '%s' "${_agents_init_out}" | grep -qi 'locked'; then
+        warn "agents.db view refresh skipped — database locked (quit agitop, then re-run --update)"
+      else
         warn "agents.db view refresh failed"
+      fi
     fi
   fi
   if [ -f "${TASKS_INIT}" ] && [ -f "${TASKS_DB}" ]; then
-    bash "${TASKS_INIT}" "${TASKS_DB}" >/dev/null 2>&1 && \
-      ok "tasks.db schema refreshed (init_tasks_db.sh — Utility Task columns)" || \
+    if _tasks_init_out="$(bash "${TASKS_INIT}" "${TASKS_DB}" 2>&1)"; then
+      ok "tasks.db schema refreshed (init_tasks_db.sh — Utility Task columns)"
+    elif printf '%s' "${_tasks_init_out}" | grep -qi 'locked'; then
+      warn "tasks.db schema refresh skipped — database locked (quit agitop, then re-run --update)"
+    else
       warn "tasks.db schema refresh failed"
+    fi
   fi
   if [ -f "${CYCLES_INIT}" ] && [ -f "${CYCLES_DB}" ]; then
-    bash "${CYCLES_INIT}" "${CYCLES_DB}" >/dev/null 2>&1 && \
-      ok "cycles.db schema refreshed (cost columns, routing audit)" || \
+    if _cycles_init_out="$(bash "${CYCLES_INIT}" "${CYCLES_DB}" 2>&1)"; then
+      ok "cycles.db schema refreshed (cost columns, routing audit)"
+    elif printf '%s' "${_cycles_init_out}" | grep -qi 'locked'; then
+      warn "cycles.db schema refresh skipped — database locked (quit agitop, then re-run --update)"
+    else
       warn "cycles.db schema refresh failed"
+    fi
   fi
   echo ""
 
