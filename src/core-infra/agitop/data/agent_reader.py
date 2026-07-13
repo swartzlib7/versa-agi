@@ -103,6 +103,18 @@ class AgentReader:
                     uid_map[sub_id] = name
         return uid_map
 
+    def get_agent_sub_account_uids(self) -> set[str]:
+        """Return all VersaVoice sub_account_id values for registered agents."""
+        uids: set[str] = set()
+        for agent in self.get_all_agents():
+            name = agent.get("name", "")
+            if not name:
+                continue
+            sub_id = self._get_sub_account_id(name)
+            if sub_id:
+                uids.add(sub_id)
+        return uids
+
     def get_active_agents(self) -> list[dict]:
         """Get active agents from agents.db."""
         return self._enrich_agent_table_fields(self._query_agents("SELECT * FROM v_active_agents"))

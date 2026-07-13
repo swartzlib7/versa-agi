@@ -177,11 +177,12 @@ class OrgRecordModal(ModalScreen):
     BINDINGS = [Binding("escape", "close", "Close")]
 
     def __init__(self, writer, reader: OrganizationReader,
-                 tasks_reader=None, row: dict | None = None, **kwargs):
+                 tasks_reader=None, agent_reader=None, row: dict | None = None, **kwargs):
         super().__init__(**kwargs)
         self.writer = writer
         self.reader = reader
         self.tasks_reader = tasks_reader
+        self.agent_reader = agent_reader
         self.row = row or {}
         self.org_id: int | None = self.row.get("id")
         self.spec = writer.spec("org")
@@ -220,6 +221,7 @@ class OrgRecordModal(ModalScreen):
                         yield OrgStaffPanel(
                             self.writer, self.reader, self.org_id,
                             tasks_reader=self.tasks_reader,
+                            agent_reader=self.agent_reader,
                             id="org-rec-staff-panel")
             yield Static("", id="org-rec-error")
             with Horizontal(classes="org-rec-footer"):
@@ -658,12 +660,13 @@ class OrgStaffPanel(Vertical):
     """Staff linked to an org via org_staff, with connections from tasks.db."""
 
     def __init__(self, writer, reader: OrganizationReader, org_id: int,
-                 tasks_reader=None, **kwargs):
+                 tasks_reader=None, agent_reader=None, **kwargs):
         super().__init__(**kwargs)
         self.writer = writer
         self.reader = reader
         self.org_id = org_id
         self.tasks_reader = tasks_reader
+        self.agent_reader = agent_reader
         self.table = DataTable(id="org-rec-staff-table", cursor_type="row",
                                classes="bridge-table")
         self._rows: dict[str, dict] = {}
@@ -686,17 +689,20 @@ class OrgStaffPanel(Vertical):
         self._load_connections()
         self._refresh()
 
-    # Agent/system account patterns excluded from the staff contact picklist.
-    _AGENT_PATTERNS = ("(Agent)", "(COA)", "Assistant")
-
     def _load_connections(self) -> None:
         """Cache the full connection list from tasks.db (excluding agents)."""
         self._conn_map.clear()
+        agent_uids: set[str] = set()
+        if self.agent_reader:
+            try:
+                agent_uids = self.agent_reader.get_agent_sub_account_uids()
+            except Exception:
+                pass
         if self.tasks_reader:
             try:
                 for c in self.tasks_reader.get_connections():
-                    name = c.get("display_name") or ""
-                    if any(p in name for p in self._AGENT_PATTERNS):
+                    uid = c.get("uid") or ""
+                    if uid in agent_uids:
                         continue
                     self._conn_map[c["uid"]] = c
             except Exception:

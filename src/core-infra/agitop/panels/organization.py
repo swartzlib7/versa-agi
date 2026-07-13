@@ -1291,11 +1291,12 @@ class OrganizationEntityPanel(Widget):
     """
 
     def __init__(self, reader: OrganizationReader, kind: str, writer=None,
-                 tasks_reader=None, **kwargs):
+                 tasks_reader=None, agent_reader=None, **kwargs):
         super().__init__(**kwargs)
         self.reader = reader
         self.writer = writer
         self.tasks_reader = tasks_reader
+        self.agent_reader = agent_reader
         self.kind = kind
         self._rows: dict[str, dict] = {}
         self._filters: dict[str, str] = {}
@@ -1696,7 +1697,9 @@ class OrganizationEntityPanel(Widget):
             from agitop.panels.org_record_modal import OrgRecordModal
             self.app.push_screen(
                 OrgRecordModal(self.writer, self.reader,
-                               tasks_reader=self.tasks_reader, row=row),
+                               tasks_reader=self.tasks_reader,
+                               agent_reader=self.agent_reader,
+                               row=row),
                 self._after_write,
             )
         else:
