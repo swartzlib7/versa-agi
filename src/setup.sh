@@ -610,6 +610,80 @@ if [ "${UPDATE_MODE}" = true ]; then
 
 fi  # end UPDATE_MODE preamble
 
+# ── Shared: Inference Server Ready banner (server install + update) ──
+print_inference_server_ready_banner() {
+  local _SRV_STATE="/etc/versa-agi/server_config.json"
+  [ -f "${_SRV_STATE}" ] || return 0
+
+  local _srv_backend _srv_model _srv_port _srv_ip _srv_key
+  _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+  _srv_model=$(jq -r '.active_model // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+  _srv_port=$(jq -r '.proxy_port // 8080' "${_SRV_STATE}" 2>/dev/null)
+  _srv_ip=$(jq -r '.lan_ip // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+  _srv_key=$(jq -r '.inference_master_key // ""' "${_SRV_STATE}" 2>/dev/null)
+
+  echo ""
+  echo "  ╭──────────────────────────────────────────────────────╮"
+  echo "  │  ✅ Inference Server Ready                          │"
+  echo "  ├──────────────────────────────────────────────────────┤"
+  echo "  │                                                      │"
+  echo "  │  GPU Backend:    ${_srv_backend}"
+  echo "  │  Active Model:   ${_srv_model}"
+  echo "  │  Inference Port: ${_srv_port}"
+  echo "  │  Master Key:     ${_srv_key}"
+  echo "  │                                                      │"
+  echo "  │  Access URLs:                                        │"
+  echo "  │    Instance:     http://${_srv_ip}:${_srv_port}"
+  if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+    echo "  │    From Windows: http://localhost:${_srv_port}"
+    echo "  │    From LAN:     http://<Windows-LAN-IPv4>:${_srv_port}"
+    echo "  │                  (ipconfig → Wi-Fi/Ethernet IPv4)     │"
+    echo "  │                                                      │"
+    echo "  │  Model Management:                                   │"
+    echo "  │    sudo agictl model activate gemma4:26b             │"
+    echo "  │    sudo agictl model add qwen3.6:35b                 │"
+    echo "  │    agictl model list                                 │"
+    echo "  │                                                      │"
+    echo "  │  ⚠  WSL2 requires Windows host-level configuration:  │"
+    echo "  │                                                      │"
+    echo "  │  1. Enable mirrored networking — in PowerShell:      │"
+    echo '  │       notepad $env:USERPROFILE\.wslconfig           │'
+    echo "  │     Set contents to:                                 │"
+    echo "  │       [wsl2]                                         │"
+    echo "  │       networkingMode=mirrored                        │"
+    echo "  │     Save, then run:  wsl --shutdown                  │"
+    echo "  │     (reopen this WSL terminal afterward)             │"
+    echo "  │                                                      │"
+    echo "  │  2. Windows Firewall (PowerShell as Admin):          │"
+    echo "  │     New-NetFirewallRule -DisplayName                 │"
+    echo "  │       'Versa AGi Inference (SSH)'                   │"
+    echo "  │       -Direction Inbound -Protocol TCP               │"
+    echo "  │       -LocalPort 22 -Action Allow                    │"
+    echo "  │     New-NetFirewallRule -DisplayName                 │"
+    echo "  │       'Versa AGi Inference (WSL)'                    │"
+    echo "  │       -Direction Inbound -Protocol TCP               │"
+    echo "  │       -LocalPort ${_srv_port} -Action Allow                  │"
+    echo "  │                                                      │"
+    echo "  │  3. Ensure SSH server is running inside WSL:         │"
+    echo "  │     sudo service ssh start                           │"
+    echo "  │                                                      │"
+  else
+    echo "  │    LAN URL:      http://${_srv_ip}:${_srv_port}"
+    echo "  │                                                      │"
+    echo "  │  Model Management:                                   │"
+    echo "  │    sudo agictl model activate gemma4:26b             │"
+    echo "  │    sudo agictl model add qwen3.6:35b                 │"
+    echo "  │    agictl model list                                 │"
+    echo "  │                                                      │"
+  fi
+  echo "  │  On the client machine, run setup.sh and select:     │"
+  echo "  │    Option 2 (Client — Cloud + Local AI)              │"
+  echo "  │    Then: Remote server → paste URL + key above       │"
+  echo "  │                                                      │"
+  echo "  ╰──────────────────────────────────────────────────────╯"
+  echo ""
+}
+
 # ═══════════════════════════════════════════════════════
 # SERVER TOPOLOGY UPDATE — early exit
 # On server-only installs, the full client/COA agent stack
@@ -701,52 +775,7 @@ if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
     echo ""
   fi
 
-  # Server-ready banner
-  _SRV_STATE="/etc/versa-agi/server_config.json"
-  if [ -f "${_SRV_STATE}" ]; then
-    _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${_SRV_STATE}" 2>/dev/null)
-    _srv_model=$(jq -r '.active_model // "unknown"' "${_SRV_STATE}" 2>/dev/null)
-    _srv_port=$(jq -r '.proxy_port // 8080' "${_SRV_STATE}" 2>/dev/null)
-    _srv_ip=$(jq -r '.lan_ip // "unknown"' "${_SRV_STATE}" 2>/dev/null)
-    _srv_key=$(jq -r '.inference_master_key // ""' "${_SRV_STATE}" 2>/dev/null)
-
-    echo ""
-    echo "  ╭──────────────────────────────────────────────────────╮"
-    echo "  │  ✅ Inference Server Ready                          │"
-    echo "  ├──────────────────────────────────────────────────────┤"
-    echo "  │                                                      │"
-    echo "  │  GPU Backend:    ${_srv_backend}"
-    echo "  │  Active Model:   ${_srv_model}"
-    echo "  │  Inference Port: ${_srv_port}"
-    echo "  │  LAN URL:        http://${_srv_ip}:${_srv_port}"
-    echo "  │  Master Key:     ${_srv_key}"
-    echo "  │                                                      │"
-    if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
-      _win_ip=$(ip route show default 2>/dev/null | awk '{print $3}' || echo "<Windows-IP>")
-      echo "  │  Windows Host:   ${_win_ip} (use this IP from LAN clients)"
-      echo "  │                                                      │"
-      echo "  │  ⚠  WSL2 requires Windows host-level configuration:  │"
-      echo "  │                                                      │"
-      echo "  │  1. Enable mirrored networking in .wslconfig:         │"
-      echo "  │     [wsl2]                                            │"
-      echo "  │     networkingMode=mirrored                           │"
-      echo "  │                                                      │"
-      echo "  │  2. Windows Firewall (PowerShell as Admin):           │"
-      echo "  │     New-NetFirewallRule -DisplayName 'SSH (WSL)'      │"
-      echo "  │       -Direction Inbound -Protocol TCP                │"
-      echo "  │       -LocalPort 22 -Action Allow                     │"
-      echo "  │     New-NetFirewallRule -DisplayName                  │"
-      echo "  │       'Versa AGi Inference (WSL)'                     │"
-      echo "  │       -Direction Inbound -Protocol TCP                │"
-      echo "  │       -LocalPort ${_srv_port} -Action Allow                   │"
-      echo "  │                                                      │"
-      echo "  │  3. Ensure SSH server is running inside WSL:          │"
-      echo "  │     sudo service ssh start                            │"
-      echo "  │                                                      │"
-    fi
-    echo "  ╰──────────────────────────────────────────────────────╯"
-    echo ""
-  fi
+  print_inference_server_ready_banner
 
   ok "Server update complete."
   exit 0
@@ -950,80 +979,13 @@ if [ "${UPDATE_MODE}" = false ]; then
       echo ""
       ok "Server setup complete. agictl is available for model management."
       echo ""
-      echo "  ┌─ Model Management ────────────────────────────┐"
-      echo "  │                                                │"
-      echo "  │  Switch active model:                          │"
-      echo "  │    sudo agictl model activate gemma4:26b       │"
-      echo "  │                                                │"
-      echo "  │  Add a model:                                  │"
-      echo "  │    sudo agictl model add qwen3.6:35b           │"
-      echo "  │                                                │"
-      echo "  │  List models:                                  │"
-      echo "  │    agictl model list                           │"
-      echo "  │                                                │"
-      echo "  └────────────────────────────────────────────────┘"
-      echo ""
       if declare -F install_acceptance_record_full >/dev/null 2>&1; then
         section "Registration Submit"
         install_acceptance_record_full "false"
         echo ""
       fi
 
-      # ── Final: Inference Server Ready banner ──
-      # Printed last so it's always visible on screen.
-      _SRV_STATE="/etc/versa-agi/server_config.json"
-      if [ -f "${_SRV_STATE}" ]; then
-        _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${_SRV_STATE}" 2>/dev/null)
-        _srv_model=$(jq -r '.active_model // "unknown"' "${_SRV_STATE}" 2>/dev/null)
-        _srv_port=$(jq -r '.proxy_port // 8080' "${_SRV_STATE}" 2>/dev/null)
-        _srv_ip=$(jq -r '.lan_ip // "unknown"' "${_SRV_STATE}" 2>/dev/null)
-        _srv_key=$(jq -r '.inference_master_key // ""' "${_SRV_STATE}" 2>/dev/null)
-
-        echo ""
-        echo "  ╭──────────────────────────────────────────────────────╮"
-        echo "  │  ✅ Inference Server Ready                          │"
-        echo "  ├──────────────────────────────────────────────────────┤"
-        echo "  │                                                      │"
-        echo "  │  GPU Backend:    ${_srv_backend}"
-        echo "  │  Active Model:   ${_srv_model}"
-        echo "  │  Inference Port: ${_srv_port}"
-        echo "  │  LAN URL:        http://${_srv_ip}:${_srv_port}"
-        echo "  │  Master Key:     ${_srv_key}"
-        echo "  │                                                      │"
-
-        # WSL: the internal IP (172.x) is not reachable from Windows.
-        # WSL2 auto-forwards listening ports to localhost on the host.
-        if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
-          _win_ip=$(ip route show default 2>/dev/null | awk '{print $3}' || echo "<Windows-IP>")
-          echo "  │  Windows Host:   ${_win_ip} (use this IP from LAN clients)"
-          echo "  │                                                      │"
-          echo "  │  ⚠  WSL2 requires Windows host-level configuration:  │"
-          echo "  │                                                      │"
-          echo "  │  1. Enable mirrored networking in .wslconfig:         │"
-          echo "  │     [wsl2]                                            │"
-          echo "  │     networkingMode=mirrored                           │"
-          echo "  │                                                      │"
-          echo "  │  2. Windows Firewall (PowerShell as Admin):           │"
-          echo "  │     New-NetFirewallRule -DisplayName 'SSH (WSL)'      │"
-          echo "  │       -Direction Inbound -Protocol TCP                │"
-          echo "  │       -LocalPort 22 -Action Allow                     │"
-          echo "  │     New-NetFirewallRule -DisplayName                  │"
-          echo "  │       'Versa AGi Inference (WSL)'                     │"
-          echo "  │       -Direction Inbound -Protocol TCP                │"
-          echo "  │       -LocalPort ${_srv_port} -Action Allow                   │"
-          echo "  │                                                      │"
-          echo "  │  3. Ensure SSH server is running inside WSL:          │"
-          echo "  │     sudo service ssh start                            │"
-          echo "  │                                                      │"
-        fi
-
-        echo "  │  On the client machine, run setup.sh and select:     │"
-        echo "  │    Option 2 (Client — Cloud + Local AI)              │"
-        echo "  │    Then: Remote server → paste URL + key above       │"
-        echo "  │                                                      │"
-        echo "  ╰──────────────────────────────────────────────────────╯"
-        echo ""
-      fi
+      print_inference_server_ready_banner
 
       exit 0
     else

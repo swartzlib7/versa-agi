@@ -581,6 +581,52 @@ if [ "${TOPOLOGY}" != "server" ]; then
     _SSH_DIR="/home/${WATCHDOG_USER}/.ssh"
     _TUNNEL_SERVICE="versa-agi-tunnel"
 
+    # Network preflight — fail early when the host is not on the LAN at all
+    # (common with WSL servers: wrong IP, host asleep, mirrored net/firewall missing).
+    info "Checking network reachability to ${_TUNNEL_HOST} (SSH port 22)..."
+    _ssh_port_ok=false
+    if command -v nc &>/dev/null; then
+      if nc -z -w 3 "${_TUNNEL_HOST}" 22 2>/dev/null; then
+        _ssh_port_ok=true
+      fi
+    elif timeout 3 bash -c "echo >/dev/tcp/${_TUNNEL_HOST}/22" 2>/dev/null; then
+      _ssh_port_ok=true
+    fi
+    if [ "${_ssh_port_ok}" != true ]; then
+      echo ""
+      warn "Cannot reach ${_TUNNEL_HOST}:22 — SSH tunnel cannot work until this is fixed."
+      echo "  Common causes when the server is WSL on Windows:"
+      echo "    1. Wrong/stale Windows LAN IP — on Windows run: ipconfig"
+      echo "       (use the Wi-Fi/Ethernet IPv4, not a 172.x WSL address)"
+      echo "    2. Mirrored networking not enabled — on Windows PowerShell:"
+      echo '         notepad $env:USERPROFILE\.wslconfig'
+      echo "         # [wsl2] / networkingMode=mirrored  then: wsl --shutdown"
+      echo "    3. Windows Firewall blocking SSH — Admin PowerShell:"
+      echo "         New-NetFirewallRule -DisplayName 'Versa AGi Inference (SSH)' \\"
+      echo "           -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow"
+      echo "    4. sshd not running inside WSL — on the server:"
+      echo "         sudo service ssh start && sudo ss -tlnp | grep ':22'"
+      echo "    5. Host offline / different subnet (this client is on $(ip -4 route show default 2>/dev/null | awk '{print $3}' | head -1 || echo '?') gateway)"
+      echo ""
+      read -p "  Retry reachability check? [Y/n]: " _retry_net
+      _retry_net=${_retry_net:-Y}
+      if [[ "${_retry_net}" =~ ^[Yy]$ ]]; then
+        info "Re-checking ${_TUNNEL_HOST}:22..."
+        _ssh_port_ok=false
+        if command -v nc &>/dev/null && nc -z -w 3 "${_TUNNEL_HOST}" 22 2>/dev/null; then
+          _ssh_port_ok=true
+        elif timeout 3 bash -c "echo >/dev/tcp/${_TUNNEL_HOST}/22" 2>/dev/null; then
+          _ssh_port_ok=true
+        fi
+      fi
+      if [ "${_ssh_port_ok}" != true ]; then
+        error "SSH port 22 on ${_TUNNEL_HOST} is unreachable. Fix network/firewall/sshd on the server, then re-run setup."
+      fi
+      ok "SSH port 22 reachable on ${_TUNNEL_HOST}"
+    else
+      ok "SSH port 22 reachable on ${_TUNNEL_HOST}"
+    fi
+
     # Step 1: Generate SSH key for watchdog (if not exists)
     if [ ! -f "${_SSH_KEY}" ]; then
       info "Generating SSH key for ${WATCHDOG_USER}..."
@@ -602,7 +648,7 @@ if [ "${TOPOLOGY}" != "server" ]; then
     echo "  │  ACTION REQUIRED: Authorize this key on the server          │"
     echo "  ├──────────────────────────────────────────────────────────────┤"
     echo "  │                                                              │"
-    echo "  │  On the SERVER (${_TUNNEL_HOST}), run:                       │"
+    echo "  │  On the SERVER (${_TUNNEL_HOST}) — inside WSL if applicable: │"
     echo "  │                                                              │"
     echo "  │  sudo mkdir -p /home/${WATCHDOG_USER}/.ssh"
     echo "  │  echo '${_PUB_KEY}' | sudo tee -a /home/${WATCHDOG_USER}/.ssh/authorized_keys"
@@ -614,17 +660,29 @@ if [ "${TOPOLOGY}" != "server" ]; then
     echo ""
     read -p "  Press Enter when the key has been added on the server... "
 
-    # Step 3: Test SSH connectivity
+    # Step 3: Test SSH connectivity (surface the real error)
     info "Testing SSH connection to ${WATCHDOG_USER}@${_TUNNEL_HOST}..."
+    _SSH_ERR_FILE=$(mktemp)
     if sudo -u "${WATCHDOG_USER}" ssh -i "${_SSH_KEY}" \
         -o StrictHostKeyChecking=accept-new \
         -o ConnectTimeout=10 \
         -o BatchMode=yes \
-        "${WATCHDOG_USER}@${_TUNNEL_HOST}" "echo ok" >/dev/null 2>&1; then
+        "${WATCHDOG_USER}@${_TUNNEL_HOST}" "echo ok" >/dev/null 2>"${_SSH_ERR_FILE}"; then
       ok "SSH connection successful"
+      rm -f "${_SSH_ERR_FILE}"
     else
-      warn "SSH connection failed. The tunnel service will be created but may not start."
+      _SSH_ERR=$(cat "${_SSH_ERR_FILE}" 2>/dev/null || true)
+      rm -f "${_SSH_ERR_FILE}"
+      warn "SSH connection failed."
+      if [ -n "${_SSH_ERR}" ]; then
+        echo "  ssh: ${_SSH_ERR}" | head -5
+      fi
       warn "Verify: sudo -u ${WATCHDOG_USER} ssh -i ${_SSH_KEY} ${WATCHDOG_USER}@${_TUNNEL_HOST}"
+      if printf '%s' "${_SSH_ERR}" | grep -qiE 'Permission denied|publickey'; then
+        warn "Key not authorized yet — re-run the authorized_keys commands on the server."
+      elif printf '%s' "${_SSH_ERR}" | grep -qiE 'No route to host|Connection refused|timed out|Network is unreachable'; then
+        warn "Network/sshd problem — fix reachability before the tunnel will work."
+      fi
     fi
 
     # Step 4: Create systemd tunnel service
@@ -641,6 +699,7 @@ User=${WATCHDOG_USER}
 ExecStart=/usr/bin/ssh -N -L ${_TUNNEL_PORT}:localhost:${_TUNNEL_PORT} \
   -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=3 \
+  -o ConnectTimeout=10 \
   -o StrictHostKeyChecking=accept-new \
   -o ExitOnForwardFailure=yes \
   -i ${_SSH_KEY} \
@@ -655,12 +714,14 @@ TUNNELEOF
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable "${_TUNNEL_SERVICE}" --quiet 2>/dev/null || true
     systemctl restart "${_TUNNEL_SERVICE}" 2>/dev/null || true
-    sleep 2
+    # Wait long enough for ssh to either establish or fail (avoid false "active")
+    sleep 3
 
     if systemctl is-active --quiet "${_TUNNEL_SERVICE}" 2>/dev/null; then
       ok "SSH tunnel active: localhost:${_TUNNEL_PORT} → ${_TUNNEL_HOST}:${_TUNNEL_PORT}"
     else
-      warn "SSH tunnel service may not have started — check: systemctl status ${_TUNNEL_SERVICE}"
+      warn "SSH tunnel service is not running — check: systemctl status ${_TUNNEL_SERVICE}"
+      journalctl -u "${_TUNNEL_SERVICE}" -n 5 --no-pager 2>/dev/null | sed 's/^/  /' || true
     fi
 
     # Step 5: Verify tunnel connectivity (pass master key — Inference Server requires auth)
@@ -1338,6 +1399,24 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
 # GPU BACKEND: STANDARD (NVIDIA / AMD)
 # ═════════════════════════════════════════════════════
 elif [ "${INSTALL_OLLAMA}" = "true" ]; then
+
+  # Ollama's install.sh decompresses packages with zstd — install it first
+  # (same pattern as other apt deps; do not rely on the host having it).
+  if ! command -v zstd &>/dev/null; then
+    info "Installing zstd (required by Ollama installer)..."
+    if command -v apt-get &>/dev/null; then
+      apt-get install -y -qq zstd
+      if command -v zstd &>/dev/null; then
+        ok "zstd installed"
+      else
+        error "Failed to install zstd. Try manually: sudo apt install zstd"
+      fi
+    else
+      error "zstd is required by the Ollama installer but apt-get is unavailable"
+    fi
+  else
+    ok "zstd already installed"
+  fi
 
   if command -v ollama &>/dev/null; then
     OLLAMA_VER=$(ollama --version 2>&1 | head -1)
