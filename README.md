@@ -41,7 +41,11 @@
 
 ## Why Versa AGi?
 
-We believe Artificial General Intelligence (AGI) will be realized through the collaborative application of agentic AI to individuals and their production. Currently, most AI workflows rely on disconnected, transient chat windows. **Versa AGi** transforms that paradigm by establishing a persistent, local, self-hosted infrastructure where AI agents act as genuine extensions of human life—complete with long-term memory, deterministic scheduling frameworks, safe external communication boundaries, and a rigorously supervised operating environment.
+**Versa AGi** is a play on the familiar term **AGI** — with a philosophical twist, hence the small **i**:
+
+> **A**gentic **G**eneral **i**nfrastructure
+
+We believe Artificial General Intelligence (AGI) will be realized through the collaborative application of agentic AI to individuals and their production — shared with others. Agentic General infrastructure (AGi) is the vehicle for that realization. Currently, most AI workflows rely on disconnected, transient chat windows. **Versa AGi** transforms that paradigm by establishing a persistent, local, self-hosted infrastructure where AI agents act as genuine extensions of human life—complete with long-term memory, deterministic scheduling frameworks, safe external communication boundaries, and a rigorously supervised operating environment.
 
 ### Key Features & Benefits
 
