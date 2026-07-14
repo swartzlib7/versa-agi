@@ -2046,6 +2046,22 @@ else
   warn "Skills source not found at ${SKILLS_SOURCE} — no system skills deployed"
 fi
 
+# Product README (installer) → COA-only on-demand consult doc (overwrite each install/update)
+# Not a skill; not distributed to sub-agents. Source: package root README.md next to src/.
+PRODUCT_README_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)/README.md"
+DOCS_DEST="${DEPLOYED_COA_ENV}/.agent/docs"
+mkdir -p "${DOCS_DEST}"
+chown "${COA_USER}:agi_agents" "${DOCS_DEST}"
+chmod 755 "${DOCS_DEST}"
+if [ -f "${PRODUCT_README_SRC}" ]; then
+  cp -f "${PRODUCT_README_SRC}" "${DOCS_DEST}/versa_agi_readme.md"
+  chown "${WATCHDOG_USER}:agi_agents" "${DOCS_DEST}/versa_agi_readme.md"
+  chmod 440 "${DOCS_DEST}/versa_agi_readme.md"
+  ok "docs/versa_agi_readme.md — product README deployed for COA consult (overwrite)"
+else
+  warn "Product README not found at ${PRODUCT_README_SRC} — COA docs/versa_agi_readme.md not updated"
+fi
+
 # Cycles: stored outside .agent/ so Gemini CLI doesn't scan them
 # Owned by coa — agent writes freely, watchdog reads for audit when needed
 CYCLES_DIR="/var/lib/versa-agi/coa/cycles"
@@ -3338,6 +3354,9 @@ apply_system_permissions() {
     
     # .agent/README.md — coa:coa 644
     [ -f "${DEPLOYED_COA_ENV}/.agent/README.md" ] && chown "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/README.md" && chmod 644 "${DEPLOYED_COA_ENV}/.agent/README.md"
+    # .agent/docs/ — COA-only product README (shipped overwrite; read-only)
+    [ -d "${DEPLOYED_COA_ENV}/.agent/docs" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/docs" && chmod 755 "${DEPLOYED_COA_ENV}/.agent/docs"
+    [ -f "${DEPLOYED_COA_ENV}/.agent/docs/versa_agi_readme.md" ] && chown "${WATCHDOG_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/docs/versa_agi_readme.md" && chmod 440 "${DEPLOYED_COA_ENV}/.agent/docs/versa_agi_readme.md"
     # .agent/poise.md — watchdog:coa 640 (copied from /etc/versa-agi/poise/coa.md by Lifeline)
     [ -f "${DEPLOYED_COA_ENV}/.agent/poise.md" ] && chown "${WATCHDOG_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/poise.md" && chmod 640 "${DEPLOYED_COA_ENV}/.agent/poise.md"
     

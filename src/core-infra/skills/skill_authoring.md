@@ -97,7 +97,7 @@ agictl skill list -s draft     # Filter by status
 | Scope | Who gets it | Use case |
 |-------|-------------|----------|
 | `all` | COA + all sub-agents | General skills (communication, git, tasks) |
-| `coa_only` | COA only (on disk) | Administrative skills — **`cli_reference.md`** (load on demand), **`skill_authoring.md`** (always injected for COA) |
+| `coa_only` | COA only (on disk) | Administrative skills — **`cli_reference.md`** (load on demand), **`skill_authoring.md`** (always injected for COA), **`versa_agi_operations_guide.md`** (triage-selected for COA) |
 
 Sub-agents never see COA-only skills — they are excluded from:
 1. The triage catalog (sub-agents can't even request them).

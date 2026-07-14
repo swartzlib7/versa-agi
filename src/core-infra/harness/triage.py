@@ -188,7 +188,8 @@ _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and resp
 - "self_introduction.md" — Introducing the agent to new contacts
 - "founder_story.md" — Sharing the VersaVoice origin story
 - "solution_architect.md" — System/environment setup guidance for PU
-- "system_packages.md" — Requesting and installing system packages (apt)"""
+- "system_packages.md" — Requesting and installing system packages (apt)
+- "versa_agi_operations_guide.md" — PU-facing Versa AGi product/ops guidance (COA only; how the system works, agitop, troubleshooting)"""
 
 _SKILLS_CATALOG_PATH = "/var/lib/versa-agi/skills_catalog.md"
 
@@ -523,6 +524,14 @@ def _get_skill_reasons(result: TriageResult) -> dict:
     # System packages
     if "system_packages.md" in result.skills_to_inject:
         reasons["system_packages.md"] = "A system-level package (apt) may need to be requested or installed. Follow the request → approve → install workflow."
+
+    # PU operations guide (COA-only — filtered from sub-agent catalogs)
+    if "versa_agi_operations_guide.md" in result.skills_to_inject:
+        reasons["versa_agi_operations_guide.md"] = (
+            "PU is asking how Versa AGi works or needs operator guidance "
+            "(dashboard, agents, tasks/messages, models, install topology, troubleshooting). "
+            "Follow the operations guide; do not dump System Design into messages."
+        )
 
     # Remaining skills get generic reasons
     for skill in result.skills_to_inject:

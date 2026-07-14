@@ -177,12 +177,14 @@ class OrgRecordModal(ModalScreen):
     BINDINGS = [Binding("escape", "close", "Close")]
 
     def __init__(self, writer, reader: OrganizationReader,
-                 tasks_reader=None, agent_reader=None, row: dict | None = None, **kwargs):
+                 tasks_reader=None, agent_reader=None, config=None,
+                 row: dict | None = None, **kwargs):
         super().__init__(**kwargs)
         self.writer = writer
         self.reader = reader
         self.tasks_reader = tasks_reader
         self.agent_reader = agent_reader
+        self.config = config
         self.row = row or {}
         self.org_id: int | None = self.row.get("id")
         self.spec = writer.spec("org")
@@ -222,6 +224,7 @@ class OrgRecordModal(ModalScreen):
                             self.writer, self.reader, self.org_id,
                             tasks_reader=self.tasks_reader,
                             agent_reader=self.agent_reader,
+                            config=self.config,
                             id="org-rec-staff-panel")
             yield Static("", id="org-rec-error")
             with Horizontal(classes="org-rec-footer"):
@@ -660,13 +663,14 @@ class OrgStaffPanel(Vertical):
     """Staff linked to an org via org_staff, with connections from tasks.db."""
 
     def __init__(self, writer, reader: OrganizationReader, org_id: int,
-                 tasks_reader=None, agent_reader=None, **kwargs):
+                 tasks_reader=None, agent_reader=None, config=None, **kwargs):
         super().__init__(**kwargs)
         self.writer = writer
         self.reader = reader
         self.org_id = org_id
         self.tasks_reader = tasks_reader
         self.agent_reader = agent_reader
+        self.config = config
         self.table = DataTable(id="org-rec-staff-table", cursor_type="row",
                                classes="bridge-table")
         self._rows: dict[str, dict] = {}
@@ -690,7 +694,7 @@ class OrgStaffPanel(Vertical):
         self._refresh()
 
     def _load_connections(self) -> None:
-        """Cache the full connection list from tasks.db (excluding agents)."""
+        """Cache connections from tasks.db (excluding agents) + Primary User if absent."""
         self._conn_map.clear()
         agent_uids: set[str] = set()
         if self.agent_reader:
@@ -707,6 +711,42 @@ class OrgStaffPanel(Vertical):
                     self._conn_map[c["uid"]] = c
             except Exception:
                 pass
+        self._inject_primary_user(agent_uids)
+
+    def _inject_primary_user(self, agent_uids: set[str]) -> None:
+        """Include Primary User from config when not already in connections (ORG-UI-STAFF-4)."""
+        if not self.config:
+            return
+        try:
+            pu = self.config.get_config().get("primary_user") or {}
+        except Exception:
+            return
+        uid = pu.get("uid") or ""
+        if not uid or uid in self._conn_map or uid in agent_uids:
+            return
+        self._conn_map[uid] = {
+            "uid": uid,
+            "display_name": pu.get("display_name") or "Primary User",
+            "spoken_lang": pu.get("spokenLanguage") or "",
+            "relationship": "Primary User",
+            "date_of_birth": None,
+            "first_seen": None,
+        }
+
+    @staticmethod
+    def _pick_label(conn: dict, name_counts: dict[str, int]) -> str:
+        """Picklist label; when display_name collides, append uid suffix + first_seen."""
+        name = conn.get("display_name") or "—"
+        rel = conn.get("relationship") or "—"
+        label = f"{name}  ({rel})"
+        if name_counts.get(name, 0) <= 1:
+            return label
+        uid = conn.get("uid") or ""
+        suffix = uid[-6:] if len(uid) >= 6 else uid
+        first = str(conn.get("first_seen") or "")[:10]
+        if first:
+            return f"{label} · …{suffix} · {first}"
+        return f"{label} · …{suffix}"
 
     def _refresh(self) -> None:
         self.table.clear()
@@ -747,8 +787,7 @@ class OrgStaffPanel(Vertical):
             self._unlink()
 
     def _link_contact(self) -> None:
-        """Open a picklist of connections from tasks.db."""
-        # Build list of already-linked UIDs
+        """Open a picklist of connections from tasks.db (+ Primary User if injected)."""
         linked_uids = {s.get("connection_uid") for s in self._rows.values()}
         available = [
             c for c in self._conn_map.values()
@@ -757,10 +796,13 @@ class OrgStaffPanel(Vertical):
         if not available:
             self.app.notify("No unlinked contacts available", severity="warning")
             return
+        name_counts: dict[str, int] = {}
+        for c in available:
+            name = c.get("display_name") or "—"
+            name_counts[name] = name_counts.get(name, 0) + 1
         options = [
-            (f"{c.get('display_name', '—')}  ({c.get('relationship', '—')})",
-             c["uid"])
-            for c in sorted(available, key=lambda x: x.get("display_name", ""))
+            (self._pick_label(c, name_counts), c["uid"])
+            for c in sorted(available, key=lambda x: x.get("display_name") or "")
         ]
         self.app.push_screen(
             _BridgePickModal(options, "Contact"),

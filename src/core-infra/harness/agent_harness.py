@@ -1517,7 +1517,13 @@ def main():
     # Inject skills based on triage classification
     # Filter out always-injected skills — they're not triage-driven.
     skill_content = ""
-    always_injected = {"cli_reference_agent.md", "skill_authoring.md", "memory_management.md", "communication_basic.md", "communication.md"}
+    always_injected = {
+        "cli_reference_agent.md",
+        "skill_authoring.md",
+        "memory_management.md",
+        "communication_basic.md",
+        "communication.md",
+    }
     skill_mode = getattr(args, 'skill_mode', 'hybrid')
     tlog(f"SKILL MODE: {skill_mode}")
     if skills_dir and triage_result.skills_to_inject:

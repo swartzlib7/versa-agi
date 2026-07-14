@@ -25,12 +25,14 @@ class OrganizationModal(ModalScreen):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, reader, writer, tasks_reader=None, agent_reader=None, **kwargs):
+    def __init__(self, reader, writer, tasks_reader=None, agent_reader=None,
+                 config=None, **kwargs):
         super().__init__(**kwargs)
         self.org_reader = reader
         self.org_writer = writer
         self.tasks_reader = tasks_reader
         self.agent_reader = agent_reader
+        self.config = config
 
     def compose(self) -> ComposeResult:
         with Vertical(id="org-modal-shell"):
@@ -43,6 +45,7 @@ class OrganizationModal(ModalScreen):
                             writer=self.org_writer,
                             tasks_reader=self.tasks_reader,
                             agent_reader=self.agent_reader,
+                            config=self.config,
                             id=f"org-{kind}-panel",
                         )
                 with TabPane("❖  Explorer", id="org-modal-explorer-tab"):

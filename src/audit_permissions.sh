@@ -186,6 +186,8 @@ check "/home/coa"                          "coa:coa"            "755"  "COA home
 check "${COA}"                             "coa:coa"            "755"  "COA env (traversable by agi_agents)"
 check "${COA}/.agent"                      "coa:agi_agents"     "775"  ".agent dir"
 check "${COA}/.agent/poise.md"             "watchdog:coa"       "640"  ".agent/poise.md (copied by Lifeline)"
+check "${COA}/.agent/docs"                 "coa:agi_agents"     "755"  "COA docs dir"
+check "${COA}/.agent/docs/versa_agi_readme.md" "watchdog:agi_agents" "440" "Product README (COA consult)"
 check "${COA}/.agent/skills"               "coa:agi_agents"     "775"  "Skills dir"
 check "${COA}/workspace"                   "coa:agi_agents"     "2770"  "Workspace dir (setgid for cross-agent collaboration §3.6)"
 check "${COA}/attachments"                "coa:agi_agents"     "2770" "Attachments dir (setgid, matches workspace/)"

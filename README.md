@@ -80,65 +80,15 @@ Not every job needs an LLM. Agents (or their sponsor) can schedule shared `.sh` 
   </a>
 </div>
 
-### Unified Global Production Network (uGPN)
-
-The synthesis of localized Versa AGi execution mapped over the cross-lingual VersaVoice routing layer births a completely borderless framework for human and autonomous collaboration.
-
 <div align="center">
-
-<h3>🌍 VersaVoice Neural Translation Core</h3>
-<p><em>Cross-Lingual Routing Barrier</em></p>
-
-<code>──────────────── Sub-Account API ────────────────</code>
-
-<table>
-  <tr>
-    <td align="center" width="300">
-      <br>
-      <h4>🇯🇵 Tokyo Node</h4>
-      <br>
-      <code>&nbsp;👤 Human Architect&nbsp;</code>
-      <br><br>
-      <sub>↕ Local OS Bound</sub>
-      <br><br>
-      <code>&nbsp;🤖 Versa AGi&nbsp;</code>
-      <br><br>
-    </td>
-    <td align="center" width="300">
-      <br>
-      <h4>🇺🇸 New York Node</h4>
-      <br>
-      <code>&nbsp;👤 Dev Lead&nbsp;</code>
-      <br><br>
-      <sub>↕ Local OS Bound</sub>
-      <br><br>
-      <code>&nbsp;🤖 Versa AGi&nbsp;</code>
-      <br><br>
-    </td>
-    <td align="center" width="300">
-      <br>
-      <h4>🇿🇦 South African Node</h4>
-      <br>
-      <code>&nbsp;🤖 Autonomous AGi&nbsp;</code>
-      <br><br>
-      <sub>(Unattended)</sub>
-      <br><br><br>
-    </td>
-  </tr>
-</table>
-
-<br>
-
-<sub>▼ &nbsp; Synchronize towards &nbsp; ▼</sub>
-
-<br>
-
-<h3>🎯 Shared Human Intent</h3>
-<p><em>(Manifested Locally via Communication)</em></p>
-
-<br>
-
+  Unified Global Production Network (uGPN)<br>
+  (exerpt from VersaVoice.AI website - click image below to open)<br><br>
+  <a href="https://versavoice.ai/versa-agi">
+    <img src="docs/brand/versa-agi/ugpn-infographic.png" alt="Unified Global Production Network (uGPN) — VersaVoice Neural Translation Core linking Tokyo, New York, and South African nodes toward Shared Human Intent" width="900">
+  </a>
 </div>
+
+---
 
 ## Architecture
 
@@ -628,6 +578,10 @@ If the agent genuinely needs a system package (e.g., `imagemagick`, `ffmpeg`), i
 ## Directory Layout & Deployed Locations
 
 The infrastructure is deployed across three layers: a **monitoring layer** (Watchdog), an **agent workspace** (per-agent home directories), and a **centralized data store** (SQLite databases managed via `agictl`). Each sub-agent gets its own OS user and isolated home directory.
+
+On each install/update, this product README is copied to the COA workspace for on-demand consult:
+
+`/home/coa/coa-env/.agent/docs/versa_agi_readme.md` (read-only; overwritten every update). Sub-agents do not receive this file.
 
 ---
 

@@ -186,6 +186,7 @@ class AgitopApp(App):
                     self.organization_writer,
                     tasks_reader=self.tasks_reader,
                     agent_reader=self.agent_reader,
+                    config=self.config,
                 ),
             )
         else:

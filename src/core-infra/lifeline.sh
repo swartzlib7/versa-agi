@@ -212,14 +212,24 @@ if [ -f "${UI_LIB}" ]; then
   # shellcheck source=ui_lib.sh
   source "${UI_LIB}"
   detect_os
+  detect_host_runtime
 fi
 VERSA_HOST_PLATFORM="unknown"
-if [ -n "${VERSA_DISTRO:-}" ] && [ "${VERSA_DISTRO}" != "unsupported" ]; then
+if [ -n "${HOST_OS_PRETTY:-}" ]; then
+  VERSA_HOST_PLATFORM="${HOST_OS_PRETTY}"
+elif [ -n "${VERSA_DISTRO:-}" ] && [ "${VERSA_DISTRO}" != "unsupported" ]; then
   VERSA_HOST_PLATFORM="${VERSA_DISTRO}"
   if [ -n "${VERSA_OS_VERSION:-}" ] && [ "${VERSA_OS_VERSION}" != "unknown" ]; then
     VERSA_HOST_PLATFORM="${VERSA_HOST_PLATFORM} ${VERSA_OS_VERSION}"
   fi
 fi
+# Defaults if ui_lib was missing or detect_host_runtime unavailable
+HOST_CLASS="${HOST_CLASS:-native_linux}"
+HOST_ARCH="${HOST_ARCH:-$(uname -m 2>/dev/null || echo unknown)}"
+HOST_VIRT="${HOST_VIRT:-none}"
+WINDOWS_INTEROP="${WINDOWS_INTEROP:-false}"
+HOST_NESTED_VIRT_POLICY="${HOST_NESTED_VIRT_POLICY:-not_required_for_normal_dev}"
+HOST_OS_PRETTY="${HOST_OS_PRETTY:-${VERSA_HOST_PLATFORM}}"
 
 # ─── Protected Identity Resolution (setup.ini [users]) ───
 # COA and watchdog usernames are INI-driven — never hardcode them in
@@ -402,7 +412,24 @@ $(cat "${TASK_PROTOCOL}")"
 - **System time**: ${SYSTEM_TIME} — **Timezone**: ${SYSTEM_TZ}. ALWAYS use this timezone for scheduling. NEVER assume UTC.
 - **SSH key**: ~/.ssh/versa_agi_ed25519 (public: ~/.ssh/versa_agi_ed25519.pub). For first-time git project assignments, send the public key to the Primary User for deploy key setup.
 - **Message addressing**: Address EVERY part of EACH new message. Satisfy requests in a SINGLE message. Long-form content → Markdown file with \`--markdown-paths\`.
-- **Efficiency**: Be decisive. Avoid lengthy monologues. Execute multiple tool actions concurrently when possible. Consider the recipient's language."
+- **Efficiency**: Be decisive. Avoid lengthy monologues. Execute multiple tool actions concurrently when possible. Consider the recipient's language.
+
+## HOST RUNTIME ORIENTATION
+- host_class: ${HOST_CLASS}          # native_linux | wsl2 | wsl1 | other
+- os: ${HOST_OS_PRETTY}
+- arch: ${HOST_ARCH}
+- virt: ${HOST_VIRT}                       # none | wsl2 | wsl1 | kvm | …
+- windows_interop: ${WINDOWS_INTEROP}           # true only on WSL with /mnt/c available
+- nested_virt_policy: ${HOST_NESTED_VIRT_POLICY}
+
+### Rules for troubleshooting & dev environments
+1. Trust host_class above; only re-detect if symptoms contradict it.
+2. native_linux: OK to recommend apt, systemd services, Vagrant/VirtualBox, or containers for isolation.
+3. wsl2: Prefer developing *inside* WSL. Do not propose nested Vagrant/VirtualBox as the default. If a full VM is required, prefer a Windows-side hypervisor workflow over nesting inside WSL.
+4. wsl1: Avoid assuming full systemd/Docker compatibility; keep guidance conservative.
+5. Project files: prefer the Linux filesystem home/workspace. On WSL, avoid heavy I/O on /mnt/c unless necessary.
+6. Never assume GUI/desktop repair or host package installs can be done by the agent without the Primary User.
+7. When recommending stacks, state assumptions: \"assuming native Ubuntu 24.04\" or \"assuming WSL2 Ubuntu\"."
 
     # Agent registry content
     # Sub-agents get a peer view: watchdog is infrastructure, not a

@@ -79,6 +79,67 @@ detect_os() {
   export VERSA_OS VERSA_DISTRO VERSA_OS_VERSION VERSA_PKG_MGR
 }
 
+# Host runtime class for agent CYCLE PARAMETERS (native Linux vs WSL).
+# Sets: HOST_CLASS, HOST_ARCH, HOST_VIRT, WINDOWS_INTEROP, HOST_OS_PRETTY,
+#        HOST_NESTED_VIRT_POLICY
+detect_host_runtime() {
+  HOST_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+  HOST_CLASS="native_linux"
+  HOST_VIRT="none"
+  WINDOWS_INTEROP="false"
+  HOST_NESTED_VIRT_POLICY="not_required_for_normal_dev"
+  HOST_OS_PRETTY=""
+
+  if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    HOST_OS_PRETTY="${PRETTY_NAME:-${NAME:-Linux} ${VERSION_ID:-}}"
+  fi
+  if [ -z "${HOST_OS_PRETTY}" ]; then
+    if [ -n "${VERSA_DISTRO:-}" ] && [ "${VERSA_DISTRO}" != "unsupported" ]; then
+      HOST_OS_PRETTY="${VERSA_DISTRO}"
+      [ -n "${VERSA_OS_VERSION:-}" ] && [ "${VERSA_OS_VERSION}" != "unknown" ] && \
+        HOST_OS_PRETTY="${HOST_OS_PRETTY} ${VERSA_OS_VERSION}"
+    else
+      HOST_OS_PRETTY="Linux"
+    fi
+  fi
+
+  local _is_wsl=false
+  if [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+    _is_wsl=true
+  fi
+
+  if [ "${_is_wsl}" = true ]; then
+    if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || [ -n "${WSL_INTEROP:-}" ]; then
+      HOST_CLASS="wsl2"
+      HOST_VIRT="wsl2"
+    else
+      HOST_CLASS="wsl1"
+      HOST_VIRT="wsl1"
+    fi
+    HOST_NESTED_VIRT_POLICY="avoid_nested_vms_prefer_windows_hypervisor"
+    if [ -d /mnt/c/Windows ]; then
+      WINDOWS_INTEROP="true"
+    fi
+  else
+    # Optional refinement when systemd-detect-virt is available.
+    # Note: systemd-detect-virt exits non-zero for "none" — do not use || echo
+    # or the word "none" is duplicated onto stdout.
+    if command -v systemd-detect-virt &>/dev/null; then
+      local _sv
+      _sv="$(systemd-detect-virt 2>/dev/null)" || true
+      _sv="$(printf '%s' "${_sv}" | tr -d '[:space:]')"
+      case "${_sv}" in
+        none|"" ) HOST_VIRT="none" ;;
+        * ) HOST_VIRT="${_sv}" ;;
+      esac
+    fi
+  fi
+
+  export HOST_CLASS HOST_ARCH HOST_VIRT WINDOWS_INTEROP HOST_OS_PRETTY HOST_NESTED_VIRT_POLICY
+}
+
 require_linux() {
   if [ "${VERSA_OS}" != "linux" ]; then
     echo ""
