@@ -284,7 +284,7 @@ class AgentReader:
         rows = self._query_cycles("SELECT COUNT(id) as count FROM cycles WHERE id LIKE ?", (f"{agent_name}-%",))
         return rows[0]["count"] if rows else 0
 
-    def get_recent_cycle_summaries(self, agent_name: str, limit: int = 5) -> list[str]:
+    def get_recent_cycle_summaries(self, agent_name: str, limit: int = 8) -> list[str]:
         """Get chronological summaries of recent cycles for context injection.
 
         Timestamps are rendered in the system's local timezone so they agree

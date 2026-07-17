@@ -1317,6 +1317,14 @@ def main():
     # Resolve skills directory early — used by both CLI reference injection and triage
     skills_dir = getattr(args, 'skills_dir', None)
 
+    # ── Always-Inject skill blocks (static content) ──
+    # Collected first, then inserted BEFORE the LIVE SITUATION sentinel so the
+    # static prompt prefix (cache-eligible) includes them — appending after the
+    # per-cycle data would make this content uncacheable (System Design §3.1,
+    # Poise Layout Design Pattern).
+    DYNAMIC_BOUNDARY_SENTINEL = "## ── LIVE SITUATION"
+    static_skill_blocks = []
+
     # ── Always-Inject: CLI Reference (agent subset) ──
     # cli_reference_agent.md — always injected for every agent (token-efficient spawn default).
     # COA loads full cli_reference.md on demand via agictl_execute (see COA block below).
@@ -1327,7 +1335,7 @@ def main():
             try:
                 with open(cli_ref_path, "r") as f:
                     cli_ref_content = f.read()
-                system_prompt += f"\n\n---\n## ── TOOL REFERENCE: cli_reference_agent.md ──\n\n{cli_ref_content}"
+                static_skill_blocks.append(f"\n\n---\n## ── TOOL REFERENCE: cli_reference_agent.md ──\n\n{cli_ref_content}")
                 cli_ref_injected = True
                 tlog(f"CLI REFERENCE (agent): Injected ({len(cli_ref_content)} chars)")
             except Exception as e:
@@ -1337,7 +1345,7 @@ def main():
     if skills_dir and args.agent == "coa":
         full_ref_path = os.path.join(skills_dir, "cli_reference.md")
         if os.path.isfile(full_ref_path):
-            system_prompt += (
+            static_skill_blocks.append(
                 "\n\n---\n## ── COA: FULL CLI REFERENCE (load on demand) ──\n"
                 "This spawn includes **cli_reference_agent.md** only. For model catalog, provider CRUD, "
                 "admin commands, and operator-only groups, load the full manual **before** that work:\n"
@@ -1354,7 +1362,7 @@ def main():
             try:
                 with open(skill_auth_path, "r") as f:
                     skill_auth_content = f.read()
-                system_prompt += f"\n\n---\n## ── SKILL AUTHORING REFERENCE ──\n\n{skill_auth_content}"
+                static_skill_blocks.append(f"\n\n---\n## ── SKILL AUTHORING REFERENCE ──\n\n{skill_auth_content}")
                 tlog(f"SKILL AUTHORING: Injected ({len(skill_auth_content)} chars)")
             except Exception as e:
                 tlog(f"SKILL AUTHORING: Failed to read — {e}")
@@ -1368,7 +1376,7 @@ def main():
             try:
                 with open(mem_skill_path, "r") as f:
                     mem_skill_content = f.read()
-                system_prompt += f"\n\n---\n## ── MANDATORY: MEMORY & AWARENESS PROCEDURE ──\n**This procedure MUST be executed before ending every cycle.**\n\n{mem_skill_content}"
+                static_skill_blocks.append(f"\n\n---\n## ── MANDATORY: MEMORY & AWARENESS PROCEDURE ──\n**This procedure MUST be executed before ending every cycle.**\n\n{mem_skill_content}")
                 tlog(f"MEMORY SKILL: Injected ({len(mem_skill_content)} chars)")
             except Exception as e:
                 tlog(f"MEMORY SKILL: Failed to read — {e}")
@@ -1382,10 +1390,27 @@ def main():
             try:
                 with open(comm_basic_path, "r") as f:
                     comm_basic_content = f.read()
-                system_prompt += f"\n\n---\n## ── COMMUNICATION RULES ──\n\n{comm_basic_content}"
+                static_skill_blocks.append(f"\n\n---\n## ── COMMUNICATION RULES ──\n\n{comm_basic_content}")
                 tlog(f"COMMUNICATION BASIC: Injected ({len(comm_basic_content)} chars)")
             except Exception as e:
                 tlog(f"COMMUNICATION BASIC: Failed to read — {e}")
+
+    # ── Insert static skill blocks at the cache boundary ──
+    if static_skill_blocks:
+        skills_payload = "".join(static_skill_blocks)
+        boundary_idx = system_prompt.find(DYNAMIC_BOUNDARY_SENTINEL)
+        if boundary_idx != -1:
+            system_prompt = (
+                system_prompt[:boundary_idx].rstrip()
+                + skills_payload
+                + "\n\n---\n\n"
+                + system_prompt[boundary_idx:]
+            )
+            tlog(f"STATIC SKILLS: Inserted at LIVE SITUATION boundary ({len(skills_payload)} chars)")
+        else:
+            # Legacy poise without sentinel — fall back to appending
+            system_prompt += skills_payload
+            tlog(f"STATIC SKILLS: No boundary sentinel found — appended ({len(skills_payload)} chars)")
 
     with open(args.wake_file, "r") as f:
         wake_prompt = f.read()

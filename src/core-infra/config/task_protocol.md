@@ -1,5 +1,3 @@
-> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
-
 Your execution lifecycle is governed by `tasks.db`. The Lifeline spawns you when a Task triggers a wake event based on its `status` and `due_date`.
 
 Use `agictl task` to manage your workload according to these parameters:
@@ -44,67 +42,16 @@ Use this order every cycle that involves a message and/or task:
 - **`task done`** — only in the "verified complete" or "confirmation arrived" rows above.
 - **`waiting` + snooze`** — whenever external confirmation is the next step; Lifeline wakes you on the **next inbound message**, not because you polled.
 
-### Utility Tasks
+### Task kinds (Normal / Utility / Script)
 
-A **Utility Task** (`task_kind=utility`) links **exactly one** Utility Model via `utility_model_id`. When due, lifeline runs the UM **as the task's `assigned_to` agent** — no LangGraph harness spawn.
-
-```bash
-agictl task add "Weekly brand hero" --assignee coa --due-date "2026-06-20 09:00:00" \
-  --utility-task --utility-model brand-hero-square \
-  --utility-input-files '["brand/ref.jpg"]' \
-  --utility-start-alert --utility-stop-alert \
-  --utility-spawn-agent coa
-```
-
-| Flag | Meaning |
-|-------|---------|
-| `--utility-task` | Sets `task_kind=utility` |
-| `--utility-model` | FK to `utility_models.id` (required) |
-| `--utility-input-files` | JSON array of paths (validated against catalog mime map) |
-| `--utility-start-alert` | VersaVoice short message to PU when run starts |
-| `--utility-stop-alert` | VV message to PU on completion (success or error) |
-| `--utility-spawn-agent` | Optional — spawn named agent on success with artifact paths in wake |
-
-**Manual invoke (no task):** PU or agent runs `agictl utility run <id>` — uses UM `run_as_agent` and UM `output_path`.
-
-**After UM completes:** Use `agictl view image` / `agictl listen audio` on artifact paths in a **later Normal Agent spawn** if you need to reason about output.
-
-See Production Plan §2.6 (Utility Models).
-
-| Use Utility Task when | Use Normal task when |
-|-------------------------|----------------------|
-| One-shot generation to files (image, audio, video, text artifact) | Multi-step conversational work across spawns |
-| Due-date scheduled render / batch | Agent must use tools, memory, messaging |
-| PU wants Start/Stop VV alerts | PU wants agent judgment mid-workflow |
-
-### Script Tasks
-
-A **Script Task** (`task_kind=script`) runs a top-level `.sh` from the shared **AGi-Tools** repo on the due date — **as the task's `assigned_to` agent, with no harness spawn and no model**. For deterministic, repeatable work (syncs, exports, housekeeping) where a reasoning cycle is wasteful.
-
-```bash
-agictl task add "Nightly export sync" --assignee coa --due-date "2026-06-22 02:00:00" \
-  --script-task --script-path nightly_export.sh \
-  --script-parameters "--region us --full" \
-  --script-interval 86400 \
-  --utility-start-alert --utility-stop-alert
-```
-
-| Flag | Meaning |
-|-------|---------|
-| `--script-task` | Sets `task_kind=script` (mutually exclusive with `--utility-task`) |
-| `--script-path` | Top-level `.sh` filename in AGi-Tools (required) |
-| `--script-parameters` | Args passed verbatim to the script (argv, no shell) |
-| `--script-interval` | Recurrence seconds — **blank/0 = once-off**; positive = reschedule each run |
-| `--utility-start-alert` / `--utility-stop-alert` | VV alerts on run start / finish (rc + output tail) |
-
-**Authoring:** the script must already live in **AGi-Tools** — executable, idempotent, exit non-zero on failure, own its logs. See `shared_tooling.md` and skill `script_tasks.md`.
-
-**Outcome:** once-off → `done` (rc `0`) / `blocked` (rc ≠ 0). Recurring → stays `planned`, `due_date` advances by the interval. Each run records `script_last_rc` and appends a `task progress` entry. A timeout reports rc `124`.
+Besides normal reasoning tasks, two automated kinds run **without** a harness spawn when due — pick by this table:
 
 | Use Script Task when | Use Utility Task when | Use Normal task when |
 |-----------------------|------------------------|----------------------|
-| Deterministic `.sh` job, no LLM needed | One-shot generation to files via a model | Multi-step conversational work |
-| Recurring/scheduled housekeeping | Due-date render / batch | Agent must use tools, memory, messaging |
+| Deterministic `.sh` job from AGi-Tools, no LLM needed | One-shot model generation to files (image, audio, text artifact) | Multi-step conversational work across spawns |
+| Recurring/scheduled housekeeping (syncs, exports) | Due-date render / batch | Agent must use tools, memory, messaging |
+
+> **DEEP DIVE**: Before **creating or modifying** a Utility Task, load the `utility_models.md` skill; for a Script Task, load `script_tasks.md`. They carry the `task add` flags, authoring rules, and outcome semantics (`--utility-task`/`--script-task`, alerts, recurrence, rc handling).
 
 ### Awaiting confirmation or feedback
 

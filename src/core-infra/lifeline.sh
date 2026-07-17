@@ -393,23 +393,41 @@ $(cat "${TASK_PROTOCOL}")"
     fi
 
     # Cycle parameters content
+    # STATIC-PREFIX RULE (Poise Layout Design Pattern, System Design §3.1):
+    # this block must stay byte-stable across cycles — the current timestamp
+    # lives in the wake prompt only. Timezone is season-stable and kept here
+    # for scheduling rules.
     SYSTEM_TZ=$(date '+%Z (%:z)')
-    SYSTEM_TIME=$(date '+%Y-%m-%dT%H:%M:%S%z')
     # Resolve the agent's real OS home from passwd — authoritative regardless
     # of workspace layout. dirname(AGENT_PATH) was wrong for sub-agents whose
     # workspace IS their home (/home/agi-x → /home), textually authorizing the
     # entire /home tree in the prompt.
     AGENT_HOME=$(getent passwd "${AGENT_USER}" | cut -d: -f6)
     [ -z "${AGENT_HOME}" ] && AGENT_HOME="${AGENT_PATH}"
+
+    # Host runtime rules — scoped to the detected host_class (native hosts do
+    # not need WSL guidance and vice versa; irrelevant rules waste tokens).
+    HOST_CLASS_RULES=""
+    case "${HOST_CLASS}" in
+      wsl2)
+        HOST_CLASS_RULES="- wsl2: Prefer developing *inside* WSL. Do not propose nested Vagrant/VirtualBox as the default. If a full VM is required, prefer a Windows-side hypervisor workflow over nesting inside WSL.
+- Project files: prefer the Linux filesystem home/workspace; avoid heavy I/O on /mnt/c unless necessary." ;;
+      wsl1)
+        HOST_CLASS_RULES="- wsl1: Avoid assuming full systemd/Docker compatibility; keep guidance conservative.
+- Project files: prefer the Linux filesystem home/workspace; avoid heavy I/O on /mnt/c unless necessary." ;;
+      *)
+        HOST_CLASS_RULES="- native_linux: OK to recommend apt, systemd services, Vagrant/VirtualBox, or containers for isolation." ;;
+    esac
+
     CYCLE_PARAMS_CONTENT="## ── CYCLE PARAMETERS ──
 
 - **Host platform**: ${VERSA_HOST_PLATFORM} — OS of this Versa AGi installation.
 - **Versa AGi version**: ${VERSA_AGI_VERSION} — installed product release on this host.
-- **YOUR HOME DIRECTORY**: \`${AGENT_HOME}\` — this is your OS user home. All your work happens here or in subdirectories. NEVER create or modify files outside this path.
-- **YOUR ENVIRONMENT ROOT**: \`${AGENT_PATH}\` — your working directory (CWD at cycle start). Agent data is at \`${AGENT_PATH}/.agent/\`.
-- **YOUR WORKSPACE**: \`${AGENT_PATH}/workspace/\` — ALL project work goes here (project clones, scratch dirs). Never work in the environment root itself.
+- **YOUR HOME DIRECTORY**: \`${AGENT_HOME}\` — your OS user home. NEVER create or modify files outside this path.
+- **YOUR ENVIRONMENT ROOT**: \`${AGENT_PATH}\` — CWD at cycle start. Agent data is at \`${AGENT_PATH}/.agent/\`.
+- **YOUR WORKSPACE**: \`${AGENT_PATH}/workspace/\` — ALL project work goes here. Never work in the environment root itself.
 - **STEP BUDGET**: You have **${AGENT_MAX_TURNS:-50} steps** this cycle. Each tool call counts. Plan accordingly — break large tasks into sub-tasks and schedule remainders. You will receive a warning when running low.
-- **System time**: ${SYSTEM_TIME} — **Timezone**: ${SYSTEM_TZ}. ALWAYS use this timezone for scheduling. NEVER assume UTC.
+- **Timezone**: ${SYSTEM_TZ}. ALWAYS use this timezone for scheduling. NEVER assume UTC. The current date/time arrives in your wake prompt.
 - **SSH key**: ~/.ssh/versa_agi_ed25519 (public: ~/.ssh/versa_agi_ed25519.pub). For first-time git project assignments, send the public key to the Primary User for deploy key setup.
 - **Message addressing**: Address EVERY part of EACH new message. Satisfy requests in a SINGLE message. Long-form content → Markdown file with \`--markdown-paths\`.
 - **Efficiency**: Be decisive. Avoid lengthy monologues. Execute multiple tool actions concurrently when possible. Consider the recipient's language.
@@ -423,13 +441,10 @@ $(cat "${TASK_PROTOCOL}")"
 - nested_virt_policy: ${HOST_NESTED_VIRT_POLICY}
 
 ### Rules for troubleshooting & dev environments
-1. Trust host_class above; only re-detect if symptoms contradict it.
-2. native_linux: OK to recommend apt, systemd services, Vagrant/VirtualBox, or containers for isolation.
-3. wsl2: Prefer developing *inside* WSL. Do not propose nested Vagrant/VirtualBox as the default. If a full VM is required, prefer a Windows-side hypervisor workflow over nesting inside WSL.
-4. wsl1: Avoid assuming full systemd/Docker compatibility; keep guidance conservative.
-5. Project files: prefer the Linux filesystem home/workspace. On WSL, avoid heavy I/O on /mnt/c unless necessary.
-6. Never assume GUI/desktop repair or host package installs can be done by the agent without the Primary User.
-7. When recommending stacks, state assumptions: \"assuming native Ubuntu 24.04\" or \"assuming WSL2 Ubuntu\"."
+- Trust host_class above; only re-detect if symptoms contradict it.
+${HOST_CLASS_RULES}
+- Never assume GUI/desktop repair or host package installs can be done by the agent without the Primary User.
+- When recommending stacks, state assumptions: \"assuming ${HOST_OS_PRETTY} (${HOST_CLASS})\"."
 
     # Agent registry content
     # Sub-agents get a peer view: watchdog is infrastructure, not a
@@ -1023,20 +1038,21 @@ To resume:
   fi
 
   # Inject recent cycle summaries so the agent has conversation continuity
+  RECENT_CYCLE_COUNT=8
   CONTEXT_SUMMARY=""
   if [ -f "${CYCLES_DB}" ]; then
     RECENT_CYCLES=$(/usr/local/bin/agictl cycle recent "${AGENT_NAME}" || true)
     if [ -n "${RECENT_CYCLES}" ]; then
       TOTAL_CYCLES=$(/usr/local/bin/agictl cycle count "${AGENT_NAME}" 2>/dev/null || echo "0")
       HIDDEN_STR=""
-      if [ "${TOTAL_CYCLES}" -gt 5 ]; then
-        HIDDEN_CYCLES=$(( TOTAL_CYCLES - 5 ))
+      if [ "${TOTAL_CYCLES}" -gt "${RECENT_CYCLE_COUNT}" ]; then
+        HIDDEN_CYCLES=$(( TOTAL_CYCLES - RECENT_CYCLE_COUNT ))
         HIDDEN_STR="(${HIDDEN_CYCLES} older cycles not shown here — use your \`agictl\` tools to query past messages, tasks, and memory blocks if needed)"
       else
         HIDDEN_STR="(This represents your entire active cycle history)"
       fi
       CONTEXT_SUMMARY="
-## ── RECENT ACTIVITY (your last 5 cycles, chronological, local time) ──
+## ── RECENT ACTIVITY (your last ${RECENT_CYCLE_COUNT} cycles, chronological, local time) ──
 ${RECENT_CYCLES}
 ${HIDDEN_STR}
 "
@@ -1149,8 +1165,18 @@ ${AGENT_TASKS}
       # Recent progress journal entries on those tasks — the agent's own
       # breadcrumbs from previous cycles (the continuity carrier for
       # fresh-start cycles).
+      #
+      # Exclude task_kind script/utility: deterministic runners append a journal
+      # row on every run (rc + output tail). Recurring Script Tasks (e.g. daily
+      # sync / PH monitor) would otherwise fill the LIMIT 10 window and flood
+      # the system prompt — especially for COA, who often owns those tasks.
+      # Dashboard / `agictl task progress` / `task get` still show full history.
+      #
+      # Rolling window: only entries from the last 7 days are injected. Older
+      # agent breadcrumbs stay in SQLite for the Progress Journal UI; script/
+      # utility rows older than 7 days are pruned on each deterministic append.
       TASK_PROGRESS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
-        "SELECT '#' || p.task_id, substr(p.created_at, 1, 16), COALESCE(p.agent_name, '?'), substr(replace(p.note, char(10), ' '), 1, 300) FROM task_progress p JOIN tasks t ON t.id = p.task_id WHERE t.assigned_to='${AGENT_NAME}' AND t.status NOT IN ('done', 'cancelled', 'frozen') ORDER BY p.id DESC LIMIT 10;" 2>/dev/null | tac || true)
+        "SELECT '#' || p.task_id, substr(p.created_at, 1, 16), COALESCE(p.agent_name, '?'), substr(replace(p.note, char(10), ' '), 1, 300) FROM task_progress p JOIN tasks t ON t.id = p.task_id WHERE t.assigned_to='${AGENT_NAME}' AND t.status NOT IN ('done', 'cancelled', 'frozen') AND COALESCE(t.task_kind, 'standard') NOT IN ('script', 'utility') AND p.created_at >= datetime('now', '-7 days') ORDER BY p.id DESC LIMIT 10;" 2>/dev/null | tac || true)
 
       if [ -n "${TASK_PROGRESS}" ]; then
         TASK_SUMMARY="${TASK_SUMMARY}
@@ -1198,15 +1224,11 @@ ${MEM_ITEMS}
 
   # ── Environmental Awareness Injection ──────────────────
   # Query games + agent_awareness for the environmental awareness context block.
-  # COA: full game board + all active awareness entries.
-  # Sub-agents: only their assigned project's game context (read-only) + own awareness.
+  # COA: full game board + own conclusions + team actions (digest form).
+  # Sub-agents: assigned-project game context (read-only) + own awareness digest.
   ENVIRONMENTAL_AWARENESS=""
   GAMES_BLOCK=""
   AWARENESS_TABLE=""
-  # Injection limit matches the documented hygiene cap (~20). Headers below
-  # always state "showing N of M" so the agent is never told to audit
-  # entries it cannot see.
-  AW_LIMIT=20
   if [ -f "${TASKS_DB}" ]; then
     if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
       # ── COA: Full Game Board ──
@@ -1226,10 +1248,43 @@ ${MEM_ITEMS}
         done <<< "${ACTIVE_GAMES}"
       fi
 
-      # ── COA: All Active Awareness (conclusions + actions) ──
-      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active --limit "${AW_LIMIT}" 2>/dev/null || true)
-      if [[ "${AWARENESS_TABLE}" != *"| ID |"* ]]; then
-        AWARENESS_TABLE=""
+      # ── COA: Awareness digest — metrics + recent slice ──
+      # Poise Layout Pattern (System Design §3.1): bounded summary with
+      # go-deeper footnotes instead of a verbatim 20-row dump. Games stay in
+      # full (strategic frame). Conclusions are the agent's OWN (superseded
+      # excluded); actions span the TEAM (active + completed) for
+      # orchestration visibility.
+      AW_RECENT=5
+      AW_TRUNC=300
+      AW_CONCLUSIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type conclusion --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      [[ "${AW_CONCLUSIONS}" != *"| ID |"* ]] && AW_CONCLUSIONS=""
+      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      [[ "${AW_ACTIONS}" != *"| ID |"* ]] && AW_ACTIONS=""
+
+      AWARENESS_TABLE=""
+      if [ -n "${AW_CONCLUSIONS}" ] || [ -n "${AW_ACTIONS}" ]; then
+        AW_C_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='conclusion' AND status!='superseded';" 2>/dev/null || echo "?")
+        AW_A_OPEN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE type='action' AND status='active';" 2>/dev/null || echo "?")
+        AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
+        AW_WARN=""
+        if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
+          AW_WARN=" ⚠ YOUR active entries OVER CAP (${AW_OWN}) — audit and revise/complete stale entries before adding new ones."
+        fi
+        AWARENESS_TABLE="YOUR ACTIVE AWARENESS — ${AW_C_OWN} current conclusions (yours) · ${AW_A_OPEN} open actions (team); showing most recent ${AW_RECENT} of each${AW_WARN}"
+        if [ -n "${AW_CONCLUSIONS}" ]; then
+          AWARENESS_TABLE="${AWARENESS_TABLE}
+
+Most recent ${AW_RECENT} conclusions (yours, superseded excluded):
+${AW_CONCLUSIONS}"
+        fi
+        if [ -n "${AW_ACTIONS}" ]; then
+          AWARENESS_TABLE="${AWARENESS_TABLE}
+
+Most recent ${AW_RECENT} actions (team, active + completed):
+${AW_ACTIONS}"
+        fi
+        AWARENESS_TABLE="${AWARENESS_TABLE}
+[!] Go deeper: 'agictl awareness table --status active --limit 100' (filters: --type conclusion|action, --agent <name>, --status active,completed). History: --status completed|superseded. Single entry: 'agictl awareness get <id>'."
       fi
 
       # Build combined block for legacy path
@@ -1242,23 +1297,8 @@ ACTIVE GAMES:${GAMES_BLOCK}
 "
       fi
       if [ -n "${AWARENESS_TABLE}" ]; then
-        AW_TOTAL=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
-        AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
-        AW_SHOWN="${AW_TOTAL}"
-        AW_HIDDEN_HINT=""
-        if [ "${AW_TOTAL}" -gt "${AW_LIMIT}" ] 2>/dev/null; then
-          AW_SHOWN="${AW_LIMIT}"
-          AW_HIDDEN_HINT="
-[!] Older active entries are not shown — list all with 'agictl awareness table --status active --limit 100'."
-        fi
-        AW_WARN=""
-        if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
-          AW_WARN=" ⚠ YOUR entries OVER CAP — audit and revise/complete stale entries before adding new ones."
-        fi
-        AW_HDR="YOUR ACTIVE AWARENESS (showing ${AW_SHOWN} of ${AW_TOTAL} active; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
         ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
-${AW_HDR}
-${AWARENESS_TABLE}${AW_HIDDEN_HINT}
+${AWARENESS_TABLE}
 "
       fi
     else
@@ -1282,27 +1322,43 @@ ${GAMES_BLOCK}
 "
       fi
 
-      # ── Sub-Agent: Own Active Awareness Only ──
-      AWARENESS_TABLE=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active --agent "${AGENT_NAME}" --limit "${AW_LIMIT}" 2>/dev/null || true)
-      if [[ "${AWARENESS_TABLE}" == *"| ID |"* ]]; then
+      # ── Sub-Agent: Own Awareness digest — metrics + recent slice ──
+      # Same shape as COA but scoped to the agent's OWN entries only:
+      # conclusions exclude superseded; actions include active + completed.
+      AW_RECENT=5
+      AW_TRUNC=300
+      AW_CONCLUSIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type conclusion --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      [[ "${AW_CONCLUSIONS}" != *"| ID |"* ]] && AW_CONCLUSIONS=""
+      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      [[ "${AW_ACTIONS}" != *"| ID |"* ]] && AW_ACTIONS=""
+
+      AWARENESS_TABLE=""
+      if [ -n "${AW_CONCLUSIONS}" ] || [ -n "${AW_ACTIONS}" ]; then
+        AW_C_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='conclusion' AND status!='superseded';" 2>/dev/null || echo "?")
+        AW_A_OPEN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='action' AND status='active';" 2>/dev/null || echo "?")
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
-        AW_SHOWN="${AW_OWN}"
-        AW_HIDDEN_HINT=""
-        if [ "${AW_OWN}" -gt "${AW_LIMIT}" ] 2>/dev/null; then
-          AW_SHOWN="${AW_LIMIT}"
-          AW_HIDDEN_HINT="
-[!] Older active entries are not shown — list all with 'agictl awareness table --status active --limit 100'."
-        fi
         AW_WARN=""
         if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
-          AW_WARN=" ⚠ OVER CAP — audit and revise/complete stale entries before adding new ones."
+          AW_WARN=" ⚠ active entries OVER CAP (${AW_OWN}) — audit and revise/complete stale entries before adding new ones."
         fi
+        AWARENESS_TABLE="YOUR ACTIVE AWARENESS — ${AW_C_OWN} current conclusions · ${AW_A_OPEN} open actions; showing most recent ${AW_RECENT} of each${AW_WARN}"
+        if [ -n "${AW_CONCLUSIONS}" ]; then
+          AWARENESS_TABLE="${AWARENESS_TABLE}
+
+Most recent ${AW_RECENT} conclusions (superseded excluded):
+${AW_CONCLUSIONS}"
+        fi
+        if [ -n "${AW_ACTIONS}" ]; then
+          AWARENESS_TABLE="${AWARENESS_TABLE}
+
+Most recent ${AW_RECENT} actions (active + completed):
+${AW_ACTIONS}"
+        fi
+        AWARENESS_TABLE="${AWARENESS_TABLE}
+[!] Go deeper: 'agictl awareness table --status active --limit 100' (filters: --type conclusion|action, --status active,completed). History: --status completed|superseded. Single entry: 'agictl awareness get <id>'."
         ENVIRONMENTAL_AWARENESS="${ENVIRONMENTAL_AWARENESS}
-YOUR ACTIVE AWARENESS (showing ${AW_SHOWN} of ${AW_OWN} active — cap: ~20${AW_WARN}):
-${AWARENESS_TABLE}${AW_HIDDEN_HINT}
+${AWARENESS_TABLE}
 "
-      else
-        AWARENESS_TABLE=""
       fi
     fi
   fi
@@ -1401,27 +1457,10 @@ The following system packages you requested have been approved. You may now inst
         ANTI_RUNAWAY="CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When this session ends or the goal is accomplished, run \`agictl cycle end \"summary\"\` first, then finish with a short conversational message."
       fi
 
-      # Build awareness labels for template injection (with volume counts for hygiene cap)
-      AWARENESS_LABEL=""
-      if [ -n "${AWARENESS_TABLE}" ]; then
-        # COA sees ALL agents' awareness (orchestration visibility) — count reflects the table
-        AW_TOTAL=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE status='active';" 2>/dev/null || echo "?")
-        AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
-        AW_SHOWN="${AW_TOTAL}"
-        AW_HIDDEN_HINT=""
-        if [ "${AW_TOTAL}" -gt "${AW_LIMIT}" ] 2>/dev/null; then
-          AW_SHOWN="${AW_LIMIT}"
-          AW_HIDDEN_HINT="
-[!] Older active entries are not shown — list all with 'agictl awareness table --status active --limit 100'."
-        fi
-        AW_WARN=""
-        if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
-          AW_WARN=" ⚠ YOUR entries OVER CAP — audit and supersede/complete stale entries before adding new ones."
-        fi
-        AWARENESS_LABEL="YOUR ACTIVE AWARENESS (showing ${AW_SHOWN} of ${AW_TOTAL} active; ${AW_OWN} yours — your cap: ~20${AW_WARN}):"
-        AWARENESS_LABEL="${AWARENESS_LABEL}
-${AWARENESS_TABLE}${AW_HIDDEN_HINT}"
-      fi
+      # Awareness block for template injection — AWARENESS_TABLE is prebuilt
+      # (header + metrics + recent slice + go-deeper footnotes) in the
+      # Environmental Awareness section above for both COA and sub-agents.
+      AWARENESS_LABEL="${AWARENESS_TABLE}"
 
       GAMES_LABEL=""
       if [ -n "${GAMES_BLOCK}" ]; then
@@ -1493,7 +1532,9 @@ ${AWARENESS_TABLE}${AW_HIDDEN_HINT}"
       # Order: WHO (identity) → WHAT (poise/protocol rules) → WHY (dynamic
       # context) → OPS → MEMORY → HISTORY. Behavioral rules precede the data
       # they govern (matches the COA template layout), and the static blocks
-      # form a stable prompt prefix for provider-side caching.
+      # form a stable prompt prefix for provider-side caching. The LIVE
+      # SITUATION header is the static/dynamic boundary sentinel — the harness
+      # inserts always-inject skills just before it (System Design §3.1).
       SYSTEM_PROMPT="${AGENT_IDENTITY}
 
 ${PRIMARY_USER_CONTEXT}
@@ -1503,6 +1544,8 @@ ${PRIMARY_USER_CONTEXT}
 ${MERGED_CONTENT}
 
 ---
+
+## ── LIVE SITUATION — per-cycle data below ──
 
 ${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${UTILITY_WAKE_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 

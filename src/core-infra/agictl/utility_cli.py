@@ -377,6 +377,13 @@ def register(
                     "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
                     (tid, agent_name, note),
                 )
+                # Rolling 7-day retention for utility journals (not injected
+                # into agent system prompts — see lifeline TASK_PROGRESS).
+                conn.execute(
+                    "DELETE FROM task_progress WHERE task_id = ? "
+                    "AND created_at < datetime('now', '-7 days')",
+                    (tid,),
+                )
                 conn.commit()
                 conn.close()
                 if t.get("utility_stop_alert"):
@@ -399,6 +406,11 @@ def register(
                 conn.execute(
                     "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
                     (tid, agent_name, f"UM failed ({e.code}): {e.message}"),
+                )
+                conn.execute(
+                    "DELETE FROM task_progress WHERE task_id = ? "
+                    "AND created_at < datetime('now', '-7 days')",
+                    (tid,),
                 )
                 conn.commit()
                 conn.close()

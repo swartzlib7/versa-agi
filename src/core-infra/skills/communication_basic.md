@@ -2,8 +2,6 @@
 
 > **Always-injected core.** For full messaging rules (attachments, effort calibration, inter-agent protocol, voice formatting, context recovery), load via tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/communication.md"`**.
 
-> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
-
 ## How to Send Messages
 
 ```bash

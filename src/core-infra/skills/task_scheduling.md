@@ -146,8 +146,10 @@ You have **no memory between cycles**. Everything must be persisted:
    ```bash
    agictl task progress <id> "DONE: [what was done]. NEXT: [what remains]. BLOCKERS: [any issues]."
    ```
-   Entries are append-only and timestamped — they build a history instead of overwriting it,
-   and are automatically injected into your wake context while the task is active.
+   Entries are append-only and timestamped — they build a history instead of overwriting it.
+   Up to the last 10 entries from the last 7 days across your **standard** active tasks are
+   injected into your wake context. Script/Utility Task journals are excluded from injection
+   (see `cli_reference` / `script_tasks`) so deterministic run tails do not flood the prompt.
 2. **Git commits** — Commit partial work so the next cycle can pick up where you left off.
 3. **System memory** — For context that spans multiple tasks, use `agictl memory system set` or `agictl memory connection set`.
 

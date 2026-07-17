@@ -47,7 +47,7 @@ class PromptViewModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="msg-dialog"):
-            yield Static(f"[bold]{self.prompt_title}[/]  [dim](select text + Ctrl+C to copy)[/]", id="msg-dialog-header")
+            yield Static(f"[bold]{self.prompt_title}[/]", id="msg-dialog-header")
             yield TextArea(self.prompt_content, id="prompt-view-body", read_only=True)
             with Horizontal(id="msg-dialog-actions"):
                 yield Button("📋 Copy All", variant="default", id="prompt-copy-all")

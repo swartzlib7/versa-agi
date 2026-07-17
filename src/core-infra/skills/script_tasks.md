@@ -61,11 +61,14 @@ Lifeline runs due Script Tasks each tick (`agictl task run-due-scripts`), **befo
 
 Every run records `script_last_rc` / `script_last_run_at` and appends a `task progress` journal entry with the return code and output tail. A timeout is reported as rc `124`.
 
+Journal rows are kept for a **7-day rolling window** (older rows deleted on each append) and are **not injected into agent system prompts** — recurring Script Tasks would otherwise crowd out real agent breadcrumbs. Use the Task modal Progress Journal or the CLI below to review runs.
+
 ## Reviewing results
 
 ```bash
 agictl task get <id>          # script_last_rc, script_last_run_at, recent_progress journal
-agictl task progress <id>     # full run history (rc + output tail per run)
+agictl task progress <id>     # list journal (default --last 20); no date filter — for Script Tasks
+                              # older rows are already pruned on each run (7-day retention)
 ```
 
 A **`blocked`** Script Task means the last run exited non-zero (or timed out). Read the journal tail, fix the script in AGi-Tools, then re-arm the task (`agictl task update <id> --status planned --due-date "..."`).

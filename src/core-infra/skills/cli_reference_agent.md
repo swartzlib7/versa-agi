@@ -94,8 +94,8 @@ agictl task list --mine                               # Tasks assigned to you
 agictl task get <id>                                  # Full task details
 agictl task add "Title" [options]                     # Create task (returns JSON with task_id)
 agictl task update <id> [options]                     # Update specific fields
-agictl task progress <id> "<text>"                    # Append a progress entry (journal — injected into your next wake)
-agictl task progress <id> [--last N]                  # No text: list the progress journal (oldest first)
+agictl task progress <id> "<text>"                    # Append a progress entry (append-only journal)
+agictl task progress <id> [--last N]                  # No text: list journal (oldest first; default --last 20, no date filter)
 agictl task done <id>                                 # Shortcut: mark as done
 agictl task cancel <id>                               # Shortcut: mark as cancelled
 agictl task snooze <id> <minutes>                     # Set wake_after (min 5 minutes)
@@ -114,7 +114,7 @@ agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 
 > **SCRIPT TASKS**: For deterministic, scheduled `.sh` jobs (no reasoning cycle), add `--script-task --script-path <name.sh> [--script-parameters "<args>"] [--script-interval <seconds>]`. The script must be a top-level `.sh` in **AGi-Tools** (idempotent, exits non-zero on failure). Blank/0 interval = once-off; positive = recurring. Optional `--utility-start-alert` / `--utility-stop-alert` send PU alerts. See skill `script_tasks.md`.
 
-> **TASK PROGRESS**: You have no memory between cycles. Before ending any cycle with unfinished work, leave a breadcrumb: `agictl task progress <id> "DONE: ... NEXT: ... BLOCKERS: ..."`. Entries are append-only, timestamped, and automatically injected into your wake context while the task is active. Use `task progress` for journaling; reserve `task update --desc` for changing the task's actual description.
+> **TASK PROGRESS**: You have no memory between cycles. Before ending any cycle with unfinished work, leave a breadcrumb: `agictl task progress <id> "DONE: ... NEXT: ... BLOCKERS: ..."`. Entries are append-only and timestamped. Up to the last 10 entries from the last 7 days across your **standard** active tasks are injected into your wake context. Script/Utility Task journals are **not** injected (and Script/Utility rows older than 7 days are pruned on each deterministic run). Listing via `task progress <id>` returns whatever remains in the DB (`--last N`, no date filter). Use `task progress` for journaling; reserve `task update --desc` for changing the task's actual description.
 
 **Reminder categories**: `general`, `preference`, `instruction`, `constraint`
 
@@ -240,6 +240,7 @@ agictl game opponent delete <id>
 agictl awareness add conclusion --subject <type> [--subject-id ID] --content "<text>" [--context "<why>"]
 agictl awareness add action --subject <type> [--subject-id ID] --content "<text>" --action-conclusion-id <id> [--context "<why>"]
 agictl awareness revise <entry_id> --content "<updated text>"
+agictl awareness supersede <entry_id>
 agictl awareness complete <entry_id>
 agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
 agictl awareness get <entry_id>

@@ -787,7 +787,12 @@ class TaskEditModal(ModalScreen):
                 with TabPane("Progress Journal", id="task-journal-tab"):
                     with Vertical(id="task-journal-pane"):
                         yield Static("", classes="modal-tab-spacer")
-                        yield PaginatedDataTable(self._handle_progress_key, id="task-progress-table")
+                        # Fixed 1fr viewport so page size tracks layout height
+                        # (DataTable alone collapses to content → only ~4 rows).
+                        with Vertical(id="task-progress-scroll"):
+                            yield PaginatedDataTable(
+                                self._handle_progress_key, id="task-progress-table"
+                            )
                         yield Static(
                             "[dim]Double-click or Enter to edit · PgUp/PgDn to navigate · "
                             "agents journal via agictl task progress · "
@@ -1006,9 +1011,11 @@ class TaskEditModal(ModalScreen):
             table = self.query_one("#task-progress-table", PaginatedDataTable)
         except Exception:
             return self._progress_page_size
+        height = table.size.height
+        if height <= 0:
+            return self._progress_page_size
         # Header row + border/chrome; each data row is one terminal line.
-        overhead = 2
-        return max(4, table.size.height - overhead)
+        return max(1, height - 3)
 
     def _sync_progress_page_size(self) -> None:
         """Recalculate page size from layout and reload if it changed."""

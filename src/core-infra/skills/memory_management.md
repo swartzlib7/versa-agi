@@ -2,9 +2,6 @@
 description: Awareness-First memory procedure (MANDATORY — always injected)
 ---
 
-> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
-
-
 # Memory Management Skill
 
 > **MANDATORY**: This skill MUST be executed before ending every cycle. It is always injected regardless of triage classification.
@@ -70,6 +67,11 @@ agictl awareness add conclusion \
 > ```bash
 > agictl awareness revise <entry_id> --content "Updated understanding..."
 > ```
+> If a conclusion simply stopped being true (no replacement), retire it:
+> ```bash
+> agictl awareness supersede <entry_id>
+> ```
+> Never use `complete` on a conclusion — `completed` is an action status only (the CLI rejects it).
 > 
 > **Idle Cycle Rule**: If this cycle was completely idle (e.g., you just checked wait statuses, nothing changed, and no new messages were received), DO NOT log a new conclusion. It is correct and expected to exit an idle cycle without adding redundant awareness entries.
 
@@ -91,10 +93,11 @@ agictl awareness add action \
   --action-conclusion-id <conclusion_id>
 ```
 
-> **Complete actions when done:**
+> **Complete actions when done** (actions only — conclusions are revised or superseded):
 > ```bash
 > agictl awareness complete <action_id>
 > ```
+> An action that became moot (parent conclusion no longer holds) is retired with `awareness supersede <action_id>` instead.
 
 ### Step 4: Profile — Write factual memory
 

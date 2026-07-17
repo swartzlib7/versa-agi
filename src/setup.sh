@@ -1754,6 +1754,20 @@ if [ -f "${ANCHOR_SOURCE}" ]; then
   ok "Anchor template deployed → ${ANCHOR_DEST} (watchdog:watchdog 640)"
 fi
 
+# ─── Sub-Agent & Watchdog Poise Deployment (single location) ──
+# scripts/sync_poise.py owns: roles registry weave (agent_poise.md skeleton +
+# role fragments) with stale-entry pruning, the watchdog poise, and the
+# canonical poise refresh for every non-removed sub-agent. Runs on fresh
+# install AND --update — identical behavior; fail-fast on any missing source
+# or failed weave (never deploys a partial registry).
+SYNC_POISE="${DEPLOYED_CORE_INFRA}/scripts/sync_poise.py"
+[ -f "${SYNC_POISE}" ] || error "sync_poise.py missing: ${SYNC_POISE}"
+VERSA_CORE_INFRA="${DEPLOYED_CORE_INFRA}" \
+  VERSA_WATCHDOG_USER="${WATCHDOG_USER}" \
+  VERSA_COA_USER="${COA_USER}" \
+  python3 "${SYNC_POISE}" || error "Poise deployment failed — see sync_poise output above"
+ok "Poise deployment complete (roles registry + watchdog + active agents)"
+
 # Install agictl: wrapper → /usr/local/bin/, binary → /usr/local/lib/versa-agi/
 AGICTL_BINARY="${DEPLOYED_CORE_INFRA}/bin/agictl"
 AGICTL_WRAPPER="${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper"
@@ -2785,42 +2799,9 @@ if [ "${UPDATE_MODE}" = true ]; then
   fi
   echo ""
 
-  # ─── Poise Deployment ────────────────────────────────
-  # Ensure every active sub-agent has a canonical poise file:
-  #   /etc/versa-agi/poise/{agent_name}.md (flat copy from roles/{role_id}/poise.md)
-  # agents.db stores the display label (e.g. "Developer Agent"), not the directory name ("dev").
-  # Build a reverse map from role.ini files: label → directory name.
-  if [ -f "${AGENTS_DB}" ] && [ -d "${POISE_DIR}/roles" ]; then
-    declare -A ROLE_MAP
-    for _rd in "${POISE_DIR}/roles"/*/role.ini; do
-      [ -f "${_rd}" ] || continue
-      _dir_name=$(basename "$(dirname "${_rd}")")
-      _role_name=$(grep -Po '^\s*name\s*=\s*\K.*' "${_rd}" 2>/dev/null || true)
-      [ -n "${_role_name}" ] && ROLE_MAP["${_role_name}"]="${_dir_name}"
-    done
-
-    POISE_AGENTS=$(sqlite3 "${AGENTS_DB}" "SELECT name, role FROM agents WHERE name != 'coa' AND name != 'watchdog' AND inactive = 0;" 2>/dev/null || true)
-    if [ -n "${POISE_AGENTS}" ]; then
-      while IFS='|' read -r _pa_name _pa_role_label; do
-        [ -z "${_pa_name}" ] && continue
-        _pa_role_dir="${ROLE_MAP[${_pa_role_label}]:-}"
-        if [ -z "${_pa_role_dir}" ]; then
-          warn "Unknown role '${_pa_role_label}' for ${_pa_name} — no poise deployed"
-          continue
-        fi
-        _pa_source="${POISE_DIR}/roles/${_pa_role_dir}/poise.md"
-        _pa_dest="${POISE_DIR}/${_pa_name}.md"
-        if [ -f "${_pa_source}" ]; then
-          cp "${_pa_source}" "${_pa_dest}"
-          chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${_pa_dest}"
-          chmod 640 "${_pa_dest}"
-          ok "Poise deployed: ${_pa_name}.md (from roles/${_pa_role_dir})"
-        else
-          warn "No poise template at ${_pa_source} — ${_pa_name} will not have a poise"
-        fi
-      done <<< "${POISE_AGENTS}"
-    fi
-  fi
+  # NOTE: Sub-agent + watchdog poise deployment happens earlier in this run
+  # via scripts/sync_poise.py (single location, both flows) — no per-flow
+  # poise logic here.
 
   # ─── 5b-U: Inject VersaVoice API Token ──────────────
   # Token lives in setup.ini; inject into all agent configs.
@@ -3524,27 +3505,29 @@ apply_system_permissions() {
 apply_system_permissions
 
 # ═══════════════════════════════════════════════════════
-# U4a: Skills DB reconcile (--update only, always)
+# U4a: Skills DB reconcile (both flows, always)
+# Fresh install seeds the shipped-skills registry (scope column included);
+# --update reconciles additions/removals/scope changes. Deterministic — the
+# DB always mirrors core-infra/skills/ + skills_scope.ini after setup.
 # ═══════════════════════════════════════════════════════
-if [ "${UPDATE_MODE}" = true ]; then
-  RECONCILE_SKILLS="${DEPLOYED_CORE_INFRA}/scripts/reconcile_skills_db.py"
-  if [ -f "${RECONCILE_SKILLS}" ]; then
-    step_arrow "Reconciling skills registry in agents.db"
-    python3 "${RECONCILE_SKILLS}" || warn "skills DB reconcile encountered an issue."
-  fi
+RECONCILE_SKILLS="${DEPLOYED_CORE_INFRA}/scripts/reconcile_skills_db.py"
+if [ -f "${RECONCILE_SKILLS}" ]; then
+  step_arrow "Reconciling skills registry in agents.db"
+  python3 "${RECONCILE_SKILLS}" || warn "skills DB reconcile encountered an issue."
 fi
 
 # ═══════════════════════════════════════════════════════
-# U4b: Sync Templates (--update only, with prompt)
+# U4b: Sync Skills (--update only, with prompt)
+# Poise is NOT gated here — sync_poise.py already ran unconditionally.
 # ═══════════════════════════════════════════════════════
 if [ "${UPDATE_MODE}" = true ]; then
-  section "Update — Sync Templates"
+  section "Update — Sync Skills"
   if [ "${DRY_RUN}" = true ]; then
-    dry "Would prompt to sync system templates to active agents"
+    dry "Would prompt to sync updated skills to active agents"
   else
-    if confirm_accent "Do you want to sync updated system templates (poise & skills) to active agents?"; then
-      step_arrow "Running: python3 ${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py"
-      python3 "${DEPLOYED_CORE_INFRA}/scripts/sync_templates.py" || warn "sync_templates encountered an issue."
+    if confirm_accent "Do you want to sync updated skills to active agents?"; then
+      step_arrow "Running: python3 ${DEPLOYED_CORE_INFRA}/scripts/sync_skills.py"
+      python3 "${DEPLOYED_CORE_INFRA}/scripts/sync_skills.py" || warn "sync_skills encountered an issue."
       apply_system_permissions
     fi
   fi

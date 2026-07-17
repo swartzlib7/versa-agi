@@ -322,10 +322,14 @@ class AgentPromptMenu(ModalScreen):
                 with TabPane("Poise Template", id="agent-poise-tab"):
                     with Vertical(id="agent-poise-pane"):
                         yield Static("", classes="modal-tab-spacer")
-                        yield Static("[bold cyan]Poise Template[/] [dim](select text + Ctrl+C to copy)[/]")
+                        yield Static("[bold cyan]Poise Template[/]")
                         with VerticalScroll(id="agent-poise-scroll"):
                             yield TextArea(poise_content, id="agent-poise-body", read_only=True)
                         with Horizontal(classes="agent-tab-actions"):
+                            yield Button(
+                                "📋 Copy All", variant="default",
+                                id="btn-agent-poise-copy", classes="panel-btn",
+                            )
                             yield Button(
                                 "Close", variant="default",
                                 id="btn-agent-poise-close",
@@ -335,10 +339,14 @@ class AgentPromptMenu(ModalScreen):
                 with TabPane("System Prompt", id="agent-last-prompt-tab"):
                     with Vertical(id="agent-prompt-pane"):
                         yield Static("", classes="modal-tab-spacer")
-                        yield Static("[bold cyan]System Prompt[/] [dim](select text + Ctrl+C to copy)[/]")
+                        yield Static("[bold cyan]System Prompt[/]")
                         with VerticalScroll(id="agent-prompt-scroll"):
                             yield TextArea(prompt_content, id="agent-last-prompt-body", read_only=True)
                         with Horizontal(classes="agent-tab-actions"):
+                            yield Button(
+                                "📋 Copy All", variant="default",
+                                id="btn-agent-prompt-copy", classes="panel-btn",
+                            )
                             yield Button(
                                 "Close", variant="default",
                                 id="btn-agent-prompt-close",
@@ -621,9 +629,45 @@ class AgentPromptMenu(ModalScreen):
         if self._cycle_embed:
             self._cycle_embed.on_select_changed(event)
 
+    def _copy_to_clipboard(self, text: str, label: str) -> None:
+        import subprocess
+
+        if not text:
+            self.app.notify("No content to copy", severity="warning")
+            return
+        try:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text.encode(), check=True,
+            )
+            self.app.notify(f"{label} copied to clipboard", title="Clipboard")
+        except FileNotFoundError:
+            try:
+                subprocess.run(
+                    ["xsel", "--clipboard", "--input"],
+                    input=text.encode(), check=True,
+                )
+                self.app.notify(f"{label} copied to clipboard", title="Clipboard")
+            except Exception:
+                self.app.notify(
+                    "Install xclip or xsel for clipboard support",
+                    severity="warning",
+                )
+        except Exception:
+            self.app.notify("Clipboard copy failed", severity="warning")
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         name = self.agent_name
+
+        if bid == "btn-agent-prompt-copy":
+            text = self.query_one("#agent-last-prompt-body", TextArea).text
+            self._copy_to_clipboard(text, "System prompt")
+            return
+        if bid == "btn-agent-poise-copy":
+            text = self.query_one("#agent-poise-body", TextArea).text
+            self._copy_to_clipboard(text, "Poise template")
+            return
 
         if bid in ("agent-step-prev", "agent-step-next", "agent-cycle-log-copy") and self._cycle_embed:
             mapped = {

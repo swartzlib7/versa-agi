@@ -2,8 +2,6 @@
 
 > **Scope:** COA-exclusive — this skill is never deployed to sub-agents.
 
-> **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
-
 ## Purpose
 
 This skill governs the skill lifecycle: creating, overriding, distributing, and withdrawing skills across the agent team. You (COA) are the sole custodian of the skills system.

@@ -58,11 +58,14 @@ agictl task add "Weekly hero" --assignee coa --due-date "2026-06-20 09:00:00" \
   --utility-spawn-agent coa
 ```
 
-| Callback | Behavior |
-|----------|----------|
-| **Start Alert** | Short VersaVoice message to PU when run begins |
-| **Stop Alert** | VV message on success or failure |
-| **Spawn agent** | On success, lifeline wakes named agent with artifact paths in prompt |
+| Flag | Meaning |
+|-------|---------|
+| `--utility-task` | Sets `task_kind=utility` (mutually exclusive with `--script-task`) |
+| `--utility-model` | FK to `utility_models.id` (required) |
+| `--utility-input-files` | JSON array of paths (validated against catalog mime map) |
+| `--utility-start-alert` | VersaVoice short message to PU when run starts |
+| `--utility-stop-alert` | VV message to PU on completion (success or error) |
+| `--utility-spawn-agent` | Optional — spawn named agent on success with artifact paths in wake |
 
 Lifeline executes due Utility Tasks **before** normal spawn logic. Task status → `done` on success, `blocked` on failure.
 
@@ -73,6 +76,8 @@ After a run, inspect paths from the JSON response or `manifest.json`:
 - **Text** — `view` / read file in workspace
 - **Image** — `agictl_view_image` with artifact path
 - **Audio / video** — `listen` (when wired) or report path to PU
+
+If you need to **reason about the output** (quality check, describe to PU), do it in a **later Normal Agent spawn** — use `--utility-spawn-agent` or a follow-up task so the artifact paths arrive in that wake prompt.
 
 ## Mime validation errors
 

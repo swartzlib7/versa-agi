@@ -4604,7 +4604,8 @@ def agent_list_roles():
     if os.path.isdir(ROLES_DIR):
         for entry in sorted(os.listdir(ROLES_DIR)):
             entry_path = os.path.join(ROLES_DIR, entry)
-            # V3.1: Directory-based roles (role_id/poise.md + role_id/role.ini)
+            # Directory-based roles only: role_id/poise.md + role_id/role.ini
+            # (fixed registry layout — setup.sh prunes anything else)
             if os.path.isdir(entry_path):
                 role_id = entry
                 poise_path = os.path.join(entry_path, "poise.md")
@@ -4626,11 +4627,6 @@ def agent_list_roles():
                     except Exception:
                         pass
                 roles.append(role_data)
-            # Legacy: flat poise-*.md files (backward compat)
-            elif entry.startswith("poise-") and entry.endswith(".md"):
-                role_id = entry.replace("poise-", "").replace(".md", "")
-                label = ROLE_LABELS.get(role_id, role_id)
-                roles.append({"id": role_id, "name": label, "poise_path": os.path.join(ROLES_DIR, entry)})
     if roles:
         print(json.dumps(roles, indent=2))
     else:
@@ -4665,6 +4661,17 @@ def agent_approve(name, force):
         reverse_roles = {v: k for k, v in ROLE_LABELS.items()}
         role_id = reverse_roles.get(role_label, "custom")
 
+        # ── Resolve role template (fixed registry path, no fallbacks) ──
+        # The registry is woven and refreshed by setup.sh on every install/update.
+        # A missing template means the host deployment is broken — fail before
+        # provisioning anything.
+        poise_source = os.path.join(ROLES_DIR, role_id, "poise.md")
+        if not os.path.isfile(poise_source):
+            conn.close()
+            json_response(False, error=f"Role template missing: {poise_source} — "
+                                       "run 'sudo setup.sh --update' to deploy the roles registry")
+            sys.exit(1)
+
         # ── Create OS user with dedicated home ──
         # --user-group: create a per-user group matching os_user (required for §IX credential isolation)
         # --groups agi_agents: add to shared collaboration group as supplementary
@@ -4691,26 +4698,19 @@ def agent_approve(name, force):
         subprocess.run(["chown", f"watchdog:{os_user}", agent_data_dir], check=False)
         subprocess.run(["chmod", "750", agent_data_dir], check=False)
 
-        poise_dir = os.path.join(ROLES_DIR, role_id)
-        poise_source = os.path.join(poise_dir, "poise.md") if os.path.isdir(poise_dir) else os.path.join(ROLES_DIR, f"poise-{role_id}.md")
-
         # Create canonical poise: /etc/versa-agi/poise/{agent_name}.md (flat copy from role template)
         # Lifeline and agitop resolve poise at this deterministic path.
+        # poise_source was validated above — the copy is unconditional.
         poise_canonical = f"/etc/versa-agi/poise/{name}.md"
-        if name != "coa" and os.path.exists(poise_source):
+        if name != "coa":
             shutil.copy2(poise_source, poise_canonical)
             subprocess.run(["chown", "watchdog:watchdog", poise_canonical], check=False)
             subprocess.run(["chmod", "640", poise_canonical], check=False)
             click.echo(f"  ✓ Poise deployed: {poise_canonical} (from roles/{role_id})")
 
-        # Legacy: also copy to /var/lib for agent-local reference
+        # Also copy to /var/lib for agent-local reference
         poise_dest = os.path.join(agent_data_dir, "poise.md")
-        if os.path.exists(poise_source):
-            shutil.copy2(poise_source, poise_dest)
-        elif not os.path.exists(poise_dest):
-            with open(poise_dest, "w") as f:
-                f.write(f"# {role_label}\n\nRole poise template not found at {poise_source}.\n")
-                f.write("Request deployment of role templates via the Primary User.\n")
+        shutil.copy2(poise_source, poise_dest)
 
         # ── Create duties.md (COA-writable assignment brief) ──
         duties_dest = os.path.join(agent_data_dir, "duties.md")
@@ -4861,22 +4861,13 @@ def agent_approve(name, force):
         subprocess.run(["chown", f"{os_user}:agi_agents", git_config_path], check=False)
 
         # ── Deploy system skills ──
-        skills_source = "/home/watchdog/core-infra/skills"
-        skills_dest = os.path.join(agent_root, ".agent", "skills")
-        os.makedirs(skills_dest, exist_ok=True)
-        subprocess.run(["chmod", "775", skills_dest], check=False)
-        if os.path.isdir(skills_source):
-            import glob
-            for skill_file in glob.glob(os.path.join(skills_source, "*.md")):
-                basename = os.path.basename(skill_file)
-                if basename == "README.md":
-                    continue  # Skip skills index
-                dest_file = os.path.join(skills_dest, basename)
-                if os.path.exists(dest_file):
-                    os.remove(dest_file)
-                shutil.copy(skill_file, dest_file)
-                subprocess.run(["chown", f"watchdog:agi_agents", dest_file], check=False)
-                subprocess.run(["chmod", "440", dest_file], check=False)
+        # Same rsync mirror as 'agent deploy-skills' — excludes coa_only and
+        # agent-created skills (the old inline copy leaked COA-only skills).
+        try:
+            _skills_deployed, _ = _rsync_skills_to_agent(name, os_user)
+            click.echo(f"  ✓ Skills deployed: {_skills_deployed} shipped skills")
+        except RuntimeError as e:
+            click.echo(f"  ⚠ Skills deploy failed: {e} — run 'sudo agictl agent deploy-skills {name}'")
 
         # ── Provision VersaVoice Identity + Config ──
         # Lifeline requires /etc/versa-agi/{name}_config.json for every agent.
@@ -5026,26 +5017,21 @@ def agent_activate(name):
         json_response(False, error=str(e))
         sys.exit(1)
 
-@agent.command("deploy-skills", hidden=True)
-@click.argument("name")
-def agent_deploy_skills(name):
-    """Deploy system skills to a sub-agent's workspace via rsync.
+def _rsync_skills_to_agent(name, os_user):
+    """Mirror shipped system skills to a sub-agent's .agent/skills/ via rsync --delete.
 
-    Mirrors read-only system skills from /home/watchdog/core-infra/skills/
-    to the agent's .agent/skills/ directory using rsync --delete.
-    Skills removed from the source are automatically cleaned from the target.
-    COA-only skills (scope='coa_only') are excluded from sub-agent deploys.
-    Requires root privileges.
-    Called by COA via sudo agictl or by the agitop dashboard.
+    Single implementation shared by 'agent deploy-skills' (refresh) and
+    'agent approve' (initial provision). COA-only skills (scope='coa_only')
+    and agent-created skills (distributed via share-skill) are excluded.
+    Returns (deployed_count, asset_dirs_count); raises RuntimeError on failure.
     """
-    name = name.lower()
-    # Resolve os_user from agents.db
+    agent_root = f"/home/{os_user}"
+    skills_source = "/home/watchdog/core-infra/skills/"
+    skills_dest = os.path.join(agent_root, ".agent", "skills") + "/"
+
     try:
         conn = sqlite3.connect(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT os_user FROM agents WHERE name=?", (name,)).fetchone()
-
-        # Build dynamic exclude list from coa_only skills
         coa_only_rows = conn.execute(
             "SELECT name FROM skills WHERE scope='coa_only'"
         ).fetchall()
@@ -5056,22 +5042,14 @@ def agent_deploy_skills(name):
             "SELECT name FROM skills WHERE type='agent_created'"
         ).fetchall()
         conn.close()
-        os_user = row["os_user"] if row else f"agi-{name}"
     except Exception:
-        os_user = f"agi-{name}"
         coa_only_rows = []
         agent_created_rows = []
-    agent_root = f"/home/{os_user}"
-    skills_source = "/home/watchdog/core-infra/skills/"
-    skills_dest = os.path.join(agent_root, ".agent", "skills") + "/"
 
     if not os.path.isdir(agent_root):
-        json_response(False, error=f"Agent workspace not found: {agent_root}")
-        sys.exit(1)
-
+        raise RuntimeError(f"Agent workspace not found: {agent_root}")
     if not os.path.isdir(skills_source):
-        json_response(False, error=f"Skills source not found: {skills_source}")
-        sys.exit(1)
+        raise RuntimeError(f"Skills source not found: {skills_source}")
 
     os.makedirs(skills_dest, exist_ok=True)
     # Set directory ownership per file manifest: {os_user}:agi_agents 775
@@ -5098,8 +5076,7 @@ def agent_deploy_skills(name):
 
     result = subprocess.run(rsync_cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        json_response(False, error=f"rsync failed: {result.stderr.strip()}")
-        sys.exit(1)
+        raise RuntimeError(f"rsync failed: {result.stderr.strip()}")
 
     # rsync -a preserves source ownership (watchdog) — restore dir per §IX.4
     subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
@@ -5122,6 +5099,39 @@ def agent_deploy_skills(name):
             subprocess.run(["chmod", "-R", "755", item_path], check=False)
             asset_dirs_deployed += 1
 
+    return deployed, asset_dirs_deployed
+
+
+@agent.command("deploy-skills", hidden=True)
+@click.argument("name")
+def agent_deploy_skills(name):
+    """Deploy system skills to a sub-agent's workspace via rsync.
+
+    Mirrors read-only system skills from /home/watchdog/core-infra/skills/
+    to the agent's .agent/skills/ directory using rsync --delete.
+    Skills removed from the source are automatically cleaned from the target.
+    COA-only skills (scope='coa_only') are excluded from sub-agent deploys.
+    Requires root privileges.
+    Called by COA via sudo agictl or by the agitop dashboard.
+    """
+    name = name.lower()
+    # Resolve os_user from agents.db
+    try:
+        conn = sqlite3.connect(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT os_user FROM agents WHERE name=?", (name,)).fetchone()
+        conn.close()
+        os_user = row["os_user"] if row else f"agi-{name}"
+    except Exception:
+        os_user = f"agi-{name}"
+
+    try:
+        deployed, asset_dirs_deployed = _rsync_skills_to_agent(name, os_user)
+    except RuntimeError as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+    skills_dest = os.path.join(f"/home/{os_user}", ".agent", "skills") + "/"
     json_response(True, agent=name, skills_deployed=deployed, asset_dirs_deployed=asset_dirs_deployed, skills_path=skills_dest)
 
 @agent.command("share-skill", hidden=True)
@@ -5910,12 +5920,15 @@ def task_progress(task_id, note, last_n):
     """Append to or list a task's progress journal.
 
     With text: appends a timestamped, attributed entry (append-only).
-    Without text: lists the journal as JSON, oldest first.
+    Without text: lists the journal as JSON, oldest first (``--last N``,
+    default 20). Listing has no date filter — it returns whatever rows
+    remain in the DB. Script/Utility journals are pruned to 7 days on each
+    deterministic append; standard-task journals are not auto-pruned.
 
     Leave yourself breadcrumbs across cycles: what you did, how far you got,
-    what to do next. Entries are injected into your wake context while the
-    task is active — they survive fresh-start cycles where chat history
-    does not.
+    what to do next. Standard-task entries from the last 7 days (up to 10
+    across active tasks) are injected into wake context; Script/Utility
+    journals are excluded from injection.
     """
     note = (note or "").strip()
     try:
@@ -6139,6 +6152,13 @@ def task_run_due_scripts(agent_name, agent_workspace):
         conn.execute(
             "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
             (tid, agent_name, note),
+        )
+        # Rolling 7-day retention for script journals (keeps Progress Journal
+        # bounded; these rows are not injected into agent system prompts).
+        conn.execute(
+            "DELETE FROM task_progress WHERE task_id = ? "
+            "AND created_at < datetime('now', '-7 days')",
+            (tid,),
         )
         conn.commit()
         conn.close()
@@ -6828,11 +6848,14 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         system_memories = [dict(r) for r in sys_rows]
         # Project memories: COA sees ALL projects with active tasks (orchestrator visibility).
         # Sub-agents only see projects where THEY have assigned tasks.
+        # Archived/paused projects are excluded — their memory is retrievable via
+        # `agictl memory project get <id>` but must not consume spawn context.
         is_coa = (agent_name == "coa")
         if is_coa:
             proj_rows = tconn.execute(
                 """SELECT DISTINCT amp.* FROM agent_memory_project amp
-                   WHERE amp.agent_name=? AND (
+                   JOIN projects p ON p.id = amp.project_id
+                   WHERE amp.agent_name=? AND p.status = 'active' AND (
                        amp.project_id IN (
                            SELECT DISTINCT t.project_id FROM tasks t
                            WHERE t.project_id IS NOT NULL
@@ -6846,7 +6869,8 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         else:
             proj_rows = tconn.execute(
                 """SELECT DISTINCT amp.* FROM agent_memory_project amp
-                   WHERE amp.agent_name=? AND (
+                   JOIN projects p ON p.id = amp.project_id
+                   WHERE amp.agent_name=? AND p.status = 'active' AND (
                        amp.project_id IN (
                            SELECT DISTINCT t.project_id FROM tasks t
                            WHERE t.project_id IS NOT NULL
@@ -6963,18 +6987,29 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         output += "⚠ No memory data found — this is your first cycle with the memory system. Use the memory_management skill at cycle end to begin building context.\n\n"
 
     # ── Project memory section ──
+    # Fields are capped at injection — key_decisions in particular grows without
+    # bound as agents append history. Full record stays retrievable on demand.
+    PROJECT_MEMORY_FIELD_CAP = 600
+
+    def _cap_pm_field(text, project_id):
+        text = str(text)
+        if len(text) <= PROJECT_MEMORY_FIELD_CAP:
+            return text
+        return text[:PROJECT_MEMORY_FIELD_CAP].rstrip() + f"… [truncated — full: agictl memory project get {project_id}]"
+
     if project_memories:
         output += "--- PROJECT MEMORY ---\n"
         for pm in project_memories:
-            output += f"  [Project #{pm['project_id']}]\n"
+            pid = pm['project_id']
+            output += f"  [Project #{pid}]\n"
             if pm.get("current_phase"):
-                output += f"    Phase: {pm['current_phase']}\n"
+                output += f"    Phase: {_cap_pm_field(pm['current_phase'], pid)}\n"
             if pm.get("key_decisions"):
-                output += f"    Decisions: {pm['key_decisions']}\n"
+                output += f"    Decisions: {_cap_pm_field(pm['key_decisions'], pid)}\n"
             if pm.get("blockers"):
-                output += f"    Blockers: {pm['blockers']}\n"
+                output += f"    Blockers: {_cap_pm_field(pm['blockers'], pid)}\n"
             if pm.get("next_steps"):
-                output += f"    Next: {pm['next_steps']}\n"
+                output += f"    Next: {_cap_pm_field(pm['next_steps'], pid)}\n"
         output += "--- END PROJECT MEMORY ---\n\n"
 
     # ── Memory for recent contacts (no thread, just memory context) ──
@@ -8479,7 +8514,7 @@ def awareness_revise(entry_id, content, agent_name):
 @click.argument("entry_id", type=int)
 @click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
 def awareness_complete(entry_id, agent_name):
-    """Mark an action as completed."""
+    """Mark an action as completed. Actions only — conclusions are superseded/revised."""
     if not agent_name:
         agent_name = get_agent_name()
     try:
@@ -8489,6 +8524,12 @@ def awareness_complete(entry_id, agent_name):
         if not row:
             conn.close()
             json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        # Status semantics: 'completed' is for actions. Conclusions are retired
+        # via supersede (no longer true) or revise (replaced by new content).
+        if row['type'] != 'action':
+            conn.close()
+            json_response(False, error=f"Entry id={entry_id} is a conclusion — 'complete' applies to actions only. Use 'awareness supersede {entry_id}' to retire it, or 'awareness revise {entry_id} --content \"...\"' to replace it.")
             sys.exit(1)
         # Ownership guard: only the owning agent (or a protected agent) can complete
         if row['agent_name'] != agent_name:
@@ -8508,6 +8549,52 @@ def awareness_complete(entry_id, agent_name):
         conn.commit()
         conn.close()
         json_response(True, action="awareness_complete", id=entry_id, type=row['type'])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@awareness.command("supersede")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_supersede(entry_id, agent_name):
+    """Retire an entry that is no longer true — no replacement created.
+
+    Use for conclusions that stopped holding (revise instead if a corrected
+    conclusion replaces it) and for actions that became moot (complete instead
+    if the action was actually done).
+    """
+    if not agent_name:
+        agent_name = get_agent_name()
+    try:
+        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT type, status, agent_name FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        if row['status'] == 'superseded':
+            conn.close()
+            json_response(False, error=f"Entry id={entry_id} is already superseded")
+            sys.exit(1)
+        # Ownership guard: only the owning agent (or a protected agent) can supersede
+        if row['agent_name'] != agent_name:
+            is_protected = False
+            try:
+                aconn = sqlite3.connect(agents_db, timeout=5)
+                prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+                aconn.close()
+                is_protected = prow and prow[0] == 1
+            except Exception:
+                pass
+            if not is_protected:
+                conn.close()
+                json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{row['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can supersede entries.")
+                sys.exit(1)
+        conn.execute("UPDATE agent_awareness SET status='superseded', updated_at=datetime('now') WHERE id=?", (entry_id,))
+        conn.commit()
+        conn.close()
+        json_response(True, action="awareness_supersede", id=entry_id, type=row['type'])
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -8549,10 +8636,11 @@ def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_nam
 @awareness.command("table")
 @click.option("--type", "entry_type", type=click.Choice(['conclusion', 'action']), default=None, help="Filter by type")
 @click.option("--subject", "subject_type", type=click.Choice(['connection','project','game','system','self']), default=None)
-@click.option("--status", "entry_status", default=None, help="Filter by status (default: all)")
+@click.option("--status", "entry_status", default=None, help="Filter by status; comma-separated for multiple (e.g. active,completed). Default: all")
 @click.option("--agent", "agent_name", default=None, help="Filter by agent (default: all)")
 @click.option("--limit", type=int, default=15, help="Limit the number of entries returned")
-def awareness_table(entry_type, subject_type, entry_status, agent_name, limit):
+@click.option("--truncate", "truncate_chars", type=int, default=0, help="Truncate Content column to N chars (0 = full)")
+def awareness_table(entry_type, subject_type, entry_status, agent_name, limit, truncate_chars):
     """Output awareness entries in a token-efficient markdown table."""
     try:
         conn = sqlite3.connect(tasks_db, timeout=5)
@@ -8566,8 +8654,9 @@ def awareness_table(entry_type, subject_type, entry_status, agent_name, limit):
             query += " AND subject_type=?"
             params.append(subject_type)
         if entry_status:
-            query += " AND status=?"
-            params.append(entry_status)
+            statuses = [s.strip() for s in entry_status.split(",") if s.strip()]
+            query += f" AND status IN ({','.join('?' * len(statuses))})"
+            params.extend(statuses)
         if agent_name:
             query += " AND agent_name=?"
             params.append(agent_name)
@@ -8581,23 +8670,37 @@ def awareness_table(entry_type, subject_type, entry_status, agent_name, limit):
             print("No awareness entries found.")
             return
 
-        table_header = "| ID | Type | Subject | Content |"
+        # Show a Status column when the query spans multiple statuses —
+        # otherwise mixed active/completed rows are indistinguishable.
+        multi_status = bool(entry_status) and ("," in entry_status)
+
+        cols = ["ID"]
         if not agent_name:
-            table_header = "| ID | Agent | Type | Subject | Content |"
-            
-        print(table_header)
-        print("|" + "|".join(["---"] * (5 if not agent_name else 4)) + "|")
-        
+            cols.append("Agent")
+        cols += ["Type", "Subject"]
+        if multi_status:
+            cols.append("Status")
+        cols.append("Content")
+
+        print("| " + " | ".join(cols) + " |")
+        print("|" + "|".join(["---"] * len(cols)) + "|")
+
         for r in reversed(rows): # Reverse to show chronological order when limited
             content = str(r["content"]).replace("\n", " ").replace("|", "\\|")
+            if truncate_chars and len(content) > truncate_chars:
+                content = content[:truncate_chars].rstrip() + f"… [truncated — full: agictl awareness get {r['id']}]"
             subj = str(r["subject_type"])
             if r["subject_id"]:
                 subj += f"({r['subject_id']})"
-            
+
+            vals = [str(r['id'])]
             if not agent_name:
-                print(f"| {r['id']} | {r['agent_name']} | {r['type']} | {subj} | {content} |")
-            else:
-                print(f"| {r['id']} | {r['type']} | {subj} | {content} |")
+                vals.append(str(r['agent_name']))
+            vals += [str(r['type']), subj]
+            if multi_status:
+                vals.append(str(r['status']))
+            vals.append(content)
+            print("| " + " | ".join(vals) + " |")
                 
     except Exception as e:
         print(f"Error: {e}")

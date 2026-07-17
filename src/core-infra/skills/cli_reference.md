@@ -163,7 +163,7 @@ agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 
 > **CONSTRAINT**: `--due-date` is **mandatory** when creating tasks (default status is `planned`) and when setting status back to `planned`. The Lifeline will automatically wake you when a planned task's due date is reached — this is how you schedule future work. If a task cannot be completed by its due date, **roll the due date forward** — do not leave it in the past.
 
-> **TASK PROGRESS**: Agents have no memory between cycles. Before ending a cycle with unfinished work, journal progress with `agictl task progress <id> "DONE: ... NEXT: ... BLOCKERS: ..."`. Entries are append-only and timestamped; the last 10 entries across an agent's active tasks are injected into its wake context, and `task get` returns the 10 most recent per task (`recent_progress`). Use `task progress` to journal; reserve `task update --desc` for changing the description itself.
+> **TASK PROGRESS**: Agents have no memory between cycles. Before ending a cycle with unfinished work, journal progress with `agictl task progress <id> "DONE: ... NEXT: ... BLOCKERS: ..."`. Entries are append-only and timestamped; up to the last 10 entries across an agent's **standard** active tasks from the **last 7 days** are injected into its wake context. Script/Utility Task journals are **not** injected (they would flood the system prompt on recurring runs) but remain visible in the Progress Journal UI and via `agictl task progress` / `task get` (`recent_progress`, 10 most recent per task). Script/Utility journals are pruned to a **7-day rolling window** on each deterministic append. Use `task progress` to journal; reserve `task update --desc` for changing the description itself.
 
 **Reminder categories**: `general`, `preference`, `instruction`, `constraint`
 
@@ -227,6 +227,7 @@ agictl task add "Nightly export sync" --assignee coa --due-date "2026-06-22 02:0
 
 - **Once-off** → task `done` (rc `0`) / `blocked` (rc ≠ 0). **Recurring** → stays `planned`, `due_date += interval`.
 - Each run records `script_last_rc` / `script_last_run_at` and appends a `task progress` journal entry (rc + output tail). Timeout = rc `124` (`[script_tasks] max_runtime_seconds`).
+- Script journal rows are kept for a **7-day rolling window** (older rows deleted on each script append) and are **excluded from agent system-prompt injection** — check rc/tail in the Task modal Progress Journal or `agictl task progress <id>` (lists whatever remains in the DB; default `--last 20`, no date filter) instead.
 - Lifeline runs due Script Tasks via `agictl task run-due-scripts` each tick (hidden command — not for manual use).
 - **agitop:** Task modal → **Utility / Script** tab → **Script** mode (gated by `SCRIPT_TASKS_UI_VISIBLE`).
 - Feature toggle: `setup.ini [script_tasks] enabled`. Reserved projects `AGi-Tools` / `AGi-Knowledgebase` cannot be archived or deleted.
@@ -386,14 +387,15 @@ agictl game opponent delete <id>                       # Remove an opponent
 agictl awareness add conclusion --subject <type> [--subject-id ID] --content "<text>" [--context "<why>"]
 agictl awareness add action --subject <type> [--subject-id ID] --content "<text>" --action-conclusion-id <id> [--context "<why>"]
 agictl awareness revise <entry_id> --content "<updated text>"    # Supersedes old, creates new
-agictl awareness complete <entry_id>                             # Mark action as done
+agictl awareness supersede <entry_id>                            # Retire entry no longer true (no replacement)
+agictl awareness complete <entry_id>                             # Mark action as done (actions only)
 agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
 agictl awareness get <entry_id>                                  # Single entry details
 ```
 
 **Subject types**: `connection`, `project`, `game`, `system`, `self`
 
-**Status lifecycle**: `active` → `revised`/`superseded` (via revise) or `completed` (via complete)
+**Status lifecycle**: conclusions: `active` → `superseded` (via revise or supersede); actions: `active` → `completed` (done) or `superseded` (moot)
 
 > **Enforcement**: `cycle end` checks for awareness entries this session. A warning is emitted if no conclusions or actions were logged.
 
