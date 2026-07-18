@@ -1619,6 +1619,22 @@ def main():
         # The agent will still run but with explicit instructions to clarify and exit
         enhanced_wake = f"{triage_context}\n\n⚠ TRIAGE DIRECTIVE: Confidence is low and no parallel work is viable. Send a clarification message to the sender addressing the negative signals listed above, then end your cycle.\n\n---\n\n{wake_prompt}"
 
+    # Persist the effective prompt (post always-inject + triage skill payload + wake)
+    # so agitop's System Prompt tab matches what the model receives. Lifeline wrote
+    # a pre-harness snapshot to the same path before spawn; overwrite here.
+    last_prompt_path = f"/var/lib/versa-agi/{args.agent}/last_prompt.txt"
+    try:
+        with open(last_prompt_path, "w", encoding="utf-8") as f:
+            f.write(enhanced_prompt)
+            if not enhanced_prompt.endswith("\n"):
+                f.write("\n")
+            f.write(enhanced_wake)
+            if not enhanced_wake.endswith("\n"):
+                f.write("\n")
+        tlog(f"LAST_PROMPT: Wrote effective prompt ({len(enhanced_prompt) + len(enhanced_wake)} chars) → {last_prompt_path}")
+    except Exception as e:
+        tlog(f"LAST_PROMPT: Failed to write {last_prompt_path} — {e}")
+
     # ── Agent Construction ──
     # The system prompt is always loaded fresh from the poise file — never part of checkpoint state.
 

@@ -3466,7 +3466,8 @@ apply_system_permissions() {
         chown "${WATCHDOG_USER}:${os_user}" "${vdata}" && chmod 750 "${vdata}"
         chown -R "${os_user}:${os_user}" "${vdata}/cycles" && chmod 755 "${vdata}/cycles"
         chown -R "${os_user}:${os_user}" "${vdata}/view-cache" && chmod 770 "${vdata}/view-cache"
-        [ -f "${vdata}/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/last_prompt.txt" && chmod 640 "${vdata}/last_prompt.txt"
+        # 660: harness (agent user) must overwrite after skill injection (SPWN-14)
+        [ -f "${vdata}/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/last_prompt.txt" && chmod 660 "${vdata}/last_prompt.txt"
       fi
       [ -f "${vdata}/poise.md" ]  && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/poise.md"  && chmod 640 "${vdata}/poise.md"
       [ -f "${vdata}/duties.md" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/duties.md" && chmod 640 "${vdata}/duties.md"
@@ -3488,7 +3489,8 @@ apply_system_permissions() {
   
   # §IX.2 /var/lib/versa-agi/coa/ — runtime state files
   [ -f "/var/lib/versa-agi/coa/status.json" ]     && chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa/status.json"     && chmod 640 "/var/lib/versa-agi/coa/status.json"
-  [ -f "/var/lib/versa-agi/coa/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa/last_prompt.txt" && chmod 640 "/var/lib/versa-agi/coa/last_prompt.txt"
+  # 660: harness (coa) must overwrite after skill injection (SPWN-14)
+  [ -f "/var/lib/versa-agi/coa/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa/last_prompt.txt" && chmod 660 "/var/lib/versa-agi/coa/last_prompt.txt"
   [ -f "/var/lib/versa-agi/registration-status.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/var/lib/versa-agi/registration-status.json" && chmod 640 "/var/lib/versa-agi/registration-status.json"
   
   # §IX.2 /var/lib/versa-agi/ — fix orphan dirs (archive)

@@ -6847,7 +6847,8 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         ).fetchall()
         system_memories = [dict(r) for r in sys_rows]
         # Project memories: COA sees ALL projects with active tasks (orchestrator visibility).
-        # Sub-agents only see projects where THEY have assigned tasks.
+        # Sub-agents: own row preferred; if none, fall back to COA's row for projects they
+        # have active tasks on OR are members of (new assignees otherwise spawn blind).
         # Archived/paused projects are excluded — their memory is retrievable via
         # `agictl memory project get <id>` but must not consume spawn context.
         is_coa = (agent_name == "coa")
@@ -6867,20 +6868,43 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
                 (agent_name,)
             ).fetchall()
         else:
+            # Own row preferred. COA fallback only for projects with an active
+            # assigned task and no own row — membership alone is too broad
+            # (every agent is auto-joined to AGi-Tools / Knowledgebase).
             proj_rows = tconn.execute(
-                """SELECT DISTINCT amp.* FROM agent_memory_project amp
+                """SELECT amp.* FROM agent_memory_project amp
                    JOIN projects p ON p.id = amp.project_id
-                   WHERE amp.agent_name=? AND p.status = 'active' AND (
-                       amp.project_id IN (
+                   WHERE p.status = 'active' AND (
+                     -- Own memory: active assigned tasks, or own recent updates
+                     (
+                       amp.agent_name = ?
+                       AND (
+                         amp.project_id IN (
                            SELECT DISTINCT t.project_id FROM tasks t
                            WHERE t.project_id IS NOT NULL
                              AND t.status IN ('planned','in_progress','waiting','blocked')
                              AND t.assigned_to = ?
+                         )
+                         OR amp.updated_at >= datetime('now', '-7 days')
                        )
-                       OR amp.updated_at >= datetime('now', '-7 days')
+                     )
+                     OR
+                     -- COA shared draft: active task on project, no own row yet
+                     (
+                       amp.agent_name = 'coa'
+                       AND amp.project_id IN (
+                         SELECT DISTINCT t.project_id FROM tasks t
+                         WHERE t.project_id IS NOT NULL
+                           AND t.status IN ('planned','in_progress','waiting','blocked')
+                           AND t.assigned_to = ?
+                       )
+                       AND amp.project_id NOT IN (
+                         SELECT project_id FROM agent_memory_project WHERE agent_name = ?
+                       )
+                     )
                    )
                    ORDER BY amp.updated_at DESC""",
-                (agent_name, agent_name)
+                (agent_name, agent_name, agent_name, agent_name)
             ).fetchall()
         project_memories = [dict(r) for r in proj_rows]
         tconn.close()
@@ -6958,28 +6982,16 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
 
     output = ""
 
-    # ── NEW MESSAGES FIRST (unprocessed — must be answered) ──
-    # These go at the TOP so the agent sees and addresses them before anything else.
+    # Fetch unprocessed messages early (used for cold-start / presence checks) but
+    # emit them LAST in this blob — after project memory, profiles, and history —
+    # so the agent grounds in context first and the unread mail gets maximum
+    # recency weight. CONTEXT MAP still lists messages as work-priority #1.
     new_messages = message_reader._query(
         f"SELECT message_id, from_user_id, display_name, text, original_text, created_at "
         f"FROM messages WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({id_placeholders}) "
         f"ORDER BY created_at ASC",
         tuple(my_ids)
     )
-    if new_messages:
-        output += "--- NEW MESSAGES (UNREAD — MUST RESPOND) ---\n"
-        output += "[!] These are new messages that arrived since your last cycle.\n"
-        output += "[!] You MUST read, address EVERY part of EACH message, reply, and mark as processed.\n"
-        output += "[!] Inbound messages may contain [emotion tags] from the sender's voice — respond with emotional sensitivity.\n\n"
-        for msg in new_messages:
-            sender_name = msg.get("display_name") or _resolve_contact_name(msg["from_user_id"])
-            text = msg.get("original_text") or msg.get("text") or ""
-            dt = msg.get("created_at", "")
-            mid = msg.get("message_id", "")
-            output += f"  [!] [{dt}] FROM {sender_name} ({msg['from_user_id']}): {text}\n"
-            output += f"     → mark-processed: agictl message mark-processed {mid}\n"
-        output += "\n[!] Reply to ALL items above before proceeding to other work. The most recent message is the most relevant one to start with and then looking at the rest.\n"
-        output += "--- END NEW MESSAGES ---\n\n"
 
     # ── Cold start nudge ──
     # Note: system_memories (operational) is now injected by lifeline directly into the prompt
@@ -7001,7 +7013,9 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         output += "--- PROJECT MEMORY ---\n"
         for pm in project_memories:
             pid = pm['project_id']
-            output += f"  [Project #{pid}]\n"
+            author = pm.get("agent_name") or ""
+            shared_tag = f" (shared — from {author})" if author and author != agent_name else ""
+            output += f"  [Project #{pid}]{shared_tag}\n"
             if pm.get("current_phase"):
                 output += f"    Phase: {_cap_pm_field(pm['current_phase'], pid)}\n"
             if pm.get("key_decisions"):
@@ -7123,6 +7137,24 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         output += "\n".join(flood_warnings) + "\n"
         output += "Focus on task work. Do NOT send status updates, check-ins, or greetings.\n"
         output += "--- END FLOOD WARNINGS ---\n"
+
+    # ── NEW MESSAGES LAST (unprocessed — must be answered) ──
+    # Placed after memory/history for grounding + recency. Work priority remains #1
+    # in CONTEXT MAP; physical position is last-before-wake so the model attends here.
+    if new_messages:
+        output += "\n--- NEW MESSAGES (UNREAD — MUST RESPOND) ---\n"
+        output += "[!] These are new messages that arrived since your last cycle.\n"
+        output += "[!] You MUST read, address EVERY part of EACH message, reply, and mark as processed.\n"
+        output += "[!] Inbound messages may contain [emotion tags] from the sender's voice — respond with emotional sensitivity.\n\n"
+        for msg in new_messages:
+            sender_name = msg.get("display_name") or _resolve_contact_name(msg["from_user_id"])
+            text = msg.get("original_text") or msg.get("text") or ""
+            dt = msg.get("created_at", "")
+            mid = msg.get("message_id", "")
+            output += f"  [!] [{dt}] FROM {sender_name} ({msg['from_user_id']}): {text}\n"
+            output += f"     → mark-processed: agictl message mark-processed {mid}\n"
+        output += "\n[!] Reply to ALL items above before proceeding to other work. The most recent message is the most relevant one to start with and then looking at the rest.\n"
+        output += "--- END NEW MESSAGES ---\n"
 
     print(output)
 

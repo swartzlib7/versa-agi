@@ -430,7 +430,7 @@ else
         if [ -d "${agent_dir}cycles" ]; then
           chown -R "${_resolved_os_user}:${_resolved_os_user}" "${agent_dir}cycles" && chmod 755 "${agent_dir}cycles"
         fi
-        [ -f "${agent_dir}last_prompt.txt" ] && chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}last_prompt.txt" && chmod 640 "${agent_dir}last_prompt.txt"
+        [ -f "${agent_dir}last_prompt.txt" ] && chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}last_prompt.txt" && chmod 660 "${agent_dir}last_prompt.txt"
         [ -f "${agent_dir}poise.md" ]  && chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}poise.md"  && chmod 640 "${agent_dir}poise.md"
         [ -f "${agent_dir}duties.md" ] && chown "${WATCHDOG_USER}:${_resolved_os_user}" "${agent_dir}duties.md" && chmod 640 "${agent_dir}duties.md"
       fi

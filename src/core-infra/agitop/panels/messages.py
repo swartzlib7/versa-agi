@@ -18,6 +18,22 @@ from agitop.data.config_reader import ConfigReader
 
 _TZ = time.strftime("%Z")
 
+
+class PasteSafeTextArea(TextArea):
+    """TextArea that tolerates Textual's WrappedDocument undo bug after paste.
+
+    Pasting into an empty document then undoing (Ctrl+Z) can raise
+    ``ValueError: The document line index N is out of bounds`` in
+    ``WrappedDocument.get_offsets``. Swallow that so agitop does not exit.
+    """
+
+    def action_undo(self) -> None:
+        try:
+            super().action_undo()
+        except ValueError:
+            pass
+
+
 def _utc_to_local(utc_str: str) -> str:
     """Convert 'YYYY-MM-DD HH:MM:SS' UTC string to local timezone."""
     if not utc_str or len(utc_str) < 16:
@@ -200,7 +216,7 @@ class ComposeModal(ModalScreen):
                 default = self.preselect_agent or (self.agents[0] if self.agents else None)
                 yield Select(options, value=default, id="compose-agent", allow_blank=False)
             yield Static("[cyan]Message:[/]")
-            yield TextArea(id="compose-body", classes="msg-input-paper")
+            yield PasteSafeTextArea(id="compose-body", classes="msg-input-paper")
             with Horizontal(id="compose-actions"):
                 yield Button("Send", variant="success", id="compose-send")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="compose-cancel")
@@ -380,7 +396,7 @@ class MessageViewModal(ModalScreen):
                     with Vertical(id="msg-reply-section"):
                         yield Static(f"[cyan]Reply To:[/] {self.reply_agent}")
                         yield Static("[cyan]Reply:[/]")
-                        yield TextArea("", id="msg-reply-body", classes="msg-input-paper")
+                        yield PasteSafeTextArea("", id="msg-reply-body", classes="msg-input-paper")
             with Horizontal(id="msg-dialog-footer"):
                 if self.reply_agent:
                     yield Button("💬 Reply", variant="warning", id="msg-reply", disabled=True)

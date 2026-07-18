@@ -525,28 +525,27 @@ ${TASK_PROTOCOL_CONTENT}"
 
 ${CYCLE_PARAMS_CONTENT}"
 
+      # Registry / feature flags / VV override are per-cycle (or per-agent runtime)
+      # data — they must land AFTER the LIVE SITUATION sentinel so they do not
+      # break the static cacheable prefix (System Design §3.1). Built below into
+      # LIVE_SITUATION_PREFIX for the legacy SYSTEM_PROMPT assembly.
+    fi
+
+    # ── Dynamic prefix blocks (legacy path — after LIVE SITUATION) ──
+    LIVE_SITUATION_PREFIX=""
+    if [ "${IS_TEMPLATE}" != true ]; then
       if [ -n "${AGENT_REGISTRY_CONTENT}" ]; then
-        MERGED_CONTENT="${MERGED_CONTENT}
-
----
-
-${AGENT_REGISTRY_CONTENT}"
+        LIVE_SITUATION_PREFIX="${LIVE_SITUATION_PREFIX}
+${AGENT_REGISTRY_CONTENT}
+"
       fi
-
       if [ -n "${FEATURE_AVAILABILITY_CONTENT}" ]; then
-        MERGED_CONTENT="${MERGED_CONTENT}
-
----
-
-${FEATURE_AVAILABILITY_CONTENT}"
+        LIVE_SITUATION_PREFIX="${LIVE_SITUATION_PREFIX}
+${FEATURE_AVAILABILITY_CONTENT}
+"
       fi
-
-      # ── VV Communication Override for sub-agents with external comms ──
       if [ "${AGENT_NAME}" != "${COA_USER}" ] && [ "${AGENT_NAME}" != "${WATCHDOG_USER}" ] && [ -n "${SUB_ACCOUNT_ID}" ]; then
-        MERGED_CONTENT="${MERGED_CONTENT}
-
----
-
+        LIVE_SITUATION_PREFIX="${LIVE_SITUATION_PREFIX}
 ## ── COMMUNICATION OVERRIDE ──
 
 > **Your poise states you do not have a VersaVoice account — this has been superseded.** You have been granted a VersaVoice sub-account and can communicate directly with your established contacts — including the Primary User when a direct connection exists. Routine reporting still goes to the COA.
@@ -555,7 +554,8 @@ ${FEATURE_AVAILABILITY_CONTENT}"
 - Reply to contacts using: agictl message send RECIPIENT_UID \"MESSAGE_TEXT\" --mode MODE
 - After replying, mark the message processed: agictl message mark-processed MESSAGE_ID
 - For internal agent-to-agent communication, continue using: agictl message internal <agent_name> \"text\"
-- See \`.agent/skills/communication.md\` for full messaging rules and mode selection."
+- See \`.agent/skills/communication.md\` for full messaging rules and mode selection.
+"
       fi
     fi
 
@@ -1268,7 +1268,7 @@ ${MEM_ITEMS}
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
         AW_WARN=""
         if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
-          AW_WARN=" ⚠ YOUR active entries OVER CAP (${AW_OWN}) — audit and revise/complete stale entries before adding new ones."
+          AW_WARN=" ⚠ YOUR active entries above the ~20 review guideline (${AW_OWN}) — consolidate duplicates and supersede dead entries; do not retire conclusions that are still true."
         fi
         AWARENESS_TABLE="YOUR ACTIVE AWARENESS — ${AW_C_OWN} current conclusions (yours) · ${AW_A_OPEN} open actions (team); showing most recent ${AW_RECENT} of each${AW_WARN}"
         if [ -n "${AW_CONCLUSIONS}" ]; then
@@ -1339,7 +1339,7 @@ ${GAMES_BLOCK}
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
         AW_WARN=""
         if [ "${AW_OWN}" -gt 20 ] 2>/dev/null; then
-          AW_WARN=" ⚠ active entries OVER CAP (${AW_OWN}) — audit and revise/complete stale entries before adding new ones."
+          AW_WARN=" ⚠ active entries above the ~20 review guideline (${AW_OWN}) — consolidate duplicates and supersede dead entries; do not retire conclusions that are still true."
         fi
         AWARENESS_TABLE="YOUR ACTIVE AWARENESS — ${AW_C_OWN} current conclusions · ${AW_A_OPEN} open actions; showing most recent ${AW_RECENT} of each${AW_WARN}"
         if [ -n "${AW_CONCLUSIONS}" ]; then
@@ -1547,7 +1547,7 @@ ${MERGED_CONTENT}
 
 ## ── LIVE SITUATION — per-cycle data below ──
 
-${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${UTILITY_WAKE_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
+${LIVE_SITUATION_PREFIX}${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${UTILITY_WAKE_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 
 ---
 
@@ -1560,13 +1560,16 @@ ${CONVERSATION_CONTEXT}"
     fi
   else
     log "WARN: ${AGENT_NAME} — no poise content, system prompt will lack rules"
+    LIVE_SITUATION_PREFIX="${LIVE_SITUATION_PREFIX:-}"
     SYSTEM_PROMPT="${AGENT_IDENTITY}
 
 ${PRIMARY_USER_CONTEXT}
 
 ---
 
-${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${UTILITY_WAKE_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
+## ── LIVE SITUATION — per-cycle data below ──
+
+${LIVE_SITUATION_PREFIX}${ENVIRONMENTAL_AWARENESS}${DUTIES_CONTEXT}${UTILITY_WAKE_CONTEXT}${TASK_SUMMARY}${OVERDUE_CONTEXT}
 
 ---
 
@@ -1625,8 +1628,14 @@ Wake reason: ${WAKE_REASON}."
   echo "${TASK_SUMMARY}" > "${TASKS_FILE}"
   echo "${CONVERSATION_CONTEXT}" > "${CONVO_FILE}"
   chmod 644 "${SYSTEM_FILE}" "${WAKE_FILE}" "${TASKS_FILE}" "${CONVO_FILE}"
-  # Persist context prompt for dashboard/audit visibility
-  cat "${SYSTEM_FILE}" "${WAKE_FILE}" > "/var/lib/versa-agi/${AGENT_NAME}/last_prompt.txt" 2>/dev/null || true
+  # Persist context prompt for dashboard/audit visibility.
+  # Mode 660 watchdog:{agent}: Lifeline writes the pre-harness snapshot; the
+  # harness (running as the agent user) overwrites with the effective prompt
+  # after skill injection — group-write is required (System Design §IX).
+  _LAST_PROMPT="/var/lib/versa-agi/${AGENT_NAME}/last_prompt.txt"
+  cat "${SYSTEM_FILE}" "${WAKE_FILE}" > "${_LAST_PROMPT}" 2>/dev/null || true
+  chown "${WATCHDOG_USER}:${AGENT_USER}" "${_LAST_PROMPT}" 2>/dev/null || true
+  chmod 660 "${_LAST_PROMPT}" 2>/dev/null || true
 
   # Read .env from /etc/versa-agi/ (watchdog-owned, outside agent workspace)
   # Build a temp env script that injects credentials + AGICTL_CONFIG
