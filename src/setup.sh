@@ -147,14 +147,15 @@ api_token=
 # Pinned Gemini CLI version. The system is validated against this version.
 # Changing this requires re-testing session format, token parsing, and auth.
 gemini_cli_version=0.40.0
-# Auth method: "api_key" or "vertex" (not required when mode=local)
+# Auth method: "api_key" or "vertex" (optional — Gemini is not required)
 auth_method=api_key
+# Gemini API key — optional at install (same as other cloud providers). Empty = skipped.
 api_key=
 
 # Execution mode: "cloud", "local", or "hybrid"
-#   cloud  — Gemini API only (api_key required)
-#   local  — Local AI only via Ollama (no api_key needed)
-#   hybrid — Both cloud and local agents available (api_key required for cloud agents)
+#   cloud  — cloud models (Gemini and/or other providers — keys optional per provider)
+#   local  — Local AI only via Ollama (no cloud keys needed)
+#   hybrid — Both cloud and local agents available
 mode=cloud
 
 # Tracked cloud model registry. Used by Lifeline for backend resolution.
@@ -2284,8 +2285,8 @@ elif [ -n "${INI_EXECUTION_MODE}" ] && [ "${INI_EXECUTION_MODE}" != "cloud" ]; t
 else
   echo "How would you like to run your agents?"
   echo ""
-  echo "  1) Cloud only   — Uses Google Gemini API (requires API key)"
-  echo "  2) Local only   — Runs on your hardware via Ollama (no API key needed)"
+  echo "  1) Cloud only   — Cloud models (Gemini and/or other providers — all optional)"
+  echo "  2) Local only   — Runs on your hardware via Ollama (no cloud keys needed)"
   echo "  3) Hybrid       — Both cloud and local agents available"
   echo ""
   read -p "Select [1/2/3] (default: 1): " EXEC_MODE_CHOICE
@@ -2302,14 +2303,19 @@ sed -i "s/^VERSA_EXECUTION_MODE=.*/VERSA_EXECUTION_MODE=\"${SELECTED_EXEC_MODE}\
 
 echo ""
 
-# ── 9b: AI Backend Authentication (cloud or hybrid only) ──
+# ── 9b: Gemini (optional — same enable/skip pattern as Step 9d providers) ──
+# System-wide "Gemini as a first-class optional provider" is TD-GEMINI-PROVIDER-001.
 if [ "${SELECTED_EXEC_MODE}" = "local" ]; then
-  info "Local-only mode — skipping Gemini API key configuration"
+  info "Local-only mode — skipping Gemini API configuration"
   # Local agents get credentials injected by lifeline.sh at spawn time
   AUTH_METHOD="1"
   api_key=""
 else
-  section "Step 9b — AI Backend Auth"
+  section "Step 9b — Gemini (Google) — optional"
+  echo ""
+  echo "  Gemini is optional, like xAI / OpenAI / Anthropic in Step 9d."
+  echo "  Skip now if you will use other providers or add a Gemini key later"
+  echo "  (agitop API Keys / agictl system set-key gemini)."
   echo ""
 
 configure_ai_auth() {
@@ -2509,8 +2515,55 @@ BASHEOF"
   fi
 }
 
-configure_ai_auth "${COA_USER}" "${DEPLOYED_COA_ENV}"
-fi  # end of cloud/hybrid auth block
+  _gemini_env="/etc/versa-agi/${COA_USER}.env"
+  _gemini_has_key=false
+  if [ -n "${INI_API_KEY}" ]; then
+    _gemini_has_key=true
+  elif [ -f "${_gemini_env}" ] && grep -qE '^GEMINI_API_KEY=.+' "${_gemini_env}" 2>/dev/null; then
+    _gemini_has_key=true
+  fi
+
+  _run_gemini_auth=false
+  if [ "${_gemini_has_key}" = true ]; then
+    echo "  Current status: configured"
+    read -p "  Keep Gemini enabled? [Y/n]: " -n 1 -r _gemini_ans
+    echo ""
+    if [[ "${_gemini_ans}" =~ ^[Nn]$ ]]; then
+      info "Gemini left as-is — clear the key via agitop / setup.ini if you want it off"
+    else
+      read -p "  Update Gemini credentials? [y/N]: " -n 1 -r _gemini_upd
+      echo ""
+      if [[ "${_gemini_upd}" =~ ^[Yy]$ ]]; then
+        _run_gemini_auth=true
+      else
+        ok "Gemini — kept (no credential change)"
+      fi
+    fi
+  else
+    echo "  Current status: not configured"
+    read -p "  Enable Gemini (Google)? [y/N]: " -n 1 -r _gemini_ans
+    echo ""
+    if [[ "${_gemini_ans}" =~ ^[Yy]$ ]]; then
+      _run_gemini_auth=true
+    else
+      info "Gemini provider skipped"
+      warn "Default COA models are often Gemini — assign a non-Gemini model in agitop,"
+      warn "or add a Gemini key later, before expecting cloud Gemini cycles to work."
+      # Ensure a minimal agent env exists (TZ) without forcing an empty API key
+      _tz="$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")"
+      if [ ! -f "${_gemini_env}" ]; then
+        printf 'TZ=%s\n' "${_tz}" > "${_gemini_env}"
+        chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${_gemini_env}"
+        chmod 640 "${_gemini_env}"
+        ok "Created ${_gemini_env} (TZ only — no Gemini key)"
+      fi
+    fi
+  fi
+
+  if [ "${_run_gemini_auth}" = true ]; then
+    configure_ai_auth "${COA_USER}" "${DEPLOYED_COA_ENV}"
+  fi
+fi  # end of cloud/hybrid Gemini block
 
 # ── 9c: Local AI Setup (local or hybrid mode) ──
 if [ "${SELECTED_EXEC_MODE}" = "local" ] || [ "${SELECTED_EXEC_MODE}" = "hybrid" ]; then
@@ -3187,7 +3240,8 @@ fi
 # now so they are the final word; the next --update's reconcile preserves them
 # ([features] keys are not stock-owned).
 if declare -F install_acceptance_persist_features >/dev/null 2>&1; then
-  install_acceptance_persist_features
+  install_acceptance_persist_features \
+    || warn "Feature flag persist skipped (non-fatal)"
 fi
 
 # ─── Step 11: Sentinel Service (reactive file watcher) ──

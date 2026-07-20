@@ -459,7 +459,9 @@ install_acceptance_feature_prompts() {
 _install_acceptance_features_set() {
   local key="$1" value="$2"
   local ini="${INSTALL_ACCEPTANCE_SETUP_INI}"
-  [ -f "${ini}" ] || return 1
+  if [ ! -f "${ini}" ]; then
+    return 1
+  fi
   if ! grep -q '^\[features\]' "${ini}" 2>/dev/null; then
     printf '\n[features]\n' >> "${ini}"
   fi
@@ -471,24 +473,39 @@ _install_acceptance_features_set() {
   else
     sed -i "/^\[features\]/a ${key}=${value}" "${ini}"
   fi
+  return 0
 }
 
 # Persist the captured feature choices to the deployed setup.ini [features].
 # Called AFTER setup.ini is deployed + reconciled, so the values are the final
 # word (and the next --update reconcile carries them forward — they are not
-# stock-owned keys).
+# stock-owned keys). Always non-fatal under setup.sh `set -e`.
 install_acceptance_persist_features() {
   if [ "${DRY_RUN:-false}" = true ]; then
     info "[DRY-RUN] Would persist feature flags to setup.ini"
     return 0
   fi
   [ -n "${VERSA_FEATURE_ORGANIZATION_UI:-}" ] || return 0   # prompts never ran
-  _install_acceptance_features_set organization_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_ORGANIZATION_UI:-false}")"
-  _install_acceptance_features_set utility_models_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_UTILITY_MODELS_UI:-false}")"
-  _install_acceptance_features_set script_tasks_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_SCRIPT_TASKS_UI:-false}")"
-  _install_acceptance_features_set output_routing_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_OUTPUT_ROUTING_UI:-false}")"
-  _install_acceptance_sync_source_ini
+
+  local ini="${INSTALL_ACCEPTANCE_SETUP_INI}"
+  if [ ! -f "${ini}" ]; then
+    # Fresh OrbStack/partial deploys can hit this before setup.ini lands —
+    # never abort the whole install for feature-flag persistence.
+    warn "Cannot persist feature flags — ${ini} not found (non-fatal; re-run setup --update)"
+    return 0
+  fi
+
+  _install_acceptance_features_set organization_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_ORGANIZATION_UI:-false}")" \
+    || { warn "Failed to set organization_ui (non-fatal)"; return 0; }
+  _install_acceptance_features_set utility_models_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_UTILITY_MODELS_UI:-false}")" \
+    || warn "Failed to set utility_models_ui (non-fatal)"
+  _install_acceptance_features_set script_tasks_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_SCRIPT_TASKS_UI:-false}")" \
+    || warn "Failed to set script_tasks_ui (non-fatal)"
+  _install_acceptance_features_set output_routing_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_OUTPUT_ROUTING_UI:-false}")" \
+    || warn "Failed to set output_routing_ui (non-fatal)"
+  _install_acceptance_sync_source_ini || true
   ok "Feature flags saved to setup.ini [features]"
+  return 0
 }
 _install_acceptance_emit_version_block() {
   local result="$1"
