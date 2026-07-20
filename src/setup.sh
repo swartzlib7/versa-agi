@@ -303,7 +303,7 @@ workspace_link=
 
 [search]
 # Web search provider for agent research capabilities.
-# Powered by SearXNG (native install via providers/searxng.sh).
+# Powered by SearXNG (Docker container via providers/searxng.sh — requires docker).
 # Agents access via: agictl search web "<query>"
 enabled=true
 engine=searxng

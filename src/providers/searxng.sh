@@ -6,7 +6,7 @@
 # web search capabilities. Agents access via HTTP
 # (agictl search web) — no Docker dependency for agents.
 #
-# Requirements: Docker installed
+# Requirements: Docker Engine (auto-installed on Ubuntu/Debian if missing)
 # Listens on: http://127.0.0.1:8888 (local only)
 #
 # Usage:
@@ -81,10 +81,8 @@ if [ -z "${VERSA_SETUP_PARENT:-}" ]; then
   echo ""
 fi
 
-# ─── Check Docker ─────────────────────────────────
-if ! command -v docker &>/dev/null; then
-  error "Docker is not installed. Install Docker first, then re-run this script."
-fi
+# ─── Ensure Docker (same auto-install path as setup_local Intel SYCL) ─
+provider_ensure_docker
 
 # ─── Check if already running ─────────────────────
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
