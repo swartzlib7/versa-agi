@@ -149,15 +149,88 @@ _install_acceptance_valid_email() {
     "${candidate}" 2>/dev/null
 }
 
-# ─── Optional email prompt (install + update) ───────
+# Derive bare 6-char call sign from email local-part: first3 + last3.
+# Local-part < 6 after alnum strip: pad from sha256(email) then take first3+last3.
+_install_acceptance_derive_call_sign() {
+  local email="$1"
+  python3 -c '
+import hashlib, re, sys
+email = (sys.argv[1] or "").strip().lower()
+local = email.split("@", 1)[0]
+local = re.sub(r"[^a-z0-9]", "", local)
+alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+if len(local) < 6:
+    h = hashlib.sha256(email.encode()).hexdigest()
+    pad = []
+    for i in range(0, len(h), 2):
+        pad.append(alphabet[int(h[i:i+2], 16) % len(alphabet)])
+        if len(local) + len(pad) >= 6:
+            break
+    local = (local + "".join(pad))[:6]
+print(local[:3] + local[-3:])
+' "${email}" 2>/dev/null
+}
+
+# Normalize user/default call sign to bare alnum (2–12); empty on failure.
+_install_acceptance_bare_call_sign() {
+  local raw="$1"
+  python3 -c '
+import re, sys
+s = (sys.argv[1] or "").strip().lower()
+s = s.strip("()[]{}")
+s = re.sub(r"[^a-z0-9]", "", s)
+sys.exit(1) if not (2 <= len(s) <= 12) else print(s)
+' "${raw}" 2>/dev/null
+}
+
+# Upsert a key in [agent] of a setup.ini (create key if missing).
+_install_acceptance_upsert_agent_key() {
+  local file="$1" key="$2" val="$3"
+  [ -f "${file}" ] || return 0
+  if grep -q "^${key}=" "${file}" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "${file}"
+  elif grep -q "^first_name=" "${file}" 2>/dev/null; then
+    sed -i "/^first_name=/a ${key}=${val}" "${file}"
+  elif grep -q "^\[agent\]" "${file}" 2>/dev/null; then
+    sed -i "/^\[agent\]/a ${key}=${val}" "${file}"
+  else
+    return 0
+  fi
+}
+
+# Write call_sign + last_name to deployed + source setup.ini immediately so
+# --update reconcile-config carries them forward (Step 13 also persists on update).
+_install_acceptance_persist_call_sign() {
+  local bare="${INSTALL_ACCEPTANCE_CALL_SIGN:-}"
+  local last="${INI_AGENT_LAST_NAME:-}"
+  local f
+  [ -n "${bare}" ] || return 0
+  [ -n "${last}" ] || last="(${bare})"
+  for f in /etc/versa-agi/setup.ini "${SCRIPT_DIR:-}/setup.ini"; do
+    [ -n "${f}" ] && [ -f "${f}" ] || continue
+    _install_acceptance_upsert_agent_key "${f}" "call_sign" "${bare}"
+    _install_acceptance_upsert_agent_key "${f}" "last_name" "${last}"
+  done
+}
+
+# ─── Required email prompt (install + update) ───────
+# Install email is siloed from the VersaVoice sponsor email — used for
+# call-sign derivation, COA VV reuse (agiInstallEmail), and registration telemetry.
 install_acceptance_email_prompt() {
   local existing reply done=false shown=false
   existing="$(_install_acceptance_load_existing_email)"
 
-  # Non-interactive escape (same as accept): keep prior email or skip.
+  # Non-interactive: keep prior email, or INSTALL_ACCEPTANCE_EMAIL if pre-set.
   case "$(printf '%s' "${VERSA_INSTALL_ACCEPT:-}" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|y)
-      INSTALL_ACCEPTANCE_EMAIL="${existing:-}"
+      if [ -n "${INSTALL_ACCEPTANCE_EMAIL:-}" ] && _install_acceptance_valid_email "${INSTALL_ACCEPTANCE_EMAIL}"; then
+        :
+      elif [ -n "${existing}" ]; then
+        INSTALL_ACCEPTANCE_EMAIL="${existing}"
+      else
+        echo "ERROR: Email is required. Set INSTALL_ACCEPTANCE_EMAIL=user@domain.tld for non-interactive setup." >&2
+        exit 1
+      fi
       export INSTALL_ACCEPTANCE_EMAIL
       return
       ;;
@@ -167,23 +240,22 @@ install_acceptance_email_prompt() {
     if [ "${shown}" = false ]; then
       if declare -F text_box >/dev/null 2>&1; then
         if [ -n "${existing}" ]; then
-          text_box "OPTIONAL CONTACT" \
-            "Enter your email for release notes and community updates." \
+          text_box "CONTACT EMAIL (REQUIRED)" \
+            "Enter your email for release notes, community updates," \
+            "and to identify this install's COA on VersaVoice." \
             "" \
-            "Press Enter to keep the address on file." \
-            "Type - to clear it, or enter a new address."
+            "Press Enter to keep the address on file, or enter a new address."
         else
-          text_box "OPTIONAL CONTACT" \
-            "Enter your email for release notes and community updates." \
-            "Press Enter to skip."
+          text_box "CONTACT EMAIL (REQUIRED)" \
+            "Enter your email for release notes, community updates," \
+            "and to identify this install's COA on VersaVoice." \
+            "This email is kept separate from your VersaVoice account email."
         fi
       else
         echo ""
-        echo "Optional: Enter your email for release notes and community updates"
+        echo "Required: Enter your email for release notes and COA identity"
         if [ -n "${existing}" ]; then
-          echo "(press Enter to keep on file, type - to clear, or enter a new address)"
-        else
-          echo "(press Enter to skip)"
+          echo "(press Enter to keep on file, or enter a new address)"
         fi
       fi
       shown=true
@@ -194,13 +266,12 @@ install_acceptance_email_prompt() {
       _install_acceptance_read_line "" reply
       case "${reply}" in
         "") INSTALL_ACCEPTANCE_EMAIL="${existing}"; done=true ;;
-        "-") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
         *)
           if _install_acceptance_valid_email "${reply}"; then
             INSTALL_ACCEPTANCE_EMAIL="${reply}"
             done=true
           else
-            warn "Invalid email. Use user@domain.tld, Enter to keep current, or - to clear."
+            warn "Invalid email. Use user@domain.tld, or press Enter to keep current."
           fi
           ;;
       esac
@@ -208,16 +279,15 @@ install_acceptance_email_prompt() {
       _install_acceptance_input_line "Email"
       _install_acceptance_read_line "" reply
       case "${reply}" in
-        "") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
-        "-")
-          warn "No email on file to clear. Enter a valid address or press Enter to skip."
+        "")
+          warn "Email is required. Enter a valid user@domain.tld address."
           ;;
         *)
           if _install_acceptance_valid_email "${reply}"; then
             INSTALL_ACCEPTANCE_EMAIL="${reply}"
             done=true
           else
-            warn "Invalid email. Use user@domain.tld or press Enter to skip."
+            warn "Invalid email. Use user@domain.tld."
           fi
           ;;
       esac
@@ -225,6 +295,82 @@ install_acceptance_email_prompt() {
   done
 
   export INSTALL_ACCEPTANCE_EMAIL
+  echo ""
+}
+
+# ─── COA call sign prompt (parenthesized last_name) ─
+install_acceptance_call_sign_prompt() {
+  local email="${INSTALL_ACCEPTANCE_EMAIL:-}"
+  local derived default_bare current_last bare reply done=false shown=false
+
+  if [ -z "${email}" ] || ! _install_acceptance_valid_email "${email}"; then
+    echo "ERROR: Call sign requires a valid INSTALL_ACCEPTANCE_EMAIL." >&2
+    exit 1
+  fi
+
+  derived="$(_install_acceptance_derive_call_sign "${email}")"
+  [ -n "${derived}" ] || derived="versa0"
+
+  current_last="${INI_AGENT_LAST_NAME:-}"
+  default_bare="$(_install_acceptance_bare_call_sign "${current_last}" || true)"
+  # Re-derive when unset, legacy (COA), or last_name still matches prior email's derived value.
+  if [ -z "${default_bare}" ] || [ "${current_last}" = "(COA)" ] || [ "${current_last}" = "COA" ]; then
+    default_bare="${derived}"
+  elif [ -n "${INSTALL_ACCEPTANCE_PREV_EMAIL:-}" ] \
+       && [ "${email}" != "${INSTALL_ACCEPTANCE_PREV_EMAIL}" ]; then
+    local prev_derived
+    prev_derived="$(_install_acceptance_derive_call_sign "${INSTALL_ACCEPTANCE_PREV_EMAIL}")"
+    if [ "${default_bare}" = "${prev_derived}" ]; then
+      default_bare="${derived}"
+    fi
+  fi
+
+  case "$(printf '%s' "${VERSA_INSTALL_ACCEPT:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y)
+      bare="${INSTALL_ACCEPTANCE_CALL_SIGN:-${default_bare}}"
+      bare="$(_install_acceptance_bare_call_sign "${bare}" || echo "${derived}")"
+      INSTALL_ACCEPTANCE_CALL_SIGN="${bare}"
+      INI_AGENT_LAST_NAME="(${bare})"
+      export INSTALL_ACCEPTANCE_CALL_SIGN INI_AGENT_LAST_NAME
+      return
+      ;;
+  esac
+
+  while [ "${done}" = false ]; do
+    if [ "${shown}" = false ]; then
+      if declare -F text_box >/dev/null 2>&1; then
+        text_box "COA CALL SIGN" \
+          "Your Chief Orchestrator appears externally as: Versa (${default_bare})" \
+          "The call sign is always shown in parentheses (replaces the old (COA) last name)." \
+          "" \
+          "Press Enter to accept the default, or type a custom 2–12 character call sign."
+      else
+        echo ""
+        echo "COA call sign — external name will be: Versa (${default_bare})"
+        echo "(press Enter to accept, or type a custom 2–12 character call sign)"
+      fi
+      shown=true
+    fi
+
+    _install_acceptance_input_line "Call sign" "${default_bare}"
+    _install_acceptance_read_line "" reply
+    case "${reply}" in
+      "") bare="${default_bare}"; done=true ;;
+      *)
+        bare="$(_install_acceptance_bare_call_sign "${reply}" || true)"
+        if [ -n "${bare}" ]; then
+          done=true
+        else
+          warn "Call sign must be 2–12 letters/digits (parentheses optional)."
+        fi
+        ;;
+    esac
+  done
+
+  INSTALL_ACCEPTANCE_CALL_SIGN="${bare}"
+  INI_AGENT_LAST_NAME="(${bare})"
+  export INSTALL_ACCEPTANCE_CALL_SIGN INI_AGENT_LAST_NAME
+  _install_acceptance_persist_call_sign
   echo ""
 }
 
@@ -314,7 +460,10 @@ install_acceptance_welcome() {
   INSTALL_ACCEPTANCE_AT_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   export INSTALL_ACCEPTANCE_AT_UTC
 
+  INSTALL_ACCEPTANCE_PREV_EMAIL="$(_install_acceptance_load_existing_email)"
+  export INSTALL_ACCEPTANCE_PREV_EMAIL
   install_acceptance_email_prompt
+  install_acceptance_call_sign_prompt
 }
 
 # ─── Feature flags (setup.ini [features]) ───────────
@@ -582,7 +731,10 @@ install_acceptance_update_prompt() {
   INSTALL_ACCEPTANCE_AT_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   export INSTALL_ACCEPTANCE_AT_UTC
 
+  INSTALL_ACCEPTANCE_PREV_EMAIL="$(_install_acceptance_load_existing_email)"
+  export INSTALL_ACCEPTANCE_PREV_EMAIL
   install_acceptance_email_prompt
+  install_acceptance_call_sign_prompt
 }
 
 # ─── VersaVoice AI enable prompt (Step 4 — single ask) ─
@@ -772,10 +924,12 @@ _install_acceptance_write_json() {
   feat_output="$(_install_acceptance_norm_bool "${VERSA_FEATURE_OUTPUT_ROUTING_UI:-$(_install_acceptance_features_get output_routing_ui false)}")"
 
   mkdir -p /etc/versa-agi
-  python3 - "${INSTALL_ACCEPTANCE_JSON}" <<'PY' "${event}" "${install_mode}" "${accepted_at}" "${email}" "${versavoice_enabled}" "${version}" "${platform}" "${hostname_hash}" "${ip_value}" "${feat_org}" "${feat_util}" "${feat_script}" "${feat_output}"
+  local call_sign="${INSTALL_ACCEPTANCE_CALL_SIGN:-}"
+  python3 - "${INSTALL_ACCEPTANCE_JSON}" <<'PY' "${event}" "${install_mode}" "${accepted_at}" "${email}" "${versavoice_enabled}" "${version}" "${platform}" "${hostname_hash}" "${ip_value}" "${feat_org}" "${feat_util}" "${feat_script}" "${feat_output}" "${call_sign}"
 import json, sys
 (out, event, install_mode, accepted_at, email, vv, version, platform,
- hostname_hash, ip_value, feat_org, feat_util, feat_script, feat_output) = sys.argv[1:15]
+ hostname_hash, ip_value, feat_org, feat_util, feat_script, feat_output,
+ call_sign) = sys.argv[1:16]
 payload = {
     "event": event,
     "product": "versa-agi",
@@ -786,6 +940,7 @@ payload = {
     "ip_address": ip_value or None,
     "email": email or None,
     "email_provided": bool(email),
+    "coa_call_sign": call_sign or None,
     "license": "BSL-1.1",
     "platform": platform,
     "hostname_hash": hostname_hash,

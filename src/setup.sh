@@ -283,8 +283,10 @@ task_max_spawn_attempts=3
 # a new outbound message. Override via VERSA_FLOOD_GUARD_TIMEOUT_HOURS env var.
 flood_guard_timeout_hours=3
 
-# COA VersaVoice identity (used by init_vv_identity.sh)
+# COA VersaVoice identity (identity provision / setup prompts)
+# call_sign bare; last_name always (call_sign). Derived from install email at setup.
 first_name=Versa
+call_sign=
 last_name=(COA)
 # Language: ISO 639-1 code (en, es, fr, de, ja, ko, zh, pt, ar, hi, etc.)
 language=en
@@ -395,8 +397,9 @@ INI_GCP_PROJECT="$(ini_get gcp project)"
 INI_GCP_LOCATION="$(ini_get gcp location us-central1)"
 INI_SA_KEY_PATH="$(ini_get gcp service_account_key)"
 
-INI_AGENT_FIRST_NAME="$(ini_get agent first_name COA)"
-INI_AGENT_LAST_NAME="$(ini_get agent last_name Agent)"
+INI_AGENT_FIRST_NAME="$(ini_get agent first_name Versa)"
+INI_AGENT_CALL_SIGN="$(ini_get agent call_sign '')"
+INI_AGENT_LAST_NAME="$(ini_get agent last_name '(COA)')"
 INI_AGENT_LANGUAGE="$(ini_get agent language en)"
 INI_AGENT_COUNTRY="$(ini_get agent country)"
 INI_AGENT_VOICE="$(ini_get agent voice female)"
@@ -2021,7 +2024,9 @@ if [ -n "${VV_TOKEN:-}" ]; then
     --last-name "${INI_AGENT_LAST_NAME}" \
     --language "${INI_AGENT_LANGUAGE:-en}" \
     --country "${INI_AGENT_COUNTRY:-}" \
-    --voice "${INI_AGENT_VOICE:-}"; then
+    --voice "${INI_AGENT_VOICE:-}" \
+    --install-email "${INSTALL_ACCEPTANCE_EMAIL:-}" \
+    --agent-key coa; then
     ok "VersaVoice identity registered natively via agictl"
   else
     warn "VersaVoice REST registration failed check VersaVoice logs"
@@ -3765,14 +3770,43 @@ mkdir -p /etc/versa-agi
 INI_FILE="/etc/versa-agi/setup.ini"
 
 if [ "${UPDATE_MODE}" = true ]; then
-  # UPDATE MODE: interactive values are not re-collected. The deployed setup.ini
-  # was already regenerated from the shipped template (structure + stock lists
-  # refreshed, user-owned values carried forward) by `agictl system
-  # reconcile-config` in the Model Catalog step — nothing left to write here.
+  # UPDATE MODE: most values are not re-collected; reconcile-config already
+  # refreshed structure. Call sign / last_name ARE collected at the acceptance
+  # gate — persist them here (and to the source template) so they are not lost.
   if [ -f "${INI_FILE}" ]; then
+    _upd_ini_set() {
+      local k="$1" v="$2"
+      if grep -q "^${k}=" "${INI_FILE}" 2>/dev/null; then
+        sed -i "s|^${k}=.*|${k}=${v}|" "${INI_FILE}"
+      elif grep -q "^first_name=" "${INI_FILE}" 2>/dev/null; then
+        sed -i "/^first_name=/a ${k}=${v}" "${INI_FILE}"
+      fi
+    }
+    if [ -n "${INSTALL_ACCEPTANCE_CALL_SIGN:-}" ]; then
+      _upd_ini_set "call_sign" "${INSTALL_ACCEPTANCE_CALL_SIGN}"
+      _upd_ini_set "last_name" "${INI_AGENT_LAST_NAME:-(${INSTALL_ACCEPTANCE_CALL_SIGN})}"
+      ok "COA call sign saved: ${INI_AGENT_LAST_NAME:-(${INSTALL_ACCEPTANCE_CALL_SIGN})}"
+    elif [ -n "${INI_AGENT_LAST_NAME:-}" ] && [ "${INI_AGENT_LAST_NAME}" != "(COA)" ]; then
+      _upd_ini_set "last_name" "${INI_AGENT_LAST_NAME}"
+      _bare="${INI_AGENT_LAST_NAME#(}"
+      _bare="${_bare%)}"
+      [ -n "${_bare}" ] && _upd_ini_set "call_sign" "${_bare}"
+    fi
     chmod 640 "${INI_FILE}"
     chown "${WATCHDOG_USER}:agi_agents" "${INI_FILE}"
     ok "Setup configuration verified at ${INI_FILE} (reconciled from template)"
+    # Keep repo/source master in sync with deployed call sign
+    if [ -f "${SCRIPT_DIR}/setup.ini" ] \
+       && [ "$(realpath "${INI_FILE}" 2>/dev/null)" != "$(realpath "${SCRIPT_DIR}/setup.ini" 2>/dev/null)" ]; then
+      if [ -n "${INSTALL_ACCEPTANCE_CALL_SIGN:-}" ]; then
+        if grep -q "^call_sign=" "${SCRIPT_DIR}/setup.ini" 2>/dev/null; then
+          sed -i "s|^call_sign=.*|call_sign=${INSTALL_ACCEPTANCE_CALL_SIGN}|" "${SCRIPT_DIR}/setup.ini"
+        fi
+        if grep -q "^last_name=" "${SCRIPT_DIR}/setup.ini" 2>/dev/null; then
+          sed -i "s|^last_name=.*|last_name=${INI_AGENT_LAST_NAME:-(${INSTALL_ACCEPTANCE_CALL_SIGN})}|" "${SCRIPT_DIR}/setup.ini"
+        fi
+      fi
+    fi
   fi
 else
   # FRESH INSTALL: seed from source template, inject collected values.
@@ -3833,6 +3867,8 @@ MINSEED
   _ini_set "circuit_breaker_consecutive" "$(ini_get agent circuit_breaker_consecutive 5)"
   _ini_set "circuit_breaker_hourly" "$(ini_get agent circuit_breaker_hourly 20)"
   _ini_set "first_name" "${INI_AGENT_FIRST_NAME:-Versa}"
+  # Call sign (bare) + parenthesized last_name — set by install_acceptance_call_sign_prompt
+  _ini_set "call_sign"  "${INSTALL_ACCEPTANCE_CALL_SIGN:-${INI_AGENT_CALL_SIGN:-}}"
   _ini_set "last_name"  "${INI_AGENT_LAST_NAME:-(COA)}"
   _ini_set "language"   "${INI_AGENT_LANGUAGE:-en}"
   _ini_set "country"    "${INI_AGENT_COUNTRY:-United States}"

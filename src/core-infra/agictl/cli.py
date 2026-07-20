@@ -1327,7 +1327,7 @@ def _resolve_protected_identities():
     """Resolve COA/watchdog agent names and the COA display name.
 
     setup.ini [users] defines the agent keys (OS usernames); the COA display
-    name (first + last, e.g. first_name=Versa last_name=(COA)) comes from her
+    name (first + last, e.g. first_name=Versa last_name=(call_sign)) comes from
     identity config (synced from VersaVoice), falling back to setup.ini
     [agent] first_name/last_name. Never hardcode these identities.
     Returns (coa_user, watchdog_user, coa_display).
@@ -4996,6 +4996,7 @@ def agent_approve(name, force):
                         country="",
                         voice="female",
                         agents_db=agents_db,
+                        agent_key=name,
                     )
                 else:
                     # No VV token — create a minimal config so Lifeline doesn't skip this agent
@@ -9037,7 +9038,16 @@ def identity():
 @click.option("--country", default="")
 @click.option("--voice", type=click.Choice(["female", "male", "reflective"], case_sensitive=False), default="female",
               help="Voice type: female (Y), male (X), reflective (Primary User's voice)")
-def provision(agent_user, token, first_name, last_name, language, country, voice):
+@click.option(
+    "--install-email", default="",
+    help="Siloed install-acceptance email for COA reuse (agiInstallEmail); not the VV sponsor email",
+)
+@click.option(
+    "--agent-key", default="",
+    help="Stable agents.db name for agiAgentKey (default: resolve from DB; COA=coa)",
+)
+def provision(agent_user, token, first_name, last_name, language, country, voice,
+              install_email, agent_key):
     """Resolve or create a VersaVoice Sub-Account.
 
     Only protected agents (COA, watchdog) can register VersaVoice identities.
@@ -9056,7 +9066,9 @@ def provision(agent_user, token, first_name, last_name, language, country, voice
     except Exception:
         pass  # Allow if DB check fails (fresh install edge case)
     success = provision_identity(
-        agent_user, token, first_name, last_name, language, country, voice, agents_db
+        agent_user, token, first_name, last_name, language, country, voice, agents_db,
+        install_email=install_email or None,
+        agent_key=agent_key or None,
     )
     if not success:
         sys.exit(1)
