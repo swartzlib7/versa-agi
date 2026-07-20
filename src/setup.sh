@@ -63,7 +63,7 @@ else
   }
 fi
 
-VERSION="3.3.3"
+VERSION="3.3.4"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
