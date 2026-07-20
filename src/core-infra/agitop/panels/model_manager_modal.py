@@ -12,8 +12,10 @@ directly — that keeps the dashboard consistent with the CLI and setup.sh.
 """
 
 import json
+import re
 import subprocess
 
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
@@ -93,14 +95,17 @@ def _run_agictl(args, timeout=25):
 def _configured_source_providers():
     """Configured (enabled + keyed) providers offering catalog import, with labels.
 
-    Falls back to OpenRouter-only when the query fails, preserving prior behavior.
+    Empty when none are configured — do not invent OpenRouter (that hid the real
+    "disabled in setup.ini" state when other providers were keyed).
     """
     ok, data, _err = _run_agictl(["model", "source", "providers"])
-    if ok:
-        rows = [p for p in data.get("providers", []) if p.get("configured")]
-        if rows:
-            return [{"slug": p["slug"], "label": p.get("label", p["slug"])} for p in rows]
-    return [{"slug": "openrouter", "label": "OpenRouter"}]
+    if not ok:
+        return []
+    return [
+        {"slug": p["slug"], "label": p.get("label", p["slug"])}
+        for p in data.get("providers", [])
+        if p.get("configured")
+    ]
 
 
 def _yn(flag):
@@ -893,6 +898,12 @@ class CatalogFormModal(ModalScreen):
         self.dismiss(result)
 
 
+def _provider_slugify(text: str) -> str:
+    """URL-safe provider slug: lowercase, non-alphanumerics → single hyphens."""
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return s
+
+
 class ProviderFormModal(ModalScreen):
     """Add or edit a provider (writes [providers_custom]). Keys set via 🔑 API Keys.
 
@@ -935,6 +946,9 @@ class ProviderFormModal(ModalScreen):
         super().__init__(**kwargs)
         self._existing = existing
         self._edit = existing is not None
+        # Add mode: keep slug in sync with name until the operator edits slug.
+        self._slug_manual = False
+        self._slug_programmatic = False
 
     def compose(self) -> ComposeResult:
         e = self._existing or {}
@@ -945,16 +959,20 @@ class ProviderFormModal(ModalScreen):
             cls_opts.append((cls_val, cls_val))
         with Vertical(id="pf-dialog"):
             yield Static(f"[bold]{title}[/]", id="pf-title")
-            # Row 1: Slug | Display Name
+            # Row 1: Display Name (left) | Slug auto from name (right)
             with Horizontal(classes="pf-grid-row"):
                 with Vertical(classes="pf-field"):
-                    yield Label("[b]Slug[/]  [dim](e.g. mistral)[/]", classes="pf-label")
-                    yield Input(value=e.get("slug", ""), placeholder="provider slug",
-                                id="p-slug", disabled=self._edit)
-                with Vertical(classes="pf-field"):
-                    yield Label("[b]Display Name[/]", classes="pf-label")
+                    yield Label("[b]Name[/]", classes="pf-label")
                     yield Input(value=e.get("label", ""), placeholder="e.g. Mistral",
                                 id="p-label")
+                with Vertical(classes="pf-field"):
+                    yield Label(
+                        "[b]Slug[/]  [dim](auto from name — editable)[/]"
+                        if not self._edit else "[b]Slug[/]",
+                        classes="pf-label",
+                    )
+                    yield Input(value=e.get("slug", ""), placeholder="e.g. mistral",
+                                id="p-slug", disabled=self._edit)
             # Row 2: LangChain Class | Enabled
             with Horizontal(classes="pf-grid-row"):
                 with Vertical(classes="pf-field"):
@@ -972,15 +990,45 @@ class ProviderFormModal(ModalScreen):
                 yield Button("Save", variant="success", id="p-save")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="p-cancel")
 
+    def on_mount(self) -> None:
+        if not self._edit:
+            try:
+                self.query_one("#p-label", Input).focus()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @on(Input.Changed, "#p-label")
+    def _on_label_changed(self, event: Input.Changed) -> None:
+        if self._edit or self._slug_manual:
+            return
+        slug = _provider_slugify(event.value)
+        self._slug_programmatic = True
+        try:
+            self.query_one("#p-slug", Input).value = slug
+        finally:
+            self._slug_programmatic = False
+
+    @on(Input.Changed, "#p-slug")
+    def _on_slug_changed(self, event: Input.Changed) -> None:
+        if self._edit or self._slug_programmatic:
+            return
+        self._slug_manual = True
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "p-cancel":
             self.dismiss(None)
         elif event.button.id == "p-save":
-            slug = self.query_one("#p-slug", Input).value.strip()
+            slug = _provider_slugify(self.query_one("#p-slug", Input).value)
             label = self.query_one("#p-label", Input).value.strip()
-            if not slug or not label:
+            if not label:
                 self.query_one("#pf-error", Static).update(
-                    "[red]Slug and display name are required.[/]")
+                    "[red]Name is required.[/]")
+                return
+            if not slug:
+                slug = _provider_slugify(label)
+            if not slug:
+                self.query_one("#pf-error", Static).update(
+                    "[red]Could not derive a slug from the name.[/]")
                 return
             self.dismiss({
                 "_mode": "edit" if self._edit else "add",

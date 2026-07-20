@@ -285,11 +285,9 @@ if [ "${TEST_MODE}" = true ]; then
   echo -e "  ${DIM}https://github.com/swartzlib7/versa-agi${RESET}"
   echo ""
 else
-  if [ "${VERSA_OS}" = "macos" ]; then
-    SETUP_SCRIPT="${INSTALL_DIR}/src/mac_setup.sh"
-  else
-    SETUP_SCRIPT="${INSTALL_DIR}/src/setup.sh"
-  fi
+  # Linux (including OrbStack Ubuntu). Native macOS exits earlier; never diverge
+  # onto a missing mac_setup.sh path.
+  SETUP_SCRIPT="${INSTALL_DIR}/src/setup.sh"
 
   if [ ! -f "${SETUP_SCRIPT}" ]; then
     fail "setup.sh not found in cloned repository"
@@ -305,6 +303,10 @@ else
   # Hand off to setup.sh. Only force /dev/tty when stdin is not already a
   # terminal (curl|bash). On OrbStack, always redirecting to /dev/tty can
   # show prompts while keystrokes stay on the session PTY — accept hangs.
+  #
+  # Capture RC without aborting: set -e would otherwise skip repo persist when
+  # setup exits non-zero — leaving ~/.versa-agi/ with only the setup.ini symlink.
+  set +e
   if [ -t 0 ]; then
     bash "${SETUP_SCRIPT}"
   elif [ -r /dev/tty ]; then
@@ -312,20 +314,45 @@ else
   else
     bash "${SETUP_SCRIPT}"
   fi
+  SETUP_RC=$?
+  set -e
 
-  # Persist repo clone to ~/.versa-agi/repo/ for the Primary User
-  # This allows setup.sh --update and other tools to operate without re-cloning
-  if [ -n "${SUDO_USER:-}" ]; then
-    PU_HOME=$(eval echo "~${SUDO_USER}")
-    REPO_PERSIST_DIR="${PU_HOME}/.versa-agi/repo"
+  # Resolve Primary User home (sudo → explicit env → login name → root).
+  PU_USER="${SUDO_USER:-${VERSA_PRIMARY_USER:-}}"
+  if [ -z "${PU_USER}" ]; then
+    PU_USER="$(logname 2>/dev/null || true)"
+  fi
+  if [ -z "${PU_USER}" ]; then
+    PU_USER="root"
+  fi
+  PU_HOME=$(eval echo "~${PU_USER}")
+  REPO_PERSIST_DIR="${PU_HOME}/.versa-agi/repo"
+
+  # Persist repo clone for updates (always — even when setup failed partway).
+  # The /tmp clone is removed by the EXIT trap; without this copy, ~/.versa-agi/
+  # only has the setup.ini symlink that setup.sh creates.
+  if [ -d "${INSTALL_DIR}" ]; then
     rm -rf "${REPO_PERSIST_DIR}" 2>/dev/null || true
     mkdir -p "$(dirname "${REPO_PERSIST_DIR}")"
-    cp -r "${INSTALL_DIR}" "${REPO_PERSIST_DIR}"
-    chown -R "${SUDO_USER}:${SUDO_USER}" "${REPO_PERSIST_DIR}"
+    cp -a "${INSTALL_DIR}" "${REPO_PERSIST_DIR}"
+    if [ "${PU_USER}" != "root" ]; then
+      chown -R "${PU_USER}:${PU_USER}" "${PU_HOME}/.versa-agi" 2>/dev/null || \
+        chown -R "${PU_USER}:${PU_USER}" "${REPO_PERSIST_DIR}" 2>/dev/null || true
+    fi
     ok "Repository persisted to ${REPO_PERSIST_DIR}"
+  else
+    warn "Install clone missing — could not persist ~/.versa-agi/repo/"
   fi
 
   # Persist tooling scripts (the /tmp clone is cleaned up on exit)
+  if [ ! -d "${INSTALL_DIR}/src" ]; then
+    warn "Install clone incomplete — skipping /usr/local tooling install"
+    if [ "${SETUP_RC}" -ne 0 ]; then
+      exit "${SETUP_RC}"
+    fi
+    exit 1
+  fi
+
   PERSIST_DIR="/usr/local/lib/versa-agi"
   mkdir -p "${PERSIST_DIR}"
   cp "${INSTALL_DIR}/src/uninstall.sh" "${PERSIST_DIR}/uninstall.sh"
@@ -350,6 +377,7 @@ if [ -f "\${_REPO_SETUP}" ]; then
   exec "\${_REPO_SETUP}" --update "\$@"
 else
   echo "[ERROR] Setup script not found at: \${_REPO_SETUP}"
+  echo "Expected the install-time clone at ~/.versa-agi/repo/ — re-run install.sh."
   exit 1
 fi
 LAUNCHER
@@ -359,4 +387,9 @@ LAUNCHER
   ok "Update available at:    sudo versa-agi-update [--dry-run]"
   ok "Rekey available at:     sudo versa-agi-rekey"
   ok "Backup available at:    sudo versa-agi-backup [--dry-run]"
+
+  if [ "${SETUP_RC}" -ne 0 ]; then
+    warn "setup.sh exited with status ${SETUP_RC} — repo was still persisted to ${REPO_PERSIST_DIR}"
+    exit "${SETUP_RC}"
+  fi
 fi

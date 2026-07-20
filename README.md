@@ -134,14 +134,16 @@ The installer automates the full provisioning pipeline in four phases:
 
 1. **Download** — Clones the repository to a temporary directory (`/tmp/versa-agi-install-$$`)
 2. **Provision** — Delegates to `setup.sh`, which prompts for installation type then executes up to 13 steps: OS user creation, file deployment, database initialization, optional VersaVoice identity provisioning, security hardening, CRON scheduling, and health checks. Server mode skips all system steps and provisions only the inference backend.
-3. **Persist** — Copies the repo clone to `~/.versa-agi/repo/` (used by future updates) and installs admin tooling to `/usr/local/bin/`
+3. **Persist** — Copies the repo clone to `~/.versa-agi/repo/` (used by future updates) and installs admin tooling to `/usr/local/bin/`. This runs even if setup exits non-zero, so a partial setup still leaves a usable clone.
 4. **Cleanup** — Removes the temporary `/tmp` clone
+
+**OrbStack / Mac:** `~/.versa-agi/` lives in the **Linux machine** home (e.g. `/home/<you>/.versa-agi/repo/`), not necessarily macOS `/Users/…` unless that home is shared into the VM. Check with `ls ~/.versa-agi/repo` inside `orb` / `ssh orb`.
 
 After installation, the system spans five isolation boundaries:
 
 | Layer | Path | Purpose |
 |---|---|---|
-| Primary User Home | `~/.versa-agi/` | Persistent repo clone + `setup.ini` symlink |
+| Primary User Home | `~/.versa-agi/` | Persistent repo clone (`repo/`) + `setup.ini` symlink |
 | Monitoring Layer | `/home/watchdog/core-infra/` | Lifeline, File Monitor, agictl, agitop |
 | Agent Workspace | `/home/coa/coa-env/` | COA agent environment |
 | Centralized Data | `/var/lib/versa-agi/` | SQLite databases, model config |

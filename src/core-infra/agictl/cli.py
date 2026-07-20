@@ -398,6 +398,7 @@ def system_set_key(key_type, value):
                 errors.append(f"{provider_keys_env}: {e}")
 
         _ini_set("third_party", "xai_api_key", value)
+        _activate_third_party_on_key("xai", updated_files, errors)
 
     # ════════════════════════════════════════════════
     # OPENAI API KEY
@@ -425,6 +426,7 @@ def system_set_key(key_type, value):
                 errors.append(f"{provider_keys_env}: {e}")
 
         _ini_set("third_party", "openai_api_key", value)
+        _activate_third_party_on_key("openai", updated_files, errors)
 
     # ════════════════════════════════════════════════
     # ANTHROPIC API KEY
@@ -452,6 +454,7 @@ def system_set_key(key_type, value):
                 errors.append(f"{provider_keys_env}: {e}")
 
         _ini_set("third_party", "anthropic_api_key", value)
+        _activate_third_party_on_key("anthropic", updated_files, errors)
 
     # ════════════════════════════════════════════════
     # OPENROUTER API KEY
@@ -494,6 +497,7 @@ def system_set_key(key_type, value):
                         errors.append(f"{provider_keys_env}: {e}")
 
         _ini_set("third_party", "openrouter_api_key", value)
+        _activate_third_party_on_key("openrouter", updated_files, errors)
 
     # ── Report result ──
     if errors:
@@ -4110,6 +4114,67 @@ def provider_update(slug, label, cls, enabled, no_sync):
         do_sync=not no_sync)
 
 
+# Third-party slugs that have matching setup.ini keys ({slug}_enabled / {slug}_api_key).
+_THIRD_PARTY_SETUP_SLUGS = frozenset({"xai", "openai", "anthropic", "openrouter"})
+
+
+def _setup_ini_write_targets():
+    """Canonical + source setup.ini paths that exist and should stay in sync."""
+    paths = []
+    if os.path.isfile(SETUP_INI_CANONICAL):
+        paths.append(SETUP_INI_CANONICAL)
+    source_ini = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "setup.ini",
+    )
+    try:
+        if os.path.isfile(source_ini) and os.path.realpath(source_ini) not in {
+            os.path.realpath(p) for p in paths
+        }:
+            paths.append(source_ini)
+    except OSError:
+        pass
+    return paths
+
+
+def _activate_third_party_on_key(slug, updated_files=None, errors=None):
+    """Setting a third-party API key implies enable — keep setup.ini + models.ini aligned.
+
+    Import buttons (``model source providers``) gate on setup.ini ``{slug}_enabled``
+    for OpenRouter and on models.ini enabled for other providers. Historically
+    ``system set-key`` / the API Keys modal only wrote the key, so a freshly keyed
+    OpenRouter never appeared as a Model source until Step 9d or a manual enable.
+    """
+    updated_files = updated_files if updated_files is not None else []
+    errors = errors if errors is not None else []
+    if slug not in _THIRD_PARTY_SETUP_SLUGS:
+        return
+    flag = "true"
+    for path in _setup_ini_write_targets():
+        try:
+            _update_ini_key(path, "third_party", f"{slug}_enabled", flag)
+            _update_ini_key(path, "third_party", "enabled", flag)
+            if path not in updated_files:
+                updated_files.append(path)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{path}: {e}")
+    try:
+        provs = _load_providers()
+        info = provs.get(slug)
+        if info:
+            value = f"true|{info['label']}|{info['cls']}"
+            for path in _models_ini_write_targets():
+                _upsert_models_ini_entry(path, "providers_custom", slug, value)
+                if path not in updated_files:
+                    updated_files.append(path)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"models.ini provider enable ({slug}): {e}")
+    try:
+        _sync_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _provider_set_enabled(slug, enabled, no_sync):
     provs = _load_providers()
     if slug not in provs:
@@ -4125,6 +4190,17 @@ def _provider_set_enabled(slug, enabled, no_sync):
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
+    # Keep setup.ini {slug}_enabled in lockstep so Import / openrouter_configured()
+    # and migrate agree with the Providers tab.
+    if slug in _THIRD_PARTY_SETUP_SLUGS:
+        flag = "true" if enabled else "false"
+        for path in _setup_ini_write_targets():
+            try:
+                _update_ini_key(path, "third_party", f"{slug}_enabled", flag)
+                if enabled:
+                    _update_ini_key(path, "third_party", "enabled", "true")
+            except Exception:  # noqa: BLE001
+                pass
     _auto_sync_and_respond(
         {"provider": slug, "enabled": enabled, "origin": info.get("origin"),
          "message": f"Provider '{slug}' {'enabled' if enabled else 'disabled'}."},

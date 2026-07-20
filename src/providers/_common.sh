@@ -47,16 +47,51 @@ provider_ini_get() {
 }
 
 # ─── INI Writer ─────────────────────────────────────
-# Usage: ini_set <section> <key> <value>
+# Usage: provider_ini_set <section> <key> <value>
 # Writes to BOTH deployed and source INI files.
+# Section-scoped update-or-insert (same idea as agictl _update_ini_key).
+# Do NOT use grep -A — shared key names like "enabled" exist in many sections.
 provider_ini_set() {
   local section="$1" key="$2" value="$3"
   local _files=()
+  local ini_file tmp
   [ -f "/etc/versa-agi/setup.ini" ] && _files+=("/etc/versa-agi/setup.ini")
   [ -f "${SCRIPT_DIR}/setup.ini" ] && [ "${SCRIPT_DIR}/setup.ini" != "/etc/versa-agi/setup.ini" ] && _files+=("${SCRIPT_DIR}/setup.ini")
   for ini_file in "${_files[@]}"; do
-    if grep -A 100 "^\[${section}\]" "${ini_file}" 2>/dev/null | grep -q "^${key}="; then
-      sed -i "/^\[${section}\]/,/^\[/{s/^${key}=.*/${key}=${value}/}" "${ini_file}" 2>/dev/null || true
+    grep -q "^\[${section}\]" "${ini_file}" 2>/dev/null || continue
+    [ -w "${ini_file}" ] || continue
+    tmp="$(mktemp)" || continue
+    if ! SECTION="${section}" KEY="${key}" VALUE="${value}" awk '
+      BEGIN {
+        sec = ENVIRON["SECTION"]; k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]
+        in_sec = 0; done = 0; saw_sec = 0
+      }
+      /^\[/ {
+        if (in_sec && !done) { print k "=" v; done = 1 }
+        in_sec = ($0 == "[" sec "]")
+        if (in_sec) saw_sec = 1
+        print
+        next
+      }
+      in_sec && !done {
+        line = $0
+        sub(/[[:space:]]+$/, "", line)
+        if (line ~ ("^" k "=") || line ~ ("^" k "[[:space:]]*=")) {
+          print k "=" v
+          done = 1
+          next
+        }
+      }
+      { print }
+      END {
+        if (saw_sec && in_sec && !done) print k "=" v
+      }
+    ' "${ini_file}" > "${tmp}"; then
+      rm -f "${tmp}"
+      continue
+    fi
+    if ! mv "${tmp}" "${ini_file}"; then
+      rm -f "${tmp}"
     fi
   done
 }

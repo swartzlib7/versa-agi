@@ -1430,6 +1430,7 @@ SystemSettingsModal {
 #task-tabs TabPane,
 #agent-tabs TabPane {
     height: 100%;
+    min-height: 0;
     padding: 0;
 }
 
@@ -1704,6 +1705,7 @@ SystemSettingsModal {
 #mm-models-pane,
 #mm-providers-pane {
     height: 100%;
+    min-height: 0;
     layout: vertical;
 }
 
@@ -2570,6 +2572,7 @@ ModelManagerModal {
     background: $surface;
     border: thick #1a73e8;
     layout: vertical;
+    overflow: hidden;
 }
 
 #model-manager-tabs {
@@ -2582,6 +2585,7 @@ ModelManagerModal {
     min-height: 0;
 }
 
+/* Keep Edit/Reset/Remove/Add/Close on-screen (ProviderForm .pf-actions pattern). */
 #model-manager-footer {
     dock: bottom;
     height: auto;
@@ -2598,22 +2602,32 @@ ModelManagerModal {
 }
 
 #mm-help {
+    height: auto;
+    max-height: 5;
     margin-bottom: 1;
+    overflow-y: auto;
+}
+
+#mm-feedback {
+    height: auto;
+    max-height: 3;
+    overflow-y: auto;
 }
 
 .mm-subheader {
     margin-top: 1;
 }
 
+/* Fill pane down to footer; min-height 0 so small terminals can shrink the table. */
 #mm-models-table {
     height: 1fr;
-    min-height: 10;
+    min-height: 0;
     border: solid $primary;
 }
 
 #mm-providers-table {
     height: 1fr;
-    min-height: 8;
+    min-height: 0;
     border: solid $primary;
 }
 
@@ -2998,21 +3012,22 @@ ModelFeedbackModal {
     margin: 0 1;
 }
 
-/* Model Manager sub-modals (Add/Edit forms) — centered like other modals. */
+/* Model Manager sub-modals (Add/Edit forms) — fixed shell + 1fr scroll so
+   Save/Cancel stay visible on short terminals (same idea as provider-pick). */
 #catalog-form-shell {
     width: 72%;
-    height: auto;
+    height: 88%;
     max-height: 88%;
     padding: 1 2;
     background: $surface;
     border: thick $accent;
     layout: vertical;
+    overflow: hidden;
 }
 
 #catalog-form-scroll {
-    height: auto;
-    min-height: 12;
-    max-height: 50;
+    height: 1fr;
+    min-height: 0;
     margin-top: 1;
 }
 
@@ -3027,6 +3042,7 @@ ModelFeedbackModal {
 }
 
 #catalog-form-footer {
+    dock: bottom;
     height: auto;
     margin-top: 1;
     border-top: solid $accent;

@@ -48,6 +48,19 @@ else
   ok()    { echo -e "\033[0;32m[OK]\033[0m $*"; }
   warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
   error() { echo -e "\033[0;31m[ERROR]\033[0m $*"; exit 1; }
+  confirm() {
+    local prompt="${1:-Continue?}" default="${2:-n}" reply="" hint="[y/N]"
+    [ "${default}" = "y" ] && hint="[Y/n]"
+    echo ""
+    read -r -p "  ${prompt} ${hint} " reply || true
+    echo
+    REPLY="${reply}"
+    if [ "${default}" = "y" ]; then
+      [[ ! ${REPLY} =~ ^[Nn]([Oo])?$ ]]
+    else
+      [[ ${REPLY} =~ ^[Yy]([Ee][Ss])?$ ]]
+    fi
+  }
 fi
 
 VERSION="3.3.3"
@@ -2526,24 +2539,19 @@ BASHEOF"
   _run_gemini_auth=false
   if [ "${_gemini_has_key}" = true ]; then
     echo "  Current status: configured"
-    read -p "  Keep Gemini enabled? [Y/n]: " -n 1 -r _gemini_ans
-    echo ""
-    if [[ "${_gemini_ans}" =~ ^[Nn]$ ]]; then
-      info "Gemini left as-is — clear the key via agitop / setup.ini if you want it off"
-    else
-      read -p "  Update Gemini credentials? [y/N]: " -n 1 -r _gemini_upd
-      echo ""
-      if [[ "${_gemini_upd}" =~ ^[Yy]$ ]]; then
+    # Line-based confirm (same as ui_lib / OrbStack-safe) — not read -n 1.
+    if confirm "Keep Gemini enabled?" "y"; then
+      if confirm "Update Gemini credentials?" "n"; then
         _run_gemini_auth=true
       else
         ok "Gemini — kept (no credential change)"
       fi
+    else
+      info "Gemini left as-is — clear the key via agitop / setup.ini if you want it off"
     fi
   else
     echo "  Current status: not configured"
-    read -p "  Enable Gemini (Google)? [y/N]: " -n 1 -r _gemini_ans
-    echo ""
-    if [[ "${_gemini_ans}" =~ ^[Yy]$ ]]; then
+    if confirm "Enable Gemini (Google)?" "n"; then
       _run_gemini_auth=true
     else
       info "Gemini provider skipped"
