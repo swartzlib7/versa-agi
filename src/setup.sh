@@ -63,7 +63,7 @@ else
   }
 fi
 
-VERSION="3.3.4"
+VERSION="3.3.5"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -1017,11 +1017,12 @@ if [ "${UPDATE_MODE}" = false ]; then
 
   # ── Client overrides: sync INI values to match installation type selection ──
   if [ "${INSTALL_TYPE}" = "1" ]; then
-    # Cloud-only: no local AI, reset topology to default
+    # Cloud-only: no local AI. mode=cloud + enabled=false gates model migrate so
+    # gemma/local catalog rows are NOT seeded into Model Manager.
     INI_TOPOLOGY="local"
     INI_EXECUTION_MODE="cloud"
     INI_LOCAL_AI_ENABLED="false"
-    info "Client (cloud only) — local AI will be skipped"
+    info "Client (cloud only) — local AI will be skipped (no local models in catalog)"
   else
     # Client + Local AI: force topology=client and mode=hybrid
     # This prevents a stale topology=server (from a shared INI) from
@@ -2637,43 +2638,43 @@ if [ -d "${PROVIDERS_DIR}" ]; then
     echo "  ── ${display} ──"
     echo "  Current status: ${state_label}"
 
-    local answer
+    # Line-based confirm (OrbStack-safe). read -n 1 was dropping the keystroke
+    # so "Enable OpenRouter? y" could silently skip and leave openrouter_enabled=false.
     if [ "${current}" = "true" ]; then
-      read -p "  Keep ${display} enabled? [Y/n]: " -n 1 -r answer
-    else
-      read -p "  Enable ${display}? [y/N]: " -n 1 -r answer
-    fi
-    echo ""
-
-    if [ "${current}" = "true" ]; then
-      # Currently enabled — default is Y (keep)
-      if [[ "${answer}" =~ ^[Nn]$ ]]; then
+      if ! confirm "Keep ${display} enabled?" "y"; then
         info "Disabling ${display}..."
         chmod +x "${script}"
         bash "${script}" --uninstall
         return
       fi
-
-      # Provider stays enabled — ask about key update
-      local key_answer
-      read -p "  Update API key? [y/N]: " -n 1 -r key_answer
-      echo ""
-      if [[ ! "${key_answer}" =~ ^[Yy]$ ]]; then
+      if ! confirm "Update API key?" "n"; then
         ok "${display} — kept (no key change)"
         _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
         return
       fi
     else
-      # Currently disabled — default is N (skip)
-      if [[ ! "${answer}" =~ ^[Yy]$ ]]; then
+      if ! confirm "Enable ${display}?" "n"; then
         info "${display} provider skipped"
         return
       fi
+      # Opt-in: stamp enabled into both INIs before the provider script runs so
+      # migrate / source-status see it even if the script exits early.
+      for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+        if [ -f "${_ini_file}" ]; then
+          sed -i "/^\[third_party\]/,/^\[/{s/^${ini_key}=.*/${ini_key}=true/}" "${_ini_file}" 2>/dev/null || true
+        fi
+      done
     fi
 
     # Run the provider setup
     chmod +x "${script}"
     bash "${script}"
+    # Re-assert enable after script (source→deployed sync later must not lose it)
+    for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+      if [ -f "${_ini_file}" ]; then
+        sed -i "/^\[third_party\]/,/^\[/{s/^${ini_key}=.*/${ini_key}=true/}" "${_ini_file}" 2>/dev/null || true
+      fi
+    done
     _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
   }
 
@@ -3190,6 +3191,55 @@ REPAIRCFG
 
 fi  # end UPDATE_MODE post-deploy steps
 
+# ─── Heal keyed third-party providers (fresh + --update) ──
+# Step 9d is skipped on --update, and OrbStack historically dropped read -n 1
+# answers so "Enable OpenRouter?" could silently leave openrouter_enabled=false
+# even when a key was saved. If a key exists, stamp enabled=true before migrate
+# so Import / provider list stay consistent without manual sed.
+_heal_keyed_third_party_providers() {
+  local keys_env="/etc/versa-agi/provider_keys.env"
+  local slug ini_key env_var has_key enabled rest
+  local -a pairs=(
+    "xai:xai_enabled:XAI_API_KEY"
+    "openai:openai_enabled:OPENAI_API_KEY"
+    "anthropic:anthropic_enabled:ANTHROPIC_API_KEY"
+    "openrouter:openrouter_enabled:OPENROUTER_API_KEY"
+  )
+  local healed=0
+  for pair in "${pairs[@]}"; do
+    slug="${pair%%:*}"
+    rest="${pair#*:}"
+    ini_key="${rest%%:*}"
+    env_var="${rest#*:}"
+    has_key=""
+    if [ -f "${keys_env}" ]; then
+      has_key="$(grep -E "^${env_var}=.+" "${keys_env}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\"' | tr -d "'" || true)"
+    fi
+    if [ -z "${has_key}" ]; then
+      has_key="$(ini_get third_party "${slug}_api_key" "")"
+    fi
+    [ -n "${has_key}" ] || continue
+    enabled="$(ini_get third_party "${ini_key}" false)"
+    if [ "${enabled}" = "true" ]; then
+      continue
+    fi
+    for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+      if [ -f "${_ini_file}" ]; then
+        sed -i "/^\[third_party\]/,/^\[/{s/^${ini_key}=.*/${ini_key}=true/}" "${_ini_file}" 2>/dev/null || true
+        sed -i "/^\[third_party\]/,/^\[/{s/^enabled=.*/enabled=true/}" "${_ini_file}" 2>/dev/null || true
+      fi
+    done
+    if command -v agictl >/dev/null 2>&1; then
+      agictl provider enable "${slug}" --no-sync >/dev/null 2>&1 || true
+    fi
+    ok "Healed ${slug}: key present → ${ini_key}=true"
+    healed=$((healed + 1))
+  done
+  if [ "${healed}" -gt 0 ]; then
+    info "Provider enable heal applied (${healed}) — was likely skipped on a prior OrbStack prompt"
+  fi
+}
+
 # ─── Config Reconcile + Model Catalog Baseline + Sync (Edition 2.x) ──
 # Runs IDENTICALLY for fresh installs and updates — deterministic regeneration:
 #   • `agictl system reconcile-config` — regenerates the deployed setup.ini and
@@ -3206,6 +3256,8 @@ fi  # end UPDATE_MODE post-deploy steps
 # ownership/modes on the files they touch.
   if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
   section "Model Catalog — Reconcile, Baseline & Sync"
+  _heal_keyed_third_party_providers
+
   if [ -f "${SCRIPT_DIR}/models.ini" ]; then
     if agictl model openrouter patch-template --models-ini "${SCRIPT_DIR}/models.ini" >/dev/null 2>&1; then
       ok "OpenRouter catalog metadata refreshed in shipped models.ini"

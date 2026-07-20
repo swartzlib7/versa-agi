@@ -12,6 +12,7 @@ directly — that keeps the dashboard consistent with the CLI and setup.sh.
 """
 
 import json
+import os
 import re
 import subprocess
 
@@ -93,19 +94,85 @@ def _run_agictl(args, timeout=25):
 
 
 def _configured_source_providers():
-    """Configured (enabled + keyed) providers offering catalog import, with labels.
+    """Providers with an API key — drives Add Model Import buttons.
 
-    Empty when none are configured — do not invent OpenRouter (that hid the real
-    "disabled in setup.ini" state when other providers were keyed).
+    Prefer ``agictl model source providers``; fall back to reading keys from
+    /etc when sudo/agictl is unavailable so a keyed OpenRouter still appears.
     """
     ok, data, _err = _run_agictl(["model", "source", "providers"])
-    if not ok:
-        return []
-    return [
-        {"slug": p["slug"], "label": p.get("label", p["slug"])}
-        for p in data.get("providers", [])
-        if p.get("configured")
-    ]
+    if ok:
+        rows = [
+            {"slug": p["slug"], "label": p.get("label", p["slug"])}
+            for p in data.get("providers", [])
+            if p.get("configured")
+        ]
+        if rows:
+            return rows
+
+    # Local fallback (key present → show Import)
+    labels = {
+        "google": "Google",
+        "xai": "xAI",
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "openrouter": "OpenRouter",
+    }
+    key_env = {
+        "google": "GEMINI_API_KEY",
+        "xai": "XAI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }
+    found = []
+    for slug, env_var in key_env.items():
+        if _provider_key_present(env_var, slug):
+            found.append({"slug": slug, "label": labels[slug]})
+    return found
+
+
+def _provider_key_present(env_var: str, slug: str) -> bool:
+    """True if a non-empty key exists in env files or setup.ini for this provider."""
+    if (os.environ.get(env_var) or "").strip():
+        return True
+    for path in (
+        "/etc/versa-agi/provider_keys.env",
+        "/etc/versa-agi/coa.env",
+        "/etc/versa-agi/inference_endpoint.env",
+    ):
+        try:
+            with open(path) as f:
+                for line in f:
+                    if line.startswith(f"{env_var}="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return True
+        except OSError:
+            continue
+    setup_keys = {
+        "google": ("gemini", "api_key"),
+        "xai": ("third_party", "xai_api_key"),
+        "openai": ("third_party", "openai_api_key"),
+        "anthropic": ("third_party", "anthropic_api_key"),
+        "openrouter": ("third_party", "openrouter_api_key"),
+    }
+    sec_opt = setup_keys.get(slug)
+    if not sec_opt:
+        return False
+    section, option = sec_opt
+    try:
+        in_sec = False
+        with open("/etc/versa-agi/setup.ini") as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    in_sec = s == f"[{section}]"
+                elif in_sec and s.startswith(f"{option}="):
+                    return bool(s.split("=", 1)[1].strip())
+    except OSError:
+        pass
+    return False
+
 
 
 def _yn(flag):

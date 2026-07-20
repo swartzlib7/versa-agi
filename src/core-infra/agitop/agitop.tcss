@@ -2412,14 +2412,22 @@ ApiKeysModal {
     background: $surface 80%;
 }
 
+/* Fixed shell + 1fr scroll so Save/Close stay on-screen (catalog-form pattern). */
 #api-keys-dialog {
     width: 52%;
-    height: auto;
-    max-height: 68%;
+    height: 80%;
+    max-height: 88%;
     padding: 1 2;
     background: $surface;
     border: thick #7c3aed;
     layout: vertical;
+    overflow: hidden;
+}
+
+#api-keys-scroll {
+    height: 1fr;
+    min-height: 0;
+    margin-top: 0;
 }
 
 #api-keys-columns {
@@ -2444,6 +2452,21 @@ ApiKeysModal {
 #api-keys-feedback {
     margin-top: 1;
     padding: 1;
+    height: auto;
+}
+
+#api-keys-footer {
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    align: center middle;
+}
+
+#api-keys-footer Button {
+    width: 1fr;
+    margin: 0 2;
+    height: 3;
 }
 
 /* ─── Model Manager Modal ────────────────────── */

@@ -48,7 +48,6 @@ from openrouter_catalog import (
     list_addable_models as _or_list_addable,
     normalize_input_modalities,
     normalize_output_modalities,
-    openrouter_configured,
     or_model_summary,
 )
 
@@ -123,26 +122,28 @@ def resolve_provider_api_key(slug: str) -> str:
 
 
 def provider_configured(slug: str, providers: dict | None = None) -> tuple[bool, str]:
-    """True when the provider is registered+enabled and has a usable API key."""
-    if slug == "openrouter":
-        return openrouter_configured()
+    """True when the provider has a usable API key (Import / Models API gating).
+
+    Import buttons key off the API key only. Runtime routing still requires the
+    provider registry ``enabled`` flag (and setup.ini ``{slug}_enabled`` for
+    migrate) — those are separate from "can we call this provider's Models API?".
+    """
     if slug not in ALL_PROVIDERS:
         return False, f"Unsupported provider '{slug}'"
-    providers = providers if providers is not None else load_providers()
-    prov = providers.get(slug)
-    if not prov:
-        return False, f"Provider '{slug}' is not in the registry"
-    if not prov.get("enabled"):
-        return False, f"Provider '{slug}' is disabled"
+    # OpenRouter keeps its own resolver (setup.ini + provider_keys.env paths).
+    if slug == "openrouter":
+        from openrouter_catalog import resolve_openrouter_api_key
+        if not resolve_openrouter_api_key():
+            return False, "OpenRouter API key not set (sudo agictl system set-key openrouter …)"
+        return True, ""
     if not resolve_provider_api_key(slug):
         return False, f"{PROVIDER_LABEL.get(slug, slug)} API key not set"
     return True, ""
 
 
 def configured_providers() -> list[str]:
-    """Slugs that are registered, enabled, and keyed (UI button gating)."""
-    providers = load_providers()
-    return [s for s in ALL_PROVIDERS if provider_configured(s, providers)[0]]
+    """Slugs with a usable API key (Import button gating)."""
+    return [s for s in ALL_PROVIDERS if provider_configured(s)[0]]
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────

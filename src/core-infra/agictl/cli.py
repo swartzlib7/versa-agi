@@ -2908,7 +2908,10 @@ def source_cmd():
 
 @source_cmd.command("providers")
 def source_providers_cmd():
-    """List providers that are registered, enabled, and keyed (UI button gating)."""
+    """List providers with Import eligibility (API key present = configured)."""
+    if _pc is None:
+        json_response(False, error="provider_catalog unavailable on this install")
+        sys.exit(1)
     rows = []
     for slug in _pc.supported_providers():
         ok, reason = _pc.provider_configured(slug)
@@ -3191,32 +3194,48 @@ def _build_migration_rows(target):
     gpu_backend = _resolve_gpu_backend()
     local_provider = local_provider_for_backend(gpu_backend)
     is_llamacpp = local_provider == "llamacpp"
-    provider_rows.append((
-        "ollama",
-        f"{'false' if is_llamacpp else 'true'}|Local (Ollama)|ChatOllama",
-    ))
-    provider_rows.append((
-        "llamacpp",
-        f"{'true' if is_llamacpp else 'false'}|Local (llama.cpp / SYCL)|ChatOpenAI",
-    ))
+    # Cloud-only Client (install type 1) sets local_ai.enabled=false + mode=cloud.
+    # Local models / Ollama / llama.cpp belong only in Local AI topologies
+    # (local, client+local AI / hybrid, server).
+    local_ai_enabled = (
+        _read_ini_value("local_ai", "enabled", "false").strip().lower() == "true"
+    )
+    exec_mode = _read_ini_value("gemini", "mode", "cloud").strip().lower()
+    include_local = local_ai_enabled and exec_mode in ("local", "hybrid")
 
-    # ── Local (advisory; pipeline-owned [local_models]/[context_windows]) ──
-    local_keys = local_models or (
-        [k for k, _ in mini.items("local_models")] if mini.has_section("local_models") else [])
-    for k in local_keys:
-        rec, mx = _local_ctx(k, 4096)
-        m = cat_meta.get(k, {})
-        lbl = m.get("label", _local_label(k, k))
-        row = {
-            "class": "local", "provider": local_provider, "enabled": True, "coa": False,
-            "ctx_recommended": rec, "ctx_max": mx,
-            "work_modality": m.get("work_modality", "local"),
-            "input_modalities": m.get("input_modalities", "text"),
-            "output_modalities": m.get("output_modalities", "text"),
-            "router_eligible": m.get("router_eligible", False),
-            "label": lbl,
-        }
-        catalog_rows.append((k, catalog_row_to_value(row)))
+    if include_local:
+        provider_rows.append((
+            "ollama",
+            f"{'false' if is_llamacpp else 'true'}|Local (Ollama)|ChatOllama",
+        ))
+        provider_rows.append((
+            "llamacpp",
+            f"{'true' if is_llamacpp else 'false'}|Local (llama.cpp / SYCL)|ChatOpenAI",
+        ))
+        # ── Local (advisory; pipeline-owned [local_models]/[context_windows]) ──
+        local_keys = local_models or (
+            [k for k, _ in mini.items("local_models")]
+            if mini.has_section("local_models") else [])
+        for k in local_keys:
+            rec, mx = _local_ctx(k, 4096)
+            m = cat_meta.get(k, {})
+            lbl = m.get("label", _local_label(k, k))
+            row = {
+                "class": "local", "provider": local_provider, "enabled": True, "coa": False,
+                "ctx_recommended": rec, "ctx_max": mx,
+                "work_modality": m.get("work_modality", "local"),
+                "input_modalities": m.get("input_modalities", "text"),
+                "output_modalities": m.get("output_modalities", "text"),
+                "router_eligible": m.get("router_eligible", False),
+                "label": lbl,
+            }
+            catalog_rows.append((k, catalog_row_to_value(row)))
+    else:
+        # Keep registry stubs disabled so a later Local AI enable + migrate can flip them.
+        provider_rows.append(("ollama", "false|Local (Ollama)|ChatOllama"))
+        provider_rows.append(
+            ("llamacpp", "false|Local (llama.cpp / SYCL)|ChatOpenAI")
+        )
 
     return provider_rows, catalog_rows
 

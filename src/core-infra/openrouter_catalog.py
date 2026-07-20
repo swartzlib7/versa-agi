@@ -89,24 +89,11 @@ def resolve_openrouter_api_key() -> str:
 
 
 def openrouter_configured() -> tuple[bool, str]:
-    """True when OpenRouter is enabled and keyed.
+    """True when an OpenRouter API key is available (Import / Models API gating).
 
-    Enable is satisfied by either setup.ini ``openrouter_enabled=true`` (Step 9d /
-    set-key) **or** an enabled row in the models.ini provider registry (dashboard
-    ``provider enable``). Both used to diverge and hide Import buttons.
+    Runtime routing still needs the provider enabled in models.ini / setup.ini;
+    Import only needs the key (same rule as other ``model source`` providers).
     """
-    enabled = read_setup_value("third_party", "openrouter_enabled", "false").lower() == "true"
-    if not enabled:
-        try:
-            from model_catalog import load_providers
-            enabled = bool((load_providers().get("openrouter") or {}).get("enabled"))
-        except Exception:  # noqa: BLE001
-            pass
-    if not enabled:
-        return False, (
-            "OpenRouter provider is disabled "
-            "(setup.ini openrouter_enabled / agictl provider enable openrouter)"
-        )
     if not resolve_openrouter_api_key():
         return False, "OpenRouter API key not set (sudo agictl system set-key openrouter …)"
     return True, ""

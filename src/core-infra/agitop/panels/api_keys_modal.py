@@ -5,7 +5,7 @@ import json
 import subprocess
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
-from textual.containers import Vertical, Horizontal, Container
+from textual.containers import Vertical, Horizontal, Container, VerticalScroll
 from textual.widgets import Static, Button, Input
 
 
@@ -97,32 +97,33 @@ class ApiKeysModal(ModalScreen):
             yield Static("[bold]🔑 API Keys & Credentials[/]", id="msg-dialog-header")
             yield Static("", id="api-keys-status")
 
-            with Container(id="api-keys-columns"):
-                with Vertical(classes="api-keys-col"):
-                    yield Static("[b]Gemini API Key[/]  [dim](Google AI Studio / GCP)[/]")
-                    yield Input(placeholder="Enter Gemini API Key...", password=True, id="input-gemini-key")
-                    yield Static("", id="status-gemini")
-                    yield Static("[b]xAI API Key[/]  [dim](Grok)[/]")
-                    yield Input(placeholder="Enter xAI API Key...", password=True, id="input-xai-key")
-                    yield Static("", id="status-xai")
-                    yield Static("[b]Anthropic API Key[/]  [dim](Claude Models)[/]")
-                    yield Input(placeholder="Enter Anthropic API Key...", password=True, id="input-anthropic-key")
-                    yield Static("", id="status-anthropic")
+            with VerticalScroll(id="api-keys-scroll"):
+                with Container(id="api-keys-columns"):
+                    with Vertical(classes="api-keys-col"):
+                        yield Static("[b]Gemini API Key[/]  [dim](Google AI Studio / GCP)[/]")
+                        yield Input(placeholder="Enter Gemini API Key...", password=True, id="input-gemini-key")
+                        yield Static("", id="status-gemini")
+                        yield Static("[b]xAI API Key[/]  [dim](Grok)[/]")
+                        yield Input(placeholder="Enter xAI API Key...", password=True, id="input-xai-key")
+                        yield Static("", id="status-xai")
+                        yield Static("[b]Anthropic API Key[/]  [dim](Claude Models)[/]")
+                        yield Input(placeholder="Enter Anthropic API Key...", password=True, id="input-anthropic-key")
+                        yield Static("", id="status-anthropic")
 
-                with Vertical(classes="api-keys-col"):
-                    yield Static("[b]VersaVoice API Token[/]  [dim](Sponsor Token)[/]")
-                    yield Input(placeholder="Enter VersaVoice API Token...", password=True, id="input-vv-token")
-                    yield Static("", id="status-vv")
-                    yield Static("[b]OpenAI API Key[/]  [dim](GPT Models)[/]")
-                    yield Input(placeholder="Enter OpenAI API Key...", password=True, id="input-openai-key")
-                    yield Static("", id="status-openai")
-                    yield Static("[b]OpenRouter API Key[/]  [dim](Multi-vendor aggregator)[/]")
-                    yield Input(placeholder="Enter OpenRouter API Key...", password=True, id="input-openrouter-key")
-                    yield Static("", id="status-openrouter")
+                    with Vertical(classes="api-keys-col"):
+                        yield Static("[b]VersaVoice API Token[/]  [dim](Sponsor Token)[/]")
+                        yield Input(placeholder="Enter VersaVoice API Token...", password=True, id="input-vv-token")
+                        yield Static("", id="status-vv")
+                        yield Static("[b]OpenAI API Key[/]  [dim](GPT Models)[/]")
+                        yield Input(placeholder="Enter OpenAI API Key...", password=True, id="input-openai-key")
+                        yield Static("", id="status-openai")
+                        yield Static("[b]OpenRouter API Key[/]  [dim](Multi-vendor aggregator)[/]")
+                        yield Input(placeholder="Enter OpenRouter API Key...", password=True, id="input-openrouter-key")
+                        yield Static("", id="status-openrouter")
 
-            yield Static("", id="api-keys-feedback")
+                yield Static("", id="api-keys-feedback")
 
-            with Horizontal(id="msg-dialog-actions"):
+            with Horizontal(id="api-keys-footer"):
                 yield Button("💾 Save Changes", variant="success", id="btn-api-save")
                 yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
 
