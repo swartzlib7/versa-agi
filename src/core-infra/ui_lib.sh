@@ -358,18 +358,22 @@ tty_prompt_read() {
 confirm() {
   local prompt="${1:-Continue?}"
   local default="${2:-n}"  # "y" or "n"
+  local reply=""
 
   local hint="[y/N]"
   [ "${default}" = "y" ] && hint="[Y/n]"
 
   echo ""
-  tty_prompt_read "  ${prompt} ${hint} " -n 1 -r
+  # Line-based (type y/n then Enter) — `read -n 1` is unreliable on OrbStack.
+  tty_prompt_read "  ${prompt} ${hint} " -r reply
+  reply="$(printf '%s' "${reply}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   echo
+  REPLY="${reply}"
 
   if [ "${default}" = "y" ]; then
-    [[ ! $REPLY =~ ^[Nn]$ ]]
+    [[ ! ${REPLY} =~ ^[Nn]([Oo])?$ ]]
   else
-    [[ $REPLY =~ ^[Yy]$ ]]
+    [[ ${REPLY} =~ ^[Yy]([Ee][Ss])?$ ]]
   fi
 }
 
@@ -377,6 +381,7 @@ confirm() {
 confirm_accent() {
   local prompt="${1:-Continue?}"
   local default="${2:-n}"  # "y" or "n"
+  local reply=""
 
   : "${BCYAN:=}"
   : "${RESET:=}"
@@ -390,13 +395,15 @@ confirm_accent() {
   else
     echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} "
   fi
-  tty_read -n 1 -r
+  tty_read -r reply
+  reply="$(printf '%s' "${reply}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   echo
+  REPLY="${reply}"
 
   if [ "${default}" = "y" ]; then
-    [[ ! $REPLY =~ ^[Nn]$ ]]
+    [[ ! ${REPLY} =~ ^[Nn]([Oo])?$ ]]
   else
-    [[ $REPLY =~ ^[Yy]$ ]]
+    [[ ${REPLY} =~ ^[Yy]([Ee][Ss])?$ ]]
   fi
 }
 

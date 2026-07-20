@@ -95,6 +95,28 @@ _install_acceptance_tty_prompt_read() {
   _install_acceptance_tty_read "$@"
 }
 
+# Trim CR/space from a tty reply (OrbStack often needs Enter; may send \r).
+_install_acceptance_trim_reply() {
+  printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# Line-based y/n (no -n 1 — single-key read is unreliable on OrbStack /dev/tty).
+# Echoes normalized reply to stdout when varname omitted; otherwise sets varname.
+_install_acceptance_read_yn() {
+  local prompt="$1"
+  local varname="${2:-}"
+  local raw=""
+  _install_acceptance_tty_prompt_read "${prompt}" -r raw
+  raw="$(_install_acceptance_trim_reply "${raw}")"
+  if [ -n "${varname}" ]; then
+    printf -v "${varname}" '%s' "${raw}"
+  else
+    REPLY="${raw}"
+  fi
+  # Enter already advanced the line on the tty; keep a blank line for layout.
+  echo "" >&2
+}
+
 # ─── Box-style input line (matches text_box body) ───
 _install_acceptance_input_line() {
   local label="$1"
@@ -262,9 +284,8 @@ install_acceptance_welcome() {
     echo ""
   fi
 
-  _install_acceptance_tty_prompt_read "  Accept and continue? [y/N] " -n 1 -r
-  echo ""
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+  _install_acceptance_read_yn "  Accept and continue? [y/N] "
+  if [[ ! $REPLY =~ ^[Yy]([Ee][Ss])?$ ]]; then
     info "Setup cancelled - no changes made."
     exit 0
   fi
@@ -311,16 +332,13 @@ _install_acceptance_feature_ask() {
   else
     hint="[y/N]"
   fi
-  _install_acceptance_tty_prompt_read "  ${prompt} ${hint} " -n 1 -r reply
-  # Cosmetic line break after the single keypress — MUST go to stderr, not
-  # stdout, or it pollutes the command-substituted return value (a leading
-  # newline would make every "y" answer normalize to false).
-  echo "" >&2
+  # Line-based (y + Enter). Breaks MUST go to stderr — this runs in $().
+  _install_acceptance_read_yn "  ${prompt} ${hint} " reply
   if [ -z "${reply}" ]; then
     [ "${default_yes}" = true ] && echo "true" || echo "false"
     return
   fi
-  [[ ${reply} =~ ^[Yy]$ ]] && echo "true" || echo "false"
+  [[ ${reply} =~ ^[Yy]([Ee][Ss])?$ ]] && echo "true" || echo "false"
 }
 
 # The Organization EXPERIMENTAL + sudo-power disclaimer (second confirmation).
@@ -518,9 +536,8 @@ install_acceptance_update_prompt() {
     echo ""
   fi
 
-  _install_acceptance_tty_prompt_read "  Continue? [Y/n] " -n 1 -r
-  echo ""
-  if [[ $REPLY =~ ^[Nn]$ ]]; then
+  _install_acceptance_read_yn "  Continue? [Y/n] "
+  if [[ $REPLY =~ ^[Nn]([Oo])?$ ]]; then
     info "Update cancelled."
     exit 0
   fi
@@ -572,27 +589,15 @@ install_acceptance_vv_prompt() {
   fi
 
   if [ "${default_enabled}" = "false" ]; then
-    if [ -w /dev/tty ]; then
-      echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] " >/dev/tty
-    else
-      echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] "
-    fi
-    _install_acceptance_tty_read -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    _install_acceptance_read_yn "  Enable $(_install_acceptance_brand)? [y/N] "
+    if [[ $REPLY =~ ^[Yy]([Ee][Ss])?$ ]]; then
       export ENABLE_VV="true"
     else
       export ENABLE_VV="false"
     fi
   else
-    if [ -w /dev/tty ]; then
-      echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] " >/dev/tty
-    else
-      echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] "
-    fi
-    _install_acceptance_tty_read -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
+    _install_acceptance_read_yn "  Enable $(_install_acceptance_brand)? [Y/n] "
+    if [[ $REPLY =~ ^[Nn]([Oo])?$ ]]; then
       export ENABLE_VV="false"
     else
       export ENABLE_VV="true"
