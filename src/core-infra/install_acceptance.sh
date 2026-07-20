@@ -69,19 +69,51 @@ _install_acceptance_link() {
   _install_acceptance_accent "$1"
 }
 
+# Prefer ui_lib tty helpers; fallback if sourced without ui_lib.
+_install_acceptance_tty_read() {
+  if declare -F tty_read >/dev/null 2>&1; then
+    tty_read "$@"
+  elif [ -r /dev/tty ]; then
+    read "$@" </dev/tty
+  else
+    read "$@"
+  fi
+}
+
+_install_acceptance_tty_prompt_read() {
+  local prompt="$1"
+  shift
+  if declare -F tty_prompt_read >/dev/null 2>&1; then
+    tty_prompt_read "${prompt}" "$@"
+    return
+  fi
+  if [ -w /dev/tty ]; then
+    printf '%s' "${prompt}" >/dev/tty
+  else
+    printf '%s' "${prompt}" >&2
+  fi
+  _install_acceptance_tty_read "$@"
+}
+
 # ─── Box-style input line (matches text_box body) ───
 _install_acceptance_input_line() {
   local label="$1"
   local value="${2:-}"
+  local out=""
   : "${BCYAN:=}"
   : "${RESET:=}"
-  echo -e -n "  ${BCYAN}│${RESET}  ${label}"
+  out="  ${BCYAN}│${RESET}  ${label}"
   if [ -n "${value}" ]; then
-    echo -e -n "["
-    printf '%s' "${value}"
-    echo -e -n "]: "
+    out="${out}["
+    out="${out}${value}"
+    out="${out}]: "
   else
-    echo -e -n ": "
+    out="${out}: "
+  fi
+  if [ -w /dev/tty ]; then
+    echo -e -n "${out}" >/dev/tty
+  else
+    echo -e -n "${out}"
   fi
 }
 
@@ -126,7 +158,7 @@ install_acceptance_email_prompt() {
 
     if [ -n "${existing}" ]; then
       _install_acceptance_input_line "Email" "${existing}"
-      read -r reply
+      _install_acceptance_tty_read -r reply
       case "${reply}" in
         "") INSTALL_ACCEPTANCE_EMAIL="${existing}"; done=true ;;
         "-") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
@@ -141,7 +173,7 @@ install_acceptance_email_prompt() {
       esac
     else
       _install_acceptance_input_line "Email"
-      read -r reply
+      _install_acceptance_tty_read -r reply
       case "${reply}" in
         "") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
         "-")
@@ -230,7 +262,7 @@ install_acceptance_welcome() {
     echo ""
   fi
 
-  read -p "  Accept and continue? [y/N] " -n 1 -r
+  _install_acceptance_tty_prompt_read "  Accept and continue? [y/N] " -n 1 -r
   echo ""
   if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     info "Setup cancelled - no changes made."
@@ -279,7 +311,7 @@ _install_acceptance_feature_ask() {
   else
     hint="[y/N]"
   fi
-  read -p "  ${prompt} ${hint} " -n 1 -r reply
+  _install_acceptance_tty_prompt_read "  ${prompt} ${hint} " -n 1 -r reply
   # Cosmetic line break after the single keypress — MUST go to stderr, not
   # stdout, or it pollutes the command-substituted return value (a leading
   # newline would make every "y" answer normalize to false).
@@ -486,7 +518,7 @@ install_acceptance_update_prompt() {
     echo ""
   fi
 
-  read -p "  Continue? [Y/n] " -n 1 -r
+  _install_acceptance_tty_prompt_read "  Continue? [Y/n] " -n 1 -r
   echo ""
   if [[ $REPLY =~ ^[Nn]$ ]]; then
     info "Update cancelled."
@@ -540,8 +572,12 @@ install_acceptance_vv_prompt() {
   fi
 
   if [ "${default_enabled}" = "false" ]; then
-    echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] "
-    read -n 1 -r
+    if [ -w /dev/tty ]; then
+      echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] " >/dev/tty
+    else
+      echo -e -n "  Enable $(_install_acceptance_brand)? [y/N] "
+    fi
+    _install_acceptance_tty_read -n 1 -r
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       export ENABLE_VV="true"
@@ -549,8 +585,12 @@ install_acceptance_vv_prompt() {
       export ENABLE_VV="false"
     fi
   else
-    echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] "
-    read -n 1 -r
+    if [ -w /dev/tty ]; then
+      echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] " >/dev/tty
+    else
+      echo -e -n "  Enable $(_install_acceptance_brand)? [Y/n] "
+    fi
+    _install_acceptance_tty_read -n 1 -r
     echo ""
     if [[ $REPLY =~ ^[Nn]$ ]]; then
       export ENABLE_VV="false"

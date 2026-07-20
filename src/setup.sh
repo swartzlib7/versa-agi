@@ -68,6 +68,13 @@ if [ "$(id -u)" -ne 0 ]; then
   error "This script must be run as root (sudo ./setup.sh)"
 fi
 
+# Reattach stdin to the controlling TTY when it is not already a terminal.
+# Second installs under OrbStack / curl|bash often leave stdin as a non-keyboard
+# fd; acceptance `read` then blocks with no prompt and Ctrl+C may not work.
+if [ ! -t 0 ] && [ -r /dev/tty ]; then
+  exec </dev/tty
+fi
+
 # ─── Parse Arguments ────────────────────────────────
 UPDATE_MODE=false
 DRY_RUN=false

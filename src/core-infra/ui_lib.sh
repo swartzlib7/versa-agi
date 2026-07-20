@@ -327,6 +327,32 @@ text_box() {
   echo ""
 }
 
+# ─── Controlling-TTY I/O ────────────────────────────
+# curl|bash, nested sudo, and some OrbStack reinstall sessions leave stdin as a
+# pipe or a fd that does not receive keystrokes. `read` then blocks with no
+# usable prompt and Ctrl+C may not reach the script. Prefer /dev/tty when present.
+
+tty_read() {
+  if [ -r /dev/tty ]; then
+    read "$@" </dev/tty
+  else
+    read "$@"
+  fi
+}
+
+# Write prompt to the controlling tty (fallback: stderr), then tty_read.
+# Usage: tty_prompt_read "Prompt text: " [-n 1] [-r] [varname]
+tty_prompt_read() {
+  local prompt="$1"
+  shift
+  if [ -w /dev/tty ]; then
+    printf '%s' "${prompt}" >/dev/tty
+  else
+    printf '%s' "${prompt}" >&2
+  fi
+  tty_read "$@"
+}
+
 # ─── Confirmation Prompt ────────────────────────────
 
 confirm() {
@@ -337,7 +363,7 @@ confirm() {
   [ "${default}" = "y" ] && hint="[Y/n]"
 
   echo ""
-  read -p "  ${prompt} ${hint} " -n 1 -r
+  tty_prompt_read "  ${prompt} ${hint} " -n 1 -r
   echo
 
   if [ "${default}" = "y" ]; then
@@ -359,8 +385,12 @@ confirm_accent() {
   [ "${default}" = "y" ] && hint="[Y/n]"
 
   echo ""
-  echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} "
-  read -n 1 -r
+  if [ -w /dev/tty ]; then
+    echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} " >/dev/tty
+  else
+    echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} "
+  fi
+  tty_read -n 1 -r
   echo
 
   if [ "${default}" = "y" ]; then
