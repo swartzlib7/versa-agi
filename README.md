@@ -105,9 +105,18 @@ Agents invoke `agictl` through typed LangGraph harness tools (`agictl_task`, `ag
 The infrastructure is provisioned strictly through a hardened orchestration wrapper natively connecting your operating system architecture to your chosen communication backbone (VersaVoice cloud API or local SQLite messaging):
 
 ```bash
-# Execute the native configuration pipeline
-curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh | sudo bash
+# Preferred — keeps stdin as your terminal (required for interactive prompts).
+# Works on native Linux and inside an OrbStack machine (`orb` shell / ssh orb).
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh)
+
+# Equally fine — download, then run
+curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh -o /tmp/versa-agi-install.sh
+sudo bash /tmp/versa-agi-install.sh
 ```
+
+> **Avoid `curl … | sudo bash` for this installer.** Piping occupies stdin, so the INSTALL ACCEPTANCE prompt cannot read the keyboard (hangs; Ctrl+C may not work). This is a general Unix/`curl|bash` issue — OrbStack’s docs recommend running a local setup script via `orb` rather than a piped installer ([Linux machines → Automatic setup](https://docs.orbstack.dev/machines/)).
+
+**OrbStack:** open an interactive shell first (`orb` or `ssh orb`), then use one of the commands above *inside* the Ubuntu machine — not `orb curl … | bash` from macOS.
 
 Setup reads the source `setup.ini` (next to `setup.sh`) as the **master configuration**. If `setup.ini` is missing, the installer scaffolds a blank template and drops into interactive configuration mode. The deployed copy at `/etc/versa-agi/setup.ini` is a runtime sync target — all setup scripts write changes back to both copies.
 

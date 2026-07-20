@@ -50,7 +50,7 @@ else
   error() { echo -e "\033[0;31m[ERROR]\033[0m $*"; exit 1; }
 fi
 
-VERSION="3.3.2"
+VERSION="3.3.3"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"

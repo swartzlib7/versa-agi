@@ -5,11 +5,14 @@
 # One-liner installation for Versa AGi infrastructure.
 # Downloads the latest release and runs setup.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh | sudo bash
+# Usage (preferred — stdin stays a TTY for interactive prompts):
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh)
+#   curl -fsSL .../install.sh -o /tmp/versa-agi-install.sh && sudo bash /tmp/versa-agi-install.sh
+#
+# Avoid: curl … | sudo bash  (stdin is the pipe — acceptance prompts hang)
 #
 # Requirements:
-#   - Linux (Ubuntu, Debian, Fedora, Arch)
+#   - Linux (Ubuntu, Debian, Fedora, Arch) — including OrbStack Ubuntu machines
 #   - git, curl
 #   - Root access (sudo)
 #
@@ -22,7 +25,7 @@ set -euo pipefail
 REPO_URL="https://github.com/swartzlib7/versa-agi.git"
 REPO_BRANCH="main"
 INSTALL_DIR="/tmp/versa-agi-install-$$"
-VERSION="3.3.2"
+VERSION="3.3.3"
 TEST_MODE=false
 
 # ─── Parse Arguments ────────────────────────────────
@@ -30,8 +33,12 @@ for arg in "$@"; do
   case "$arg" in
     --test)  TEST_MODE=true ;;
     --help|-h)
-      echo "Usage: curl -fsSL .../install.sh | sudo bash"
-      echo "       sudo ./install.sh [--test]"
+      echo "Usage (preferred):"
+      echo "  sudo bash <(curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh)"
+      echo "  curl -fsSL .../install.sh -o /tmp/versa-agi-install.sh && sudo bash /tmp/versa-agi-install.sh"
+      echo "  sudo ./install.sh [--test]"
+      echo ""
+      echo "Avoid: curl … | sudo bash  (breaks interactive prompts)"
       echo ""
       echo "  --test    Show visual output only, skip clone and setup"
       exit 0
@@ -87,9 +94,23 @@ echo ""
 if [ "$(id -u)" -ne 0 ]; then
   fail "This installer must be run as root."
   echo ""
-  echo -e "  ${DIM}Run with: curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh | sudo bash${RESET}"
+  echo -e "  ${DIM}Run with:${RESET}"
+  echo -e "  ${DIM}sudo bash <(curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh)${RESET}"
   echo ""
   exit 1
+fi
+
+# Piped install (curl|bash) occupies stdin — interactive acceptance cannot read
+# the keyboard. Prefer process substitution or a downloaded file (see --help).
+if [ ! -t 0 ] && [ "${TEST_MODE}" != true ]; then
+  warn "stdin is not a terminal (likely curl … | sudo bash)."
+  warn "Interactive prompts may hang. Prefer:"
+  echo ""
+  echo -e "  ${BOLD}sudo bash <(curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh)${RESET}"
+  echo ""
+  echo -e "  ${DIM}Or: curl … -o /tmp/versa-agi-install.sh && sudo bash /tmp/versa-agi-install.sh${RESET}"
+  echo -e "  ${DIM}Escape hatch: VERSA_INSTALL_ACCEPT=yes sudo -E bash …${RESET}"
+  echo ""
 fi
 
 # ─── Platform Detection ────────────────────────────
