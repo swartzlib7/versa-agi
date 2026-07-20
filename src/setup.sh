@@ -3197,7 +3197,12 @@ fi  # end UPDATE_MODE post-deploy steps
 # even when a key was saved. If a key exists, stamp enabled=true before migrate
 # so Import / provider list stay consistent without manual sed.
 _heal_keyed_third_party_providers() {
+  # Canonical enable state is /etc/versa-agi/setup.ini. Do NOT use ini_get() here:
+  # during setup INI_FILE is the source-tree setup.ini, which may already say
+  # openrouter_enabled=true while the deployed copy is still false — skipping
+  # heal then leaves Import working (key-only) but Providers tab En=· / missing.
   local keys_env="/etc/versa-agi/provider_keys.env"
+  local deployed="/etc/versa-agi/setup.ini"
   local slug ini_key env_var has_key enabled rest
   local -a pairs=(
     "xai:xai_enabled:XAI_API_KEY"
@@ -3206,6 +3211,23 @@ _heal_keyed_third_party_providers() {
     "openrouter:openrouter_enabled:OPENROUTER_API_KEY"
   )
   local healed=0
+
+  _heal_ini_get() {
+    local section="$1" key="$2" file="$3" default="${4:-false}"
+    local value=""
+    [ -f "${file}" ] || { echo "${default}"; return; }
+    value="$(awk -F= -v section="${section}" -v key="${key}" '
+      /^\[/ { current = substr($0, 2, length($0)-2) }
+      current == section && $1 ~ "^"key"$" {
+        val = substr($0, index($0,"=")+1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+        print val
+        exit
+      }
+    ' "${file}" 2>/dev/null)"
+    echo "${value:-${default}}"
+  }
+
   for pair in "${pairs[@]}"; do
     slug="${pair%%:*}"
     rest="${pair#*:}"
@@ -3215,28 +3237,53 @@ _heal_keyed_third_party_providers() {
     if [ -f "${keys_env}" ]; then
       has_key="$(grep -E "^${env_var}=.+" "${keys_env}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\"' | tr -d "'" || true)"
     fi
+    if [ -z "${has_key}" ] && [ -f "${deployed}" ]; then
+      has_key="$(_heal_ini_get third_party "${slug}_api_key" "${deployed}" "")"
+    fi
     if [ -z "${has_key}" ]; then
       has_key="$(ini_get third_party "${slug}_api_key" "")"
     fi
     [ -n "${has_key}" ] || continue
-    enabled="$(ini_get third_party "${ini_key}" false)"
-    if [ "${enabled}" = "true" ]; then
+
+    enabled="$(_heal_ini_get third_party "${ini_key}" "${deployed}" false)"
+    # Also heal when baseline provider row is disabled even if setup.ini says true
+    local prov_en=""
+    if command -v agictl >/dev/null 2>&1; then
+      prov_en="$(agictl provider list 2>/dev/null | python3 -c "
+import sys,json
+try:
+  d=json.load(sys.stdin)
+  for p in d.get('providers',[]):
+    if p.get('slug')=='${slug}':
+      print('true' if p.get('enabled') else 'false'); break
+except Exception:
+  pass
+" 2>/dev/null || true)"
+    fi
+
+    if [ "${enabled}" = "true" ] && [ "${prov_en}" = "true" ]; then
       continue
     fi
-    for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
-      if [ -f "${_ini_file}" ]; then
+
+    for _ini_file in "${deployed}" "${INI_FILE:-}" "${SCRIPT_DIR:-}/setup.ini"; do
+      [ -n "${_ini_file}" ] && [ -f "${_ini_file}" ] || continue
+      if grep -q "^${ini_key}=" "${_ini_file}" 2>/dev/null; then
         sed -i "/^\[third_party\]/,/^\[/{s/^${ini_key}=.*/${ini_key}=true/}" "${_ini_file}" 2>/dev/null || true
-        sed -i "/^\[third_party\]/,/^\[/{s/^enabled=.*/enabled=true/}" "${_ini_file}" 2>/dev/null || true
+      else
+        # Key missing — insert under [third_party] (sed replace alone is a no-op)
+        sed -i "/^\[third_party\]/a ${ini_key}=true" "${_ini_file}" 2>/dev/null || true
       fi
+      sed -i "/^\[third_party\]/,/^\[/{s/^enabled=.*/enabled=true/}" "${_ini_file}" 2>/dev/null || true
     done
     if command -v agictl >/dev/null 2>&1; then
+      # Ensure registry row exists + enabled (migrate may not have run yet)
       agictl provider enable "${slug}" --no-sync >/dev/null 2>&1 || true
     fi
-    ok "Healed ${slug}: key present → ${ini_key}=true"
+    ok "Healed ${slug}: key present → setup.ini ${ini_key}=true + provider enable"
     healed=$((healed + 1))
   done
   if [ "${healed}" -gt 0 ]; then
-    info "Provider enable heal applied (${healed}) — was likely skipped on a prior OrbStack prompt"
+    info "Provider enable heal applied (${healed}) — deployed setup.ini was out of sync with keys"
   fi
 }
 
@@ -3256,6 +3303,7 @@ _heal_keyed_third_party_providers() {
 # ownership/modes on the files they touch.
   if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
   section "Model Catalog — Reconcile, Baseline & Sync"
+  # Before reconcile: stamp /etc so carried-forward values include enables.
   _heal_keyed_third_party_providers
 
   if [ -f "${SCRIPT_DIR}/models.ini" ]; then
@@ -3274,11 +3322,16 @@ _heal_keyed_third_party_providers() {
       warn "Config reconcile skipped (non-fatal)"
     fi
   fi
+  # After reconcile: re-heal in case template carry missed a flag, then migrate
+  # so [providers] baseline gets openrouter=true|OpenRouter|...
+  _heal_keyed_third_party_providers
   if agictl model migrate >/dev/null 2>&1; then
     ok "Model catalog baseline regenerated from setup.ini (custom layer preserved)"
   else
     warn "Model catalog migrate skipped (non-fatal)"
   fi
+  # After migrate: ensure providers_custom enable overlay (idempotent)
+  _heal_keyed_third_party_providers
   if [ -f "/etc/versa-agi/models.ini" ]; then
     if agictl model openrouter patch-template --models-ini "/etc/versa-agi/models.ini" >/dev/null 2>&1; then
       ok "OpenRouter metadata + pricing refreshed on deployed models.ini"

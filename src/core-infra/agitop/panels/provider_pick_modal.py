@@ -143,7 +143,8 @@ class ProviderPickModal(ModalScreen):
                 "[dim]Chat-capable models not yet in your catalog. "
                 "In/Out: 📝 text · 🖼 image · 🔊 audio · 🎬 video (icon + name in table). "
                 "Context limits are tokens (provider API; inferred where absent). "
-                "PgUp/PgDn to page · select a row · Use selected to fill the Add Model form.[/]"
+                "PgUp/PgDn (Mac: Fn+↑/↓ or Ctrl+B/F) to page · select a row · "
+                "Use selected to fill the Add Model form.[/]"
             )
             yield Static("", id="provider-pick-loading")
             with Vertical(id="provider-pick-scroll", classes="provider-pick-hidden"):
@@ -288,7 +289,8 @@ class ProviderPickModal(ModalScreen):
         total_pages = self._max_page() + 1
         current_page = self._page + 1
         table.border_title = (
-            f"{total} addable model(s)  │  Page {current_page}/{total_pages}  │  PgUp/PgDn to navigate"
+            f"{total} addable model(s)  │  Page {current_page}/{total_pages}  │  "
+            f"PgUp/PgDn · Fn+↑/↓ · Ctrl+B/F"
         )
         if table.row_count:
             table.move_cursor(row=0)
