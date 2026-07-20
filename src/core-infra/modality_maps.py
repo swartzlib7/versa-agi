@@ -1,6 +1,8 @@
 """Per-catalog-key input/output extension maps for Utility Models and file validation."""
-
 from __future__ import annotations
+
+import db_connect
+
 
 import json
 import os
@@ -80,7 +82,7 @@ def load_modality_map(catalog_key: str, *, agents_db: str | None = None) -> dict
     if not os.path.isfile(db):
         return None
     try:
-        conn = sqlite3.connect(db, timeout=5)
+        conn = db_connect.connect_compat(db, timeout=5)
         row = conn.execute(
             "SELECT map_json FROM catalog_modality_maps WHERE catalog_key=?",
             (catalog_key.strip(),),
@@ -112,7 +114,7 @@ def resolve_modality_map(catalog_key: str, *, agents_db: str | None = None) -> d
 
 def save_modality_map(catalog_key: str, data: dict[str, Any], *, agents_db: str | None = None) -> None:
     db = agents_db or _agents_db()
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     conn.execute(
         """INSERT INTO catalog_modality_maps (catalog_key, map_json, updated_at)
            VALUES (?, ?, datetime('now'))
@@ -132,7 +134,7 @@ def seed_all_modality_maps(*, agents_db: str | None = None, cat: dict | None = N
     if not os.path.isfile(db):
         return 0
     seeded = 0
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     for key, m in cat.items():
         existing = conn.execute(
             "SELECT 1 FROM catalog_modality_maps WHERE catalog_key=?",

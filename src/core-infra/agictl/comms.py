@@ -1,3 +1,5 @@
+
+import db_connect
 import os
 import json
 import base64
@@ -102,7 +104,7 @@ def tombstone_message(message_id, messages_db):
     if not message_id:
         return False
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
         _ensure_deleted_table(conn)
         conn.execute(
             "INSERT OR IGNORE INTO deleted_message_ids (message_id) VALUES (?)",
@@ -120,7 +122,7 @@ def is_message_tombstoned(message_id, messages_db):
     if not message_id:
         return False
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
         _ensure_deleted_table(conn)
         row = conn.execute(
             "SELECT 1 FROM deleted_message_ids WHERE message_id = ? LIMIT 1",
@@ -134,7 +136,7 @@ def is_message_tombstoned(message_id, messages_db):
 
 def delete_local_message(message_id, messages_db):
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
         conn.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
         conn.commit()
         conn.close()
@@ -177,7 +179,7 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
         
     inserted = 0
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
         _ensure_deleted_table(conn)
         c = conn.cursor()
         
@@ -431,7 +433,7 @@ def send_message(token, sub_account_id, recipient_id, text, mode, messages_db, a
     
     # Save the outbound message text in SQLite so the Agent can see its own sent logs
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
         c = conn.cursor()
         cycle_id = os.environ.get("VERSA_CYCLE_ID") or None
         has_attach = 1 if attachments else 0
@@ -468,7 +470,7 @@ def send_message(token, sub_account_id, recipient_id, text, mode, messages_db, a
 def mark_message_processed(msg_id, messages_db):
     """Updates the local SQLite message instance to processed status so the Agent ignores it on subsequent wakes."""
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
         c = conn.cursor()
         c.execute("UPDATE messages SET status='processed' WHERE message_id=?", (msg_id,))
         rows = c.rowcount

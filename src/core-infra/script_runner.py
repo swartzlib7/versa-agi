@@ -8,8 +8,10 @@ Mirrors the structure of ``harness/utility_runner.py`` (run-lock + containment)
 but the payload is a script file, not a Utility Model run. Kept dependency-light
 (no harness/langchain imports) so lifeline can invoke it cheaply per tick.
 """
-
 from __future__ import annotations
+
+import db_connect
+
 
 import os
 import shlex
@@ -49,7 +51,7 @@ def resolve_agitools_path(tasks_db: str) -> str | None:
     if not tasks_db or not os.path.isfile(tasks_db):
         return None
     try:
-        con = sqlite3.connect(f"file:{tasks_db}?mode=ro", uri=True, timeout=5)
+        con = db_connect.connect_compat(f"file:{tasks_db}?mode=ro", uri=True, timeout=5)
         try:
             row = con.execute(
                 "SELECT workspace_path FROM projects WHERE name='AGi-Tools'"

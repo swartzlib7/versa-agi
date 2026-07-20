@@ -1,5 +1,12 @@
 """System Memory Editor Modal."""
 
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import sqlite3
 import os
 from textual import on
@@ -39,7 +46,7 @@ class SystemMemoryEditorModal(ModalScreen):
 
         tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
         try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM agent_memory_system ORDER BY updated_at ASC").fetchall()
             for r in rows:
@@ -77,7 +84,7 @@ class SystemMemoryEditorModal(ModalScreen):
     def delete_memory(self, key_value: str) -> None:
         tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
         try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
             conn.execute("DELETE FROM agent_memory_system WHERE key=?", (key_value,))
             conn.commit()
             conn.close()
@@ -99,7 +106,7 @@ class EditMemoryRowModal(ModalScreen):
     def on_mount(self) -> None:
         tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
         try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT value FROM agent_memory_system WHERE key=?", (self.key_value,)).fetchone()
             if row:
@@ -124,7 +131,7 @@ class EditMemoryRowModal(ModalScreen):
             new_val = self.query_one("#input-mem-val", Input).value
             tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
             try:
-                conn = sqlite3.connect(tasks_db, timeout=5)
+                conn = db_connect.connect_compat(tasks_db, timeout=5)
                 # Keep original agent_name but update timestamp natively via CURRENT_TIMESTAMP
                 conn.execute(
                     "UPDATE agent_memory_system SET value=?, updated_at=CURRENT_TIMESTAMP WHERE key=?", 
@@ -166,7 +173,7 @@ class DeleteMemoryConfirmModal(ModalScreen):
         if event.button.id == "btn-confirm-delete-mem":
             tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
             try:
-                conn = sqlite3.connect(tasks_db, timeout=5)
+                conn = db_connect.connect_compat(tasks_db, timeout=5)
                 conn.execute("DELETE FROM agent_memory_system WHERE key=?", (self.key_value,))
                 conn.commit()
                 conn.close()

@@ -1,6 +1,8 @@
 """Ephemeral per-spawn model routing — pool build, preferred-map resolve, COA guards."""
-
 from __future__ import annotations
+
+import db_connect
+
 
 import json
 import os
@@ -81,7 +83,7 @@ def load_model_feedback() -> list[dict]:
     if not os.path.isfile(db):
         return []
     try:
-        conn = sqlite3.connect(db, timeout=5)
+        conn = db_connect.connect_compat(db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute("SELECT * FROM model_feedback").fetchall()]
         conn.close()

@@ -36,25 +36,38 @@ def connect(
     readonly: bool = False,
     timeout: float = DEFAULT_TIMEOUT_S,
     row_factory: bool = True,
+    check_same_thread: bool = True,
+    immutable: bool = False,
 ) -> sqlite3.Connection:
     """Open a SQLite connection with FK enforcement and a busy timeout.
 
     Args:
         db_path: Filesystem path to the database.
-        readonly: Open via an immutable ``file:...?mode=ro`` URI (for readers
-            such as agitop panels that must never write).
+        readonly: Open via a ``file:...?mode=ro`` URI (for readers such as
+            agitop panels that must never write).
         timeout: Seconds to wait on a locked database before erroring. Also
             pinned as ``PRAGMA busy_timeout`` in milliseconds.
         row_factory: When True, set ``sqlite3.Row`` for dict-style access.
+        check_same_thread: Passed through to ``sqlite3.connect`` (LangGraph
+            checkpoint DBs need ``False``).
+        immutable: When readonly, append ``immutable=1`` (agitop cycle-log
+            readers that must not touch WAL).
 
     Returns:
         A configured :class:`sqlite3.Connection`.
     """
     if readonly:
-        uri = f"file:{db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=timeout)
+        q = "mode=ro"
+        if immutable:
+            q += "&immutable=1"
+        uri = f"file:{db_path}?{q}"
+        conn = sqlite3.connect(
+            uri, uri=True, timeout=timeout, check_same_thread=check_same_thread
+        )
     else:
-        conn = sqlite3.connect(db_path, timeout=timeout)
+        conn = sqlite3.connect(
+            db_path, timeout=timeout, check_same_thread=check_same_thread
+        )
 
     # Per-connection pragmas. foreign_keys cannot be toggled inside a
     # transaction; a freshly opened connection is not in one, so this is safe.
@@ -64,6 +77,45 @@ def connect(
     if row_factory:
         conn.row_factory = sqlite3.Row
     return conn
+
+
+def connect_compat(
+    database: str,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    *,
+    uri: bool = False,
+    check_same_thread: bool = True,
+    row_factory: bool = False,
+    **_ignored,
+) -> sqlite3.Connection:
+    """Drop-in replacement for ``sqlite3.connect`` used by the D24 retrofit.
+
+    Understands plain paths and ``file:…?mode=ro[&immutable=1]`` URIs.
+    Defaults ``row_factory=False`` so tuple-style callers keep working;
+    callers that set ``conn.row_factory = sqlite3.Row`` themselves are unchanged.
+    """
+    path = database
+    readonly = False
+    immutable = False
+    if uri or (isinstance(database, str) and database.startswith("file:")):
+        rest = database[5:] if database.startswith("file:") else database
+        if "?" in rest:
+            path, query = rest.split("?", 1)
+            qs = dict(
+                part.split("=", 1) for part in query.split("&") if "=" in part
+            )
+            readonly = qs.get("mode") == "ro"
+            immutable = qs.get("immutable") in ("1", "true")
+        else:
+            path = rest
+    return connect(
+        path,
+        readonly=readonly,
+        timeout=timeout,
+        row_factory=row_factory,
+        check_same_thread=check_same_thread,
+        immutable=immutable,
+    )
 
 
 def organization_db_path() -> str:

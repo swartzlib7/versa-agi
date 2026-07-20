@@ -1,6 +1,8 @@
 """agictl utility + model modality-map command groups (TD-UTIL-001)."""
-
 from __future__ import annotations
+
+import db_connect
+
 
 import json
 import os
@@ -363,7 +365,7 @@ def register(
                     task_output_override=t.get("utility_output_override"),
                     agent_home=agent_workspace,
                 )
-                conn = sqlite3.connect(tasks_db, timeout=5)
+                conn = db_connect.connect_compat(tasks_db, timeout=5)
                 conn.execute(
                     "UPDATE tasks SET status='done', completed_at=datetime('now'), "
                     "updated_at=datetime('now') WHERE id=?",
@@ -398,7 +400,7 @@ def register(
                 result["alerts_sent"] = alerts
                 results.append(result)
             except UtilityRunError as e:
-                conn = sqlite3.connect(tasks_db, timeout=5)
+                conn = db_connect.connect_compat(tasks_db, timeout=5)
                 conn.execute(
                     "UPDATE tasks SET status='blocked', updated_at=datetime('now') WHERE id=?",
                     (tid,),

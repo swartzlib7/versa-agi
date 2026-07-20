@@ -1,4 +1,11 @@
 """System Settings Modal — configure Task Management, Circuit Breaker, Web Search, COA Autonomous Mode via agitop."""
+
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
 """Includes read-only Skill Viewer modal for inspecting skill file contents."""
 
 import json
@@ -171,7 +178,7 @@ def _sweep_local_agents_to_model(target_model: str) -> list[tuple[str, str]]:
 
     affected = []
     try:
-        conn = sqlite3.connect(agents_db)
+        conn = db_connect.connect_compat(agents_db)
         cursor = conn.cursor()
         placeholders = ",".join("?" * len(local_names))
         cursor.execute(
@@ -200,7 +207,7 @@ def _get_skills_rows() -> list[dict]:
     if not os.path.exists(db_path):
         return []
     try:
-        conn = sqlite3.connect(db_path)
+        conn = db_connect.connect_compat(db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT name, type, origin, has_assets, status, description "
@@ -218,7 +225,7 @@ def _get_packages_rows() -> list[dict]:
     if not os.path.exists(db_path):
         return []
     try:
-        conn = sqlite3.connect(db_path)
+        conn = db_connect.connect_compat(db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT name, status, reason, requested_by, requested_at, resolved_at "
@@ -232,7 +239,7 @@ def _get_packages_rows() -> list[dict]:
 def _get_coa_skills_dir() -> str:
     """Resolve COA's .agent/skills directory from the agents registry."""
     try:
-        conn = sqlite3.connect("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
+        conn = db_connect.connect_compat("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
         row = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
         conn.close()
         if row and row[0]:
@@ -313,7 +320,7 @@ def _write_skill_file(skill_path: str, content: str) -> tuple:
 def _mark_skill_updated(skill_name: str) -> None:
     """Flag an edited skill for Lifeline re-distribution (synced → updated)."""
     try:
-        conn = sqlite3.connect("/var/lib/versa-agi/agents.db", timeout=5)
+        conn = db_connect.connect_compat("/var/lib/versa-agi/agents.db", timeout=5)
         conn.execute(
             "UPDATE skills SET status = CASE WHEN status = 'synced' THEN 'updated' ELSE status END, "
             "updated_at = datetime('now') WHERE name = ?",
@@ -348,7 +355,7 @@ def _delete_skill(skill_data: dict) -> tuple:
 
         # Distributed copies in sub-agent skill directories
         try:
-            conn = sqlite3.connect("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
+            conn = db_connect.connect_compat("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
             rows = conn.execute(
                 "SELECT os_user FROM agents WHERE name NOT IN ('coa', 'watchdog') AND os_user IS NOT NULL"
             ).fetchall()
@@ -363,7 +370,7 @@ def _delete_skill(skill_data: dict) -> tuple:
                            capture_output=True, timeout=10)
 
         # Registry row
-        conn = sqlite3.connect("/var/lib/versa-agi/agents.db", timeout=5)
+        conn = db_connect.connect_compat("/var/lib/versa-agi/agents.db", timeout=5)
         conn.execute("DELETE FROM skills WHERE name = ?", (name,))
         conn.commit()
         conn.close()
@@ -1667,7 +1674,7 @@ class SystemSettingsModal(ModalScreen):
         tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
         offset = self._memory_page * _SYS_MEMORY_PAGE_SIZE
         try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
             conn.row_factory = sqlite3.Row
             total = conn.execute("SELECT COUNT(*) FROM agent_memory_system").fetchone()[0]
             total_pages = max(1, (total + _SYS_MEMORY_PAGE_SIZE - 1) // _SYS_MEMORY_PAGE_SIZE)
@@ -1728,7 +1735,7 @@ class SystemSettingsModal(ModalScreen):
             if isinstance(focused, DataTable) and focused.id == "settings-sys-memory-table":
                 try:
                     db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
-                    conn = sqlite3.connect(db, timeout=5)
+                    conn = db_connect.connect_compat(db, timeout=5)
                     total = conn.execute("SELECT COUNT(*) FROM agent_memory_system").fetchone()[0]
                     conn.close()
                     max_page = max(0, (total - 1) // _SYS_MEMORY_PAGE_SIZE)
@@ -1918,7 +1925,7 @@ class SystemSettingsModal(ModalScreen):
             if ok:
                 # Resolve COA os_user from agents DB (authoritative after setup)
                 try:
-                    _db = sqlite3.connect("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
+                    _db = db_connect.connect_compat("file:/var/lib/versa-agi/agents.db?mode=ro", uri=True)
                     _row = _db.execute("SELECT os_user FROM agents WHERE name='coa'").fetchone()
                     _db.close()
                     coa_user = _row[0] if _row else "coa"

@@ -6,7 +6,9 @@
 
 ## Purpose
 
-Guide the PU through safe, non-containerized environment configuration on Ubuntu 24.04. Generate self-contained bash installation scripts that the PU (or COA in autonomous mode) can execute with `sudo` to set up development stacks, runtime environments, and supporting services.
+Guide the PU through safe, non-containerized environment configuration on the **actual host** (see `host_class` below). Generate self-contained bash installation scripts that the PU (or COA in autonomous mode) can execute with `sudo` to set up development stacks, runtime environments, and supporting services.
+
+This skill is **not** for product application code — use **software_engineering** for that.
 
 ## Differentiation from Requirements Elicitation (5W1H)
 
@@ -20,11 +22,29 @@ Guide the PU through safe, non-containerized environment configuration on Ubuntu
 ## Workflow
 
 ### 1. Confirm Host Assumptions
-Before generating any script, verify:
-- **OS**: Ubuntu 24.04 LTS (unless PU specifies otherwise)
+Read **HOST RUNTIME ORIENTATION** / CYCLE PARAMETERS in your spawn prompt first:
+
+| Field | Use |
+|-------|-----|
+| **host_class** | `native_linux` \| `wsl2` \| `wsl1` \| `other` — **trust this**; only re-detect if symptoms contradict it |
+| **os / arch** | Pretty name + architecture for package choice |
+| **windows_interop** | `true` only on WSL with `/mnt/c` available |
+
+Branch guidance by `host_class`:
+
+| host_class | Environment guidance |
+|------------|----------------------|
+| **native_linux** | apt, systemd services, Vagrant/VirtualBox, or containers for isolation are OK when appropriate |
+| **wsl2** | Prefer developing *inside* WSL; avoid nested Vagrant/VirtualBox as the default; prefer Linux filesystem home/workspace — avoid heavy I/O on `/mnt/c` |
+| **wsl1** | Conservative: do not assume full systemd/Docker; same filesystem preference as wsl2 |
+| **other** | State assumptions explicitly; ask PU before systemd- or hypervisor-heavy designs |
+
+Also verify before generating any script:
+- **OS family** matches the prompt (often Ubuntu 24.04 LTS — do not assume if `os` says otherwise)
 - **Architecture**: x86_64 or aarch64
 - **Existing packages**: Check for conflicts with installed software
 - **Available resources**: Disk space, memory, ports in use
+- State assumptions in the script header: `assuming <os> (<host_class>)`
 
 ### 2. Gather PU Requirements
 Collect specific details about the desired stack:

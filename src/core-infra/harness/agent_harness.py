@@ -1,3 +1,5 @@
+
+import db_connect
 import os
 import sys
 import json
@@ -910,6 +912,47 @@ if _is_browser_enabled():
 
 
 # ═══════════════════════════════════════════════════════
+# ORGANIZATION — Business records (feature-gated, TEAM-2 / D27)
+# ═══════════════════════════════════════════════════════
+
+class OrganizationInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl organization subcommand. "
+        "Examples: 'organization org list', "
+        "'organization invoice list', "
+        "'organization invoice add --customer-org-id 1 --status draft', "
+        "'organization transaction list', "
+        "'organization exchange list', "
+        "'organization exchange get 3'."
+    ))
+
+@tool("agictl_organization", args_schema=OrganizationInput)
+def agictl_organization(command: str) -> str:
+    """Organization domain — orgs, products, invoices, estimates, transactions, exchange.
+    Money fields are integer cents. COA owns integration/exchange sync; Accountant owns ops.
+    Examples:
+      - 'organization org list'
+      - 'organization product list'
+      - 'organization invoice list'
+      - 'organization invoice add --customer-org-id 1 --status draft'
+      - 'organization transaction list'
+      - 'organization exchange list'
+    """
+    return _run_agictl(command)
+
+def _is_organization_enabled():
+    import configparser
+    config = configparser.ConfigParser()
+    config.read("/etc/versa-agi/setup.ini")
+    return config.get("features", "organization_ui", fallback="false").lower() in (
+        "1", "true", "yes", "on",
+    )
+
+if _is_organization_enabled():
+    ALL_TOOLS.append(agictl_organization)
+
+
+# ═══════════════════════════════════════════════════════
 # VIEW — Agent-initiated image perception
 # ═══════════════════════════════════════════════════════
 
@@ -1463,7 +1506,7 @@ def main():
             from langgraph.checkpoint.sqlite import SqliteSaver
             checkpoint_path = f"/var/lib/versa-agi/{args.agent}/cycles/checkpoints.db"
             os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-            db_conn = sqlite3.connect(checkpoint_path, check_same_thread=False)
+            db_conn = db_connect.connect_compat(checkpoint_path, check_same_thread=False)
             checkpointer = SqliteSaver(db_conn)
             config["configurable"] = {"thread_id": args.thread_id}
             tlog(f"CHECKPOINT: {checkpoint_path} (thread: {args.thread_id})")

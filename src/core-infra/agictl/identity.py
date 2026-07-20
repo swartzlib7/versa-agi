@@ -1,3 +1,5 @@
+
+import db_connect
 import os
 import json
 import urllib.request
@@ -47,7 +49,7 @@ def provision_identity(agent_user, token, first_name, last_name, language, count
     # agent_user may be either the social name or os_user — check both.
     if os.path.exists(agents_db):
         try:
-            conn = sqlite3.connect(agents_db, timeout=5)
+            conn = db_connect.connect_compat(agents_db, timeout=5)
             conn.row_factory = sqlite3.Row
             agent_row = conn.execute(
                 "SELECT name, os_user FROM agents WHERE name = ? OR os_user = ?", (agent_user, agent_user)

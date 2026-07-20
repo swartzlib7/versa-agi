@@ -1625,14 +1625,16 @@ find "${LIB_DIR}/harness" -type d -exec chmod 755 {} +
 find "${LIB_DIR}/harness" -type f -exec chmod 644 {} +
 
 # Shared modules the harness imports as top-level (one level above harness/).
-# model_catalog.py lives in the core-infra root and is required by
-# harness/model_routing.py — deploy it next to harness/ so `from model_catalog
-# import ...` resolves under PYTHONPATH=${LIB_DIR} (the harness runtime layout).
-if [ -f "${DEPLOYED_CORE_INFRA}/model_catalog.py" ]; then
-  cp "${DEPLOYED_CORE_INFRA}/model_catalog.py" "${LIB_DIR}/model_catalog.py"
-  chown root:root "${LIB_DIR}/model_catalog.py"
-  chmod 644 "${LIB_DIR}/model_catalog.py"
-fi
+# These live in the core-infra root and must sit next to harness/ so
+# `import model_catalog` / `import db_connect` resolve under
+# PYTHONPATH=${LIB_DIR} (the harness runtime layout).
+for _shared_py in model_catalog.py db_connect.py; do
+  if [ -f "${DEPLOYED_CORE_INFRA}/${_shared_py}" ]; then
+    cp "${DEPLOYED_CORE_INFRA}/${_shared_py}" "${LIB_DIR}/${_shared_py}"
+    chown root:root "${LIB_DIR}/${_shared_py}"
+    chmod 644 "${LIB_DIR}/${_shared_py}"
+  fi
+done
 if [ -d "${DEPLOYED_CORE_INFRA}/model_drivers" ]; then
   rm -rf "${LIB_DIR}/model_drivers"
   cp -r "${DEPLOYED_CORE_INFRA}/model_drivers" "${LIB_DIR}/"

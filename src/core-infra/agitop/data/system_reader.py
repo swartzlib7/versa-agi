@@ -3,6 +3,13 @@ System reader — CRON state, disk, memory, processes.
 """
 
 import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
+import os
 import shutil
 import subprocess
 from typing import Optional
@@ -179,7 +186,7 @@ class SystemReader:
             # (the sqlite3 CLI fails with 'readonly database' due to WAL journal permissions)
             import os, sqlite3
             db_path = os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
-            conn = sqlite3.connect(db_path)
+            conn = db_connect.connect_compat(db_path)
             conn.execute("UPDATE agents SET status='idle' WHERE status='active';")
             conn.commit()
             conn.close()

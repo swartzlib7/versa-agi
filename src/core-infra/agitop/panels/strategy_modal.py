@@ -10,6 +10,13 @@ Sub-modals:
 """
 
 import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
+import os
 import sqlite3
 import time
 import json
@@ -792,7 +799,7 @@ class EditGameModal(ModalScreen):
 
         tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
         try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
             assess_env = (
                 posture != (self._game.get("posture") or "exploratory")
                 or freedoms != (self._game.get("freedoms_summary") or None)
@@ -889,7 +896,7 @@ class DeleteGameConfirmModal(ModalScreen):
             return
         tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
         try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
             conn.execute(
                 "UPDATE projects SET game_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE game_id=?",
                 (self.game_id,),
@@ -1000,7 +1007,7 @@ class EditAwarenessModal(ModalScreen):
             entry_id = self._entry.get("id")
             tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
             try:
-                conn = sqlite3.connect(tasks_db, timeout=5)
+                conn = db_connect.connect_compat(tasks_db, timeout=5)
                 conn.execute(
                     "UPDATE agent_awareness SET content=?, context=?, status=?, "
                     "updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -1065,7 +1072,7 @@ class DeleteAwarenessConfirmModal(ModalScreen):
         if event.button.id == "btn-confirm-delete-awareness":
             tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
             try:
-                conn = sqlite3.connect(tasks_db, timeout=5)
+                conn = db_connect.connect_compat(tasks_db, timeout=5)
                 conn.execute("DELETE FROM agent_awareness WHERE id=?", (self.entry_id,))
                 conn.commit()
                 conn.close()

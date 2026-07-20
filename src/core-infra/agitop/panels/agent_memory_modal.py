@@ -1,6 +1,13 @@
 """Agent memory viewer — connection memory with PU edit/remove."""
-
 from __future__ import annotations
+
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 
 import json
 import os
@@ -119,7 +126,7 @@ class AgentMemoryViewModal(ModalScreen):
             "[dim]Select a row to edit or remove.[/]"
         )
         try:
-            conn = sqlite3.connect(_tasks_db(), timeout=5)
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
             conn.row_factory = sqlite3.Row
             name_cache = _build_name_cache(conn)
             rows = conn.execute(
@@ -276,7 +283,7 @@ class EditConnectionMemoryModal(ModalScreen):
         uid = self.row.get("contact_uid")
         rapport = self.query_one("#conn-mem-rapport", Select).value
         try:
-            conn = sqlite3.connect(_tasks_db(), timeout=5)
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
             conn.execute(
                 """UPDATE agent_memory_connection SET
                    rapport_level=?, communication_style=?, preferences=?,
@@ -352,7 +359,7 @@ class RemoveConnectionMemoryModal(ModalScreen):
             self.app.pop_screen()
             return
         try:
-            conn = sqlite3.connect(_tasks_db(), timeout=5)
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
             conn.execute(
                 "DELETE FROM agent_memory_connection WHERE agent_name=? AND contact_uid=?",
                 (self.agent_name, self.contact_uid),

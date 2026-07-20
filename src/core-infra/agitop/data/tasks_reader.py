@@ -3,6 +3,13 @@ Tasks reader — read/write access to tasks.db.
 Provides data for the Tasks Panel and agictl.
 """
 
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import sqlite3
 from typing import Optional
 
@@ -25,7 +32,7 @@ class TasksReader:
 
     def _query(self, sql: str, params: tuple = ()) -> list[dict]:
         try:
-            conn = sqlite3.connect(
+            conn = db_connect.connect_compat(
                 f"file:{self.db_path}?mode=ro",
                 uri=True,
                 timeout=2,
@@ -43,7 +50,7 @@ class TasksReader:
 
     def _insert(self, sql: str, params: tuple = ()) -> Optional[int]:
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             cur = conn.execute(sql, params)
             rowid = cur.lastrowid
             conn.commit()
@@ -169,7 +176,7 @@ class TasksReader:
         try:
             import sqlite3
             agents_path = self.db_path.replace("coa/tasks.db", "agents.db")
-            conn = sqlite3.connect(agents_path, timeout=5)
+            conn = db_connect.connect_compat(agents_path, timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT name FROM agents WHERE inactive=0 ORDER BY name").fetchall()
             conn.close()
@@ -226,7 +233,7 @@ class TasksReader:
     def delete_task_progress_entry(self, entry_id: int, task_id: int) -> bool:
         """Delete a single progress entry (PU dashboard only)."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             cur = conn.cursor()
             cur.execute(
                 "DELETE FROM task_progress WHERE id = ? AND task_id = ?",
@@ -254,7 +261,7 @@ class TasksReader:
         if not note:
             return False
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             cur = conn.cursor()
             cur.execute(
                 "UPDATE task_progress SET note = ? WHERE id = ? AND task_id = ?",
@@ -275,7 +282,7 @@ class TasksReader:
     def prune_task_progress(self, task_id: int, pattern: str) -> int:
         """Delete matching progress entries except the most recent (PU dashboard only)."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             cur = conn.cursor()
             keep = cur.execute(
                 "SELECT id FROM task_progress WHERE task_id = ? AND note LIKE ? "
@@ -355,7 +362,7 @@ class TasksReader:
         """Unfreeze all frozen tasks for an agent. Restores pre_freeze_status, resets spawn_attempts.
         Returns count of unfrozen tasks."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             # Restore to pre_freeze_status if available, otherwise 'planned'
             conn.execute(
                 "UPDATE tasks SET status = COALESCE(pre_freeze_status, 'planned'), "
@@ -495,7 +502,7 @@ class TasksReader:
         Returns (success, message).
         """
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT id, name, status FROM projects WHERE id = ?", (project_id,)).fetchone()
             if not row:
@@ -534,7 +541,7 @@ class TasksReader:
         Returns (success, message).
         """
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT id, title, status FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if not row:
@@ -637,7 +644,7 @@ class TasksReader:
         )
         count_sql = f"SELECT COUNT(*) as c FROM agent_awareness {where}"
         try:
-            conn = sqlite3.connect(
+            conn = db_connect.connect_compat(
                 f"file:{self.db_path}?mode=ro",
                 uri=True,
                 timeout=2,

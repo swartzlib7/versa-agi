@@ -21,6 +21,11 @@ import sqlite3
 import subprocess
 import glob
 
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 
 def sync():
     if os.geteuid() != 0:
@@ -57,7 +62,7 @@ def sync():
     # 1. Sync skills to active sub-agents via agictl (single rsync implementation)
     agents_db = os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         active_agents = conn.execute(
             "SELECT name FROM agents WHERE status != 'removed' AND name NOT IN (?, ?)",
@@ -86,7 +91,7 @@ def sync():
     # also holds agent_created and override skills that must survive setup --update)
     coa_skills_dest = f"/home/{coa_user}/coa-env/.agent/skills/"
     try:
-        _conn = sqlite3.connect(agents_db, timeout=5)
+        _conn = db_connect.connect_compat(agents_db, timeout=5)
         _row = _conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
         _conn.close()
         if _row and _row[0]:

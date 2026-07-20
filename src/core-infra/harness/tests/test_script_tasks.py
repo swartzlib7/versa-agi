@@ -11,7 +11,6 @@ Run:  python -m unittest harness.tests.test_script_tasks   (from core-infra)
 """
 
 import os
-import sqlite3
 import stat
 import sys
 import tempfile
@@ -19,6 +18,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import db_connect  # noqa: E402
 import script_runner  # noqa: E402
 import utility_store  # noqa: E402
 from script_runner import (  # noqa: E402
@@ -53,7 +53,7 @@ class TestDueScriptSelection(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.mkdtemp()
         self.db = os.path.join(self._dir, "tasks.db")
-        conn = sqlite3.connect(self.db)
+        conn = db_connect.connect(self.db, row_factory=False)
         conn.executescript(_TASKS_SCHEMA)
         conn.commit()
         conn.close()
@@ -69,7 +69,7 @@ class TestDueScriptSelection(unittest.TestCase):
     def _insert(self, **cols):
         keys = ", ".join(cols)
         marks = ", ".join("?" for _ in cols)
-        conn = sqlite3.connect(self.db)
+        conn = db_connect.connect(self.db, row_factory=False)
         conn.execute(f"INSERT INTO tasks ({keys}) VALUES ({marks})", tuple(cols.values()))
         conn.commit()
         conn.close()

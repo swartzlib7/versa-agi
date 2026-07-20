@@ -19,6 +19,8 @@ from rich.table import Table
 # Add core-infra to path for data readers
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+import db_connect  # noqa: E402
+
 # These modules are only available on full (client/local) installs.
 # Server-only topology deploys a minimal agictl subset (model commands only).
 try:
@@ -95,18 +97,19 @@ def get_agent_name():
 
 # ─── Role ENUM (from Product Spec §3.5) ───────────────
 VALID_ROLES = [
-    "coa",       # Chief Orchestrator Agent
-    "watchdog",  # System Watchdog
-    "pa",        # Personal Assistant
-    "ba",        # Business Analyst
-    "sa",        # Technical Architect
-    "dev",       # Developer Agent
-    "devops",    # DevOps Agent
-    "qa",        # QA Agent
-    "mm",        # Marketing Manager
-    "sr",        # Subject Researcher
-    "sysmon",    # System Monitor
-    "custom",    # Custom Agent (generic, COA fills specifics)
+    "coa",         # Chief Orchestrator Agent
+    "watchdog",    # System Watchdog
+    "pa",          # Personal Assistant
+    "ba",          # Business Analyst
+    "sa",          # Technical Architect
+    "dev",         # Developer Agent
+    "devops",      # DevOps Agent
+    "qa",          # QA Agent
+    "mm",          # Marketing Manager
+    "sr",          # Subject Researcher
+    "sysmon",      # System Monitor
+    "accountant",  # Accountant (Organization / bookkeeping)
+    "custom",      # Custom Agent (generic, COA fills specifics)
 ]
 
 ROLE_LABELS = {
@@ -115,7 +118,8 @@ ROLE_LABELS = {
     "sa": "Technical Architect", "dev": "Developer Agent",
     "devops": "DevOps Agent", "qa": "QA Agent",
     "mm": "Marketing Manager", "sr": "Subject Researcher",
-    "sysmon": "System Monitor", "custom": "Custom Agent",
+    "sysmon": "System Monitor", "accountant": "Accountant",
+    "custom": "Custom Agent",
 }
 
 ROLES_DIR = "/etc/versa-agi/poise/roles"
@@ -716,7 +720,7 @@ def system_vacuum():
             continue
         try:
             before = os.path.getsize(db_path)
-            conn = sqlite3.connect(db_path, timeout=10)
+            conn = db_connect.connect_compat(db_path, timeout=10)
             # Prune old checkpoint versions before VACUUM
             pruned = 0
             if db_path in checkpoint_dbs:
@@ -1579,7 +1583,7 @@ def _update_all_local_agent_models(new_model):
         local_names.add(prev_active)
 
     try:
-        conn = sqlite3.connect(agents_db)
+        conn = db_connect.connect_compat(agents_db)
         cursor = conn.cursor()
         # Find agents assigned to any local model
         placeholders = ",".join("?" * len(local_names))
@@ -3686,7 +3690,7 @@ def feedback_add(catalog_key, preference, work_modality, task_hint, note):
         sys.exit(1)
     created_by = os.environ.get("AGICTL_AGENT_USER") or "pu"
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         dup = conn.execute(
             """SELECT id FROM model_feedback
                WHERE catalog_key=? AND preference=?
@@ -3726,7 +3730,7 @@ def feedback_add(catalog_key, preference, work_modality, task_hint, note):
 def feedback_list(catalog_key, work_modality, as_table):
     """List model feedback entries."""
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         q = "SELECT * FROM model_feedback WHERE 1=1"
         params = []
@@ -3760,7 +3764,7 @@ def feedback_list(catalog_key, work_modality, as_table):
 def feedback_show(feedback_id):
     """Show one feedback entry."""
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM model_feedback WHERE id=?", (feedback_id,)).fetchone()
         conn.close()
@@ -3783,7 +3787,7 @@ def feedback_update(feedback_id, preference, work_modality, task_hint, note):
     """Update a model feedback entry."""
     _require_pu_or_coa()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         row = conn.execute("SELECT id FROM model_feedback WHERE id=?", (feedback_id,)).fetchone()
         if not row:
             conn.close()
@@ -3817,7 +3821,7 @@ def feedback_remove(feedback_id):
     """Remove a model feedback entry."""
     _require_pu_or_coa()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         cur = conn.execute("DELETE FROM model_feedback WHERE id=?", (feedback_id,))
         conn.commit()
         conn.close()
@@ -4478,7 +4482,7 @@ def agent_list(show_all):
 def agent_show(name):
     """Return all DB fields for a specific agent as JSON."""
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
         conn.close()
@@ -4503,7 +4507,7 @@ def agent_add(name, role):
     os_user = f"agi-{name}"  # OS user gets agi- prefix; DB name is the social name
     agent_root = f"/home/{os_user}"
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         # Guard: block creation if any inactive agent is pending approval
         pending = conn.execute(
@@ -4647,7 +4651,7 @@ def agent_approve(name, force):
     os_user = f"agi-{name}"  # OS user gets agi- prefix; DB name is the social name
     agent_root = f"/home/{os_user}"
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -4775,7 +4779,7 @@ def agent_approve(name, force):
         #   AGi-Knowledgebase  — collaborative PU/agent documentation (Grav CMS source)
         SHARED_SYSTEM_PROJECTS = ["AGi-Tools", "AGi-Knowledgebase"]
         try:
-            conn_tasks = sqlite3.connect(tasks_db, timeout=5)
+            conn_tasks = db_connect.connect_compat(tasks_db, timeout=5)
             conn_tasks.row_factory = sqlite3.Row
             for shared_name in SHARED_SYSTEM_PROJECTS:
                 shared_proj = conn_tasks.execute(
@@ -4949,7 +4953,7 @@ def agent_activate(name):
     """Set inactive=0 and clear circuit breaker if tripped. Also unfreezes tasks."""
     name = name.lower()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT inactive, status FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -4988,7 +4992,7 @@ def agent_activate(name):
             try:
                 cycles_db_path = os.environ.get("AGICTL_CYCLES_DB", "/var/lib/versa-agi/coa/cycles.db")
                 if os.path.exists(cycles_db_path):
-                    cconn = sqlite3.connect(cycles_db_path, timeout=5)
+                    cconn = db_connect.connect_compat(cycles_db_path, timeout=5)
                     cconn.execute(
                         "DELETE FROM cycles WHERE id LIKE ? AND exit_code IN (1, 42, 99)",
                         (f"{name}-%",)
@@ -5030,7 +5034,7 @@ def _rsync_skills_to_agent(name, os_user):
     skills_dest = os.path.join(agent_root, ".agent", "skills") + "/"
 
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         coa_only_rows = conn.execute(
             "SELECT name FROM skills WHERE scope='coa_only'"
@@ -5117,7 +5121,7 @@ def agent_deploy_skills(name):
     name = name.lower()
     # Resolve os_user from agents.db
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT os_user FROM agents WHERE name=?", (name,)).fetchone()
         conn.close()
@@ -5155,7 +5159,7 @@ def agent_share_skill(skill_path, target_agent):
     basename = os.path.basename(skill_path)
 
     # Get target agents
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
     if target_agent:
         agents = conn.execute(
@@ -5220,7 +5224,7 @@ def agent_set_duties(name, duties_file):
     import shutil
     name = name.lower()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT name, os_user, protected FROM agents WHERE name=?", (name,)).fetchone()
         conn.close()
@@ -5252,7 +5256,7 @@ def agent_deactivate(name):
     """Set inactive=1. Blocked for protected agents (coa/watchdog)."""
     name = name.lower()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT inactive, protected FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -5297,7 +5301,7 @@ def agent_kill(name):
         sys.exit(1)
 
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT name, os_user, protected, inactive, status FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -5363,7 +5367,7 @@ def agent_request_remove(name, reason):
     """
     name = name.lower()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT name, protected, status FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -5430,7 +5434,7 @@ def agent_confirm_remove(name):
         sys.exit(1)
 
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT name, protected, os_user, workspace, status FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -5489,7 +5493,7 @@ def agent_confirm_remove(name):
         coa_tasks_db = "/var/lib/versa-agi/coa/tasks.db"
         if os.path.exists(coa_tasks_db):
             try:
-                tconn = sqlite3.connect(coa_tasks_db, timeout=5)
+                tconn = db_connect.connect_compat(coa_tasks_db, timeout=5)
                 tconn.execute("DELETE FROM tasks WHERE assigned_to=?", (name,))
                 tconn.commit()
                 tconn.close()
@@ -5534,7 +5538,7 @@ def agent_cancel_remove(name):
     """Cancel a pending removal request — reactivates the agent."""
     name = name.lower()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT status FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -5578,7 +5582,7 @@ def agent_remove(name, archive):
 def agent_set_timeout(name, minutes):
     """Set the maximum execution timeout for an agent in minutes."""
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.execute("UPDATE agents SET timeout_minutes=?, updated_at=datetime('now') WHERE name=?", (minutes, name))
         conn.commit()
         conn.close()
@@ -5609,7 +5613,7 @@ def agent_set_model(name, model, clear_model):
         sys.exit(1)
 
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT name, protected FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -5682,7 +5686,7 @@ def agent_toggle_comms(name):
     """
     name = name.lower()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT name, protected, can_message_connections FROM agents WHERE name=?", (name,)).fetchone()
         if not row:
@@ -5715,7 +5719,7 @@ def agent_status_show():
     """Read current agent status from agents.db."""
     agent_name = get_agent_name()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT status, status_message FROM agents WHERE name=?", (agent_name,)).fetchone()
         conn.close()
@@ -5733,7 +5737,7 @@ def agent_status_set(state, summary):
     """Write agent status + message to agents.db."""
     agent_name = get_agent_name()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.execute("UPDATE agents SET status=?, status_message=?, updated_at=datetime('now') WHERE name=?", (state, summary, agent_name))
         conn.commit()
         conn.close()
@@ -5777,7 +5781,7 @@ def agent_summary(exclude_watchdog):
 def agent_ensure_protected():
     """Ensure coa/watchdog cannot be deactivated (self-heal)."""
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.execute("UPDATE agents SET inactive=0, updated_at=datetime('now') WHERE name IN ('coa', 'watchdog') AND inactive=1")
         conn.commit()
         conn.close()
@@ -5791,7 +5795,7 @@ def agent_get_active():
     # Direct agents-table read — v_active_agents can be stale until init_agents_db view migration runs.
     agent_overrides: dict[str, dict] = {}
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         for row in conn.execute(
             "SELECT name, tool_output_token_budget, model_routing_enabled FROM agents WHERE inactive=0"
@@ -5896,7 +5900,7 @@ def task_get(task_id):
     task_data = tasks_reader.get_task(task_id)
     if task_data:
         try:
-            conn = sqlite3.connect(tasks_db, timeout=5)
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT created_at, agent_name, note FROM task_progress "
@@ -5932,7 +5936,7 @@ def task_progress(task_id, note, last_n):
     """
     note = (note or "").strip()
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
 
         if not note:
@@ -6026,7 +6030,7 @@ def task_add(title, desc, priority, assignee, project, callback, source_msg, req
             json_response(False, error="--project is required. Use 'agictl project list' to find the correct project ID.")
             sys.exit(1)
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         c = conn.cursor()
         task_kind = "script" if script_task else ("utility" if utility_task else "standard")
         is_special = utility_task or script_task
@@ -6135,7 +6139,7 @@ def task_run_due_scripts(agent_name, agent_workspace):
 
         # Status routing (decision #3): once-off → done(rc==0)/blocked(rc!=0);
         # recurring → stays 'planned', due_date re-armed by the interval.
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         sets = ["script_last_rc=?", "script_last_run_at=COALESCE(?, datetime('now'))", "updated_at=datetime('now')"]
         params: list = [rc, ran_at]
         if recurring:
@@ -6282,7 +6286,7 @@ def task_snooze(task_id, minutes):
 def task_reminder(text, category):
     """Shortcut: create a task of type reminder."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         c = conn.cursor()
         c.execute(
             "INSERT INTO tasks (title, description, priority, tags, assigned_to) VALUES (?, ?, 'normal', ?, ?)",
@@ -6341,7 +6345,7 @@ def task_freeze_all(agent_name):
     """Freeze all non-terminal tasks for an agent. Saves prior status in pre_freeze_status."""
     _assert_can_manage_agent_tasks(agent_name)
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         cursor = conn.execute(
             """UPDATE tasks
                SET pre_freeze_status = status, status = 'frozen', updated_at = datetime('now')
@@ -6362,7 +6366,7 @@ def task_unfreeze_all(agent_name):
     """Unfreeze all frozen tasks for an agent. Restores prior status from pre_freeze_status."""
     _assert_can_manage_agent_tasks(agent_name)
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         cursor = conn.execute(
             """UPDATE tasks
                SET status = COALESCE(pre_freeze_status, 'planned'), pre_freeze_status = NULL,
@@ -6404,7 +6408,7 @@ def task_unfreeze_one(task_id):
 def task_count_frozen(agent_name):
     """Return count of frozen tasks for an agent."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         count = conn.execute(
             "SELECT COUNT(*) FROM tasks WHERE status = 'frozen' AND (assigned_to = ? OR assigned_to IS NULL)",
             (agent_name,)
@@ -6457,7 +6461,7 @@ def _send_as_internal(contact_uid, text, mode, db_path, attachment_paths=None):
             attach_data = json.dumps(filtered)
 
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         conn.execute(
             "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
             "message_id, text, mode, status, channel, attachment_path) "
@@ -6488,7 +6492,7 @@ def _send_as_internal(contact_uid, text, mode, db_path, attachment_paths=None):
 def message_get(agent_uid, unread, last_n_minutes, last_n_count, limit, contact):
     """Query messages for an agent/user from SQLite. Returns JSON array."""
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
         conn.row_factory = sqlite3.Row
         conditions = ["(to_user_id=? OR from_user_id=?)"]
         params = [agent_uid, agent_uid]
@@ -6541,7 +6545,7 @@ def message_send(contact_uid, text, mode, media_paths, markdown_paths, urls):
     # ── Identity Validation: agent can only send as itself ──
     caller = get_agent_name()
     try:
-        id_conn = sqlite3.connect(agents_db, timeout=5)
+        id_conn = db_connect.connect_compat(agents_db, timeout=5)
         id_conn.row_factory = sqlite3.Row
         agent_row = id_conn.execute(
             "SELECT protected, can_message_connections FROM agents WHERE name=?", (caller,)
@@ -6601,8 +6605,8 @@ def message_internal(recipient_agent, text, from_pu):
     sender = get_agent_name()
     display_name = sender
     try:
-        conn = sqlite3.connect(messages_db, timeout=5)
-        agents_conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        agents_conn = db_connect.connect_compat(agents_db, timeout=5)
 
         # Verify recipient exists
         recipient = agents_conn.execute("SELECT name FROM agents WHERE name=?", (recipient_agent,)).fetchone()
@@ -6758,7 +6762,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         name = fallback
         # 1. Try connections table in tasks.db (canonical)
         try:
-            tconn = _sqlite3.connect(tasks_db, timeout=2)
+            tconn = _db_connect.connect_compat(tasks_db, timeout=2)
             tconn.row_factory = _sqlite3.Row
             row = tconn.execute("SELECT display_name FROM connections WHERE uid=?", (uid,)).fetchone()
             tconn.close()
@@ -6823,7 +6827,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
     system_memories = []
     project_memories = []
     try:
-        tconn = _sqlite3.connect(tasks_db, timeout=5)
+        tconn = _db_connect.connect_compat(tasks_db, timeout=5)
         tconn.row_factory = _sqlite3.Row
         # Contact memories for all known contacts
         for uid in all_contacts:
@@ -7206,7 +7210,7 @@ def cycle_start(agent_name):
         agent_name = get_agent_name()
     cycle_id = f"{agent_name}-{int(time.time())}"
     try:
-        conn = sqlite3.connect(cycles_db, timeout=5)
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
         conn.execute("INSERT INTO cycles (id, started_at, session_start_ts) VALUES (?, datetime('now'), datetime('now'))", (cycle_id,))
         conn.commit()
         conn.close()
@@ -7228,7 +7232,7 @@ def cycle_end(summary, agent_name):
     # Check if agent logged any awareness this cycle (advisory, not hard-blocking)
     awareness_warning = False
     try:
-        conn = sqlite3.connect(cycles_db, timeout=5)
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
         row = conn.execute(
             "SELECT session_start_ts, last_awareness_ts FROM cycles WHERE id LIKE ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
             (f"{agent_name}-%",)
@@ -7241,7 +7245,7 @@ def cycle_end(summary, agent_name):
         pass
 
     try:
-        conn = sqlite3.connect(cycles_db, timeout=5)
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
         conn.execute(
             "UPDATE cycles SET ended_at=datetime('now'), summary=? WHERE id LIKE ? AND ended_at IS NULL",
             (sum_text, f"{agent_name}-%")
@@ -7255,7 +7259,7 @@ def cycle_end(summary, agent_name):
     try:
         agents_db_path = os.environ.get("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
         if os.path.exists(agents_db_path):
-            aconn = sqlite3.connect(agents_db_path, timeout=5)
+            aconn = db_connect.connect_compat(agents_db_path, timeout=5)
             aconn.execute(
                 "UPDATE agents SET status='idle', updated_at=datetime('now') WHERE name=?",
                 (agent_name,)
@@ -7294,7 +7298,7 @@ def cycle_tokens(agent_name, t_in, t_out, t_think, t_total, exit_code, cached, s
 def cycle_get(cycle_id):
     """Return full cycle row as JSON (incl. routing audit fields)."""
     try:
-        conn = sqlite3.connect(cycles_db, timeout=5)
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM cycles WHERE id=?", (cycle_id,)).fetchone()
         conn.close()
@@ -7316,7 +7320,7 @@ def cycle_get(cycle_id):
 def cycle_set_routing(cycle_id, assigned_model, execution_model, routing_mode, work_modality):
     """Record ephemeral model routing on a cycle row."""
     try:
-        conn = sqlite3.connect(cycles_db, timeout=5)
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
         cur = conn.execute(
             """UPDATE cycles SET assigned_model=?, execution_model=?, routing_mode=?,
                routing_work_modality=? WHERE id=?""",
@@ -7417,7 +7421,7 @@ except ImportError:
 def project_list():
     """List all projects as JSON."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT * FROM projects ORDER BY name").fetchall()
         conn.close()
@@ -7445,7 +7449,7 @@ def project_add(name_arg, name_opt, dir_name, desc, remote, git_init, agent_name
         if not name:
             json_response(False, error="Project name is required (use --name or positional NAME)")
             sys.exit(1)
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         # Check display-name uniqueness
         existing = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
@@ -7565,7 +7569,7 @@ def project_add(name_arg, name_opt, dir_name, desc, remote, git_init, agent_name
 def project_pause(project_id):
     """Set project status to paused."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         proj = _get_project(conn, project_id)
         name = proj["name"]
@@ -7592,7 +7596,7 @@ def project_pause(project_id):
 def project_resume(project_id):
     """Set project status back to active."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         proj = _get_project(conn, project_id)
         name = proj["name"]
@@ -7610,7 +7614,7 @@ def project_resume(project_id):
 def project_archive(project_id, do_zip):
     """Soft-delete: set project status to archived. --zip compresses and removes source."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = _get_project(conn, project_id)
         name = row["name"]
@@ -7674,7 +7678,7 @@ def project_update(project_id, new_name, remote_url, branch, desc, platform, acc
     Display --name may change; workspace directory / --dir is intentionally unsupported.
     """
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         proj = _get_project(conn, project_id)
         updates = []
@@ -7777,7 +7781,7 @@ def project_assign(project_id, agent_name, connection_uid, roles, branch):
         json_response(False, error="Specify either --agent or --connection, not both")
         sys.exit(1)
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         proj = _get_project(conn, project_id)
         name = proj["name"]
@@ -7792,7 +7796,7 @@ def project_assign(project_id, agent_name, connection_uid, roles, branch):
         if agent_name:
             # ── Agent assignment ──
             # Agent registry lives in agents_db, not tasks_db
-            agents_conn = sqlite3.connect(agents_db, timeout=5)
+            agents_conn = db_connect.connect_compat(agents_db, timeout=5)
             agents_conn.row_factory = sqlite3.Row
             agent_row = agents_conn.execute("SELECT name, os_user, workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
             agents_conn.close()
@@ -8022,7 +8026,7 @@ def project_unassign(project_id, agent_name, connection_uid):
         json_response(False, error="Must specify --agent or --connection")
         sys.exit(1)
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         proj = _get_project(conn, project_id)
         name = proj["name"]
@@ -8102,7 +8106,7 @@ def project_unassign(project_id, agent_name, connection_uid):
 def project_members(project_id):
     """List all members (agents + connections) assigned to a project."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         proj = _get_project(conn, project_id)
         name = proj["name"]
@@ -8137,7 +8141,7 @@ def project_git_setup():
     # Resolve OS user from agent's DB record, NOT from $HOME
     caller = get_agent_name()
     try:
-        db_conn = sqlite3.connect(agents_db, timeout=5)
+        db_conn = db_connect.connect_compat(agents_db, timeout=5)
         db_conn.row_factory = sqlite3.Row
         agent_row = db_conn.execute("SELECT os_user, workspace FROM agents WHERE name=?", (caller,)).fetchone()
         db_conn.close()
@@ -8211,7 +8215,7 @@ def game():
 def game_add(name, postulate, posture, autonomy):
     """Register a new strategic game."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         existing = conn.execute("SELECT id FROM games WHERE name=?", (name,)).fetchone()
         if existing:
             conn.close()
@@ -8242,7 +8246,7 @@ def game_add(name, postulate, posture, autonomy):
 def game_update(game_id, name, postulate, posture, autonomy, freedoms, barriers, milestones, status):
     """Update a game's strategic state."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         existing = conn.execute("SELECT id FROM games WHERE id=?", (game_id,)).fetchone()
         if not existing:
             conn.close()
@@ -8281,7 +8285,7 @@ def game_update(game_id, name, postulate, posture, autonomy, freedoms, barriers,
 def game_show(game_id):
     """Show full details of a game including related projects and awareness."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
         if not row:
@@ -8308,7 +8312,7 @@ def game_show(game_id):
 def game_list(game_status):
     """List all games."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         if game_status:
             rows = conn.execute("SELECT * FROM games WHERE status=? ORDER BY name", (game_status,)).fetchall()
@@ -8325,7 +8329,7 @@ def game_list(game_status):
 def game_assign_project(game_id, project_id):
     """Assign a project to a game (sets projects.game_id)."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         g = conn.execute("SELECT id FROM games WHERE id=?", (game_id,)).fetchone()
         if not g:
             conn.close()
@@ -8360,7 +8364,7 @@ def game_opponent():
 def opponent_add(project_id, name, opp_type, desc, sources):
     """Add a competitor/opponent to a project."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.execute(
             "INSERT INTO project_opponents (project_id, name, type, description, intelligence_sources) VALUES (?, ?, ?, ?, ?)",
             (project_id, name, opp_type, desc, sources)
@@ -8378,7 +8382,7 @@ def opponent_add(project_id, name, opp_type, desc, sources):
 def opponent_list(project_id):
     """List opponents (optionally filtered by project)."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         if project_id:
             rows = conn.execute("SELECT * FROM project_opponents WHERE project_id=? ORDER BY name", (project_id,)).fetchall()
@@ -8398,7 +8402,7 @@ def opponent_list(project_id):
 def opponent_update(opponent_id, name, desc, sources, assessment):
     """Update an opponent record."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         updates = []
         params = []
         for col, val in [("name", name), ("description", desc), ("intelligence_sources", sources), ("last_assessment", assessment)]:
@@ -8425,7 +8429,7 @@ def opponent_update(opponent_id, name, desc, sources, assessment):
 def opponent_delete(opponent_id):
     """Remove an opponent record."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         existing = conn.execute("SELECT id, name FROM project_opponents WHERE id=?", (opponent_id,)).fetchone()
         if not existing:
             conn.close()
@@ -8468,7 +8472,7 @@ def awareness_add(entry_type, subject_type, subject_id, content, action_conclusi
         json_response(False, error="--action-conclusion-id is only valid for actions, not conclusions")
         sys.exit(1)
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         # If action, validate conclusion exists
         if action_conclusion_id is not None:
             parent = conn.execute("SELECT id, type FROM agent_awareness WHERE id=?", (action_conclusion_id,)).fetchone()
@@ -8503,7 +8507,7 @@ def awareness_revise(entry_id, content, agent_name):
     if not agent_name:
         agent_name = get_agent_name()
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         old = conn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
         if not old:
@@ -8515,7 +8519,7 @@ def awareness_revise(entry_id, content, agent_name):
         if old['agent_name'] != agent_name:
             is_protected = False
             try:
-                aconn = sqlite3.connect(agents_db, timeout=5)
+                aconn = db_connect.connect_compat(agents_db, timeout=5)
                 prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
                 aconn.close()
                 is_protected = prow and prow[0] == 1
@@ -8550,7 +8554,7 @@ def awareness_complete(entry_id, agent_name):
     if not agent_name:
         agent_name = get_agent_name()
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT type, agent_name FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
         if not row:
@@ -8567,7 +8571,7 @@ def awareness_complete(entry_id, agent_name):
         if row['agent_name'] != agent_name:
             is_protected = False
             try:
-                aconn = sqlite3.connect(agents_db, timeout=5)
+                aconn = db_connect.connect_compat(agents_db, timeout=5)
                 prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
                 aconn.close()
                 is_protected = prow and prow[0] == 1
@@ -8598,7 +8602,7 @@ def awareness_supersede(entry_id, agent_name):
     if not agent_name:
         agent_name = get_agent_name()
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT type, status, agent_name FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
         if not row:
@@ -8613,7 +8617,7 @@ def awareness_supersede(entry_id, agent_name):
         if row['agent_name'] != agent_name:
             is_protected = False
             try:
-                aconn = sqlite3.connect(agents_db, timeout=5)
+                aconn = db_connect.connect_compat(agents_db, timeout=5)
                 prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
                 aconn.close()
                 is_protected = prow and prow[0] == 1
@@ -8642,7 +8646,7 @@ def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_nam
     if not agent_name:
         agent_name = get_agent_name()
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         query = "SELECT * FROM agent_awareness WHERE agent_name=?"
         params = [agent_name]
@@ -8675,7 +8679,7 @@ def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_nam
 def awareness_table(entry_type, subject_type, entry_status, agent_name, limit, truncate_chars):
     """Output awareness entries in a token-efficient markdown table."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         query = "SELECT * FROM agent_awareness WHERE 1=1"
         params = []
@@ -8743,7 +8747,7 @@ def awareness_table(entry_type, subject_type, entry_status, agent_name, limit, t
 def awareness_get(entry_id):
     """Get a single awareness entry by ID."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
         conn.close()
@@ -8758,7 +8762,7 @@ def awareness_get(entry_id):
 def _update_awareness_timestamp(agent_name):
     """Update last_awareness_ts on the agent's current cycle for enforcement gate."""
     try:
-        cdb = sqlite3.connect(cycles_db, timeout=5)
+        cdb = db_connect.connect_compat(cycles_db, timeout=5)
         cdb.execute(
             "UPDATE cycles SET last_awareness_ts=datetime('now') WHERE id LIKE ? AND ended_at IS NULL",
             (f"{agent_name}-%",)
@@ -8823,7 +8827,7 @@ def connection_list_agent():
     """List the agent's own established connections (local DB filtered by agent memory)."""
     caller = get_agent_name()
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         query = """
             SELECT c.*, amc.preferences, amc.personal_notes, amc.rapport_level 
@@ -8849,7 +8853,7 @@ def connection_request(uid):
     # Guard: check can_message_connections gate
     caller = get_agent_name()
     try:
-        guard_conn = sqlite3.connect(agents_db, timeout=5)
+        guard_conn = db_connect.connect_compat(agents_db, timeout=5)
         guard_conn.row_factory = sqlite3.Row
         row = guard_conn.execute(
             "SELECT protected, can_message_connections FROM agents WHERE name=?", (caller,)
@@ -8870,7 +8874,7 @@ def connection_request(uid):
     from comms import api_request
     # Delegate request fully to the cloud backend (idempotent REST response)
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
 
         # Pre-fetch display name from primary-user contacts list
@@ -8947,7 +8951,7 @@ def provision(agent_user, token, first_name, last_name, language, country, voice
     # Guard: sub-agents cannot register VV identities
     caller = get_agent_name()
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         row = conn.execute("SELECT protected FROM agents WHERE name=?", (caller,)).fetchone()
         conn.close()
         if row and row[0] == 0:
@@ -8985,7 +8989,7 @@ def memory_connection_get(contact_uid):
     """Get memory for a specific contact."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM agent_memory_connection WHERE agent_name=? AND contact_uid=?",
@@ -9010,7 +9014,7 @@ def memory_connection_set(contact_uid, preferences, personal_notes, comm_style, 
     """Set or update memory for a contact. Uses UPSERT — only provided fields are updated."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         # Check if record exists
         existing = conn.execute(
             "SELECT id FROM agent_memory_connection WHERE agent_name=? AND contact_uid=?",
@@ -9061,7 +9065,7 @@ def memory_connection_list():
     """List all contact memories for this agent."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM agent_memory_connection WHERE agent_name=? ORDER BY updated_at DESC",
@@ -9085,7 +9089,7 @@ def memory_project_get(project_id):
     """Get memory for a specific project."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM agent_memory_project WHERE agent_name=? AND project_id=?",
@@ -9109,7 +9113,7 @@ def memory_project_set(project_id, phase, decisions, blockers, next_steps):
     """Set or update memory for a project. Uses UPSERT — only provided fields are updated."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         existing = conn.execute(
             "SELECT id FROM agent_memory_project WHERE agent_name=? AND project_id=?",
             (agent_name, project_id)
@@ -9153,7 +9157,7 @@ def memory_project_list():
     """List all project memories for this agent."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM agent_memory_project WHERE agent_name=? ORDER BY updated_at DESC",
@@ -9177,7 +9181,7 @@ def memory_system_get(key):
     """Get system memory. If key is provided, returns single entry; otherwise returns all."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         if key:
             row = conn.execute(
@@ -9205,7 +9209,7 @@ def memory_system_set(key, value):
     """Set a system memory entry. Uses UPSERT — replaces value if key exists."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.execute(
             """INSERT INTO agent_memory_system (agent_name, key, value)
                VALUES (?, ?, ?)
@@ -9223,7 +9227,7 @@ def memory_system_list():
     """List all system memory entries for this agent."""
     try:
         agent_name = get_agent_name()
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM agent_memory_system ORDER BY key ASC"
@@ -9238,7 +9242,7 @@ def memory_system_list():
 def memory_system_delete(key):
     """Delete a system memory entry by key."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         cursor = conn.execute(
             "DELETE FROM agent_memory_system WHERE key=?", (key,)
         )
@@ -9258,7 +9262,7 @@ def memory_system_delete(key):
 def memory_system_rename(old_key, new_key):
     """Rename a system memory key (preserves value and metadata)."""
     try:
-        conn = sqlite3.connect(tasks_db, timeout=5)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
         # Check old key exists
         existing = conn.execute(
             "SELECT id FROM agent_memory_system WHERE key=?", (old_key,)
@@ -9527,7 +9531,7 @@ def _check_browser_access():
         sys.exit(1)
 
     agent_name = get_agent_name()
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT browser_enabled FROM agents WHERE name=?", (agent_name,)).fetchone()
     conn.close()
@@ -9544,7 +9548,7 @@ def _get_screenshot_dir(agent_name: str) -> str:
     COA:        {workspace}/.agent/workspace/screenshots/
     Sub-agents: {workspace}/workspace/screenshots/
     """
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
     conn.close()
@@ -9880,7 +9884,7 @@ def browser_enable(agent_name):
         sys.exit(1)
 
     # Guard: COA must have browser access
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
 
     # Resolve COA name from setup.ini
@@ -9944,7 +9948,7 @@ def browser_disable(agent_name):
         json_response(False, error="Permission denied: only COA can manage browser access for other agents")
         sys.exit(1)
 
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
 
     target = conn.execute("SELECT name, os_user, protected, workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
@@ -10007,7 +10011,7 @@ def skill_new(name, description, scope):
     name = name.lower().replace(" ", "_").replace("-", "_")
 
     # Resolve COA skills directory
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
     coa = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
     if not coa:
@@ -10086,7 +10090,7 @@ Reference them using relative paths from the agent's workspace.
     subprocess.run(["chmod", "664", asset_readme], check=False)
 
     # Register in DB
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     try:
         conn.execute(
             "INSERT OR IGNORE INTO skills (name, type, origin, has_assets, description, status, scope) "
@@ -10112,7 +10116,7 @@ def skill_status(name, new_status):
     """
     name = name.lower()
 
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT status FROM skills WHERE name=?", (name,)).fetchone()
 
@@ -10149,7 +10153,7 @@ def skill_status(name, new_status):
 @click.option("--json-output", is_flag=True, help="Output as JSON instead of table")
 def skill_list(status, json_output):
     """List all registered skills with their status."""
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
 
     if status:
@@ -10215,7 +10219,7 @@ def skill_register():
     manual skill file additions.
     """
     # Resolve COA skills directory
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
     coa = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
     if not coa:
@@ -10301,7 +10305,7 @@ def skill_override(name):
     override_name = f"{name}_override"
 
     # Resolve COA skills directory
-    conn = sqlite3.connect(agents_db, timeout=5)
+    conn = db_connect.connect_compat(agents_db, timeout=5)
     conn.row_factory = sqlite3.Row
     coa = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
     if not coa:
@@ -10407,7 +10411,7 @@ def pkg_list():
     """List all registered system packages."""
     db_path = _get_agents_db_path()
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT name, status, reason, requested_by, requested_at, resolved_at, notified_at "
@@ -10458,7 +10462,7 @@ def pkg_request(name, reason):
     db_path = _get_agents_db_path()
 
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         # Check if already exists
         existing = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
         if existing:
@@ -10490,7 +10494,7 @@ def pkg_add(name, reason):
     db_path = _get_agents_db_path()
 
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         conn.execute(
             "INSERT OR REPLACE INTO system_packages (name, status, reason, requested_by, requested_at, resolved_at) "
             "VALUES (?, 'approved', ?, 'pu', datetime('now'), datetime('now'))",
@@ -10514,7 +10518,7 @@ def pkg_approve(name):
     db_path = _get_agents_db_path()
 
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
         if not row:
             json_response(False, error=f"Package '{name}' not found in registry.")
@@ -10547,7 +10551,7 @@ def pkg_deny(name):
     db_path = _get_agents_db_path()
 
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
         if not row:
             json_response(False, error=f"Package '{name}' not found in registry.")
@@ -10576,7 +10580,7 @@ def pkg_remove(name):
     db_path = _get_agents_db_path()
 
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         row = conn.execute("SELECT name FROM system_packages WHERE name=?", (name,)).fetchone()
         if not row:
             json_response(False, error=f"Package '{name}' not found in registry.")
@@ -10602,7 +10606,7 @@ def pkg_install(name):
 
     # Verify package is approved before attempting install
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
         conn.close()
     except Exception as e:

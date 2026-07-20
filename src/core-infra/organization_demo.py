@@ -14,8 +14,8 @@ Safety model (protects real books):
 All inserts go through :mod:`organization_store` (the same validated, FK-checked
 path the CLI uses), so the demo set is also a live integration exercise.
 """
-
 from __future__ import annotations
+
 
 import os
 import sys

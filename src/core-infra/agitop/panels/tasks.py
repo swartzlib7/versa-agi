@@ -1,5 +1,12 @@
 """Tasks panel — active tasks list with live data."""
 
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import json
 import os
 import subprocess
@@ -1611,7 +1618,7 @@ class TasksPanel(Widget):
         if self.tasks_reader:
             try:
                 import sqlite3
-                conn = sqlite3.connect(self.tasks_reader.db_path, timeout=2)
+                conn = db_connect.connect_compat(self.tasks_reader.db_path, timeout=2)
                 conn.row_factory = sqlite3.Row
                 row = conn.execute("SELECT display_name FROM connections WHERE uid=?", (uid,)).fetchone()
                 conn.close()
@@ -1625,7 +1632,7 @@ class TasksPanel(Widget):
         if self.message_reader:
             try:
                 import sqlite3
-                conn = sqlite3.connect(self.message_reader.db_path, timeout=2)
+                conn = db_connect.connect_compat(self.message_reader.db_path, timeout=2)
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     "SELECT display_name FROM messages WHERE from_user_id=? AND display_name IS NOT NULL LIMIT 1",

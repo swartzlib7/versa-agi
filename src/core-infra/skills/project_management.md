@@ -43,6 +43,7 @@ This mindset applies **after** the product is released and has live users.
 - During **Building**: bias toward simplicity and clean re-implementation over workarounds.
 - During **Maintaining**: bias toward safety and incremental changes over wholesale rewrites.
 - If unsure, **ask the Primary User** which phase applies.
+- Once a project is registered and work is **product code / a named feature**, load **`software_engineering`** and **`feature_statefold`** (one living `state_*.md` per feature — no parallel specs).
 
 ## Trigger
 

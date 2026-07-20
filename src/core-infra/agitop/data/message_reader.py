@@ -3,6 +3,13 @@ Message reader — read-only access to messages.db.
 Provides data for the Messages Feed panel and agictl.
 """
 
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import sqlite3
 from typing import Optional
 
@@ -12,7 +19,7 @@ class MessageReader:
 
     def _query(self, sql: str, params: tuple = ()) -> list[dict]:
         try:
-            conn = sqlite3.connect(
+            conn = db_connect.connect_compat(
                 self.db_path,
                 timeout=5,
             )
@@ -26,7 +33,7 @@ class MessageReader:
 
     def _execute(self, sql: str, params: tuple = ()) -> bool:
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             conn.execute(sql, params)
             conn.commit()
             conn.close()
@@ -148,7 +155,7 @@ class MessageReader:
         inserted = 0
         persisted_ids = []
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             for msg in messages:
                 # Resolve IDs varying between REST and MCP payloads
                 msg_id = msg.get("messageId")
@@ -192,7 +199,7 @@ class MessageReader:
         # Cycle ID from environment (set by lifeline env script)
         env_cycle_id = os.environ.get("VERSA_CYCLE_ID") or None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             for msg in messages:
                 msg_id = msg.get("messageId")
                 
@@ -226,7 +233,7 @@ class MessageReader:
     def stamp_cycle_id(self, sub_account: str, cycle_id: str, agent_name: str = "") -> int:
         """Stamp all unprocessed received messages with the given cycle_id."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             if agent_name and agent_name != sub_account:
                 cursor = conn.execute(
                     "UPDATE messages SET cycle_id = ? WHERE status = 'unprocessed' AND direction = 'received' AND (to_user_id = ? OR to_user_id = ?) AND cycle_id IS NULL",
@@ -263,7 +270,7 @@ class MessageReader:
     def delete_message(self, message_id: str) -> bool:
         """Delete a message by its message_id and tombstone it against inbox re-sync."""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5)
+            conn = db_connect.connect_compat(self.db_path, timeout=5)
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS deleted_message_ids ("
                 "message_id TEXT PRIMARY KEY, "

@@ -11,7 +11,6 @@ Run:  python -m unittest harness.tests.test_utility_models   (from core-infra)
 """
 
 import os
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -20,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import base64 as _b64  # noqa: E402
 
+import db_connect  # noqa: E402
 import modality_maps  # noqa: E402
 import utility_store  # noqa: E402
 from harness import generation as gen  # noqa: E402
@@ -61,7 +61,7 @@ class _TempAgentsDB(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.mkdtemp()
         self.db = os.path.join(self._dir, "agents.db")
-        conn = sqlite3.connect(self.db)
+        conn = db_connect.connect(self.db, row_factory=False)
         conn.executescript(_AGENTS_SCHEMA)
         conn.commit()
         conn.close()

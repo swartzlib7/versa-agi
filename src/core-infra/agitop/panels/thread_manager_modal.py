@@ -1,6 +1,13 @@
 """Thread Manager modal — inspect and drain LangGraph checkpoint threads."""
 
 import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
+import os
 import sqlite3
 import subprocess
 from typing import Optional
@@ -15,7 +22,7 @@ def _query_checkpoint_db(db_path: str, sql: str, params: tuple = ()) -> list[dic
     """Query a checkpoints.db via sudo (owned by agent user, not root)."""
     try:
         # Try direct access first (works if run as root/sudo)
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        conn = db_connect.connect_compat(f"file:{db_path}?mode=ro", uri=True, timeout=2)
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
         conn.close()
@@ -73,7 +80,7 @@ def _resolve_project_name(thread_id: str) -> str:
         pid = int(project_part)
         tasks_db = "/var/lib/versa-agi/coa/tasks.db"
         if os.path.exists(tasks_db):
-            conn = sqlite3.connect(f"file:{tasks_db}?mode=ro", uri=True, timeout=2)
+            conn = db_connect.connect_compat(f"file:{tasks_db}?mode=ro", uri=True, timeout=2)
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT name FROM projects WHERE id = ?", (pid,)).fetchone()
             conn.close()
@@ -88,7 +95,7 @@ def _drain_thread(agent_name: str, thread_id: str) -> bool:
     """Delete all checkpoint data for a specific thread."""
     db_path = f"/var/lib/versa-agi/{agent_name}/cycles/checkpoints.db"
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
         conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
         conn.commit()
@@ -117,7 +124,7 @@ def _drain_all_threads(agent_name: str) -> bool:
     """Delete ALL checkpoint data for an agent."""
     db_path = f"/var/lib/versa-agi/{agent_name}/cycles/checkpoints.db"
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         conn.execute("DELETE FROM checkpoints")
         conn.execute("DELETE FROM writes")
         conn.commit()

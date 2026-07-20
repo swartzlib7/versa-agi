@@ -12,8 +12,8 @@ Unlike the Reader (which swallows errors to stay resilient for display), the
 Writer returns a small structured result ``{"success": bool, ...}`` mirroring the
 agictl JSON envelope, so panels can show inline success/failure without crashing.
 """
-
 from __future__ import annotations
+
 
 import os
 import sys

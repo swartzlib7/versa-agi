@@ -1,8 +1,13 @@
 """Cycle Log Modal — live tail viewer for agent cycle output."""
-
 from __future__ import annotations
 
 import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import subprocess
 from typing import Any, Callable, Optional
 
@@ -123,7 +128,7 @@ class CycleLogController:
         try:
             if os.path.exists(db_path):
                 import sqlite3
-                conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2)
+                conn = db_connect.connect_compat(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2)
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT thread_id, COUNT(*) as count FROM checkpoints GROUP BY thread_id ORDER BY thread_id"
@@ -134,7 +139,7 @@ class CycleLogController:
                 tasks_db = "/var/lib/versa-agi/coa/tasks.db"
                 try:
                     if os.path.exists(tasks_db):
-                        tconn = sqlite3.connect(tasks_db, timeout=2)
+                        tconn = db_connect.connect_compat(tasks_db, timeout=2)
                         for prow in tconn.execute("SELECT id, name FROM projects"):
                             project_names[str(prow[0])] = prow[1]
                         tconn.close()
@@ -199,7 +204,7 @@ class CycleLogController:
             return
         try:
             import sqlite3
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2)
+            conn = db_connect.connect_compat(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2)
             rows = conn.execute(
                 "SELECT DISTINCT json_extract(c.metadata, '$.step') as step_num, c.checkpoint_id "
                 "FROM checkpoints c "
@@ -247,7 +252,7 @@ class CycleLogController:
                 sys.path.insert(0, harness_sites[0])
             from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
             serializer = JsonPlusSerializer()
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2)
+            conn = db_connect.connect_compat(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT checkpoint_id, parent_checkpoint_id, checkpoint, metadata "

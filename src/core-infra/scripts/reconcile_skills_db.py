@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Idempotent skills table reconcile from shipped skill files."""
-
 from __future__ import annotations
 
 import configparser
@@ -12,6 +11,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CORE_INFRA = SCRIPT_DIR.parent
+if str(CORE_INFRA) not in sys.path:
+    sys.path.insert(0, str(CORE_INFRA))
+import db_connect  # noqa: E402
+
 SKILLS_SRC = CORE_INFRA / "skills"
 SCOPE_INI = CORE_INFRA / "config" / "skills_scope.ini"
 DEFAULT_DB = "/var/lib/versa-agi/agents.db"
@@ -39,7 +42,7 @@ def reconcile(db_path: str = DEFAULT_DB) -> tuple[int, int, int]:
     updated = 0
     deleted = 0
 
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = db_connect.connect_compat(db_path, timeout=10)
     try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS skills ("

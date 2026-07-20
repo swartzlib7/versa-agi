@@ -1,8 +1,13 @@
 """Tabbed agent detail modal — settings, memory, prompts, cycle logs, threads."""
-
 from __future__ import annotations
 
 import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import sqlite3
 from typing import Optional
 
@@ -512,7 +517,7 @@ class AgentPromptMenu(ModalScreen):
         self.query_one("#btn-agent-mem-remove-conn", Button).disabled = True
         self.query_one("#agent-tab-mem-hint", Static).update("[dim]Select a row to edit or remove.[/]")
         try:
-            conn = sqlite3.connect(_tasks_db(), timeout=5)
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
             conn.row_factory = sqlite3.Row
             name_cache = _build_name_cache(conn)
             rows = conn.execute(

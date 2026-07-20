@@ -28,6 +28,7 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 | `identity` | `agictl_identity` | `identity provision …` |
 | `execute` / `bash` | `agictl_execute` | `bash "ls -la"` or `execute python "print(1)"` |
 | `browser` | `agictl_browser` | `browser goto "https://…"` |
+| `organization` | `agictl_organization` | `organization org list` (only when Organization feature is ON) |
 | `search` | `agictl_search` | typed args: `query`, `count` (not a command string) |
 | `view` | `agictl_view_image` | typed arg: `path` (not a command string) |
 

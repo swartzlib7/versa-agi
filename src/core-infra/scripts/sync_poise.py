@@ -28,8 +28,12 @@ import shutil
 import subprocess
 import configparser
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from weave_poise import weave
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_CORE_INFRA = os.path.dirname(_SCRIPT_DIR)
+sys.path.insert(0, _CORE_INFRA)
+sys.path.insert(0, _SCRIPT_DIR)
+import db_connect  # noqa: E402
+from weave_poise import weave  # noqa: E402
 
 POISE_DIR = "/etc/versa-agi/poise"
 
@@ -170,7 +174,7 @@ def refresh_agent_poises(label_map: dict, watchdog_user: str, coa_user: str) -> 
         return
 
     try:
-        conn = sqlite3.connect(agents_db, timeout=5)
+        conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT name, role FROM agents WHERE status != 'removed' AND name NOT IN (?, ?)",

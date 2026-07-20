@@ -11,8 +11,8 @@ Money is stored as integer cents; :func:`format_money` renders it for display.
 The reader returns both the raw ``*_cents`` integer (for logic) and, where handy,
 a ``*_display`` string (for the panel), so presentation code stays trivial.
 """
-
 from __future__ import annotations
+
 
 import os
 import sys

@@ -32,6 +32,15 @@ Before beginning execution:
 *   If registering a new project: Follow onboarding and then update status.
 *   If disposable: `agictl agent status set active "Processing temporary request"`
 
+### Step 3: Load craft skills (when applicable)
+
+If the work is **product/feature code** (implement, fix, refactor, close a feature):
+
+1. Load **`software_engineering`** before changing code.
+2. Load **`feature_statefold`** and open (or create) the feature’s living `state_*.md` — do not start a parallel `*_spec.md` / `context_*.md`.
+
+Host stack / apt / systemd setup → **`solution_architect`** instead. Ambiguous “what to build” → **`requirements_elicitation`** first.
+
 ## Core Directive
 
 **Generally, all work will end up being in a project somewhere**, unless it is temporary stuff that you are doing just for the moment that you can clean up afterwards—that's disposable. **Always determine which project to target the work at, or creating a new project.**

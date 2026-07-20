@@ -4,6 +4,8 @@ Versa AGi — Task Triage Node
 project routing, and skill injection.
 """
 
+import db_connect
+
 import os
 import json
 from dataclasses import dataclass, field, asdict
@@ -220,7 +222,7 @@ def load_skills_catalog(agent_name: str = "coa") -> str:
             import sqlite3
             agents_db = os.environ.get("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
             if os.path.isfile(agents_db):
-                conn = sqlite3.connect(f"file:{agents_db}?mode=ro", uri=True, timeout=3)
+                conn = db_connect.connect_compat(f"file:{agents_db}?mode=ro", uri=True, timeout=3)
                 coa_only = {row[0] for row in conn.execute(
                     "SELECT name FROM skills WHERE scope='coa_only'"
                 ).fetchall()}
@@ -385,7 +387,7 @@ def enrich_triage_from_inbox(result: TriageResult, agent_name: str) -> TriageRes
     placeholders = ",".join("?" * len(ids))
     try:
         import sqlite3
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = db_connect.connect_compat(db_path, timeout=5)
         rows = conn.execute(
             f"SELECT has_attachments, attachment_path, raw_payload FROM messages "
             f"WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({placeholders})",

@@ -1,6 +1,8 @@
 """Validate local image paths for agictl view / harness modality tools."""
-
 from __future__ import annotations
+
+import db_connect
+
 
 import os
 import sqlite3
@@ -22,7 +24,7 @@ def _agent_workspace(agent_name: str) -> str:
     if agent_dir:
         return os.path.dirname(agent_dir)
 
-    conn = sqlite3.connect(AGENTS_DB, timeout=5)
+    conn = db_connect.connect_compat(AGENTS_DB, timeout=5)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
     conn.close()

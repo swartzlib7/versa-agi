@@ -3,6 +3,13 @@ Agent reader — read-only composite access to agents.db and cycles.db.
 Provides data for the Agents Panel and Footer Stats.
 """
 
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import sqlite3
 from typing import Optional
 
@@ -15,7 +22,7 @@ class AgentReader:
 
     def _query_agents(self, sql: str, params: tuple = ()) -> list[dict]:
         try:
-            conn = sqlite3.connect(
+            conn = db_connect.connect_compat(
                 f"file:{self.agents_db_path}?mode=ro",
                 uri=True,
                 timeout=2,
@@ -30,7 +37,7 @@ class AgentReader:
 
     def _query_cycles(self, sql: str, params: tuple = ()) -> list[dict]:
         try:
-            conn = sqlite3.connect(
+            conn = db_connect.connect_compat(
                 f"file:{self.cycles_db_path}?mode=ro",
                 uri=True,
                 timeout=2,
@@ -46,7 +53,7 @@ class AgentReader:
     def _query_messages(self, sql: str, params: tuple = ()) -> list[dict]:
         if not self.messages_db_path: return []
         try:
-            conn = sqlite3.connect(
+            conn = db_connect.connect_compat(
                 f"file:{self.messages_db_path}?mode=ro",
                 uri=True,
                 timeout=2,
@@ -62,7 +69,7 @@ class AgentReader:
     def _query_tasks(self, sql: str, params: tuple = ()) -> list[dict]:
         if not self.tasks_db_path: return []
         try:
-            conn = sqlite3.connect(
+            conn = db_connect.connect_compat(
                 f"file:{self.tasks_db_path}?mode=ro",
                 uri=True,
                 timeout=2,
@@ -128,7 +135,7 @@ class AgentReader:
         if not agents or not self.agents_db_path:
             return agents
         try:
-            conn = sqlite3.connect(self.agents_db_path, timeout=5)
+            conn = db_connect.connect_compat(self.agents_db_path, timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """SELECT name, tool_output_token_budget, model_routing_enabled FROM agents"""
@@ -161,7 +168,7 @@ class AgentReader:
         if field not in allowed:
             return False
         try:
-            conn = sqlite3.connect(self.agents_db_path, timeout=5)
+            conn = db_connect.connect_compat(self.agents_db_path, timeout=5)
             conn.execute(
                 f"UPDATE agents SET {field} = ?, updated_at = datetime('now') WHERE name = ?",
                 (value, agent_name)
@@ -251,7 +258,7 @@ class AgentReader:
     def reset_monthly_cycles(self) -> bool:
         """Delete all cycle records in the current month. Returns True on success."""
         try:
-            conn = sqlite3.connect(self.cycles_db_path, timeout=5)
+            conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
             conn.execute(
                 "DELETE FROM cycles WHERE started_at >= strftime('%Y-%m-01', 'now')"
             )
@@ -265,7 +272,7 @@ class AgentReader:
     def drain_all_cycles(self) -> bool:
         """Delete ALL cycle records (full history drain). Returns True on success."""
         try:
-            conn = sqlite3.connect(self.cycles_db_path, timeout=5)
+            conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
             conn.execute("DELETE FROM cycles")
             conn.commit()
             conn.execute("VACUUM")
@@ -317,7 +324,7 @@ class AgentReader:
 
     def update_last_cycle_tokens(self, agent_name: str, t_in: int, t_out: int, t_think: int, t_total: int, exit_code: int = None, t_cached: int = 0, session_path: str = None) -> bool:
         try:
-            conn = sqlite3.connect(self.cycles_db_path, timeout=5)
+            conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 "SELECT id, execution_model FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1",

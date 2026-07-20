@@ -1,6 +1,8 @@
 """One-shot Utility Model runner — no LangGraph checkpoint."""
-
 from __future__ import annotations
+
+import db_connect
+
 
 import json
 import os
@@ -56,7 +58,7 @@ def _agent_home(agent_name: str) -> str:
 
     db = os.environ.get("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
     try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con = db_connect.connect_compat(f"file:{db}?mode=ro", uri=True)
         try:
             row = con.execute(
                 "SELECT workspace FROM agents WHERE name=?", (agent_name,)

@@ -460,23 +460,72 @@ agictl agent list for full details — you and your agentic team:
 ${AGENT_REGISTRY_FOR_SYSTEM}"
     fi
 
-    # Feature availability (setup.ini [features], D34): when an optional feature
-    # is OFF, tell the agent so it does not reach for that feature's agictl
-    # command group. Only features that gate an agent-facing command group are
-    # listed (the others are dashboard-only surfaces).
+    # Feature availability (setup.ini [features], D34 + TEAM-2/D27):
+    # - OFF → warn so agents do not reach for that feature's agictl group
+    # - ON  → positive enablement for COA + Accountant (ops); other agents via duties
+    # Only features that gate an agent-facing command group are listed here.
     FEATURE_AVAILABILITY_CONTENT=""
     if [ -f "${SETUP_INI}" ]; then
       _org_ui=$(sed -n '/^\[features\]/,/^\[/{s/^organization_ui=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ')
       _features_off=""
+      _org_enabled=0
       case "${_org_ui}" in
-        1|true|yes|on) ;;  # enabled — no warning
+        1|true|yes|on) _org_enabled=1 ;;
         *) _features_off="${_features_off}
-- Organization (accounting/business) is OFF — do not use \`agictl organization …\`." ;;
+- Organization (accounting/business) is OFF — do not use \`agictl organization …\` or email access skills (**email_admin** / **email_technical**)." ;;
       esac
       if [ -n "${_features_off}" ]; then
         FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
 
 Some optional features are OFF on this system. Do not use their commands:${_features_off}"
+      elif [ "${_org_enabled}" = "1" ]; then
+        _org_audience=0
+        if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
+          _org_audience=1
+        else
+          _agent_role_label=$(sqlite3 "${AGENTS_DB}" "SELECT role FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
+          case "${_agent_role_label}" in
+            Accountant|accountant) _org_audience=1 ;;
+          esac
+        fi
+        if [ "${_org_audience}" = "1" ]; then
+          FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
+
+**Organization is ON** — business records (orgs, products, invoices, transactions, exchange) via \`agictl organization …\`.
+
+- **Skill:** load **organization** when doing org/invoice/expense/exchange work.
+- **Email:** load **email_admin** / **email_technical** for inbox ops; prefer Organization credentials (\`credential_id=\`).
+- **Money:** integer **cents** only (e.g. \$45.00 → \`4500\`).
+- **COA:** owns **integration sync** / exchange execution; escalate sync failures here.
+- **Accountant:** owns invoicing, expense categorization, products, and financial summaries — not sync.
+
+Basic commands:
+\`\`\`
+agictl organization org list
+agictl organization product list
+agictl organization invoice list
+agictl organization invoice add --customer-org-id <id> --status draft
+agictl organization transaction list
+agictl organization exchange list
+agictl organization exchange get <id>
+\`\`\`
+Discover entity flags with \`agictl organization <entity> add --help\`. Full surface: cli_reference / skill **organization**."
+        fi
+      fi
+    fi
+
+    # Fold feature availability into the agent-registry block so BOTH assembly
+    # paths see it: COA template substitutes {AGENT_REGISTRY} only (never uses
+    # LIVE_SITUATION_PREFIX); legacy sub-agents prepend the same registry block
+    # after the LIVE SITUATION sentinel.
+    if [ -n "${FEATURE_AVAILABILITY_CONTENT}" ]; then
+      if [ -n "${AGENT_REGISTRY_CONTENT}" ]; then
+        AGENT_REGISTRY_CONTENT="${AGENT_REGISTRY_CONTENT}
+${FEATURE_AVAILABILITY_CONTENT}
+"
+      else
+        AGENT_REGISTRY_CONTENT="${FEATURE_AVAILABILITY_CONTENT}
+"
       fi
     fi
 
@@ -532,16 +581,13 @@ ${CYCLE_PARAMS_CONTENT}"
     fi
 
     # ── Dynamic prefix blocks (legacy path — after LIVE SITUATION) ──
+    # FEATURE AVAILABILITY is already folded into AGENT_REGISTRY_CONTENT above
+    # (required for COA template {AGENT_REGISTRY}; avoids double-inject here).
     LIVE_SITUATION_PREFIX=""
     if [ "${IS_TEMPLATE}" != true ]; then
       if [ -n "${AGENT_REGISTRY_CONTENT}" ]; then
         LIVE_SITUATION_PREFIX="${LIVE_SITUATION_PREFIX}
 ${AGENT_REGISTRY_CONTENT}
-"
-      fi
-      if [ -n "${FEATURE_AVAILABILITY_CONTENT}" ]; then
-        LIVE_SITUATION_PREFIX="${LIVE_SITUATION_PREFIX}
-${FEATURE_AVAILABILITY_CONTENT}
 "
       fi
       if [ "${AGENT_NAME}" != "${COA_USER}" ] && [ "${AGENT_NAME}" != "${WATCHDOG_USER}" ] && [ -n "${SUB_ACCOUNT_ID}" ]; then

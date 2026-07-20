@@ -1,5 +1,12 @@
 """Projects panel — projects with member management from tasks.db."""
 
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
 import json
 import os
 import sqlite3
@@ -69,7 +76,7 @@ def _preview_directory(display_name: str) -> tuple[str, str]:
     """Return (directory_slug, full_coa_workspace_path) for Create preview."""
     base = slugify_project_dir(display_name)
     try:
-        conn = sqlite3.connect(_tasks_db(), timeout=2)
+        conn = db_connect.connect_compat(_tasks_db(), timeout=2)
         conn.row_factory = sqlite3.Row
         taken = collect_taken_project_dirs(conn, COA_WORKSPACE_BASE)
         conn.close()
@@ -579,7 +586,7 @@ class ProjectMembersModal(ModalScreen):
             return
 
         try:
-            conn = sqlite3.connect(_tasks_db(), timeout=5)
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM agent_memory_project WHERE project_id=? ORDER BY updated_at DESC",
@@ -932,7 +939,7 @@ class EditProjectMemoryModal(ModalScreen):
             return
         pid = self.row.get("project_id")
         try:
-            conn = sqlite3.connect(_tasks_db(), timeout=5)
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
             conn.execute(
                 """UPDATE agent_memory_project SET
                    current_phase=?, key_decisions=?, blockers=?, next_steps=?,
@@ -1007,7 +1014,7 @@ class RemoveProjectMemoryModal(ModalScreen):
             self.app.pop_screen()
             return
         try:
-            conn = sqlite3.connect(_tasks_db(), timeout=5)
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
             conn.execute(
                 "DELETE FROM agent_memory_project WHERE agent_name=? AND project_id=?",
                 (self.agent_name, self.project_id),

@@ -4,6 +4,10 @@
 
 > **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
 
+## Host class
+
+Trust spawn **host_class** (`native_linux` / `wsl2` / `wsl1`) before requesting packages. On WSL, prefer packages that make sense inside the Linux environment; do not assume Windows-side installs. Full env-stack scripts → **solution_architect**.
+
 ## How It Works
 
 1. **You request** a package via `agictl pkg request <name> --reason "..."`.

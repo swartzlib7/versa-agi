@@ -1,6 +1,8 @@
 """Persistence helpers for utility_models and utility task fields."""
-
 from __future__ import annotations
+
+import db_connect
+
 
 import json
 import os
@@ -29,7 +31,7 @@ def list_utility_models(*, enabled_only: bool = False) -> list[dict[str, Any]]:
     if not os.path.isfile(db):
         return []
     try:
-        conn = sqlite3.connect(db, timeout=5)
+        conn = db_connect.connect_compat(db, timeout=5)
         conn.row_factory = sqlite3.Row
         q = "SELECT * FROM utility_models"
         if enabled_only:
@@ -46,7 +48,7 @@ def get_utility_model(um_id: str) -> dict[str, Any] | None:
     db = _agents_db()
     if not os.path.isfile(db):
         return None
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM utility_models WHERE id=?", (um_id.strip(),)).fetchone()
     conn.close()
@@ -69,7 +71,7 @@ def add_utility_model(
     if om not in VALID_OUTPUT_MODALITIES:
         raise ValueError(f"Invalid output_modality: {output_modality}")
     db = _agents_db()
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     conn.execute(
         """INSERT INTO utility_models
            (id, label, catalog_model, system_prompt, output_modality, output_path,
@@ -109,7 +111,7 @@ def update_utility_model(um_id: str, fields: dict[str, Any]) -> bool:
     updates.append("updated_at=datetime('now')")
     params.append(um_id.strip())
     db = _agents_db()
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     cur = conn.execute(
         f"UPDATE utility_models SET {', '.join(updates)} WHERE id=?",
         params,
@@ -121,7 +123,7 @@ def update_utility_model(um_id: str, fields: dict[str, Any]) -> bool:
 
 def remove_utility_model(um_id: str) -> bool:
     db = _agents_db()
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     cur = conn.execute("DELETE FROM utility_models WHERE id=?", (um_id.strip(),))
     conn.commit()
     conn.close()
@@ -132,7 +134,7 @@ def get_task_utility_fields(task_id: int) -> dict[str, Any] | None:
     db = _tasks_db()
     if not os.path.isfile(db):
         return None
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """SELECT id, title, assigned_to, status, due_date, task_kind,
@@ -149,7 +151,7 @@ def list_due_utility_tasks(assignee: str) -> list[dict[str, Any]]:
     db = _tasks_db()
     if not os.path.isfile(db):
         return []
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT id, title, assigned_to, utility_model_id, utility_input_files,
@@ -174,7 +176,7 @@ def freeze_active_utility_tasks() -> int:
     db = _tasks_db()
     if not os.path.isfile(db):
         return 0
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     cur = conn.execute(
         """UPDATE tasks
            SET pre_freeze_status = status, status = 'frozen', updated_at = datetime('now')
@@ -202,7 +204,7 @@ def list_due_script_tasks(assignee: str) -> list[dict[str, Any]]:
     db = _tasks_db()
     if not os.path.isfile(db):
         return []
-    conn = sqlite3.connect(db, timeout=5)
+    conn = db_connect.connect_compat(db, timeout=5)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT id, title, assigned_to, script_path, script_parameters,

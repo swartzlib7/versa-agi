@@ -69,10 +69,10 @@ When authoring or editing any agent-facing skill, include this blockquote near t
 
 COA-only skills (e.g. this file) may omit the blockquote if they are never distributed to sub-agents.
 
-## Differentiation: Requirements Elicitation vs Solution Architect
+## Differentiation: Requirements vs Environment vs Product Code
 
-| Aspect | Requirements Elicitation | Solution Architect |
-|---|---|---|
-| **Focus** | **What to build** (5W1H) | **How to set up the environment** |
-| **Output** | Validated requirements → WBS | Self-contained bash install script |
-| **When** | New work with missing dimensions | PU needs stack/environment setup |
+| Aspect | Requirements Elicitation | Solution Architect | Software Engineering | Feature Statefold |
+|---|---|---|---|---|
+| **Focus** | **What to build** (5W1H) | **How to set up the host environment** | **How to change product code** | **One living `state_*.md` per feature** |
+| **Output** | Validated requirements → WBS | Self-contained bash install script | Small tested diffs | Folded docs + backlog/results |
+| **When** | New work with missing dimensions | PU needs stack/environment setup (`host_class`-aware) | Implement/fix/refactor in a project | Feature plan ↔ results; stop `*_spec.md` sprawl |

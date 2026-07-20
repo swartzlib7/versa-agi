@@ -11,8 +11,8 @@ rounds — callers pass and receive integer minor units. ``updated_at`` is
 maintained by AFTER UPDATE triggers in the schema (D6), so the store does not
 touch it on update.
 """
-
 from __future__ import annotations
+
 
 import os
 import sys
