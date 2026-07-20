@@ -328,24 +328,33 @@ text_box() {
 }
 
 # ─── Controlling-TTY I/O ────────────────────────────
-# curl|bash, nested sudo, and some OrbStack reinstall sessions leave stdin as a
-# pipe or a fd that does not receive keystrokes. `read` then blocks with no
-# usable prompt and Ctrl+C may not reach the script. Prefer /dev/tty when present.
+# curl|bash leaves stdin as a pipe — then fall back to /dev/tty.
+# OrbStack interactive shells often deliver keys on stdin (the session PTY) while
+# /dev/tty is a different/broken fd: prompt shows, but reads from /dev/tty hang.
+# Rule: use stdin when it is a terminal; only use /dev/tty when stdin is not.
+
+tty_stdin_is_tty() {
+  [ -t 0 ]
+}
 
 tty_read() {
-  if [ -r /dev/tty ]; then
-    read "$@" </dev/tty
+  if tty_stdin_is_tty; then
+    read "$@" || return $?
+  elif { : >/dev/tty; } 2>/dev/null; then
+    read "$@" </dev/tty 2>/dev/null || read "$@" || return $?
   else
-    read "$@"
+    read "$@" || return $?
   fi
 }
 
-# Write prompt to the controlling tty (fallback: stderr), then tty_read.
-# Usage: tty_prompt_read "Prompt text: " [-n 1] [-r] [varname]
+# Write prompt to stderr (same session) when stdin is a tty; else /dev/tty.
+# Usage: tty_prompt_read "Prompt text: " [-r] [varname]
 tty_prompt_read() {
   local prompt="$1"
   shift
-  if [ -w /dev/tty ]; then
+  if tty_stdin_is_tty; then
+    printf '%s' "${prompt}" >&2
+  elif { : >/dev/tty; } 2>/dev/null; then
     printf '%s' "${prompt}" >/dev/tty
   else
     printf '%s' "${prompt}" >&2
@@ -365,7 +374,7 @@ confirm() {
 
   echo ""
   # Line-based (type y/n then Enter) — `read -n 1` is unreliable on OrbStack.
-  tty_prompt_read "  ${prompt} ${hint} " -r reply
+  tty_prompt_read "  ${prompt} ${hint} " -r reply || true
   reply="$(printf '%s' "${reply}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   echo
   REPLY="${reply}"
@@ -390,12 +399,15 @@ confirm_accent() {
   [ "${default}" = "y" ] && hint="[Y/n]"
 
   echo ""
-  if [ -w /dev/tty ]; then
-    echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} " >/dev/tty
+  if tty_stdin_is_tty; then
+    echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} " >&2
+  elif [ -w /dev/tty ]; then
+    echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} " >/dev/tty 2>/dev/null \
+      || echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} " >&2
   else
-    echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} "
+    echo -e -n "  ${BCYAN}${prompt}${RESET} ${hint} " >&2
   fi
-  tty_read -r reply
+  tty_read -r reply || true
   reply="$(printf '%s' "${reply}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   echo
   REPLY="${reply}"

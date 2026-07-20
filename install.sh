@@ -281,9 +281,16 @@ else
   # Install acceptance (welcome, optional email, registration telemetry) runs inside setup.sh
   # via core-infra/install_acceptance.sh — shared for install and --update paths.
 
-  # Hand off to setup.sh — redirect stdin from /dev/tty so interactive
-  # prompts work even when install.sh is piped via curl
-  bash "${SETUP_SCRIPT}" < /dev/tty
+  # Hand off to setup.sh. Only force /dev/tty when stdin is not already a
+  # terminal (curl|bash). On OrbStack, always redirecting to /dev/tty can
+  # show prompts while keystrokes stay on the session PTY — accept hangs.
+  if [ -t 0 ]; then
+    bash "${SETUP_SCRIPT}"
+  elif [ -r /dev/tty ]; then
+    bash "${SETUP_SCRIPT}" < /dev/tty
+  else
+    bash "${SETUP_SCRIPT}"
+  fi
 
   # Persist repo clone to ~/.versa-agi/repo/ for the Primary User
   # This allows setup.sh --update and other tools to operate without re-cloning

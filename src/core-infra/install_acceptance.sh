@@ -69,52 +69,52 @@ _install_acceptance_link() {
   _install_acceptance_accent "$1"
 }
 
-# Prefer ui_lib tty helpers; fallback if sourced without ui_lib.
-_install_acceptance_tty_read() {
-  if declare -F tty_read >/dev/null 2>&1; then
-    tty_read "$@"
-  elif [ -r /dev/tty ]; then
-    read "$@" </dev/tty
-  else
-    read "$@"
-  fi
-}
-
-_install_acceptance_tty_prompt_read() {
-  local prompt="$1"
-  shift
-  if declare -F tty_prompt_read >/dev/null 2>&1; then
-    tty_prompt_read "${prompt}" "$@"
-    return
-  fi
-  if [ -w /dev/tty ]; then
-    printf '%s' "${prompt}" >/dev/tty
-  else
-    printf '%s' "${prompt}" >&2
-  fi
-  _install_acceptance_tty_read "$@"
-}
-
-# Trim CR/space from a tty reply (OrbStack often needs Enter; may send \r).
+# Trim CR/space from a tty reply (OrbStack may send \r).
 _install_acceptance_trim_reply() {
   printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
-# Line-based y/n (no -n 1 — single-key read is unreliable on OrbStack /dev/tty).
-# Echoes normalized reply to stdout when varname omitted; otherwise sets varname.
+# Prompt + line read in THIS function (locals + nested read across /dev/tty
+# redirects are unreliable). Prefer stdin when it is a tty — OrbStack often
+# delivers keys there while /dev/tty hangs. Fall back to /dev/tty for curl|bash
+# only when that device can actually be opened.
+_install_acceptance_read_line() {
+  local prompt="$1"
+  local varname="${2:-REPLY}"
+  # Distinct from caller locals — a nested `local raw` would shadow printf -v.
+  local _ia_buf=""
+  local use_tty=0
+
+  if [ -t 0 ]; then
+    printf '%s' "${prompt}" >&2
+    read -r _ia_buf || true
+  else
+    # Probe open — `[ -w /dev/tty ]` can be true while open still fails.
+    if { : >/dev/tty; } 2>/dev/null; then
+      use_tty=1
+    fi
+    if [ "${use_tty}" -eq 1 ]; then
+      printf '%s' "${prompt}" >/dev/tty
+      if ! read -r _ia_buf </dev/tty 2>/dev/null; then
+        printf '%s' "${prompt}" >&2
+        read -r _ia_buf || true
+      fi
+    else
+      printf '%s' "${prompt}" >&2
+      read -r _ia_buf || true
+    fi
+  fi
+
+  _ia_buf="$(_install_acceptance_trim_reply "${_ia_buf}")"
+  printf -v "${varname}" '%s' "${_ia_buf}"
+  echo "" >&2
+}
+
+# Line-based y/n (type y/n then Enter — not single-key -n 1).
 _install_acceptance_read_yn() {
   local prompt="$1"
-  local varname="${2:-}"
-  local raw=""
-  _install_acceptance_tty_prompt_read "${prompt}" -r raw
-  raw="$(_install_acceptance_trim_reply "${raw}")"
-  if [ -n "${varname}" ]; then
-    printf -v "${varname}" '%s' "${raw}"
-  else
-    REPLY="${raw}"
-  fi
-  # Enter already advanced the line on the tty; keep a blank line for layout.
-  echo "" >&2
+  local varname="${2:-REPLY}"
+  _install_acceptance_read_line "${prompt}" "${varname}"
 }
 
 # ─── Box-style input line (matches text_box body) ───
@@ -132,10 +132,12 @@ _install_acceptance_input_line() {
   else
     out="${out}: "
   fi
-  if [ -w /dev/tty ]; then
-    echo -e -n "${out}" >/dev/tty
+  if [ -t 0 ]; then
+    echo -e -n "${out}" >&2
+  elif [ -w /dev/tty ]; then
+    echo -e -n "${out}" >/dev/tty 2>/dev/null || echo -e -n "${out}" >&2
   else
-    echo -e -n "${out}"
+    echo -e -n "${out}" >&2
   fi
 }
 
@@ -151,6 +153,15 @@ _install_acceptance_valid_email() {
 install_acceptance_email_prompt() {
   local existing reply done=false shown=false
   existing="$(_install_acceptance_load_existing_email)"
+
+  # Non-interactive escape (same as accept): keep prior email or skip.
+  case "$(printf '%s' "${VERSA_INSTALL_ACCEPT:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y)
+      INSTALL_ACCEPTANCE_EMAIL="${existing:-}"
+      export INSTALL_ACCEPTANCE_EMAIL
+      return
+      ;;
+  esac
 
   while [ "${done}" = false ]; do
     if [ "${shown}" = false ]; then
@@ -180,7 +191,7 @@ install_acceptance_email_prompt() {
 
     if [ -n "${existing}" ]; then
       _install_acceptance_input_line "Email" "${existing}"
-      _install_acceptance_tty_read -r reply
+      _install_acceptance_read_line "" reply
       case "${reply}" in
         "") INSTALL_ACCEPTANCE_EMAIL="${existing}"; done=true ;;
         "-") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
@@ -195,7 +206,7 @@ install_acceptance_email_prompt() {
       esac
     else
       _install_acceptance_input_line "Email"
-      _install_acceptance_tty_read -r reply
+      _install_acceptance_read_line "" reply
       case "${reply}" in
         "") INSTALL_ACCEPTANCE_EMAIL=""; done=true ;;
         "-")
@@ -284,7 +295,17 @@ install_acceptance_welcome() {
     echo ""
   fi
 
-  _install_acceptance_read_yn "  Accept and continue? [y/N] "
+  # Escape hatch when the OrbStack/session TTY cannot deliver keystrokes:
+  #   VERSA_INSTALL_ACCEPT=yes sudo ./setup.sh
+  case "$(printf '%s' "${VERSA_INSTALL_ACCEPT:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y)
+      REPLY="y"
+      info "VERSA_INSTALL_ACCEPT set — skipping interactive accept prompt"
+      ;;
+    *)
+      _install_acceptance_read_yn "  Accept and continue? [y/N] (then Enter) "
+      ;;
+  esac
   if [[ ! $REPLY =~ ^[Yy]([Ee][Ss])?$ ]]; then
     info "Setup cancelled - no changes made."
     exit 0
