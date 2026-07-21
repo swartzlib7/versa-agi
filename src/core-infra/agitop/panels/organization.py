@@ -31,6 +31,7 @@ from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.coordinate import Coordinate
 from textual.widget import Widget
 from textual.widgets import DataTable, Static, Button, Input, Label, Tree, Checkbox, Select, TextArea
+from agitop.widgets.clear_checkbox import ClearCheckbox
 
 from agitop.data import OrganizationReader
 from agitop.data.organization_reader import format_money
@@ -149,7 +150,7 @@ EntityFormModal, ConfirmDeleteModal {
 .form-textarea { height: 7; width: 100%; }
 .form-textarea-tall { height: 14; width: 100%; }
 .form-field { height: auto; padding: 0; }
-.form-field Input, .form-field Select, .form-field Checkbox { width: 100%; }
+.form-field Input, .form-field Select, .form-field Checkbox, .form-field ClearCheckbox { width: 100%; }
 .form-label { margin-top: 1; color: $text-muted; }
 #form-error { color: $error; height: auto; }
 #confirm-dialog {
@@ -285,7 +286,7 @@ class EntityFormModal(ModalScreen):
                 w = TextArea(raw, id=f"f-{col}", classes="form-textarea")
         elif col in s.get("bool", []):
             default = bool(val) if val is not None else _BOOL_NEW_DEFAULT.get(col, False)
-            w = Checkbox("yes", value=default, disabled=disabled, id=f"f-{col}")
+            w = ClearCheckbox("yes", value=default, disabled=disabled, id=f"f-{col}")
         elif ref or choices or pick:
             nullable_fk = (self.entity, col) in _NULLABLE_FK
             if choices:

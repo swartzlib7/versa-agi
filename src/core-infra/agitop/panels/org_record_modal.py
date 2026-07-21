@@ -28,6 +28,7 @@ from textual.widgets import (    TextArea,
 )
 
 from agitop.data import OrganizationReader
+from agitop.widgets.clear_checkbox import ClearCheckbox
 from agitop.panels.organization import (
     _FIELD_LABEL, _FORM_ORDER, _FK_REF, _FK_DISABLED, _FIELD_CHOICES,
     _PICKLIST_FIELDS, _BOOL_NEW_DEFAULT, _AUTO_SLUG, _AUTO_NUMBER_FIELDS,
@@ -136,7 +137,7 @@ OrgRecordModal {
 .org-rec-full-width { height: auto; }
 .org-rec-notes-area { height: 7; width: 100%; }
 .org-rec-form-field { height: auto; padding: 0; }
-.org-rec-form-field Input, .org-rec-form-field Select, .org-rec-form-field Checkbox { width: 100%; }
+.org-rec-form-field Input, .org-rec-form-field Select, .org-rec-form-field Checkbox, .org-rec-form-field ClearCheckbox { width: 100%; }
 .org-rec-form-label { margin-top: 1; color: $text-muted; }
 #org-rec-error { color: $error; height: auto; }
 
@@ -307,7 +308,7 @@ class OrgRecordModal(ModalScreen):
         pick = _PICKLIST_FIELDS.get(("org", col))
         if col in s.get("bool", []):
             default = bool(val) if val is not None else _BOOL_NEW_DEFAULT.get(col, False)
-            w = Checkbox("yes", value=default, disabled=disabled, id=f"f-{col}")
+            w = ClearCheckbox("yes", value=default, disabled=disabled, id=f"f-{col}")
         elif ref or choices or pick:
             if choices:
                 options = list(choices)

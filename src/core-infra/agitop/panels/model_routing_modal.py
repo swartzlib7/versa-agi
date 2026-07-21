@@ -8,6 +8,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Select, Static, TabbedContent, TabPane
+from agitop.widgets.clear_checkbox import ClearCheckbox
 
 from agitop.feature_flags import OUTPUT_ROUTING_UI_VISIBLE
 from agitop.panels.system_settings_modal import (
@@ -126,7 +127,7 @@ class ModelRoutingModal(ModalScreen):
                                     "[cyan]Enable auto model routing for newly registered agents[/]"
                                 )
                                 with Container(classes="routing-checkbox-box"):
-                                    yield Checkbox(
+                                    yield ClearCheckbox(
                                         "Default for new agents",
                                         id="chk-routing-default",
                                         value=routing_default,

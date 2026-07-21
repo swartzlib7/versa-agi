@@ -22,6 +22,7 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual.widgets import Static, Button, Input, Label, DataTable, Select, Checkbox, TabbedContent, TabPane
+from agitop.widgets.clear_checkbox import ClearCheckbox
 
 from agitop.panels.modality_format import format_io_modalities
 from agitop.widgets.provider_brand_icon import provider_brand_class, provider_import_button_label
@@ -753,13 +754,13 @@ class CatalogFormModal(ModalScreen):
                         yield Input(value=str(e.get("ctx_max", 0)), type="integer", id="f-ctx-max")
 
                 with Horizontal(classes="mm-form-row mm-check-row"):
-                    yield Checkbox("Enabled", value=e.get("enabled", True), id="f-enabled")
-                    yield Checkbox("COA approved", value=e.get("coa", False), id="f-coa")
+                    yield ClearCheckbox("Enabled", value=e.get("enabled", True), id="f-enabled")
+                    yield ClearCheckbox("COA approved", value=e.get("coa", False), id="f-coa")
 
                 yield Static("[bold cyan]Routing Modalities[/]", classes="mm-section-heading")
                 with Horizontal(classes="mm-form-row"):
                     with Vertical(classes="mm-form-col"):
-                        yield Checkbox(
+                        yield ClearCheckbox(
                             "Router eligible",
                             value=bool(e.get("router_eligible")),
                             id="f-router-eligible",
@@ -996,7 +997,7 @@ class ProviderFormModal(ModalScreen):
         grid-rows: auto;
     }
     .pf-field { height: auto; padding: 0; }
-    .pf-field Input, .pf-field Select, .pf-field Checkbox { width: 100%; }
+    .pf-field Input, .pf-field Select, .pf-field Checkbox, .pf-field ClearCheckbox { width: 100%; }
     .pf-label { margin-top: 1; color: $text-muted; }
     .pf-full { height: auto; margin-top: 1; }
     #pf-error { height: auto; }
@@ -1047,7 +1048,7 @@ class ProviderFormModal(ModalScreen):
                     yield Select(cls_opts, value=cls_val, allow_blank=False, id="p-class")
                 with Vertical(classes="pf-field"):
                     yield Label("", classes="pf-label")  # spacer to align
-                    yield Checkbox("Enabled", value=e.get("enabled", False), id="p-enabled")
+                    yield ClearCheckbox("Enabled", value=e.get("enabled", False), id="p-enabled")
             with Vertical(classes="pf-full"):
                 yield Static(
                     "[dim]Set the API key afterwards via the 🔑 API Keys modal "

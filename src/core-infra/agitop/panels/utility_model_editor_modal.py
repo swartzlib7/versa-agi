@@ -9,6 +9,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
+from agitop.widgets.clear_checkbox import ClearCheckbox
 
 _OUTPUT_MODALITIES = [
     ("Text", "text"),
@@ -242,7 +243,7 @@ class UtilityModelEditorModal(ModalScreen):
                 yield Static("[b]System prompt[/]", classes="modal-form-label")
                 yield TextArea(r.get("system_prompt") or "", id="um-system-prompt", show_line_numbers=True)
                 with Horizontal(id="um-enabled-row"):
-                    yield Checkbox("Enabled", id="um-enabled", value=bool(r.get("enabled", True)))
+                    yield ClearCheckbox("Enabled", id="um-enabled", value=bool(r.get("enabled", True)))
                     yield Static(
                         "[dim]Disabled profiles remain saved but cannot run or be selected for new Utility Tasks.[/]",
                         id="um-enabled-note",

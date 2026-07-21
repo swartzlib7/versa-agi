@@ -304,20 +304,22 @@ class SystemPanel(Static):
             f" AI MODE:   {self._dot(local_ai_on)} [{mode_color}]{exec_mode}[/{mode_color}]{exp_tag}"
         )
 
-        # Inference Endpoint Status (show when local AI or cloud proxy is enabled)
+        # Local inference (Ollama / llama-server) — not third-party cloud.
+        # Cloud providers call APIs directly (LiteLLM proxy retired); gating on
+        # third-party made Mac/cloud-only installs show INFERENCE: down falsely.
         proxy_on = self.system_reader.is_third_party_enabled()
-        if local_ai_on or proxy_on:
+        if local_ai_on:
             inference_endpoint_on = self.system_reader.is_inference_endpoint_running()
             self.query_one("#m-inference_endpoint").update(
-                f" INFERENCE:   {self._dot(inference_endpoint_on)} {'active' if inference_endpoint_on else 'down'}"
+                f" LOCAL AI:   {self._dot(inference_endpoint_on)} {'active' if inference_endpoint_on else 'down'}"
             )
         else:
             self.query_one("#m-inference_endpoint").update("")
 
-        # Third-Party Cloud Providers Status
+        # Third-party cloud providers (OpenRouter / OpenAI / Anthropic / xAI)
         if proxy_on:
             self.query_one("#m-cloudproxy").update(
-                f" PROXY:     {self._dot(proxy_on)} enabled"
+                f" PROVIDERS: {self._dot(proxy_on)} enabled"
             )
         else:
             self.query_one("#m-cloudproxy").update("")

@@ -8,11 +8,13 @@ from agitop.widgets.braille_spinner import (
     dots2_markup,
     parse_cycle_agent,
 )
+from agitop.widgets.clear_checkbox import ClearCheckbox
 from agitop.widgets.paginated_data_table import PaginatedDataTable
 
 __all__ = [
     "AtriumDisplay",
     "AtriumPanel",
+    "ClearCheckbox",
     "DOTS2",
     "DOTS2_INTERVAL_S",
     "PaginatedDataTable",

@@ -33,7 +33,7 @@ SelectCurrent {
     color: $text;
 }
 
-Checkbox {
+Checkbox, ClearCheckbox {
     border: solid $surface-lighten-2;
     color: $text-muted;
     background: $surface-lighten-2;
@@ -41,21 +41,21 @@ Checkbox {
     padding: 0 1;
 }
 
-Checkbox:focus {
+Checkbox:focus, ClearCheckbox:focus {
     border: solid $surface-lighten-2;
     color: $text-muted;
 }
 
-Checkbox > .toggle--label {
+Checkbox > .toggle--label, ClearCheckbox > .toggle--label {
     color: $text;
 }
 
-Checkbox > .toggle--button {
+Checkbox > .toggle--button, ClearCheckbox > .toggle--button {
     background: $surface-lighten-2;
     color: $panel-darken-2;
 }
 
-Checkbox.-on > .toggle--button {
+Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     color: $text-success;
     background: $surface-lighten-2;
 }
@@ -1181,7 +1181,7 @@ TaskEditModal {
     content-align: center middle;
 }
 
-.utility-models-row-col Checkbox {
+.utility-models-row-col Checkbox, .utility-models-row-col ClearCheckbox {
     width: auto;
     margin: 0;
 }
@@ -1744,7 +1744,7 @@ SystemSettingsModal {
     align: left middle;
 }
 
-.settings-inline-row Checkbox {
+.settings-inline-row Checkbox, .settings-inline-row ClearCheckbox {
     width: auto;
     margin-right: 1;
 }
@@ -2545,7 +2545,7 @@ ModelRoutingModal {
     content-align: left middle;
 }
 
-.routing-checkbox-box Checkbox {
+.routing-checkbox-box Checkbox, .routing-checkbox-box ClearCheckbox {
     width: 100%;
     height: auto;
     border: none;
@@ -2727,7 +2727,7 @@ ModelManagerModal {
     margin-bottom: 1;
 }
 
-.mm-check-row Checkbox {
+.mm-check-row Checkbox, .mm-check-row ClearCheckbox {
     width: 1fr;
     margin: 0 2;
     content-align: center middle;

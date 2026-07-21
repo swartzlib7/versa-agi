@@ -18,6 +18,7 @@ from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.widgets import DataTable, Static, Button, Select, Input, TextArea, TabbedContent, TabPane, Checkbox, RadioSet, RadioButton
+from agitop.widgets.clear_checkbox import ClearCheckbox
 from textual.widget import Widget
 from rich.markup import escape
 
@@ -924,9 +925,9 @@ class TaskEditModal(ModalScreen):
                                             yield Static("[b]VV alerts[/b]", classes="modal-form-label")
                                             with Horizontal(id="task-utility-alert-row"):
                                                 with Vertical(classes="task-field-col task-vv-alert-col"):
-                                                    yield Checkbox("Start Alert", id="task-edit-utility-start-alert", value=current_um_start)
+                                                    yield ClearCheckbox("Start Alert", id="task-edit-utility-start-alert", value=current_um_start)
                                                 with Vertical(classes="task-field-col task-vv-alert-col"):
-                                                    yield Checkbox("Stop Alert", id="task-edit-utility-stop-alert", value=current_um_stop)
+                                                    yield ClearCheckbox("Stop Alert", id="task-edit-utility-stop-alert", value=current_um_stop)
                             with Horizontal(classes="task-dialog-buttons"):
                                 yield Button("Save", variant="success", id="task-utility-save")
                                 yield Button(

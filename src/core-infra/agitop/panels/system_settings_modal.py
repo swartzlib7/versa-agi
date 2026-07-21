@@ -19,6 +19,7 @@ from textual.screen import ModalScreen
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import Static, Button, Input, Checkbox, DataTable, Markdown, TextArea, TabbedContent, TabPane, Select, RichLog
+from agitop.widgets.clear_checkbox import ClearCheckbox
 
 from agitop.widgets import PaginatedDataTable
 from agitop.feature_flags import UTILITY_MODELS_UI_VISIBLE
@@ -1116,7 +1117,7 @@ class SystemSettingsModal(ModalScreen):
                                             "[dim]Turn off messages delivery to VersaVoice AI (API) - messages do "
                                             "not leave the system and must be handled locally.[/]"
                                         )
-                                        yield Checkbox(
+                                        yield ClearCheckbox(
                                             "Use VersaVoice API",
                                             id="chk-vv-enabled",
                                             value=vv_enabled,
@@ -1154,7 +1155,7 @@ class SystemSettingsModal(ModalScreen):
                                         yield Static(
                                             "[dim]Grants COA unrestricted sudo access (NOPASSWD: ALL).[/]"
                                         )
-                                        yield Checkbox(
+                                        yield ClearCheckbox(
                                             "Enable sudo access",
                                             id="chk-coa-autonomous",
                                             value=coa_autonomous,
@@ -1165,7 +1166,7 @@ class SystemSettingsModal(ModalScreen):
                                         yield Static("[dim]Local SearXNG integration for agent research[/]")
                                         with Horizontal(classes="settings-web-search-row"):
                                             with Vertical(classes="settings-web-search-col"):
-                                                yield Checkbox("Enabled", id="chk-search-enabled", value=search_enabled)
+                                                yield ClearCheckbox("Enabled", id="chk-search-enabled", value=search_enabled)
                                             with Vertical(classes="settings-web-search-col"):
                                                 yield Static("[cyan]SearXNG URL[/]")
                                                 yield Input(
@@ -1271,7 +1272,7 @@ class SystemSettingsModal(ModalScreen):
                                     "so context size stays predictable.[/]"
                                 )
                                 yield Static("")
-                                yield Checkbox("Enabled", id="chk-image-processing-enabled", value=img_enabled)
+                                yield ClearCheckbox("Enabled", id="chk-image-processing-enabled", value=img_enabled)
                                 yield Static("")
                                 yield Static("[cyan]Output Format[/]")
                                 yield Select(
@@ -1334,7 +1335,7 @@ class SystemSettingsModal(ModalScreen):
                                     "may override these per-profile.[/]"
                                 )
                                 yield Static("")
-                                yield Checkbox("Enabled", id="chk-audio-processing-enabled", value=aud_enabled)
+                                yield ClearCheckbox("Enabled", id="chk-audio-processing-enabled", value=aud_enabled)
                                 yield Static("")
                                 with Horizontal(classes="task-field-row"):
                                     with Vertical(classes="task-field-col"):
@@ -1392,9 +1393,9 @@ class SystemSettingsModal(ModalScreen):
                                 )
                                 with Horizontal(id="utility-models-enabled-row"):
                                     with Vertical(classes="utility-models-row-col"):
-                                        yield Checkbox("Enabled", id="chk-utility-models-enabled", value=um_enabled)
+                                        yield ClearCheckbox("Enabled", id="chk-utility-models-enabled", value=um_enabled)
                                     with Vertical(classes="utility-models-row-col"):
-                                        yield Checkbox(
+                                        yield ClearCheckbox(
                                             "Write Manifest", id="chk-utility-models-write-manifest",
                                             value=um_write_manifest,
                                         )
