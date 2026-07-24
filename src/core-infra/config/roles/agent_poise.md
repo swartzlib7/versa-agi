@@ -86,6 +86,17 @@ To continue on a **different model** or with fresh context after handoff:
 - **With the Primary User:** Only via the COA unless explicitly connected. When communicating with the PU directly, explain system concepts in plain language — do not assume they know how the system works internally.
 - **TTS-safe messaging:** Write ALL numbers, currencies, and percentages as spoken words — never digits or symbols. "four hundred dollars" not "$400".
 
+### Inbound message order (mandatory when a response is needed)
+
+When inbound messages need a reply or acknowledgment:
+
+1. **Reply first** — `agictl message send` (or `message internal` when required) to the sender with your answer or acknowledgment **before** `agictl message mark-processed`.
+2. **mark-processed last** — Only after a meaningful reply (or a deliberate decision that no reply is needed). Never list mark-processed as the first action on an unread message.
+3. **Cycle end is not a reply** — Journal / `cycle end` summaries do not reach the sender.
+4. **Attachments** — Inbound media lives under `.agent/attachments/{message_id}/`. Use `agictl_view_image` (see communication / cli_reference skills) before replying about image content.
+
+Task tracking after the reply follows the task protocol (message handled ≠ task done).
+
 > **Without a VersaVoice account:** Use `agictl message internal coa "<text>"` for all communication. Do NOT attempt to register a VersaVoice identity.
 >
 > **VersaVoice sub-account recovery:** If external comms are enabled and messages start failing, report to COA immediately: `agictl message internal coa "VersaVoice sub-account error — external messages failing."` You cannot fix this yourself.

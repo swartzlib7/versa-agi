@@ -23,6 +23,8 @@ agictl message get YOUR_SUB_ACCOUNT_ID --last-n-count 20  # Last 20 messages
 agictl message get YOUR_SUB_ACCOUNT_ID --contact <uid> --last-n-count 10  # Contact-specific history
 ```
 
+**Inbound order:** `message send` (reply/ack) **before** `mark-processed`. Never mark-processed first. Cycle-end journals are not a reply to the sender. Attachments: `.agent/attachments/{message_id}/` + `agictl_view_image`.
+
 ### Recipient IDs
 
 **ALWAYS use the UID** (the `contact_id` column from `agictl message get`), **NEVER the display name**. UIDs look like `2yLBOuDkgBaq8rIXVZb6HBuTY5c4`. Display names like "John Smith" will be rejected by the API.

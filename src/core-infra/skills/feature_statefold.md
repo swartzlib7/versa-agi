@@ -36,6 +36,22 @@ Official product overviews (Orientation, System Design, Production Plan, Change 
 3. **Merge** unique facts and behavior rules into the state doc; verify Current State against code.
 4. **Archive** folded sources under `__archive/` (or delete if instructed).
 5. **Work from the backlog** in that state doc; update results when you ship or learn.
+6. If `workspace/{slug}/COLLABORATION.md` exists, **fold** it into § Collaboration on the first feature state doc and remove/archive the interim file.
+
+## Collaboration §
+
+Copy pattern / `qa_reviewer` from **project_management** Step 4. Prefer this section over a long-lived `COLLABORATION.md`.
+
+## Backlog / Plan (WBS)
+
+When work is **multi-step** or the collaboration pattern is **staged** or **milestone**, §4 **must** use a WBS table:
+
+| ID | Deliverable | Depends | Agent verify | QA | Status | Task ID |
+|----|-------------|---------|--------------|-----|--------|---------|
+
+- **Tiny one-shot fixes** may use a single row or a short checklist instead.
+- **Task ID** — mirror each active row to an `agictl task` with `--project` (`task_scheduling`; bridge in `software_engineering`). State WBS remains the human-readable plan of record; tasks are the wake/progress system.
+- **software_engineering** staged units write/update this table and pause for the QA reviewer in § Collaboration.
 
 ## Minimal state skeleton
 
@@ -51,10 +67,17 @@ Copy from `.agent/skills/feature_statefold/templates/state_feature.md` (shipped 
 | **Last verified against code** | YYYY-MM-DD |
 | **Primary code** | |
 
+## Collaboration
+| Field | Value |
+|-------|-------|
+| **Mindset** | Building \| Maintaining |
+| **Pattern** | staged \| milestone \| continuous |
+| **qa_reviewer** | pu \| connection:<uid> |
+
 ## 1. Behavior / contract
 ## 2. Current State
 ## 3. Target State
-## 4. Backlog / Plan
+## 4. Backlog / Plan (WBS)
 ## 5. Results Feedback
 ## 6. Change Log
 ```
@@ -63,3 +86,4 @@ Copy from `.agent/skills/feature_statefold/templates/state_feature.md` (shipped 
 
 - **Code changes** → also load **software_engineering**.
 - **New project onboarding** → **project_management** / **work_initiation** first, then this skill for the first feature inside that project.
+- **Tasks for WBS rows** → load **task_scheduling**.

@@ -12,6 +12,21 @@
 
 ---
 
+## Collaboration
+
+<!-- From project_management Step 4. Fold interim workspace/{slug}/COLLABORATION.md here on first feature. -->
+
+| Field | Value |
+|-------|-------|
+| **Mindset** | Building \| Maintaining |
+| **Pattern** | staged \| milestone \| continuous |
+| **qa_reviewer** | pu \| connection:\<uid\> |
+| **QA display name** | (if Connection) |
+
+Notes: (optional)
+
+---
+
 ## 1. Behavior / contract
 
 <!-- Authoritative rules this feature must obey. Update when behavior changes. -->
@@ -32,11 +47,19 @@
 
 ---
 
-## 4. Backlog / Plan
+## 4. Backlog / Plan (WBS)
 
-| ID | Work item | Acceptance | Status |
-|----|-----------|------------|--------|
-| | | | ⬜ |
+<!-- Required WBS shape when multi-step or pattern is staged/milestone. Tiny one-shot fixes may use a single row. -->
+<!-- Mirror each active row to: agictl task add "…" --project <id> (see task_scheduling / software_engineering). -->
+
+| ID | Deliverable | Depends | Agent verify | QA | Status | Task ID |
+|----|-------------|---------|--------------|-----|--------|---------|
+| WU-01 | Example: ship X | — | ⬜ | ⬜ | ⬜ | |
+| WU-02 | Example: wire Y | WU-01 | ⬜ | ⬜ | ⬜ | |
+
+- **Agent verify** — tests/checks the agent ran for this unit.
+- **QA** — pending / passed / notes (reviewer = PU or elected Connection from § Collaboration).
+- **Task ID** — `agictl task` id for this row (`--project` required).
 
 ---
 

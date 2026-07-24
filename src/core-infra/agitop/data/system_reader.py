@@ -18,9 +18,57 @@ from typing import Optional
 class SystemReader:
     """Reads system-level infrastructure state."""
 
+    # Canonical Lifeline OFF flag — lifeline.sh / File Monitor honor this.
+    LIFELINE_DISABLED_FLAG = "/var/lib/versa-agi/lifeline.disabled"
+
     def __init__(self, coa_user: str = "coa", watchdog_user: str = "watchdog"):
         self.coa_user = coa_user
         self.watchdog_user = watchdog_user
+
+    def _lifeline_flag_path(self) -> str:
+        return self.LIFELINE_DISABLED_FLAG
+
+    def _set_lifeline_disabled_flag(self, disabled: bool) -> None:
+        """Create or remove the hard OFF flag (sudo fallback)."""
+        path = self._lifeline_flag_path()
+        if disabled:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "a", encoding="utf-8"):
+                    pass
+                return
+            except OSError:
+                pass
+            try:
+                subprocess.run(
+                    ["sudo", "mkdir", "-p", os.path.dirname(path)],
+                    capture_output=True, timeout=5, check=False,
+                )
+                subprocess.run(
+                    ["sudo", "touch", path],
+                    capture_output=True, timeout=5, check=False,
+                )
+                subprocess.run(
+                    ["sudo", "chown", f"{self.watchdog_user}:{self.watchdog_user}", path],
+                    capture_output=True, timeout=5, check=False,
+                )
+            except Exception:
+                pass
+            return
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            pass
+        try:
+            subprocess.run(
+                ["sudo", "rm", "-f", path],
+                capture_output=True, timeout=5, check=False,
+            )
+        except Exception:
+            pass
 
     def get_cpu_usage(self) -> str:
         """Get current CPU utilization using psutil if available."""
@@ -83,7 +131,10 @@ class SystemReader:
         return "--"
 
     def is_cron_enabled(self) -> bool:
-        """Check if watchdog CRON is active."""
+        """Check if Lifeline is ON (flag absent and crontab lifeline line active)."""
+        if os.path.exists(self._lifeline_flag_path()):
+            return False
+
         def check_output(out: str) -> bool:
             for line in out.splitlines():
                 line = line.strip()
@@ -133,7 +184,11 @@ class SystemReader:
         return None
 
     def toggle_cron(self) -> bool:
-        """Toggle CRON lifeline schedule. Returns new state (True=enabled)."""
+        """Toggle Lifeline ON/OFF. Returns new state (True=enabled).
+
+        Writes the hard OFF flag (lifeline.sh honors it) and syncs the
+        watchdog crontab lifeline line.
+        """
         try:
             result = subprocess.run(
                 ["crontab", "-u", self.watchdog_user, "-l"],
@@ -143,6 +198,9 @@ class SystemReader:
                 return self.is_cron_enabled()
 
             is_on = self.is_cron_enabled()
+            # Flag first so a mid-toggle lifeline run cannot spawn
+            self._set_lifeline_disabled_flag(disabled=is_on)
+
             new_lines = []
             for line in result.stdout.splitlines():
                 if "lifeline" in line.lower():
@@ -160,6 +218,8 @@ class SystemReader:
                 input=new_content, capture_output=True, text=True, timeout=5,
             )
             if write_result.returncode != 0:
+                # Restore flag to pre-toggle state (is_on)
+                self._set_lifeline_disabled_flag(disabled=not is_on)
                 return self.is_cron_enabled()
             return not is_on
         except Exception:
@@ -203,6 +263,81 @@ class SystemReader:
             return result.returncode == 0
         except Exception:
             return False
+
+    def is_lifeline_process_running(self) -> bool:
+        """True if a lifeline.sh process is currently running."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", r"lifeline\.sh"],
+                capture_output=True, text=True, timeout=3,
+            )
+            return result.returncode == 0 and bool(result.stdout.strip())
+        except Exception:
+            return False
+
+    def get_cron_interval_minutes(self) -> int:
+        """Lifeline CRON interval in minutes (from crontab */N or setup.ini)."""
+        expr = self.get_cron_interval()
+        if expr:
+            first = expr.split()[0]
+            if first.startswith("*/"):
+                try:
+                    n = int(first[2:])
+                    if n >= 1:
+                        return n
+                except ValueError:
+                    pass
+        try:
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read("/etc/versa-agi/setup.ini")
+            n = int(cfg.get("agent", "cron_interval", fallback="1"))
+            return max(1, n)
+        except Exception:
+            return 1
+
+    def seconds_until_lifeline_tick(self) -> int:
+        """Seconds until the next CRON lifeline boundary (local clock)."""
+        from datetime import datetime
+        interval = self.get_cron_interval_minutes()
+        now = datetime.now()
+        mins_into = now.minute % interval
+        secs_into = mins_into * 60 + now.second
+        cycle_secs = interval * 60
+        remaining = cycle_secs - secs_into
+        return remaining if remaining > 0 else 0
+
+    def try_force_lifeline(
+        self,
+        *,
+        near_tick_seconds: int = 5,
+        lifeline_path: str = "/home/watchdog/core-infra/lifeline.sh",
+    ) -> tuple[bool, str]:
+        """Start lifeline.sh --force if safe.
+
+        Returns (ok, message). Refuses when Lifeline is OFF, already running,
+        or within ``near_tick_seconds`` of the next CRON boundary.
+        """
+        if not self.is_cron_enabled():
+            return False, "Lifeline is OFF — turn it ON in Controls first."
+        if self.is_lifeline_process_running():
+            return False, "Lifeline is already running."
+        remaining = self.seconds_until_lifeline_tick()
+        if remaining <= near_tick_seconds:
+            return False, (
+                f"CRON tick in {remaining}s — wait for the scheduled run."
+            )
+        if not os.path.isfile(lifeline_path):
+            return False, f"Lifeline script not found: {lifeline_path}"
+        try:
+            subprocess.Popen(
+                ["sudo", "-u", self.watchdog_user, lifeline_path, "--force"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "Lifeline started (manual)."
+        except Exception as e:
+            return False, f"Failed to start Lifeline: {e}"
 
     def is_sentinel_running(self) -> bool:
         """Check if the Sentinel file watcher (inotifywait) is running."""

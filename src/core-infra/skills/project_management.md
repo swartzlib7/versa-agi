@@ -14,7 +14,7 @@ Guide the Primary User through onboarding a new project into the Versa AGi works
 
 Always present to the user what is needed to perform the work at their level of experience and highlight if the user needs to perform any actions to enable the work.
 
-Then setup a basic plan to collaborate on the project. When such a plan exists, use it as the primary operational model for collaboration and coordination. Continually adapt the plan it based on what is workable and what is needed and wanted by the user.
+After onboarding (or when collaboration is unset), run **Step 4: Collaboration pattern** and write the plan. When a collaboration plan exists, use it as the primary operational model and adapt it when the Primary User changes how they want to work.
 
 ## Operational Mindset
 
@@ -106,13 +106,96 @@ If no Git:
    ```
 3. Confirm: "Local project created. You can find it at `~/agi-workspace/<project-name>/`"
 
-### Step 3: Confirmation
+### Step 3: Confirmation + owner seed task
 
 After either path, summarize:
 - Project name and type (git/local)
 - Platform (GitHub/GitLab, if applicable)
 - Workspace path
 - Current branch (if git)
+- Project `id` from `agictl project list` (needed for tasks and member assign)
+
+**Seed task (required on new projects):** Create a tracking task assigned to the **project owner agent** (the creating agent — `project_members.roles` includes `owner`; usually you). This wakes the owner to finish collaboration setup if the cycle ends early.
+
+```bash
+# due-date: soon but realistic (see task_scheduling) — example: ~30 minutes from now
+agictl task add "Project setup: collaboration plan + WBS" \
+  --project <project_id> \
+  --assignee <owner_agent_name> \
+  --due-date "YYYY-MM-DD HH:MM:SS" \
+  --desc "Run project_management Step 4 (collaboration interview + QA reviewer). Write the collaboration plan (state_*.md § Collaboration or interim COLLABORATION.md). On the first feature, establish a WBS backlog table (feature_statefold). Keep WBS rows mirrored to project tasks (task_scheduling / software_engineering bridge)."
+```
+
+Before creating, check `agictl task list --all` so you do not duplicate an existing setup task for this project.
+
+Then continue to **Step 4** (do not skip on new projects). When Step 4 and the first-feature WBS are done, journal progress and mark the seed task done (`agictl task done <id>` or update status).
+
+### Step 4: Collaboration pattern
+
+Establish *how* you and the Primary User will stage work and who does quality verification. This is **not** requirements elicitation (`requirements_elicitation` = *what* to build via 5W1H). This step = *how we work / who QAs*.
+
+If a collaboration plan already exists for this project and the PU confirms it is still valid, summarize it and skip the interview. Otherwise interview and write the artifact.
+
+#### 4a — Building vs Maintaining
+
+If not already confirmed for this project, ask which Operational Mindset applies (Building vs Maintaining). Record the answer in the collaboration plan.
+
+#### 4b — Delivery pattern
+
+Ask the Primary User to choose one:
+
+| Pattern | Meaning |
+|---------|---------|
+| **Staged QT units** | WBS table; one work unit at a time; QA after each unit before the next |
+| **Milestone batches** | Several units built, then QA at agreed milestones |
+| **Continuous** | Agent runs until a feature/milestone is done; QA at the end (still keep a WBS table for non-trivial work) |
+
+**Defaults if the PU does not choose:** **staged** for multi-step features; **continuous** for tiny one-shot fixes.
+
+#### 4c — QA reviewer
+
+Ask who will quality-test / sign off:
+
+- **Primary User** (default), or
+- An elected **Connection** (must be a known contact uid)
+
+If a Connection is elected:
+
+1. Resolve uid via `agictl connection list` / `agictl connection list agent` as appropriate.
+2. Assign them to the project if not already a member:
+   ```bash
+   agictl project assign <project_id> --connection <uid>
+   ```
+3. Record `qa_reviewer=connection:<uid>` (and display name) in the collaboration plan.
+4. On staged/milestone QA pauses (see `software_engineering`), **notify that Connection** that a unit is ready for QA; do not advance to the next staged unit until they sign off (or the PU overrides).
+
+If PU: record `qa_reviewer=pu`.
+
+#### 4d — Write the collaboration plan
+
+Write a short plan (pattern, Building/Maintaining, `qa_reviewer`, any notes) to:
+
+1. **Preferred once a feature exists:** that feature’s living `state_*.md` under a **§ Collaboration** section (`feature_statefold`).
+2. **Interim (no feature yet):** `workspace/{slug}/COLLABORATION.md` only.
+
+**Fold rule:** When the first feature `state_*.md` is created, copy/merge `COLLABORATION.md` into § Collaboration and remove or archive the interim file so it is not a second live tracker. Do **not** create `*_spec.md` or `context_*.md` for this.
+
+Example interim / § Collaboration body:
+
+```markdown
+## Collaboration
+
+| Field | Value |
+|-------|-------|
+| **Mindset** | Building \| Maintaining |
+| **Pattern** | staged \| milestone \| continuous |
+| **qa_reviewer** | pu \| connection:<uid> |
+| **QA display name** | (if Connection) |
+
+Notes: (optional)
+```
+
+Continually adapt this plan when the PU changes pattern or QA reviewer.
 
 ## Updating Existing Projects
 
@@ -140,7 +223,9 @@ Reference for managing projects after onboarding:
 | `agictl project list` | Show all projects with status (includes `id`) |
 | `agictl project update <id> [--desc TEXT] [--remote URL] [--branch B] [--platform github\|gitlab] [--access-token T] [--type git\|local]` | Update project metadata by ID (description, git remote/branch, platform, credentials) |
 | `agictl project assign <id> --agent <name>` | Assign agent to project (provisions workspace) |
+| `agictl project assign <id> --connection <uid>` | Assign a Connection as project member (e.g. elected QA reviewer) |
 | `agictl project unassign <id> --agent <name>` | Remove agent from project |
+| `agictl project unassign <id> --connection <uid>` | Remove Connection from project |
 | `agictl project members <id>` | List project members |
 | `agictl project pause <id>` | Pause — sentinel/lifeline skip this project |
 | `agictl project resume <id>` | Resume a paused project |
@@ -165,8 +250,13 @@ Reference for managing projects after onboarding:
 
 ## New Project Workflow
 
-**Phase 1 — Conceptualization:** Create `workspace/{slug}/`, register with `agictl project add`, produce a Product Specification capturing the essence, components, technologies, and process flow.
-**Phase 2 — Specification:** Create a Production Plan with high-level component list. Each component spec gets its own Technical Specification file.
-**Phase 3 — Iterative Build:** Work through the Product Specification systematically, using SQLite tasks to track progress across cycles. Each iteration gathers and confirms a Software Configuration Object for the product.
-**Phase 4 — Prototype:** Build a basic prototype to test the main concept. Confirm all assumptions and cross-reference with official technical documentation.
+Aligned with **feature_statefold**: one living `state_*.md` per feature. Do **not** create `*_spec.md`, `context_*.md`, or parallel “Technical Specification” files.
+
+**Phase 1 — Register & orient:** Create `workspace/{slug}/`, register with `agictl project add`, seed the owner setup task (Step 3). Capture the project essence in the first feature’s `state_*.md` (Behavior / Current / Target). Product-level Orientation / Production Plan / Change Logs stay as official overviews only when a backlog `DOC-*` item says to sync them — they are not a substitute for the feature state doc.
+
+**Phase 2 — Collaborate & plan:** Run Step 4 (collaboration pattern + QA reviewer). Write § Collaboration. Build a WBS backlog table in that state doc (§4 Backlog — see `feature_statefold`). Human-readable progress lives in the WBS table.
+
+**Phase 3 — Iterative build:** Work the WBS one unit (or milestone batch) at a time per the collaboration plan. Mirror active WBS rows to `agictl task … --project <id>` for Lifeline wake and progress journals (`task_scheduling`; bridge detail in `software_engineering`). SQLite/tasks are the runtime tracker — **not** a replacement for the WBS table.
+
+**Phase 4 — Validate:** Prototype or exercise the main path; confirm Behavior § in the state doc against real runs; update Results Feedback and Change Log. Close done tasks when WBS rows complete.
 

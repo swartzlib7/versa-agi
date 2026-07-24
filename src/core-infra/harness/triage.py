@@ -2,13 +2,16 @@
 Versa AGi — Task Triage Node
 10-signal confidence-scored decision matrix for message classification,
 project routing, and skill injection.
+
+Altitude: flagship triage produces checks + strategic brief + skill picks.
+Low-altitude protocol (CLI, mark-processed, snooze) lives in poise/skills.
 """
 
 import db_connect
 
 import os
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 
@@ -28,13 +31,17 @@ class TriageResult:
     attachment_paths: list = field(default_factory=list)
     required_work_modality: Optional[str] = None
     recommended_model: Optional[str] = None
+    # Provenance: which triage inputs were non-empty this cycle
+    inputs_used: list = field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════
 # Triage Prompt — Injected as a structured analysis request
 # ═══════════════════════════════════════════════════════
 
-TRIAGE_PROMPT = """You are a message triage system. Analyze the following wake prompt and context, then output a JSON classification.
+TRIAGE_PROMPT = """You are a message triage system. Analyze the wake prompt and context, then output a JSON classification.
+
+The execution agent that receives your output may be a **weaker / cheaper model**. Use this pass for high-altitude judgment: classification, risks, skill selection, and a clear strategic brief. Do **not** teach low-altitude protocol (CLI, mark-processed order, snooze recipes, messaging etiquette, attachment paths) — poise and skills already own those with fuller context.
 
 ## WAKE PROMPT (the message/task to analyze):
 {wake_prompt}
@@ -44,6 +51,9 @@ TRIAGE_PROMPT = """You are a message triage system. Analyze the following wake p
 
 ## CONVERSATION HISTORY (last 5 messages):
 {conversation_context}
+
+## ACTIVE GAMES (digest — strategic frame; may be empty):
+{games_context}
 
 ## INSTRUCTIONS:
 Evaluate the wake prompt against these 10 signals and produce a JSON response:
@@ -65,26 +75,14 @@ Then classify the message:
 - **informational**: Status update, acknowledgment, or FYI — no action needed
 - **clarification_needed**: Cannot proceed without more information
 
-Determine which skills should be injected (filenames only, select ALL that apply):
+Determine which skills should be injected (filenames only, select ALL the weaker agent will need):
 {skills_catalog}
 
-## COMMUNICATION ORDER (mandatory when inbound messages need a response)
-The agent's poise, task protocol, and communication skills already define how to handle
-messages and attachments. Do NOT repeat CLI syntax or filesystem paths in strategy_notes.
-
-1. **Reply first** — The agent MUST `agictl message send` to the sender with their answer
-   or acknowledgment BEFORE `agictl message mark-processed`.
-2. **mark-processed last** — Only after a meaningful reply (or a deliberate decision that
-   no reply is needed). Never list mark-processed as the first task action.
-3. **task_actions** — High-level work items only (e.g. "reply-to-sender-with-analysis").
-   Do NOT put raw CLI commands in task_actions.
-4. **cycle end is not a reply** — Journal/cycle-end summaries do not reach the sender.
-
-## ATTACHMENTS (flag only — mechanics live in poise/skills)
-Set `has_attachments: true` when the wake prompt or conversation context indicates
-media, images, files, or markdown attached to an inbound message.
-Do NOT put attachment paths or view/send instructions in strategy_notes — poise documents
-`.agent/attachments/{{message_id}}/` and skills document `agictl_view_image`.
+## OUTPUT RULES (altitude)
+- **strategy_notes**: Short strategic brief for the execution agent (goal, risks, clarify-vs-proceed, why these skills, game posture if relevant). Structured bullets OK. Assume a weaker model will read this.
+- **Forbid** in strategy_notes and task_actions: CLI commands, `agictl` invocations, mark-processed ordering, snooze recipes, attachment filesystem paths, messaging etiquette.
+- **task_actions**: High-level work labels only (e.g. "reply-to-sender-with-analysis", "update-game-barriers").
+- Set `has_attachments: true` when wake/conversation indicates media/files attached — do not instruct how to view them.
 
 Output ONLY valid JSON in this exact format:
 ```json
@@ -94,7 +92,7 @@ Output ONLY valid JSON in this exact format:
   "project_id": null or integer,
   "task_actions": [],
   "skills_to_inject": [],
-  "strategy_notes": "Brief rationale and instructions for the agent",
+  "strategy_notes": "Short strategic brief (not protocol)",
   "parallel_work_viable": true/false,
   "has_attachments": true/false,
   "signal_results": {{
@@ -195,6 +193,37 @@ _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and resp
 
 _SKILLS_CATALOG_PATH = "/var/lib/versa-agi/skills_catalog.md"
 
+_NOT_USED_BY_TRIAGE = (
+    "full poise, full Games/awareness board in system prompt, workspace files, "
+    "WBS/collaboration docs, operational memory dumps"
+)
+
+# Signals where True means a problem (others: True = healthy / present).
+_ADVERSE_WHEN_TRUE = frozenset({
+    "contradiction_check",
+    "memory_conflict",
+    "risk_assessment",
+    "pending_question",
+})
+
+
+def adverse_signals(signals: Optional[dict]) -> List[str]:
+    """Return signal names that indicate a problem for this cycle.
+
+    - Most signals: False is adverse (e.g. direction_clarity missing).
+    - ``_ADVERSE_WHEN_TRUE``: True is adverse (e.g. pending_question present).
+    """
+    if not signals:
+        return []
+    out: List[str] = []
+    for key, value in signals.items():
+        if key in _ADVERSE_WHEN_TRUE:
+            if value:
+                out.append(key)
+        elif not value:
+            out.append(key)
+    return out
+
 
 def load_skills_catalog(agent_name: str = "coa") -> str:
     """Load the dynamic skills catalog from the cached file.
@@ -275,9 +304,29 @@ def _extract_json(text: str) -> dict:
     return {}
 
 
+def _record_inputs_used(
+    wake_prompt: str,
+    tasks_context: str,
+    conversation_context: str,
+    games_context: str,
+    routing_context: Optional[dict],
+) -> List[str]:
+    used = ["wake", "skills-catalog"]
+    if tasks_context and tasks_context.strip() and tasks_context.strip() != "(none)":
+        used.append("active-tasks")
+    if conversation_context and conversation_context.strip() and conversation_context.strip() != "(none)":
+        used.append("conversation(last-N)")
+    if games_context and games_context.strip() and games_context.strip() != "(none)":
+        used.append("games-digest")
+    if routing_context:
+        used.append("routing")
+    return used
+
+
 def run_triage(llm, wake_prompt: str, tasks_context: str = "",
                conversation_context: str = "", skills_dir: str = None,
-               agent_name: str = "coa", routing_context: dict = None) -> TriageResult:
+               agent_name: str = "coa", routing_context: dict = None,
+               games_context: str = "") -> TriageResult:
     """Execute the triage node: classify the wake prompt and determine routing.
 
     Args:
@@ -287,18 +336,28 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
         conversation_context: Recent conversation history
         skills_dir: Path to agent's skills directory for injection
         agent_name: Agent name for scope filtering (default: coa)
+        routing_context: Optional ephemeral model routing JSON
+        games_context: Compact active-games digest for strategic frame
 
     Returns:
         TriageResult with classification, confidence, skills, and routing info
     """
     from langchain_core.messages import HumanMessage as HMsg
 
+    games_ctx = (games_context or "").strip() or "(none)"
+    tasks_ctx = (tasks_context or "").strip() or "(none)"
+    convo_ctx = (conversation_context or "").strip() or "(none)"
+    inputs_used = _record_inputs_used(
+        wake_prompt, tasks_ctx, convo_ctx, games_ctx, routing_context,
+    )
+
     # Build the triage prompt with dynamic skills catalog
     skills_catalog = load_skills_catalog(agent_name=agent_name)
     prompt = TRIAGE_PROMPT.format(
         wake_prompt=wake_prompt[:4000],  # Cap to prevent context overflow
-        tasks_context=tasks_context[:2000] if tasks_context else "(none)",
-        conversation_context=conversation_context[:2000] if conversation_context else "(none)",
+        tasks_context=tasks_ctx[:2000],
+        conversation_context=convo_ctx[:2000],
+        games_context=games_ctx[:1500],
         skills_catalog=skills_catalog,
     )
     if routing_context:
@@ -320,6 +379,7 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
             classification="follow_up",
             confidence=0.5,
             strategy_notes=f"Triage failed ({e}). Passing through to agent.",
+            inputs_used=inputs_used,
         )
 
     if not data:
@@ -328,6 +388,7 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
             classification="follow_up",
             confidence=0.5,
             strategy_notes="Triage JSON parse failed. Passing through to agent.",
+            inputs_used=inputs_used,
         )
 
     # Build result from parsed JSON
@@ -343,15 +404,13 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
         signal_results=data.get("signal_results", {}),
         required_work_modality=data.get("required_work_modality"),
         recommended_model=data.get("recommended_model"),
+        inputs_used=inputs_used,
     )
 
     print(f"TRIAGE: {result.classification} (confidence={result.confidence:.2f})", flush=True)
-    signals = result.signal_results
-    if signals:
-        neg = [k for k, v in signals.items() if not v and k not in ("contradiction_check", "memory_conflict", "risk_assessment")]
-        neg += [k for k, v in signals.items() if v and k in ("contradiction_check", "memory_conflict", "risk_assessment")]
-        if neg:
-            print(f"TRIAGE: Negative signals: {', '.join(neg)}", flush=True)
+    adverse = adverse_signals(result.signal_results)
+    if adverse:
+        print(f"TRIAGE: Adverse signals: {', '.join(adverse)}", flush=True)
     if result.skills_to_inject:
         print(f"TRIAGE: Skills to inject: {', '.join(result.skills_to_inject)}", flush=True)
     if result.required_work_modality:
@@ -365,6 +424,8 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
 def enrich_triage_from_inbox(result: TriageResult, agent_name: str) -> TriageResult:
     """Set has_attachments from unprocessed inbox rows (mechanics stay in poise/skills)."""
     if result.has_attachments:
+        if "attachment-enrich" not in result.inputs_used:
+            result.inputs_used = list(result.inputs_used) + ["attachment-enrich"]
         return result
 
     db_path = os.environ.get("AGICTL_MESSAGES_DB", "")
@@ -419,6 +480,9 @@ def enrich_triage_from_inbox(result: TriageResult, agent_name: str) -> TriageRes
     elif result.has_attachments:
         result.attachment_paths = []
 
+    if result.has_attachments and "attachment-enrich" not in result.inputs_used:
+        result.inputs_used = list(result.inputs_used) + ["attachment-enrich"]
+
     return result
 
 
@@ -445,8 +509,11 @@ def inject_skills(result: TriageResult, skills_dir: str) -> str:
             try:
                 with open(skill_path, "r") as f:
                     content = f.read()
-                reason = skill_reasons.get(skill_name, "Referenced by triage classification.")
-                injected.append(f"\n---\n## ── SKILL: {skill_name} ──\n**Why injected:** {reason}\n\n{content}")
+                reason = skill_reasons.get(skill_name, "Selected by triage for this cycle.")
+                injected.append(
+                    f"\n---\n## ── SKILL: {skill_name} (triage-selected) ──\n"
+                    f"**Why injected:** {reason}\n\n{content}"
+                )
                 print(f"TRIAGE: Injected skill: {skill_name} ({len(content)} chars)", flush=True)
             except Exception as e:
                 print(f"TRIAGE: Failed to read skill {skill_name}: {e}", flush=True)
@@ -457,197 +524,96 @@ def inject_skills(result: TriageResult, skills_dir: str) -> str:
 
 
 def _get_skill_reasons(result: TriageResult) -> dict:
-    """Map skill filenames to human-readable injection reasons based on triage context."""
+    """Map skill filenames to short injection reasons (not protocol essays)."""
     reasons = {}
     cls = result.classification
     signals = result.signal_results or {}
 
-    # Communication — always explain why
     if "communication.md" in result.skills_to_inject:
-        if cls == "work_request":
-            reasons["communication.md"] = "Acknowledge the sender's request before starting work. Follow the communication etiquette and mode selection rules."
-        elif cls == "follow_up":
-            reasons["communication.md"] = "Continue the conversation thread. Match the sender's tone and formality."
-        elif cls == "clarification_needed":
-            reasons["communication.md"] = "Craft a clear, empathetic clarification request. Reference what you understood and what needs clarity."
-        else:
-            reasons["communication.md"] = "A response may be needed. Follow messaging rules — especially the Inter-Agent Acknowledgment Protocol for agent-sourced messages."
-
-    # Task scheduling
+        reasons["communication.md"] = f"Classification={cls}; follow messaging rules in this skill."
     if "task_scheduling.md" in result.skills_to_inject:
-        if len(result.task_actions) > 1:
-            reasons["task_scheduling.md"] = f"Multiple work items detected ({len(result.task_actions)} actions). Review existing tasks for overlap before creating new ones."
-        else:
-            reasons["task_scheduling.md"] = "Task management may be needed. Verify whether related tasks already exist before creating or updating."
-
-    # Work initiation
+        reasons["task_scheduling.md"] = "Task create/update/progress may be needed; check duplicates first."
     if "work_initiation.md" in result.skills_to_inject:
         if signals.get("project_correlation"):
-            reasons["work_initiation.md"] = "New work detected that maps to an existing project. Target the correct project before starting."
+            reasons["work_initiation.md"] = "New work may map to an existing project — target correctly."
         else:
-            reasons["work_initiation.md"] = "New work detected with no clear project match. Determine if this needs a new project or is disposable."
-
-    # Git operations
+            reasons["work_initiation.md"] = "New work with unclear project — register or treat as disposable."
     if "git_operations.md" in result.skills_to_inject:
-        reasons["git_operations.md"] = "The work involves code or file changes. Follow git commit, branch, and push protocols."
-
-    # Project management
+        reasons["git_operations.md"] = "Code/file changes likely; follow git protocols in this skill."
     if "project_management.md" in result.skills_to_inject:
-        reasons["project_management.md"] = "Project setup, configuration, or membership changes are needed."
-
-    # Requirements elicitation
+        reasons["project_management.md"] = "Project setup, collaboration, or membership may be needed."
     if "requirements_elicitation.md" in result.skills_to_inject:
-        reasons["requirements_elicitation.md"] = "The request has missing dimensions or ambiguous scope. Elicit requirements before committing to work."
-
-    # Security
+        reasons["requirements_elicitation.md"] = "Ambiguous scope — elicit 5W1H before committing."
     if "security_protocol.md" in result.skills_to_inject:
-        reasons["security_protocol.md"] = "Security-sensitive operations detected. Follow security protocol before proceeding."
-
-    # Connection lifecycle
+        reasons["security_protocol.md"] = "Security-sensitive operations may be involved."
     if "connection_lifecycle.md" in result.skills_to_inject:
-        reasons["connection_lifecycle.md"] = "Connection management actions detected (connect, disconnect, or verify)."
-
-    # Self introduction
+        reasons["connection_lifecycle.md"] = "Connection management actions may be needed."
     if "self_introduction.md" in result.skills_to_inject:
-        reasons["self_introduction.md"] = "A new contact requires introduction. Follow the self-introduction protocol."
-
-    # Memory management
+        reasons["self_introduction.md"] = "New contact may need introduction."
     if "memory_management.md" in result.skills_to_inject:
-        reasons["memory_management.md"] = "Persistent memory operations are needed (store, retrieve, or update context)."
-
-    # Message relay
+        reasons["memory_management.md"] = "Persistent memory store/retrieve may be needed."
     if "message_relay.md" in result.skills_to_inject:
-        reasons["message_relay.md"] = "A message needs to be relayed between users or agents."
-
-    # Solution architect
+        reasons["message_relay.md"] = "Relay between users/agents may be needed."
     if "solution_architect.md" in result.skills_to_inject:
-        reasons["solution_architect.md"] = "Environment setup or stack installation needed. Guide the PU through safe configuration."
-
-    # System packages
+        reasons["solution_architect.md"] = "Environment/stack setup guidance may be needed."
     if "system_packages.md" in result.skills_to_inject:
-        reasons["system_packages.md"] = "A system-level package (apt) may need to be requested or installed. Follow the request → approve → install workflow."
-
-    # PU operations guide (COA-only — filtered from sub-agent catalogs)
+        reasons["system_packages.md"] = "System package request/install may be needed."
     if "versa_agi_operations_guide.md" in result.skills_to_inject:
         reasons["versa_agi_operations_guide.md"] = (
-            "PU is asking how Versa AGi works or needs operator guidance "
-            "(dashboard, agents, tasks/messages, models, install topology, troubleshooting). "
-            "Follow the operations guide; do not dump System Design into messages."
+            "PU ops/how-Versa-AGi-works guidance; follow this skill, not System Design dumps."
         )
 
-    # Remaining skills get generic reasons
     for skill in result.skills_to_inject:
         if skill not in reasons:
-            reasons[skill] = "Referenced by triage classification."
+            reasons[skill] = "Selected by triage for this cycle."
 
     return reasons
 
 
 def build_triage_context(result: TriageResult) -> str:
-    """Build a context block from triage results to prepend to the wake prompt.
+    """Build a provenance-labeled advisory preamble from triage results.
 
-    This gives the agent immediate awareness of the triage decision AND
-    actionable behavioral directives based on the classification and signals.
+    High-altitude facts + strategic brief only — no static execution-order scripts.
     """
+    inputs = result.inputs_used or ["wake", "skills-catalog"]
+    inputs_line = " | ".join(inputs)
+
     lines = [
-        "## ── TRIAGE RESULT ──",
+        "## ── TRIAGE RESULT (advisory) ──",
+        "Source: **Triage node** (separate model from this cycle’s execution agent).",
+        f"Inputs used: {inputs_line}",
+        f"Not used by triage: {_NOT_USED_BY_TRIAGE}.",
+        "Treat the strategic brief as high-altitude guidance. For protocol "
+        "(messaging, tasks CLI, git), follow poise and injected skills — they have fuller context.",
+        "",
         f"Classification: **{result.classification}** (confidence: {result.confidence:.2f})",
     ]
     if result.strategy_notes:
-        lines.append(f"Strategy: {result.strategy_notes}")
+        lines.append(f"Strategic brief: {result.strategy_notes}")
     if result.required_work_modality:
         lines.append(f"Work modality: **{result.required_work_modality}**")
     if result.recommended_model:
         lines.append(f"Routed model (ephemeral): **{result.recommended_model}**")
+    if result.skills_to_inject:
+        lines.append(f"Skills selected: {', '.join(result.skills_to_inject)}")
     if result.has_attachments:
         lines.append(
-            "⚠ Inbound attachment(s) detected — locate under `.agent/attachments/` "
-            "(see poise) and use `agictl_view_image` per cli_reference before replying."
+            "⚠ Inbound attachment(s) flagged — locate under `.agent/attachments/` "
+            "(see poise) and use `agictl_view_image` per cli_reference / communication skill before replying."
         )
     if result.task_actions:
-        lines.append(f"Task actions: {json.dumps(result.task_actions)}")
+        lines.append(f"Task actions (labels): {json.dumps(result.task_actions)}")
 
-    # ── Signal Summary ──
-    signals = result.signal_results or {}
-    neg_signals = []
-    for k, v in signals.items():
-        if k in ("contradiction_check", "memory_conflict", "risk_assessment"):
-            if v:
-                neg_signals.append(k)
-        else:
-            if not v:
-                neg_signals.append(k)
-    if neg_signals:
-        lines.append(f"Negative signals: {', '.join(neg_signals)}")
+    # ── Signal Summary (only truly adverse — see adverse_signals) ──
+    adverse = adverse_signals(result.signal_results)
+    if adverse:
+        lines.append(f"Adverse signals: {', '.join(adverse)}")
 
-    # ── Behavioral Directives ──
-    lines.append("")
-    lines.append("## ── TRIAGE DIRECTIVES ──")
-    lines.append("Follow this execution order for this cycle:")
-    lines.append("")
-    lines.append(
-        "**Inbound message rule:** `agictl message send` to the sender BEFORE "
-        "`agictl message mark-processed`. Cycle-end text does not notify them."
-    )
-    lines.append("")
-
-    cls = result.classification
-
-    if cls == "work_request":
-        lines.append("### Execution Order")
-        lines.append("1. **COMMUNICATE FIRST** — `agictl message send` to acknowledge the request before any work. Tell them what you understood and what you will do.")
-        if len(result.task_actions) > 1:
-            lines.append(f"2. **PLAN WORK** — This request contains {len(result.task_actions)} distinct work items. Review existing tasks for overlap before planning new ones.")
-        elif result.task_actions:
-            lines.append("2. **PLAN WORK** — Verify whether a related task already exists. Create a new task only if none covers this work.")
-        else:
-            lines.append("2. **PLAN WORK** — Determine the scope. Create tasks if the work is non-trivial and no existing tasks cover it.")
-        lines.append("3. **EXECUTE** — Begin the work, keeping task states accurate as you progress.")
-        lines.append("4. **REPORT** — When work is complete, `agictl message send` results to the sender, then `mark-processed`, then `cycle end`.")
-
-    elif cls == "follow_up":
-        lines.append("### Execution Order")
-        lines.append("1. **REVIEW CONTEXT** — Read related tasks (`agictl task get`), progress journal, and conversation history.")
-        lines.append("2. **CLASSIFY** — Is this (a) confirmation that completes work, (b) new direction, or (c) no change since last cycle?")
-        lines.append("3. **IF (a) confirmation** — `agictl message send` brief reply → `task done` → `mark-processed` → `cycle end`.")
-        lines.append("4. **IF (b) new direction** — `agictl message send` acknowledgment → update task `in_progress` → resume work.")
-        lines.append("5. **IF (c) no change** — `task snooze` only (60–1440 min). No inbox poll. No status message. `cycle end`.")
-        lines.append("6. **UNREAD INBOUND** — If triage flagged an unread message: compose and send your reply FIRST, then `mark-processed`. Never mark-processed before the sender receives your answer.")
-        lines.append("7. **TASK STATUS** — `task progress` `DONE:` is cycle notes only. `task done` only when work is actually complete or explicitly accepted.")
-
-    elif cls == "informational":
-        lines.append("### Execution Order")
-        lines.append("1. **ASSESS SENDER** — Determine if the message is from the Primary User/contact or from another agent.")
-        lines.append("2. **IF FROM AGENT** — This is likely a terminal acknowledgment or status update. Mark as processed, update relevant memory if needed, and **end cycle without replying**. Do NOT send an acknowledgment to an acknowledgment.")
-        lines.append("3. **IF FROM PU/CONTACT** — Acknowledge receipt appropriately if the content warrants it.")
-        lines.append("4. **UPDATE MEMORY** — If the information is relevant for future work, store it in agent memory.")
-        lines.append("5. **NO TASK CREATION** — Informational messages do not require task creation unless they reveal new work.")
-
-    elif cls == "clarification_needed":
-        lines.append("### Execution Order")
-        lines.append("1. **COMMUNICATE** — Send a clear, specific clarification request to the sender. Reference what you understood and what needs clarity.")
-        if result.parallel_work_viable:
-            lines.append("2. **PARALLEL WORK** — While waiting for clarification, proceed with any unambiguous aspects of the request.")
-        else:
-            lines.append("2. **WAIT** — Do not start work until clarification is received. End your cycle after sending the clarification request.")
-
-    # ── Signal-Specific Guidance ──
-    signal_guidance = []
-    if signals.get("pending_question"):
-        signal_guidance.append("— **Pending question detected** — address the unanswered question in your response before proceeding with new work.")
-    if signals.get("contradiction_check"):
-        signal_guidance.append("— **Contradiction detected** — flag the contradicting elements in your response and ask for clarification before proceeding.")
-    if signals.get("memory_conflict"):
-        signal_guidance.append("— **Memory conflict** — your stored context conflicts with the current request. Mention this discrepancy and confirm the correct approach.")
-    if signals.get("risk_assessment"):
-        signal_guidance.append("— **High risk detected** — proceed cautiously. Confirm destructive or irreversible actions with the sender before executing.")
-    if not signals.get("project_correlation") and cls == "work_request":
-        signal_guidance.append("— **No project match** — identify the correct project before starting. If none exists, consult the work_initiation skill for project registration.")
-
-    if signal_guidance:
+    if result.classification == "clarification_needed":
         lines.append("")
-        lines.append("### Signal-Specific Guidance")
-        lines.extend(signal_guidance)
+        lines.append(
+            "Note: classification is clarification_needed — load "
+            "`requirements_elicitation` if injected; ask before irreversible work."
+        )
 
     return "\n".join(lines)
-

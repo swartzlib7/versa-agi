@@ -19,6 +19,13 @@ agictl message mark-processed <id>                    # Mark as handled
 
 **Message vs task:** `mark-processed` means *this inbox item is handled* (you replied or acknowledged). It does **not** complete related work — keep the tracking task `in_progress` or `waiting` until the work is actually done. See task protocol for the full decision guide.
 
+### Inbound message order (mandatory)
+
+1. **Reply first** — `agictl message send` to the sender **before** `mark-processed`.
+2. **mark-processed last** — only after a meaningful reply (or a deliberate decision that no reply is needed). Never mark-processed as the first action on an unread message.
+3. **Cycle end is not a reply** — journal / `cycle end` text does not reach the sender.
+4. **Attachments** — under `.agent/attachments/{message_id}/`; use `agictl_view_image` per full `communication.md` before describing image content.
+
 ### Inbound work message — do this
 
 1. **Read** — `agictl message get … --unread`

@@ -1,6 +1,5 @@
 """System panel — CRON, disk, memory, uptime, AI mode."""
 
-import os
 import time
 from typing import Optional
 from datetime import datetime
@@ -25,13 +24,160 @@ class MetricLabel(Static):
     pass
 
 
-class SystemPanel(Static):
-    """Displays system-level infrastructure status using individual metric cells."""
+class ControlsPanel(Static):
+    """Dashboard control buttons — 5 columns × 2 rows (filled top-to-bottom)."""
 
     REFRESH_INTERVALS = [
         ("15s", 15), ("30s", 30), ("1m", 60), ("5m", 300),
         ("10m", 600), ("30m", 1800), ("1h", 3600),
     ]
+
+    def __init__(self, system: SystemReader,
+                 agent: Optional[AgentReader] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.system_reader = system
+        self.agent_reader = agent
+        self._refresh_idx = 3  # Default 5m
+
+    def compose(self) -> ComposeResult:
+        # Columns fill top→bottom: (Lifeline, Log), (Settings, Game),
+        # (Refresh, API Keys), (Model Manager, Routing), (Kill, Vacuum).
+        with Horizontal(id="controls-grid"):
+            with Vertical(classes="ctrl-col"):
+                yield Button(
+                    "LIFELINE: ON / OFF",
+                    id="btn-cron-toggle",
+                    classes="panel-btn ctrl-lifeline",
+                    tooltip="OFF stops all Lifeline runs (CRON, Fetch, File Monitor) — not just the schedule",
+                )
+                yield Button("LOG: ON / OFF", id="btn-log-toggle",
+                             classes="panel-btn ctrl-log-toggle")
+            with Vertical(classes="ctrl-col"):
+                yield Button("⚙ SYSTEM SETTINGS", id="btn-system-settings",
+                             classes="panel-btn ctrl-system-settings")
+                yield Button("🎯 GAME OF LIFE", id="btn-strategy",
+                             variant="warning", classes="panel-btn strategy-btn")
+            with Vertical(classes="ctrl-col"):
+                yield Button("◀ REFRESH - 5m ▶", id="btn-refresh-cycle",
+                             variant="default", classes="panel-btn")
+                yield Button("🔑 API KEYS", id="btn-api-keys",
+                             classes="panel-btn api-keys-btn")
+            with Vertical(classes="ctrl-col"):
+                yield Button("🧩 MODEL MANAGER", id="btn-model-manager",
+                             classes="panel-btn model-manager-btn")
+                yield Button("🔀 MODEL ROUTING", id="btn-model-routing",
+                             variant="default", classes="panel-btn")
+            with Vertical(classes="ctrl-col"):
+                yield Button("KILL ALL AGENTS", id="btn-kill-agents",
+                             variant="error", classes="panel-btn")
+                yield Button("🗜 VACUUM DBs", id="btn-vacuum",
+                             classes="panel-btn ctrl-vacuum")
+
+    def on_mount(self) -> None:
+        self._update_refresh_label()
+        self._update_control_labels()
+
+    def get_refresh_seconds(self) -> int:
+        return self.REFRESH_INTERVALS[self._refresh_idx][1]
+
+    def _update_refresh_label(self) -> None:
+        label, _ = self.REFRESH_INTERVALS[self._refresh_idx]
+        try:
+            self.query_one("#btn-refresh-cycle", Button).label = f"◀ REFRESH - {label} ▶"
+        except Exception:
+            pass
+
+    def _update_control_labels(self) -> None:
+        cron_on = self.system_reader.is_cron_enabled()
+        log_on = self.system_reader.is_logging_enabled()
+        try:
+            self.query_one("#btn-cron-toggle", Button).label = (
+                f"LIFELINE: {'ON' if cron_on else 'OFF'}"
+            )
+        except Exception:
+            pass
+        try:
+            self.query_one("#btn-log-toggle", Button).label = (
+                f"LOG: {'ON' if log_on else 'OFF'}"
+            )
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "btn-cron-toggle":
+            self.system_reader.toggle_cron()
+            self._update_control_labels()
+            try:
+                self.app.query_one("#system-panel", SystemPanel).refresh_data()
+            except Exception:
+                pass
+        elif button_id == "btn-log-toggle":
+            self.system_reader.toggle_logging()
+            self._update_control_labels()
+            try:
+                self.app.query_one("#system-panel", SystemPanel).refresh_data()
+            except Exception:
+                pass
+        elif button_id == "btn-kill-agents":
+            os_users = None
+            if self.agent_reader:
+                os_users = list({
+                    a["os_user"] for a in self.agent_reader.get_all_agents()
+                    if a.get("os_user")
+                })
+            self.system_reader.kill_agents(os_users)
+            self.app.action_refresh_all()
+        elif button_id == "btn-strategy":
+            from agitop.panels.strategy_modal import StrategyModal
+            self.app.push_screen(StrategyModal(self.app.tasks_reader))
+        elif button_id == "btn-api-keys":
+            from agitop.panels.api_keys_modal import ApiKeysModal
+            self.app.push_screen(ApiKeysModal())
+        elif button_id == "btn-model-manager":
+            from agitop.panels.model_manager_modal import ModelManagerModal
+            self.app.push_screen(ModelManagerModal())
+        elif button_id == "btn-refresh-cycle":
+            self._refresh_idx = (self._refresh_idx + 1) % len(self.REFRESH_INTERVALS)
+            self._update_refresh_label()
+            self.app.action_update_refresh_interval()
+        elif button_id == "btn-model-routing":
+            from agitop.panels.model_routing_modal import ModelRoutingModal
+            self.app.push_screen(ModelRoutingModal())
+        elif button_id == "btn-system-settings":
+            from agitop.panels.system_settings_modal import SystemSettingsModal
+            self.app.push_screen(SystemSettingsModal())
+        elif button_id == "btn-vacuum":
+            import subprocess as _sp
+            try:
+                result = _sp.run(
+                    ["agictl", "system", "vacuum"],
+                    capture_output=True, text=True, timeout=60
+                )
+                if result.returncode == 0:
+                    import json as _json
+                    data = _json.loads(result.stdout)
+                    dbs = data.get("databases", [])
+                    total_saved = sum(
+                        float(d.get("saved", "0").replace(" KB", ""))
+                        for d in dbs
+                        if d.get("status") == "ok" and "KB" in str(d.get("saved", ""))
+                    )
+                    ok_count = sum(1 for d in dbs if d.get("status") == "ok")
+                    self.app.notify(
+                        f"✓ Vacuumed {ok_count} database(s) — {total_saved:.1f} KB reclaimed",
+                        title="Vacuum"
+                    )
+                else:
+                    self.app.notify(
+                        f"Vacuum failed: {result.stderr[:200]}", severity="error"
+                    )
+            except Exception as e:
+                self.app.notify(f"Vacuum error: {e}", severity="error")
+
+
+class SystemPanel(Static):
+    """Displays system-level infrastructure status using individual metric cells."""
 
     def __init__(self, system: SystemReader,
                  config: Optional[ConfigReader],
@@ -42,75 +188,64 @@ class SystemPanel(Static):
         self.config_reader = config
         self.status_reader = status
         self.agent_reader = agent
-        self._refresh_idx = 3  # Default 5m
         self._blink_until = 0.0
         self._spinner_tick = 0
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="system-columns"):
-            with Vertical(classes="sys-left-stack"):
-                with Horizontal(classes="sys-metrics-row"):
-                    with Vertical(classes="sys-col"):
-                        yield Static(" [b]Machine[/b]", classes="col-header")
-                        yield MetricLabel(id="m-cpu")
-                        yield MetricLabel(id="m-disk")
-                        yield MetricLabel(id="m-mem")
-                        yield MetricLabel(id="m-up")
-                    with Vertical(classes="sys-col"):
-                        yield Static(" [b]System[/b]", classes="col-header")
-                        yield MetricLabel(id="m-cron")
-                        yield MetricLabel(id="m-inference_endpoint")
-                        yield MetricLabel(id="m-localai")
-                        yield MetricLabel(id="m-cloudproxy")
-                        yield MetricLabel(id="m-cooldown")
-                        yield MetricLabel(id="m-logging")
-                        yield MetricLabel(id="m-loginfo")
-                        yield MetricLabel(id="m-config-error")
-                    with Vertical(classes="sys-col"):
-                        yield Static(" [b]Agents[/b]", classes="col-header")
-                        yield MetricLabel(id="m-running")
-                        yield MetricLabel(id="m-count")
-                        yield MetricLabel(id="m-timer")
-                        if _DETERMINISTIC_UI_VISIBLE:
-                            yield MetricLabel(id="m-util-running")
-                            yield MetricLabel(id="m-util-lastrun")
-                yield AtriumPanel(id="sys-atrium", classes="sys-atrium-panel")
-            with Vertical(classes="sys-col controls-col"):
-                yield Static(" [b]Controls[/b]", classes="col-header")
-                with Horizontal(classes="btn-grid-row"):
-                    yield Button("LIFELINE: ON / OFF", id="btn-cron-toggle", classes="panel-btn ctrl-lifeline")
-                    yield Button("KILL ALL AGENTS", id="btn-kill-agents", variant="error", classes="panel-btn")
-                with Horizontal(classes="btn-grid-row"):
-                    yield Button("⚙ SYSTEM SETTINGS", id="btn-system-settings", classes="panel-btn ctrl-system-settings")
-                    yield Button("LOG: ON / OFF", id="btn-log-toggle", classes="panel-btn ctrl-log-toggle")
-                with Horizontal(classes="btn-grid-row"):
-                    yield Button("🎯 GAME OF LIFE", id="btn-strategy", variant="warning", classes="panel-btn strategy-btn")
-                    yield Button("🗜 VACUUM DBs", id="btn-vacuum", classes="panel-btn ctrl-vacuum")
-                with Horizontal(classes="btn-grid-row"):
-                    yield Button("🔑 API KEYS", id="btn-api-keys", classes="panel-btn api-keys-btn")
-                    yield Button("🧩 MODEL MANAGER", id="btn-model-manager", classes="panel-btn model-manager-btn")
-                with Horizontal(classes="btn-grid-row"):
-                    yield Button("◀ REFRESH - 5m ▶", id="btn-refresh-cycle", variant="default", classes="panel-btn")
-                    yield Button("🔀 MODEL ROUTING", id="btn-model-routing", variant="default", classes="panel-btn")
+            with Vertical(classes="sys-col"):
+                yield Static(" [b]Machine[/b]", classes="col-header")
+                yield MetricLabel(id="m-cpu")
+                yield MetricLabel(id="m-disk")
+                yield MetricLabel(id="m-mem")
+                yield MetricLabel(id="m-up")
+            with Vertical(classes="sys-col"):
+                yield Static(" [b]System[/b]", classes="col-header")
+                yield MetricLabel(id="m-cron")
+                yield MetricLabel(id="m-inference_endpoint")
+                yield MetricLabel(id="m-localai")
+                yield MetricLabel(id="m-cloudproxy")
+                yield MetricLabel(id="m-cooldown")
+                yield MetricLabel(id="m-logging")
+                yield MetricLabel(id="m-loginfo")
+                yield MetricLabel(id="m-config-error")
+            with Vertical(classes="sys-col"):
+                yield Static(" [b]Agents[/b]", classes="col-header")
+                yield MetricLabel(id="m-running")
+                yield MetricLabel(id="m-count")
+                yield MetricLabel(id="m-timer")
+                if _DETERMINISTIC_UI_VISIBLE:
+                    yield MetricLabel(id="m-util-running")
+                    yield MetricLabel(id="m-util-lastrun")
             with Vertical(classes="sys-col clock-col"):
                 yield Static("", id="m-clock")
+                with Horizontal(classes="clock-force-row"):
+                    yield Button(
+                        "▶ RUN NOW",
+                        id="btn-lifeline-force",
+                        classes="panel-btn-sm clock-force-btn",
+                        tooltip=(
+                            "Run Lifeline now (skipped if already running "
+                            "or within 5s of the CRON tick)"
+                        ),
+                    )
+            with Vertical(classes="sys-col atrium-col"):
+                yield AtriumPanel(id="sys-atrium", classes="sys-atrium-panel")
 
     def on_mount(self) -> None:
         self._clock_timer = self.set_interval(1, self._tick_clock)
         self.set_interval(DOTS2_INTERVAL_S, self._tick_running_spinner)
-        self._update_refresh_label()
         self.refresh_data()
 
-    def get_refresh_seconds(self) -> int:
-        """Return current refresh interval in seconds."""
-        return self.REFRESH_INTERVALS[self._refresh_idx][1]
-
-    def _update_refresh_label(self) -> None:
-        label, _ = self.REFRESH_INTERVALS[self._refresh_idx]
-        try:
-            self.query_one("#btn-refresh-cycle", Button).label = f"◀ REFRESH - {label} ▶"
-        except Exception:
-            pass
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "btn-lifeline-force":
+            return
+        ok, msg = self.system_reader.try_force_lifeline()
+        self.app.notify(
+            msg,
+            title="Lifeline",
+            severity="information" if ok else "warning",
+        )
 
     def _tick_clock(self) -> None:
         """Update clock every second — blink at :00; refresh spawn timer when harness is up."""
@@ -162,84 +297,8 @@ class SystemPanel(Static):
             return
         self._update_running_label(running_count)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id == "btn-cron-toggle":
-            self.system_reader.toggle_cron()
-            self.refresh_data()
-        elif button_id == "btn-log-toggle":
-            self.system_reader.toggle_logging()
-            self.refresh_data()
-        elif button_id == "btn-kill-agents":
-            os_users = None
-            if self.agent_reader:
-                os_users = list({a["os_user"] for a in self.agent_reader.get_all_agents() if a.get("os_user")})
-            self.system_reader.kill_agents(os_users)
-            self.app.action_refresh_all()
-        elif button_id == "btn-strategy":
-            from agitop.panels.strategy_modal import StrategyModal
-            self.app.push_screen(StrategyModal(self.app.tasks_reader))
-        elif button_id == "btn-api-keys":
-            from agitop.panels.api_keys_modal import ApiKeysModal
-            self.app.push_screen(ApiKeysModal())
-        elif button_id == "btn-model-manager":
-            from agitop.panels.model_manager_modal import ModelManagerModal
-            self.app.push_screen(ModelManagerModal())
-        elif button_id == "btn-refresh-cycle":
-            self._refresh_idx = (self._refresh_idx + 1) % len(self.REFRESH_INTERVALS)
-            self._update_refresh_label()
-            # Notify app to update its timers
-            self.app.action_update_refresh_interval()
-        elif button_id == "btn-model-routing":
-            from agitop.panels.model_routing_modal import ModelRoutingModal
-            self.app.push_screen(ModelRoutingModal())
-        elif button_id == "btn-system-settings":
-            from agitop.panels.system_settings_modal import SystemSettingsModal
-            self.app.push_screen(SystemSettingsModal())
-        elif button_id == "btn-vacuum":
-            import subprocess as _sp
-            try:
-                result = _sp.run(
-                    ["agictl", "system", "vacuum"],
-                    capture_output=True, text=True, timeout=60
-                )
-                if result.returncode == 0:
-                    import json as _json
-                    data = _json.loads(result.stdout)
-                    dbs = data.get("databases", [])
-                    total_saved = sum(
-                        float(d.get("saved", "0").replace(" KB", ""))
-                        for d in dbs if d.get("status") == "ok" and "KB" in str(d.get("saved", ""))
-                    )
-                    ok_count = sum(1 for d in dbs if d.get("status") == "ok")
-                    self.app.notify(
-                        f"✓ Vacuumed {ok_count} database(s) — {total_saved:.1f} KB reclaimed",
-                        title="Vacuum"
-                    )
-                else:
-                    self.app.notify(f"Vacuum failed: {result.stderr[:200]}", severity="error")
-            except Exception as e:
-                self.app.notify(f"Vacuum error: {e}", severity="error")
-
     def _dot(self, active: bool) -> str:
         return "[bold green]●[/]" if active else "[bold red]●[/]"
-
-    def _update_control_labels(self) -> None:
-        """Sync toggle button labels with current lifeline / logging state."""
-        cron_on = self.system_reader.is_cron_enabled()
-        log_on = self.system_reader.is_logging_enabled()
-        try:
-            self.query_one("#btn-cron-toggle", Button).label = (
-                f"LIFELINE: {'ON' if cron_on else 'OFF'}"
-            )
-        except Exception:
-            pass
-        try:
-            self.query_one("#btn-log-toggle", Button).label = (
-                f"LOG: {'ON' if log_on else 'OFF'}"
-            )
-        except Exception:
-            pass
 
     def refresh_data(self) -> None:
         """Refresh all metric cells."""
@@ -371,7 +430,10 @@ class SystemPanel(Static):
         else:
             self.query_one("#m-config-error").update("")
 
-        self._update_control_labels()
+        try:
+            self.app.query_one("#controls-panel", ControlsPanel)._update_control_labels()
+        except Exception:
+            pass
 
     def _update_running_label(self, running_count: int) -> None:
         if running_count > 0:

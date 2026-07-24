@@ -22,11 +22,19 @@ from langchain_core.messages import (  # noqa: E402
     ToolMessage,
 )
 
-from harness.agent_harness import _canonicalize_messages  # noqa: E402
+from harness.agent_harness import (  # noqa: E402
+    _canonicalize_messages,
+    _stream_suffix_not_in_checkpoint,
+    _unresolved_tool_call_ids,
+)
 
 
 def _ai_tool_call(text, call_id, name="agictl_task"):
-    return AIMessage(content=text, tool_calls=[{"name": name, "args": {}, "id": call_id}])
+    return AIMessage(
+        content=text,
+        tool_calls=[{"name": name, "args": {}, "id": call_id}],
+        id=f"ai-{call_id}",
+    )
 
 
 def _resume_should_reseed(changed: bool, pending_next) -> bool:
@@ -153,6 +161,64 @@ class TestResumeReseedGuard(unittest.TestCase):
     def test_dirty_transcript_reseeds_regardless_of_next(self):
         self.assertTrue(_resume_should_reseed(True, ()))
         self.assertTrue(_resume_should_reseed(True, ("tools",)))
+
+
+class TestViewReinvokeFlushHelpers(unittest.TestCase):
+    """VIEW RE-INVOKE pending-writes race (5× crash 2026-07-24 on thread 1-26)."""
+
+    def test_suffix_is_tool_results_when_ai_message_already_committed(self):
+        # Agent node committed the parallel tool_calls AIMessage; tools streamed
+        # locally but were not committed before break-and-reinvoke.
+        ai = AIMessage(
+            content="batch",
+            id="ai-batch",
+            tool_calls=[
+                {"name": "agictl_view_image", "args": {"path": "/tmp/a.png"}, "id": "c1"},
+                {"name": "agictl_execute", "args": {"command": "true"}, "id": "c2"},
+            ],
+        )
+        t1 = ToolMessage(content='{"success":true}', tool_call_id="c1",
+                         name="agictl_view_image", id="t1")
+        t2 = ToolMessage(content='{"success":true}', tool_call_id="c2",
+                         name="agictl_execute", id="t2")
+        committed = [
+            HumanMessage(content="wake", id="h0"),
+            ai,
+        ]
+        streamed = [ai, t1, t2]
+        suffix = _stream_suffix_not_in_checkpoint(committed, streamed)
+        self.assertEqual([m.id for m in suffix], ["t1", "t2"])
+        merged = committed + suffix
+        self.assertFalse(_unresolved_tool_call_ids(merged))
+        clean, changed, stats = _canonicalize_messages(merged)
+        self.assertFalse(changed)
+        self.assertEqual(stats["placeholders"], 0)
+        self.assertEqual(len(clean), 4)
+
+    def test_suffix_includes_ai_when_neither_committed(self):
+        ai = _ai_tool_call("calling", "c1", name="agictl_view_image")
+        t1 = ToolMessage(content="ok", tool_call_id="c1",
+                         name="agictl_view_image", id="t1")
+        committed = [HumanMessage(content="wake", id="h0")]
+        streamed = [ai, t1]
+        suffix = _stream_suffix_not_in_checkpoint(committed, streamed)
+        self.assertEqual([m.id for m in suffix], [ai.id, "t1"])
+
+    def test_unresolved_committed_matches_crash_shape(self):
+        # The INVALID_CHAT_HISTORY shape from the five failed cycles: committed
+        # AIMessage with parallel view+execute, no ToolMessages yet.
+        committed = [
+            AIMessage(
+                content="",
+                id="ai-x",
+                tool_calls=[
+                    {"name": "agictl_view_image", "args": {}, "id": "c1"},
+                    {"name": "agictl_execute", "args": {}, "id": "c2"},
+                ],
+            ),
+        ]
+        pending = _unresolved_tool_call_ids(committed)
+        self.assertEqual(pending, {"c1", "c2"})
 
 
 if __name__ == "__main__":

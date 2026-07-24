@@ -63,7 +63,7 @@ else
   }
 fi
 
-VERSION="3.3.5"
+VERSION="3.3.6"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -480,11 +480,16 @@ if [ "${UPDATE_MODE}" = true ]; then
   if echo "${_EARLY_CRON}" | grep -qi "^[^#].*lifeline"; then
     CRON_WAS_ACTIVE=true
     if [ "${DRY_RUN}" = true ]; then
-      dry "Would comment out lifeline CRON entries"
+      dry "Would comment out lifeline CRON entries and set lifeline.disabled"
     else
       echo "${_EARLY_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
         crontab -u watchdog -
-      ok "CRON paused (commented out)"
+      # Hard OFF flag — blocks Fetch / stray lifeline.sh during update
+      mkdir -p /var/lib/versa-agi
+      touch /var/lib/versa-agi/lifeline.disabled
+      chown "${WATCHDOG_USER:-watchdog}:${WATCHDOG_USER:-watchdog}" \
+        /var/lib/versa-agi/lifeline.disabled 2>/dev/null || true
+      ok "CRON paused (commented out + lifeline.disabled)"
     fi
   else
     if echo "${_EARLY_CRON}" | grep -qi "^#.*lifeline"; then
@@ -2773,6 +2778,8 @@ if confirm_accent "Install CRON entries for user '${WATCHDOG_USER}'?"; then
   # Build crontab: preserve existing non-lifeline entries, add TZ + schedule + rotation
   (crontab -u "${WATCHDOG_USER}" -l 2>/dev/null | grep -v "lifeline.sh" | grep -v "^TZ=" | grep -v "versa-agi-archive" || true; echo "${CRON_TZ_LINE}"; echo "${CRON_SCHEDULE}"; echo "${LOG_ROTATION}") | \
     crontab -u "${WATCHDOG_USER}" -
+  # Lifeline ON for fresh install — clear hard OFF flag if present
+  rm -f /var/lib/versa-agi/lifeline.disabled
   ok "CRON entries installed for ${WATCHDOG_USER}"
 
   # Create lifeline log file (single consolidated log)
@@ -3728,10 +3735,16 @@ if [ "${UPDATE_MODE}" = true ]; then
       CURRENT_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
       echo "${CURRENT_CRON}" | sed '/[Ll]ifeline/s|^#||' | \
         crontab -u "${WATCHDOG_USER}" -
-      ok "CRON resumed"
+      rm -f /var/lib/versa-agi/lifeline.disabled
+      ok "CRON resumed (lifeline.disabled cleared)"
     else
+      # Keep hard OFF so Fetch / stray lifeline.sh cannot spawn during pause
+      mkdir -p /var/lib/versa-agi
+      touch /var/lib/versa-agi/lifeline.disabled
+      chown "${WATCHDOG_USER}:${WATCHDOG_USER}" \
+        /var/lib/versa-agi/lifeline.disabled 2>/dev/null || true
       warn "CRON NOT resumed — agents will not spawn until you re-enable it"
-      echo -e "  ${DIM:-}To resume manually: sudo agitop → Controls → Resume CRON${RESET:-}"
+      echo -e "  ${DIM:-}To resume: sudo agitop → Controls → LIFELINE ON${RESET:-}"
     fi
   else
     warn "CRON was not active before update — skipping resume"

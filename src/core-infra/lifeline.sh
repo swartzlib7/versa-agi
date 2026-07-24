@@ -45,6 +45,15 @@ else
   log() { :; }  # no-op
 fi
 
+# ─── Hard OFF gate (agitop LIFELINE toggle) ──────────
+# Present = operator disabled Lifeline. Blocks CRON, Fetch/--force,
+# and File Monitor invokes — not only the crontab line.
+LIFELINE_DISABLED_FLAG="/var/lib/versa-agi/lifeline.disabled"
+if [ -f "${LIFELINE_DISABLED_FLAG}" ]; then
+  log "Lifeline disabled (${LIFELINE_DISABLED_FLAG}) — skipping run"
+  exit 0
+fi
+
 # ─── Runaway Agent Monitor ─────────────────────────
 # Background watcher: polls result file every 10s.
 # Checks: (1) line count, (2) result file size, (3) session file size DELTA.
@@ -1671,9 +1680,17 @@ Wake reason: ${WAKE_REASON}."
   # Write triage context files — reuse data already computed for system prompt
   TASKS_FILE="/tmp/versa_agi_${AGENT_NAME}_tasks.txt"
   CONVO_FILE="/tmp/versa_agi_${AGENT_NAME}_convo.txt"
+  GAMES_FILE="/tmp/versa_agi_${AGENT_NAME}_games.txt"
   echo "${TASK_SUMMARY}" > "${TASKS_FILE}"
   echo "${CONVERSATION_CONTEXT}" > "${CONVO_FILE}"
-  chmod 644 "${SYSTEM_FILE}" "${WAKE_FILE}" "${TASKS_FILE}" "${CONVO_FILE}"
+  # Compact games digest for triage (same scope as ENVIRONMENTAL_AWARENESS games;
+  # exclude awareness tables — those stay agent-side / TD-TRIAGE-021).
+  if [ -n "${GAMES_BLOCK}" ]; then
+    printf '%s\n' "${GAMES_BLOCK}" | head -c 1500 > "${GAMES_FILE}"
+  else
+    echo "(none)" > "${GAMES_FILE}"
+  fi
+  chmod 644 "${SYSTEM_FILE}" "${WAKE_FILE}" "${TASKS_FILE}" "${CONVO_FILE}" "${GAMES_FILE}"
   # Persist context prompt for dashboard/audit visibility.
   # Mode 660 watchdog:{agent}: Lifeline writes the pre-harness snapshot; the
   # harness (running as the agent user) overwrites with the effective prompt
@@ -1939,7 +1956,7 @@ Wake reason: ${WAKE_REASON}."
   rm -f "${STEP_RESUME_SENTINEL}" 2>/dev/null || true
   sudo -u "${AGENT_USER}" \
     timeout "${TIMEOUT_DURATION}" \
-      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} ${ROUTING_ARGS} > '${RESULT_FILE}' 2>&1"
+      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --games-file '${GAMES_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} ${ROUTING_ARGS} > '${RESULT_FILE}' 2>&1"
   EXIT_CODE=$?
   # NOTE: Do NOT re-enable set -e here. The subshell runs with set +e
   # (line 631) intentionally — post-spawn commands like kill/wait may fail
@@ -1949,7 +1966,7 @@ Wake reason: ${WAKE_REASON}."
   kill "${MONITOR_PID}" 2>/dev/null || true
   wait "${MONITOR_PID}" 2>/dev/null || true
 
-  rm -f "${ENV_SCRIPT}" "${TASKS_FILE}" "${CONVO_FILE}" "${ROUTING_FILE}" "${ROUTING_ATTACHMENTS_FILE}"
+  rm -f "${ENV_SCRIPT}" "${TASKS_FILE}" "${CONVO_FILE}" "${GAMES_FILE}" "${ROUTING_FILE}" "${ROUTING_ATTACHMENTS_FILE}"
   # Keep a readable log copy alongside the result file
   cp "${RESULT_FILE}" "${RESULT_LOG}" 2>/dev/null || true
 

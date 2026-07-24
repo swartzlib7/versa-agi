@@ -9,6 +9,7 @@ from agitop.widgets.braille_spinner import (
     parse_cycle_agent,
 )
 from agitop.widgets.clear_checkbox import ClearCheckbox
+from agitop.widgets.flex_data_table import FlexDataTable
 from agitop.widgets.paginated_data_table import PaginatedDataTable
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "ClearCheckbox",
     "DOTS2",
     "DOTS2_INTERVAL_S",
+    "FlexDataTable",
     "PaginatedDataTable",
     "dots2_char",
     "dots2_markup",

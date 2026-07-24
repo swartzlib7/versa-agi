@@ -34,12 +34,14 @@ Before beginning execution:
 
 ### Step 3: Load craft skills (when applicable)
 
+If registering or onboarding a **new project**, follow **`project_management`** through Step 4 (collaboration pattern + QA reviewer), owner seed task, and (on first feature) a WBS backlog — not only `project add`.
+
 If the work is **product/feature code** (implement, fix, refactor, close a feature):
 
-1. Load **`software_engineering`** before changing code.
-2. Load **`feature_statefold`** and open (or create) the feature’s living `state_*.md` — do not start a parallel `*_spec.md` / `context_*.md`.
+1. Load **`software_engineering`** before changing code (includes optional staged QT units and WBS ↔ task bridge).
+2. Load **`feature_statefold`** and open (or create) the feature’s living `state_*.md` — do not start a parallel `*_spec.md` / `context_*.md`. Use the WBS backlog table for multi-step work; mirror rows to `agictl task --project` via **`task_scheduling`**.
 
-Host stack / apt / systemd setup → **`solution_architect`** instead. Ambiguous “what to build” → **`requirements_elicitation`** first.
+Host stack / apt / systemd setup → **`solution_architect`** instead. Ambiguous “what to build” → **`requirements_elicitation`** first (*what*, not collaboration pattern).
 
 ## Core Directive
 

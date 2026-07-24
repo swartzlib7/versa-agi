@@ -351,6 +351,83 @@ def _unresolved_tool_call_ids(messages) -> set:
     return pending
 
 
+def _stream_suffix_not_in_checkpoint(committed, streamed) -> list:
+    """Return the trailing streamed messages not yet present in committed state.
+
+    Walks ``streamed`` from the end until a message id already in ``committed``
+    is found. Used to merge ToolMessages (and any uncommitted AIMessage) from
+    the local stream mirror into the checkpoint without wiping prior history.
+    """
+    if not streamed:
+        return []
+    committed_ids = {
+        getattr(m, "id", None) for m in committed if getattr(m, "id", None)
+    }
+    if not committed_ids:
+        return list(streamed)
+    suffix: list = []
+    for m in reversed(streamed):
+        mid = getattr(m, "id", None)
+        if mid and mid in committed_ids:
+            break
+        suffix.append(m)
+    suffix.reverse()
+    return suffix
+
+
+def _flush_stream_messages_to_checkpoint(agent, config, messages) -> str:
+    """Commit streamed tool results before break-and-reinvoke.
+
+    Breaking ``agent.stream()`` after a tools batch (especially parallel
+    ``agictl_view_image`` + other tools) can interrupt the tools superstep
+    before ToolMessages are committed. They may exist only as pending writes
+    — invisible in ``get_state().values`` — while ``snapshot.next`` still
+    points at a half-finished step. The next ``stream({"messages": [...]})``
+    then validates a dangling ``AIMessage.tool_calls`` and raises
+    ``INVALID_CHAT_HISTORY``.
+
+    Fix (same idea as RESUME pending-writes repair): merge any streamed
+    suffix missing from the committed transcript, canonicalize, and reseed
+    ``as_node="__start__"`` so pending writes are discarded. Never reseed
+    from the local mirror alone — on RESUME it is only this cycle's stream
+    chunks, not the full thread.
+    """
+    if agent is None or not messages:
+        return "skip"
+    if _unresolved_tool_call_ids(messages):
+        # Caller should have gated on this; refuse to flush a dangling local tail.
+        return "skip-local-unresolved"
+    try:
+        snapshot = agent.get_state(config)
+    except Exception as e:
+        return f"get_state-failed:{e}"
+
+    pending_next = tuple(getattr(snapshot, "next", ()) or ()) if snapshot else ()
+    committed = list((snapshot.values or {}).get("messages", []) or []) if snapshot else []
+    unresolved_ckpt = _unresolved_tool_call_ids(committed)
+    suffix = _stream_suffix_not_in_checkpoint(committed, messages)
+
+    if not pending_next and not unresolved_ckpt and not suffix:
+        return "ok-committed"
+
+    try:
+        merged = list(committed) + suffix
+        clean, _changed, stats = _canonicalize_messages(merged)
+        agent.update_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + clean},
+            as_node="__start__",
+        )
+        return (
+            f"flushed pending_next={pending_next or '—'} "
+            f"unresolved_ckpt={len(unresolved_ckpt)} "
+            f"suffix={len(suffix)} msgs={len(clean)} "
+            f"placeholders={stats.get('placeholders', 0)}"
+        )
+    except Exception as e:
+        return f"flush-failed:{e}"
+
+
 # Transient HTTP statuses worth retrying — timeouts, conflicts, rate limits,
 # the "headers too large" edge case (431), and all 5xx. Excludes 400/401/403/404
 # and other deterministic client errors (retrying those is pointless).
@@ -1177,6 +1254,46 @@ def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, comp
         }, f)
 
 
+# Late nudge: prefer ~15 steps from the end on large budgets; clamp for small max_steps.
+END_OFF_REMAINING_CAP = 15
+
+
+def end_off_remaining_threshold(max_steps: int) -> int:
+    """Steps remaining when the end-off nudge fires.
+
+    Large budgets (~300): 15 left. Small budgets: ~10% of max (floor 2) so a
+    20-step agent is not nudged almost immediately.
+    """
+    if max_steps <= 0:
+        return 1
+    return min(END_OFF_REMAINING_CAP, max(2, max_steps // 10))
+
+
+def budget_wrap_message(step_count: int, max_steps: int) -> str:
+    """Soft wrap-up at ~80% of the step budget."""
+    remaining = max(0, max_steps - step_count)
+    return (
+        f"⏱️ Step budget: {step_count} of {max_steps} used ({remaining} remaining). "
+        "Begin wrapping up current work. "
+        "Journal progress: agictl task progress <id> 'DONE: ... NEXT: ...'. "
+        "If you cannot finish in the remaining steps, save progress and end the cycle — "
+        "you will be respawned to continue."
+    )
+
+
+def budget_end_off_message(step_count: int, max_steps: int) -> str:
+    """Calm end-off nudge near the hard step limit (not a panic CRITICAL)."""
+    remaining = max(0, max_steps - step_count)
+    return (
+        f"⏱️ Step budget: {step_count} of {max_steps} used ({remaining} remaining). "
+        "Please end off now: journal progress with "
+        "agictl task progress <id> 'DONE: ... NEXT: ... BLOCKERS: ...', then "
+        "agictl cycle end 'Summary of what was done and what remains'. "
+        "Your progress entry is injected into the next wake — "
+        "you will be respawned on the next tick to continue."
+    )
+
+
 def _finalize_cycle_step_budget(agent_name: str, step_count: int, max_steps: int) -> None:
     """Close the open cycle row when the harness hits the hard step limit.
 
@@ -1347,6 +1464,7 @@ def main():
     parser.add_argument("--model-params-extra", default=None, help="Per-agent extra params JSON passthrough (omit = inherit)")
     parser.add_argument("--tasks-file", default=None, help="Path to pre-computed active tasks context for triage")
     parser.add_argument("--convo-file", default=None, help="Path to pre-computed conversation history for triage")
+    parser.add_argument("--games-file", default=None, help="Path to compact active-games digest for triage")
     parser.add_argument("--routing-file", default=None, help="Path to ephemeral model routing JSON from lifeline")
     parser.add_argument("--resume-max-messages", type=int, default=0, help="Trim checkpoint to last N messages on resume (0 = unlimited)")
     parser.add_argument("--skill-mode", default="hybrid", choices=["full", "lazy", "hybrid"], help="Skill injection mode: full (inject all), lazy (manifest only), hybrid (core injected + lazy manifest)")
@@ -1469,6 +1587,11 @@ def main():
         with open(args.convo_file, "r") as f:
             convo_context = f.read().strip()
 
+    games_context = ""
+    if getattr(args, "games_file", None) and os.path.isfile(args.games_file):
+        with open(args.games_file, "r") as f:
+            games_context = f.read().strip()
+
     # ── Session Type ──
     # Determined later by actual checkpoint state inspection, not just --resume flag.
     session_type = "NEW"
@@ -1536,6 +1659,7 @@ def main():
         skills_dir=skills_dir,
         agent_name=args.agent,
         routing_context=routing_context,
+        games_context=games_context,
     )
     triage_result = enrich_triage_from_inbox(triage_result, args.agent)
 
@@ -1659,8 +1783,14 @@ def main():
     # confidence < 0.7 + no parallel work: clarify and exit
     if triage_result.classification == "clarification_needed" and triage_result.confidence < 0.7 and not triage_result.parallel_work_viable:
         tlog(f"TRIAGE: Low confidence ({triage_result.confidence:.2f}), no parallel work — clarify & exit path")
-        # The agent will still run but with explicit instructions to clarify and exit
-        enhanced_wake = f"{triage_context}\n\n⚠ TRIAGE DIRECTIVE: Confidence is low and no parallel work is viable. Send a clarification message to the sender addressing the negative signals listed above, then end your cycle.\n\n---\n\n{wake_prompt}"
+        # Harness gate (not a user message): keep altitude — one line + triage brief above
+        enhanced_wake = (
+            f"{triage_context}\n\n"
+            "⚠ TRIAGE/HARNESS GATE (advisory): Low confidence and parallel work not viable — "
+            "clarify with the sender (see strategic brief / negative signals), then end this cycle. "
+            "Follow poise and communication skills for how to message.\n\n"
+            f"---\n\n{wake_prompt}"
+        )
 
     # Persist the effective prompt (post always-inject + triage skill payload + wake)
     # so agitop's System Prompt tab matches what the model receives. Lifeline wrote
@@ -1939,8 +2069,16 @@ def main():
     if triage_result.task_actions:
         tlog(f"  TASK ACTIONS: {triage_result.task_actions}")
     if triage_result.signal_results:
-        signals = " | ".join(f"{k}={'✓' if v else '✗'}" for k, v in triage_result.signal_results.items())
-        tlog(f"  SIGNALS: {signals}")
+        from harness.triage import adverse_signals
+        # ✓ = healthy for this key (inverted for pending_question / contradiction / etc.)
+        _INV = {"contradiction_check", "memory_conflict", "risk_assessment", "pending_question"}
+        parts = []
+        for k, v in triage_result.signal_results.items():
+            healthy = (not v) if k in _INV else bool(v)
+            parts.append(f"{k}={'✓' if healthy else '✗'}")
+        tlog(f"  SIGNALS: {' | '.join(parts)}")
+        adv = adverse_signals(triage_result.signal_results)
+        tlog(f"  ADVERSE: {', '.join(adv) if adv else '(none)'}")
     if triage_result.has_attachments:
         tlog(f"  ATTACHMENTS: {triage_result.attachment_paths}")
     tlog(f"TOOLS: {', '.join(t.name for t in ALL_TOOLS)} ({len(ALL_TOOLS)} total)")
@@ -1957,9 +2095,9 @@ def main():
     step_count = 0
     max_steps = args.max_steps
     budget_80 = int(max_steps * 0.80)
-    budget_95 = int(max_steps * 0.95)
+    end_off_remaining = end_off_remaining_threshold(max_steps)
     warned_80 = False
-    warned_95 = False
+    warned_end_off = False
     cycle_ended = False
     budget_hard_stop = False
     input_messages = messages  # Initial input for first stream invocation
@@ -2049,18 +2187,32 @@ def main():
                         # current tool batch is fully resolved, break and re-invoke
                         # with the queued image HumanMessage(s) as input — only then
                         # does the agent node actually receive the image.
-                        # SAFETY GATE: same as budget — wait until no tool_call from
-                        # the latest AIMessage is unanswered, or the re-invoke raises
-                        # INVALID_CHAT_HISTORY on dangling parallel tool_calls.
+                        # SAFETY GATE: wait until no tool_call from the latest
+                        # AIMessage is unanswered in the local mirror.
+                        # CHECKPOINT FLUSH: breaking the stream can leave ToolMessages
+                        # as pending writes (parallel view+tools especially) — flush
+                        # the local transcript before re-invoke or LangGraph raises
+                        # INVALID_CHAT_HISTORY on dangling tool_calls.
                         if pending_view_injects and not _unresolved_tool_call_ids(messages):
-                            input_messages = pending_view_injects
-                            messages.extend(pending_view_injects)
-                            tlog(
-                                f"VIEW RE-INVOKE: feeding {len(pending_view_injects)} "
-                                f"image message(s) to the model (step {step_count})"
+                            flush_note = _flush_stream_messages_to_checkpoint(
+                                agent, config, messages,
                             )
-                            pending_view_injects = []
-                            break
+                            tlog(f"VIEW RE-INVOKE: checkpoint {flush_note}")
+                            if flush_note.startswith(("flush-failed", "skip-local-unresolved")):
+                                tlog(
+                                    "VIEW RE-INVOKE: aborting image inject — "
+                                    "checkpoint not safe (avoid INVALID_CHAT_HISTORY)"
+                                )
+                                pending_view_injects = []
+                            else:
+                                input_messages = pending_view_injects
+                                messages.extend(pending_view_injects)
+                                tlog(
+                                    f"VIEW RE-INVOKE: feeding {len(pending_view_injects)} "
+                                    f"image message(s) to the model (step {step_count})"
+                                )
+                                pending_view_injects = []
+                                break
 
                         # ── Budget Warnings ──
                         # Break the stream and re-invoke with the warning as a genuine HumanMessage.
@@ -2077,35 +2229,33 @@ def main():
 
                         if pending_tool_calls:
                             pass  # defer warning to the next chunk
-                        elif step_count >= budget_95 and not warned_95:
-                            warned_95 = True
+                        elif remaining <= end_off_remaining and not warned_end_off:
+                            warned_end_off = True
                             warned_80 = True  # suppress a stale 80% warning after this one
-                            warning = (
-                                f"⚠️ CRITICAL: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
-                                "STOP all work immediately. You MUST: "
-                                "1) Journal your progress on the current task: agictl task progress <id> 'DONE: ... NEXT: ... BLOCKERS: ...'. "
-                                "2) End your cycle with a summary: agictl cycle end 'Summary of what was done and what remains'. "
-                                "Your progress entry is injected into your next wake context — it is how your future self resumes. "
-                                "You will be respawned on the next tick to continue."
-                            )
+                            warning = budget_end_off_message(step_count, max_steps)
                         elif step_count >= budget_80 and not warned_80:
                             warned_80 = True
-                            warning = (
-                                f"⚠️ BUDGET WARNING: You have used {step_count} of {max_steps} steps ({remaining} remaining). "
-                                "Begin wrapping up your current work. "
-                                "Journal your progress: agictl task progress <id> 'DONE: ... NEXT: ...'. "
-                                "If you cannot complete the task in the remaining steps, "
-                                "save your progress and end the cycle — you will be respawned to continue."
-                            )
+                            warning = budget_wrap_message(step_count, max_steps)
 
                         if warning:
                             tlog(f"[BUDGET] Injecting warning into agent conversation (step {step_count})")
                             tlog(f"[BUDGET] {warning}")
-                            # Break this stream — re-invoke with warning as the only new input.
-                            # The checkpointer holds all prior state; the agent sees this as a new human message.
-                            input_messages = [HumanMessage(content=warning, id=str(uuid.uuid4()))]
-                            messages.append(input_messages[0])
-                            break
+                            # Flush streamed ToolMessages before break-and-reinvoke —
+                            # same pending-writes hazard as VIEW RE-INVOKE.
+                            flush_note = _flush_stream_messages_to_checkpoint(
+                                agent, config, messages,
+                            )
+                            tlog(f"[BUDGET] checkpoint {flush_note}")
+                            if flush_note.startswith("flush-failed"):
+                                tlog(
+                                    "[BUDGET] Skipping warning inject — "
+                                    "checkpoint flush failed"
+                                )
+                            else:
+                                # Break this stream — re-invoke with warning as the only new input.
+                                input_messages = [HumanMessage(content=warning, id=str(uuid.uuid4()))]
+                                messages.append(input_messages[0])
+                                break
 
                         # ── Hard Budget Enforcement ──
                         # Same safety gate: wait until every parallel tool_call in the

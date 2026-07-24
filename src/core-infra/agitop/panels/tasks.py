@@ -25,7 +25,7 @@ from rich.markup import escape
 from agitop.data import TasksReader
 from agitop.data.status_reader import StatusReader
 from agitop.feature_flags import UTILITY_MODELS_UI_VISIBLE, SCRIPT_TASKS_UI_VISIBLE
-from agitop.widgets import PaginatedDataTable
+from agitop.widgets import FlexDataTable, PaginatedDataTable
 
 _TZ = time.strftime("%Z")
 
@@ -1527,7 +1527,11 @@ class TasksPanel(Widget):
         self._task_data: dict[str, dict] = {}
         self._project_cache: dict[int, str] = {}
         self._name_cache: dict[str, str] = {}
-        self.table = DataTable(id="tasks-table")
+        self.table = FlexDataTable(
+            id="tasks-table",
+            flex_keys=["title", "desc"],
+            min_flex_width=16,
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="tasks-panel-body", classes="work-tab-body"):
@@ -1541,19 +1545,20 @@ class TasksPanel(Widget):
     def on_mount(self) -> None:
         self._update_title()
         self.table.cursor_type = "row"
-        self.table.add_column("ID", width=5)
-        self.table.add_column("Type", width=8)
-        self.table.add_column("Title", width=48)
-        self.table.add_column("Desc", width=40)
-        self.table.add_column("Status", width=14)
-        self.table.add_column("Spawns", width=7)
-        self.table.add_column("Priority", width=9)
-        self.table.add_column("Requested By", width=14)
-        self.table.add_column("Project", width=16)
-        self.table.add_column("Assign To", width=12)
-        self.table.add_column("Assign By", width=12)
-        self.table.add_column("Tags", width=12)
-        self.table.add_column(f"Due ({_TZ})", width=19)
+        self.table.add_column("ID", width=5, key="id")
+        self.table.add_column("Type", width=8, key="type")
+        self.table.add_column("Title", width=16, key="title")
+        self.table.add_column("Desc", width=16, key="desc")
+        self.table.add_column("Status", width=14, key="status")
+        self.table.add_column("Spawns", width=7, key="spawns")
+        self.table.add_column("Priority", width=9, key="priority")
+        self.table.add_column("Requested By", width=14, key="requested_by")
+        self.table.add_column("Project", width=16, key="project")
+        self.table.add_column("Assign To", width=12, key="assign_to")
+        self.table.add_column("Assign By", width=12, key="assign_by")
+        self.table.add_column("Tags", width=12, key="tags")
+        self.table.add_column(f"Due ({_TZ})", width=19, key="due")
+        self.table.apply_flex_widths()
         self.refresh_data()
 
     def _update_action_buttons(self) -> None:

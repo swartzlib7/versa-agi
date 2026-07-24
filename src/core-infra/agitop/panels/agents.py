@@ -107,7 +107,7 @@ class AgentsPanel(DataTable):
         self.cursor_type = "row"
         self.border_title = "Agents (Registry & Telemetry)"
         self.add_columns(
-            "Agent", "Provider", "Model", "Role", "Reasoning", "Skills", "Routing",
+            "Agent", "Provider", "Model", "Triage", "Role", "Reasoning", "Skills", "Routing",
             "Inactive", "Protected", "Browser", "Comms", "Req. By",
             f"Last Cycle ({_TZ})", "Sent", "Recv", "Tasks", "Tokens", "Budget", "Status"
         )
@@ -236,6 +236,8 @@ class AgentsPanel(DataTable):
 
             # Model display — short name only (provider shown in dedicated column)
             model_display = f"[dim]{agent_model}[/]" if agent_model else "[dim]default[/]"
+            triage_model = (agent.get("triage_model") or "").strip()
+            triage_display = f"[dim]{triage_model}[/]" if triage_model else "[dim]—[/]"
 
             browser_val = agent.get("browser_enabled", 0)
             browser_display = "[green]●[/]" if browser_val else "[dim]○[/]"
@@ -257,6 +259,7 @@ class AgentsPanel(DataTable):
                 name_markup,
                 provider_display,
                 model_display,
+                triage_display,
                 role + coa_warning,
                 reasoning_display,
                 skill_display,

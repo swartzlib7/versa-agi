@@ -2,19 +2,22 @@
 from agitop.data import AgentReader
 
 import json
+import os
 import re
+import subprocess
 import time
 from typing import Optional
+
 from textual import on
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import DataTable, Static, Button, Select, TextArea, Markdown
 from textual.widget import Widget
-import subprocess
 
 from agitop.data import MessageReader
 from agitop.data.config_reader import ConfigReader
+from agitop.widgets import FlexDataTable
 
 _TZ = time.strftime("%Z")
 
@@ -674,7 +677,11 @@ class MessagesPanel(Widget):
         self._primary_name: Optional[str] = None
         self._primary_uid: Optional[str] = None
         self._uid_to_agent: dict[str, str] = {}
-        self.table = DataTable(id="messages-table")
+        self.table = FlexDataTable(
+            id="messages-table",
+            flex_keys=["text"],
+            min_flex_width=24,
+        )
         self._msg_data: dict[str, dict] = {}
         self._channel_filter: str = None  # None = all, 'vv', 'internal'
         self._page = 0
@@ -724,19 +731,20 @@ class MessagesPanel(Widget):
     def on_mount(self) -> None:
         self._update_title()
         self.table.cursor_type = "row"
-        # Compact metadata cols; Text is the primary readable field.
-        self.table.add_column("ID", width=6)
-        self.table.add_column("Channel", width=10)
-        self.table.add_column("Msg Src", width=8)
-        self.table.add_column("Dir", width=4)
-        self.table.add_column("From", width=12)
-        self.table.add_column("To", width=12)
-        self.table.add_column("Text", width=90)
-        self.table.add_column("Mode", width=8)
-        self.table.add_column("Status", width=10)
-        self.table.add_column("Attach", width=6)
-        self.table.add_column(f"Date/Time ({_TZ})", width=14)
-        self.table.add_column("Cycle", width=8)
+        # Compact metadata cols; Text flexes to fill leftover terminal width.
+        self.table.add_column("ID", width=6, key="id")
+        self.table.add_column("Channel", width=10, key="channel")
+        self.table.add_column("Msg Src", width=8, key="msg_src")
+        self.table.add_column("Dir", width=4, key="dir")
+        self.table.add_column("From", width=12, key="from")
+        self.table.add_column("To", width=12, key="to")
+        self.table.add_column("Text", width=24, key="text")
+        self.table.add_column("Mode", width=8, key="mode")
+        self.table.add_column("Status", width=10, key="status")
+        self.table.add_column("Attach", width=6, key="attach")
+        self.table.add_column(f"Date/Time ({_TZ})", width=14, key="datetime")
+        self.table.add_column("Cycle", width=8, key="cycle")
+        self.table.apply_flex_widths()
         self._update_filter_links()
         self.refresh_data()
 
@@ -1015,12 +1023,15 @@ class MessagesPanel(Widget):
             return True
 
     def _trigger_fetch_inbox(self) -> None:
-        command = ["sudo", "-u", "watchdog", "/home/watchdog/core-infra/lifeline.sh", "--force"]
-        try:
-            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.app.notify("Cloud Firehose Activated! Polling Data Gateway...", title="Versa AGi")
-        except Exception as e:
-            self.app.notify(f"Failed to trigger Lifeline: {e}", title="Error", severity="error")
+        # Same gates as System ▶ RUN NOW (OFF / already running / near CRON tick).
+        ok, msg = self.app.system.try_force_lifeline()
+        if ok:
+            self.app.notify(
+                "Cloud Firehose Activated! Polling Data Gateway...",
+                title="Versa AGi",
+            )
+        else:
+            self.app.notify(msg, title="Lifeline", severity="warning")
 
     def on_click(self, event) -> None:
         widget_id = getattr(event.widget, "id", None)

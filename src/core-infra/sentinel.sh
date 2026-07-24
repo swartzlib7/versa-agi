@@ -39,6 +39,7 @@ if [ -f "${PATHS_ENV}" ]; then
 fi
 
 AGENTS_DB="${VERSA_AGENTS_DB:-/var/lib/versa-agi/registry.db}"
+LIFELINE_DISABLED_FLAG="/var/lib/versa-agi/lifeline.disabled"
 
 # ─── Logging ─────────────────────────────────────────
 log() {
@@ -207,6 +208,12 @@ run_watcher | while read -r changed_file; do
   date +%s > "/tmp/versa_agi_sentinel_${agent_name}.debounce"
 
   log "TRIGGER: ${agent_name} — file changed: $(basename "${changed_file}")"
+
+  # Honor Lifeline hard OFF (agitop LIFELINE toggle) — do not invoke
+  if [ -f "${LIFELINE_DISABLED_FLAG}" ]; then
+    log "SKIP: Lifeline disabled (${LIFELINE_DISABLED_FLAG})"
+    continue
+  fi
 
   # Invoke Lifeline in background with a 10-second buffer (it handles all spawn logic)
   (sleep 10 && "${LIFELINE_SCRIPT}") &

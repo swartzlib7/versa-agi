@@ -9,6 +9,7 @@
 3. **Due dates are commitments, not wishes.** Set realistic dates based on actual capability, not optimistic estimates.
 4. **Self-assignment is automatic.** The system defaults `--assignee` to your agent name. Only override with `--assignee <other>` if COA or another agent should own the task.
 5. **Every task MUST have a `--project`.** Use `agictl project list` to find the correct project ID. Tasks without a project are orphaned and harder to track. The system will warn you if you omit `--project`.
+6. **Feature WBS rows** in a living `state_*.md` (§4 Backlog) should mirror project tasks — see **software_engineering** (*WBS ↔ Task bridge*) and **feature_statefold**. The state table remains the human-readable plan; tasks drive wake cycles and journals.
 
 ---
 

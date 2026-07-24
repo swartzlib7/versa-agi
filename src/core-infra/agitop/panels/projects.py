@@ -21,6 +21,7 @@ from textual.widgets import DataTable, Static, Button, Input, Select, TabbedCont
 from textual.widget import Widget
 
 from agitop.data import TasksReader
+from agitop.widgets import FlexDataTable
 
 try:
     from project_workspace import (
@@ -1079,7 +1080,11 @@ class ProjectsPanel(Widget):
         super().__init__(**kwargs)
         self.tasks_reader = tasks_reader
         self._project_data: dict[str, dict] = {}
-        self.table = DataTable(id="projects-table")
+        self.table = FlexDataTable(
+            id="projects-table",
+            flex_keys=["desc"],
+            min_flex_width=24,
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="projects-panel-body", classes="work-tab-body"):
@@ -1093,16 +1098,18 @@ class ProjectsPanel(Widget):
     def on_mount(self) -> None:
         self.table.cursor_type = "row"
         self._update_title()
-        self.table.add_column("ID", width=5)
-        self.table.add_column("Name", width=24)
-        self.table.add_column("Desc", width=80)
-        self.table.add_column("Status", width=10)
-        self.table.add_column("Type", width=8)
-        self.table.add_column("Platform", width=10)
-        self.table.add_column("Branch", width=12)
-        self.table.add_column("Game", width=16)
-        self.table.add_column("Members", width=12)
+        self.table.add_column("ID", width=5, key="id")
+        self.table.add_column("Name", width=24, key="name")
+        self.table.add_column("Desc", width=24, key="desc")
+        self.table.add_column("Status", width=10, key="status")
+        self.table.add_column("Type", width=8, key="type")
+        self.table.add_column("Platform", width=10, key="platform")
+        self.table.add_column("Branch", width=12, key="branch")
+        self.table.add_column("Game", width=16, key="game")
+        self.table.add_column("Members", width=12, key="members")
+        self.table.apply_flex_widths()
         self.refresh_data()
+
 
     def _update_title(self) -> None:
         count = len(self._project_data)

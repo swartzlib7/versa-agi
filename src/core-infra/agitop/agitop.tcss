@@ -115,10 +115,88 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     padding: 0;
 }
 
-#system-controls-collapse #system-panel {
+#system-controls-collapse #system-panel,
+#system-controls-collapse #controls-panel {
     border: none;
     margin: 0;
     padding: 1;
+}
+
+/* System / Controls / Agents tabs inside the collapsible */
+#system-tabs {
+    width: 100%;
+    height: auto;
+    min-height: 0;
+}
+
+#system-tabs ContentSwitcher {
+    height: auto;
+    min-height: 0;
+}
+
+#system-tabs TabPane {
+    height: auto;
+    padding: 0;
+}
+
+#sys-agents-tab {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+/* Match #work-tabs chrome; accent per pane (System red / Controls blue / Agents yellow) */
+#system-tabs Tabs {
+    height: 4;
+    padding: 0 1;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+#system-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#system-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+#system-tabs #--content-tab-sys-system-tab {
+    border-top: heavy $error;
+}
+
+#system-tabs #--content-tab-sys-system-tab.-active {
+    background: $error 25%;
+    border: heavy $error;
+    color: $error;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-controls-tab {
+    border-top: heavy $primary;
+}
+
+#system-tabs #--content-tab-sys-controls-tab.-active {
+    background: $primary 25%;
+    border: heavy $primary;
+    color: $primary-lighten-2;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-agents-tab {
+    border-top: heavy $warning;
+}
+
+#system-tabs #--content-tab-sys-agents-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
 }
 
 .panel-header {
@@ -186,22 +264,20 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     align: left top;
 }
 
-.sys-left-stack {
-    layout: vertical;
-    width: 3fr;
-    height: auto;
-}
-
-.sys-metrics-row {
-    height: auto;
-    width: 100%;
-}
-
 #sys-atrium,
 .sys-atrium-panel {
     width: 100%;
     height: auto;
-    margin-top: 1;
+    margin-top: 0;
+    align: center top;
+}
+
+.atrium-col {
+    width: 2fr;
+    min-width: 36;
+    max-width: 100;  /* ~800px at typical terminal cell width */
+    height: auto;
+    padding-left: 1;
 }
 
 .sys-atrium-box {
@@ -282,6 +358,7 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     content-align: center middle;
     text-align: center;
     height: auto;
+    align: center top;
 }
 
 #m-clock {
@@ -292,10 +369,58 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     padding: 1 2;
 }
 
+.clock-force-row {
+    width: 100%;
+    height: auto;
+    align: center middle;
+}
+
+.clock-force-btn {
+    width: auto;
+    min-width: 12;
+    height: 3;
+    margin: 0;
+    background: $primary;
+    color: $text;
+    text-style: bold;
+    content-align: center middle;
+    text-align: center;
+}
+
+.clock-force-btn:hover {
+    background: $primary-lighten-1;
+}
+
+
 .controls-col {
     width: 2fr;
     min-width: 40;
     height: auto;
+}
+
+#controls-panel {
+    height: auto;
+    width: 100%;
+    background: $surface-darken-1;
+}
+
+#controls-grid {
+    width: 100%;
+    height: auto;
+    align: left top;
+    padding: 1 0;
+}
+
+.ctrl-col {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+}
+
+.ctrl-col > .panel-btn {
+    width: 100%;
+    margin: 0 0 1 0;
+    height: 3;
 }
 
 .btn-grid-row {
@@ -370,36 +495,13 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     height: auto;
 }
 
-/* ─── Agents Panel ─────────────────────────────── */
-/* Collapsible mirrors #system-controls-collapse: the border + dark background
-   live on the Collapsible itself so the COLLAPSED state still shows a bordered
-   dark box; the inner DataTable is borderless (the collapse provides the box). */
+/* ─── Agents Panel (System & Controls → Agents tab) ─ */
 
-#agents-collapse {
-    height: auto;
-    margin-top: 1;
-    margin-bottom: 1;
-    border: solid $accent;
-    background: $surface-darken-1;
-}
-
-#agents-collapse > CollapsibleTitle {
-    background: $surface-darken-1;
-    color: $accent-lighten-2;
-    text-style: bold;
-    padding: 0 1;
-}
-
-#agents-collapse > Contents {
-    height: auto;
-    padding: 0;
-}
-
-#agents-collapse #agents-panel {
+#system-controls-collapse #agents-panel {
     width: 1fr;
     height: auto;
     min-height: 5;
-    max-height: 10;
+    max-height: 14;
     border: none;
     margin: 0;
     padding: 1;

@@ -16,7 +16,7 @@ from agitop.data import AgentReader, MessageReader, TasksReader, OrganizationRea
 from agitop.data.status_reader import StatusReader
 from agitop.data.system_reader import SystemReader
 from agitop.data.config_reader import ConfigReader
-from agitop.panels.system import SystemPanel
+from agitop.panels.system import SystemPanel, ControlsPanel
 from agitop.panels.agents import AgentsPanel
 from agitop.panels.tasks import TasksPanel
 from agitop.panels.messages import MessagesPanel
@@ -101,6 +101,11 @@ class AgitopApp(App):
     def compose(self) -> ComposeResult:
         """Create the dashboard layout."""
         ui_state = _load_ui_state()
+        _sys_tab = ui_state.get("system_tabs_active", "sys-system-tab")
+        if _sys_tab not in (
+            "sys-system-tab", "sys-controls-tab", "sys-agents-tab",
+        ):
+            _sys_tab = "sys-system-tab"
         yield Header()
 
         with VerticalScroll(id="dashboard-scroll", can_focus=False):
@@ -110,16 +115,23 @@ class AgitopApp(App):
                     id="system-controls-collapse",
                     collapsed=ui_state.get("system_controls_collapsed", False),
                 ):
-                    yield SystemPanel(
-                        self.system, self.config, self.status, self.agent_reader,
-                        id="system-panel",
-                    )
-                with Collapsible(
-                    title="Agents",
-                    id="agents-collapse",
-                    collapsed=ui_state.get("agents_collapsed", False),
-                ):
-                    yield AgentsPanel(self.agent_reader, self.system, id="agents-panel")
+                    with TabbedContent(
+                        initial=_sys_tab,
+                        id="system-tabs",
+                    ):
+                        with TabPane("System", id="sys-system-tab"):
+                            yield SystemPanel(
+                                self.system, self.config, self.status,
+                                self.agent_reader, id="system-panel",
+                            )
+                        with TabPane("Controls", id="sys-controls-tab"):
+                            yield ControlsPanel(
+                                self.system, self.agent_reader, id="controls-panel",
+                            )
+                        with TabPane("Agents", id="sys-agents-tab"):
+                            yield AgentsPanel(
+                                self.agent_reader, self.system, id="agents-panel",
+                            )
                 yield FooterStatsPanel(
                     self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel",
                 )
@@ -147,16 +159,13 @@ class AgitopApp(App):
         yield Footer()
 
     def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
-        """Remember the collapsed state of the top-level regions across restarts."""
+        """Remember the collapsed state of System & Controls across restarts."""
         if not self._ui_ready:
             return   # ignore events fired during initial mount/compose
-        cid = event.collapsible.id
-        if cid not in ("system-controls-collapse", "agents-collapse"):
+        if event.collapsible.id != "system-controls-collapse":
             return
-        key = ("system_controls_collapsed" if cid == "system-controls-collapse"
-               else "agents_collapsed")
         state = _load_ui_state()
-        state[key] = event.collapsible.collapsed
+        state["system_controls_collapsed"] = event.collapsible.collapsed
         _save_ui_state(state)
 
     # Also handle the concrete subclasses explicitly — Textual posts Collapsed/
@@ -171,7 +180,19 @@ class AgitopApp(App):
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        """Open the Organization modal when clicking the Organizations tab."""
+        """Persist system tabs; open Organization modal from work-tabs."""
+        # Remember System / Controls / Agents selection
+        try:
+            system_tabs = self.query_one("#system-tabs", TabbedContent)
+        except Exception:
+            system_tabs = None
+        if system_tabs is not None and event.tabbed_content is system_tabs:
+            if self._ui_ready and event.pane and event.pane.id:
+                state = _load_ui_state()
+                state["system_tabs_active"] = event.pane.id
+                _save_ui_state(state)
+            return
+
         tabbed_content = self.query_one("#work-tabs", TabbedContent)
         # Only handle events originating from the dashboard's work-tabs,
         # not from nested TabbedContent inside modals (OrgRecordModal, etc.)
@@ -253,10 +274,10 @@ class AgitopApp(App):
         self.push_screen(RegistrationModal(self._fetch_registration_status()))
 
     def _start_refresh_timer(self) -> None:
-        """Create data refresh timer based on SystemPanel's interval setting."""
+        """Create data refresh timer based on ControlsPanel's interval setting."""
         if hasattr(self, '_data_timer') and self._data_timer:
             self._data_timer.stop()
-        interval = self.query_one("#system-panel", SystemPanel).get_refresh_seconds()
+        interval = self.query_one("#controls-panel", ControlsPanel).get_refresh_seconds()
         self._data_timer = self.set_interval(interval, self._refresh_all_data)
 
     def _refresh_all_data(self) -> None:
@@ -271,11 +292,10 @@ class AgitopApp(App):
         self.query_one("#footer-stats-panel", FooterStatsPanel).refresh_data()
 
     def action_update_refresh_interval(self) -> None:
-        """Called by SystemPanel when user cycles the refresh rate."""
+        """Called by ControlsPanel when user cycles the refresh rate."""
         self._start_refresh_timer()
-        interval_label = SystemPanel.REFRESH_INTERVALS[
-            self.query_one("#system-panel", SystemPanel)._refresh_idx
-        ][0]
+        controls = self.query_one("#controls-panel", ControlsPanel)
+        interval_label = ControlsPanel.REFRESH_INTERVALS[controls._refresh_idx][0]
         self.notify(f"Refresh interval: {interval_label}", title="agitop")
 
     def action_refresh_all(self) -> None:
