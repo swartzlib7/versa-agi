@@ -1,12 +1,15 @@
-"""API Keys Management Modal — View and update system credentials."""
+"""API Keys modal — credentials + optional COA first-login model picker."""
 
-import os
+from __future__ import annotations
+
 import json
+import os
 import subprocess
+
 from textual.app import ComposeResult
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.containers import Vertical, Horizontal, Container, VerticalScroll
-from textual.widgets import Static, Button, Input
+from textual.widgets import Button, Input, Select, Static
 
 
 def _mask_key(value: str) -> str:
@@ -56,27 +59,22 @@ def _read_env_key(env_var: str) -> str:
 
 
 def _read_xai_key() -> str:
-    """Read current xAI API key from provider_keys.env."""
     return _read_env_key("XAI_API_KEY")
 
 
 def _read_openai_key() -> str:
-    """Read current OpenAI API key from provider_keys.env."""
     return _read_env_key("OPENAI_API_KEY")
 
 
 def _read_anthropic_key() -> str:
-    """Read current Anthropic API key from provider_keys.env."""
     return _read_env_key("ANTHROPIC_API_KEY")
 
 
 def _read_openrouter_key() -> str:
-    """Read current OpenRouter API key from provider_keys.env."""
     return _read_env_key("OPENROUTER_API_KEY")
 
 
 def _is_proxy_enabled() -> bool:
-    """Check if cloud proxy is enabled in paths.env."""
     env_path = "/etc/versa-agi/paths.env"
     try:
         with open(env_path, "r") as f:
@@ -88,47 +86,102 @@ def _is_proxy_enabled() -> bool:
     return False
 
 
-
 class ApiKeysModal(ModalScreen):
-    """Modal for viewing and updating API keys."""
+    """Credentials manager; optional COA bootstrap picker when ``bootstrap=True``."""
+
+    def __init__(self, bootstrap: bool = False) -> None:
+        super().__init__()
+        self._bootstrap = bootstrap
+        self._selected_provider = ""
+        self._selected_model = ""
+        self._original: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
+        title = (
+            "[bold]🔑 COA Setup — API Keys & Model[/]"
+            if self._bootstrap
+            else "[bold]🔑 API Keys & Credentials[/]"
+        )
         with Vertical(id="api-keys-dialog"):
-            yield Static("[bold]🔑 API Keys & Credentials[/]", id="msg-dialog-header")
+            yield Static(title, id="msg-dialog-header")
             yield Static("", id="api-keys-status")
 
             with VerticalScroll(id="api-keys-scroll"):
                 with Container(id="api-keys-columns"):
                     with Vertical(classes="api-keys-col"):
                         yield Static("[b]Gemini API Key[/]  [dim](Google AI Studio / GCP)[/]")
-                        yield Input(placeholder="Enter Gemini API Key...", password=True, id="input-gemini-key")
+                        yield Input(
+                            placeholder="Enter Gemini API Key...",
+                            password=True,
+                            id="input-gemini-key",
+                        )
                         yield Static("", id="status-gemini")
                         yield Static("[b]xAI API Key[/]  [dim](Grok)[/]")
-                        yield Input(placeholder="Enter xAI API Key...", password=True, id="input-xai-key")
+                        yield Input(
+                            placeholder="Enter xAI API Key...",
+                            password=True,
+                            id="input-xai-key",
+                        )
                         yield Static("", id="status-xai")
                         yield Static("[b]Anthropic API Key[/]  [dim](Claude Models)[/]")
-                        yield Input(placeholder="Enter Anthropic API Key...", password=True, id="input-anthropic-key")
+                        yield Input(
+                            placeholder="Enter Anthropic API Key...",
+                            password=True,
+                            id="input-anthropic-key",
+                        )
                         yield Static("", id="status-anthropic")
 
                     with Vertical(classes="api-keys-col"):
                         yield Static("[b]VersaVoice API Token[/]  [dim](Sponsor Token)[/]")
-                        yield Input(placeholder="Enter VersaVoice API Token...", password=True, id="input-vv-token")
+                        yield Input(
+                            placeholder="Enter VersaVoice API Token...",
+                            password=True,
+                            id="input-vv-token",
+                        )
                         yield Static("", id="status-vv")
                         yield Static("[b]OpenAI API Key[/]  [dim](GPT Models)[/]")
-                        yield Input(placeholder="Enter OpenAI API Key...", password=True, id="input-openai-key")
+                        yield Input(
+                            placeholder="Enter OpenAI API Key...",
+                            password=True,
+                            id="input-openai-key",
+                        )
                         yield Static("", id="status-openai")
                         yield Static("[b]OpenRouter API Key[/]  [dim](Multi-vendor aggregator)[/]")
-                        yield Input(placeholder="Enter OpenRouter API Key...", password=True, id="input-openrouter-key")
+                        yield Input(
+                            placeholder="Enter OpenRouter API Key...",
+                            password=True,
+                            id="input-openrouter-key",
+                        )
                         yield Static("", id="status-openrouter")
 
                 yield Static("", id="api-keys-feedback")
+                # Bootstrap COA picker mounts here after keys are usable
+                yield Vertical(id="coa-bootstrap-section")
 
             with Horizontal(id="api-keys-footer"):
+                if self._bootstrap:
+                    yield Button("Remind later", id="btn-coa-remind", variant="default")
                 yield Button("💾 Save Changes", variant="success", id="btn-api-save")
-                yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+                if self._bootstrap:
+                    yield Button(
+                        "Set as COA model",
+                        variant="primary",
+                        id="btn-coa-set-model",
+                    )
+                else:
+                    yield Button(
+                        "Close",
+                        classes="dismiss-btn",
+                        variant="default",
+                        id="msg-dialog-close",
+                    )
 
-    def on_mount(self) -> None:
-        """Load current key states and populate status indicators."""
+    async def on_mount(self) -> None:
+        self._refresh_key_status()
+        if self._bootstrap:
+            await self._rebuild_coa_section()
+
+    def _refresh_key_status(self) -> None:
         gemini_key = _read_gemini_key()
         vv_token = _read_vv_token()
         xai_key = _read_xai_key()
@@ -137,9 +190,17 @@ class ApiKeysModal(ModalScreen):
         openrouter_key = _read_openrouter_key()
         proxy_enabled = _is_proxy_enabled()
 
-        g_status = f"[green]✅ Set[/] — {_mask_key(gemini_key)}" if gemini_key else "[red]❌ Not configured[/]"
-        v_status = f"[green]✅ Set[/] — {_mask_key(vv_token)}" if vv_token else "[red]❌ Not configured[/]"
-        x_status_prefix = f"[cyan]Enabled[/]" if proxy_enabled else "[dim]Disabled[/]"
+        g_status = (
+            f"[green]✅ Set[/] — {_mask_key(gemini_key)}"
+            if gemini_key
+            else "[red]❌ Not configured[/]"
+        )
+        v_status = (
+            f"[green]✅ Set[/] — {_mask_key(vv_token)}"
+            if vv_token
+            else "[red]❌ Not configured[/]"
+        )
+        x_status_prefix = "[cyan]Enabled[/]" if proxy_enabled else "[dim]Disabled[/]"
 
         def _provider_status(key: str) -> str:
             if key:
@@ -150,11 +211,21 @@ class ApiKeysModal(ModalScreen):
         self.query_one("#status-vv", Static).update(f"   {v_status}")
         self.query_one("#status-xai", Static).update(f"   {_provider_status(xai_key)}")
         self.query_one("#status-openai", Static).update(f"   {_provider_status(openai_key)}")
-        self.query_one("#status-anthropic", Static).update(f"   {_provider_status(anthropic_key)}")
-        self.query_one("#status-openrouter", Static).update(f"   {_provider_status(openrouter_key)}")
-        self.query_one("#api-keys-status", Static).update(
-            "[dim]Enter a new value to update. Leave blank to keep current.[/]"
+        self.query_one("#status-anthropic", Static).update(
+            f"   {_provider_status(anthropic_key)}"
         )
+        self.query_one("#status-openrouter", Static).update(
+            f"   {_provider_status(openrouter_key)}"
+        )
+
+        if self._bootstrap:
+            self.query_one("#api-keys-status", Static).update(
+                "[dim]Connect at least one cloud provider, then pick a Recommended COA model below.[/]"
+            )
+        else:
+            self.query_one("#api-keys-status", Static).update(
+                "[dim]Enter a new value to update. Leave blank to keep current.[/]"
+            )
 
         self._original = {
             "gemini": gemini_key,
@@ -165,13 +236,102 @@ class ApiKeysModal(ModalScreen):
             "openrouter": openrouter_key,
         }
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "msg-dialog-close":
-            self.app.pop_screen()
-        elif event.button.id == "btn-api-save":
-            self._save_keys()
+    async def _rebuild_coa_section(self) -> None:
+        from agitop.coa_bootstrap import (
+            PROVIDER_LABELS,
+            recommended_options,
+            usable_providers,
+        )
 
-    def _save_keys(self) -> None:
+        section = self.query_one("#coa-bootstrap-section", Vertical)
+        await section.remove_children()
+
+        providers = usable_providers()
+        if not providers:
+            await section.mount(
+                Static(
+                    "[yellow]Save a provider API key above to unlock Recommended COA models.[/]",
+                    id="coa-bootstrap-hint",
+                )
+            )
+            return
+
+        await section.mount(
+            Static(
+                "[b]COA model[/]  [dim]Recommended for your connected provider(s)[/]",
+                id="coa-bootstrap-heading",
+            )
+        )
+
+        if not self._selected_provider or self._selected_provider not in providers:
+            self._selected_provider = providers[0]
+
+        if len(providers) > 1:
+            opts = [(PROVIDER_LABELS.get(p, p), p) for p in providers]
+            await section.mount(
+                Select(
+                    opts,
+                    value=self._selected_provider,
+                    id="coa-provider-select",
+                    allow_blank=False,
+                )
+            )
+        else:
+            await section.mount(
+                Static(
+                    f"Provider: [cyan]{PROVIDER_LABELS.get(self._selected_provider, self._selected_provider)}[/]",
+                    id="coa-provider-label",
+                )
+            )
+
+        rec = recommended_options(self._selected_provider)
+        if not rec:
+            await section.mount(
+                Static("[red]No Recommended models for this provider.[/]")
+            )
+            return
+        if not self._selected_model or self._selected_model not in [k for _, k in rec]:
+            self._selected_model = rec[0][1]
+        await section.mount(
+            Select(
+                rec,
+                value=self._selected_model,
+                id="coa-model-select",
+                allow_blank=False,
+                prompt="Recommended COA models",
+            )
+        )
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid == "msg-dialog-close":
+            self.app.pop_screen()
+        elif bid == "btn-api-save":
+            await self._save_keys()
+        elif bid == "btn-coa-remind":
+            from agitop.coa_bootstrap import mark_bootstrap_remind_later
+
+            mark_bootstrap_remind_later()
+            self.app.notify(
+                "COA setup deferred — reopen with b or API Keys when ready.",
+                severity="warning",
+            )
+            self.dismiss("remind")
+        elif bid == "btn-coa-set-model":
+            self._set_coa_model()
+
+    async def on_select_changed(self, event: Select.Changed) -> None:
+        if not self._bootstrap:
+            return
+        sid = event.select.id or ""
+        if sid == "coa-provider-select" and event.value != Select.BLANK:
+            self._selected_provider = str(event.value)
+            self._selected_model = ""
+            await self._rebuild_coa_section()
+        elif sid == "coa-model-select" and event.value != Select.BLANK:
+            self._selected_model = str(event.value)
+
+    async def _save_keys(self) -> None:
         """Save changed keys via agictl system set-key."""
         new_gemini = self.query_one("#input-gemini-key", Input).value.strip()
         new_vv = self.query_one("#input-vv-token", Input).value.strip()
@@ -202,11 +362,15 @@ class ApiKeysModal(ModalScreen):
 
         results = []
         errors = []
+        # VV / provider keys can take longer (live VV validation).
+        timeout = 45 if any(t == "versavoice" for t, _ in changes) else 20
         for key_type, value in changes:
             try:
                 proc = subprocess.run(
                     ["sudo", "agictl", "system", "set-key", key_type, value],
-                    capture_output=True, text=True, timeout=15
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
                 )
                 result = json.loads(proc.stdout) if proc.stdout else {}
                 if result.get("success"):
@@ -220,10 +384,46 @@ class ApiKeysModal(ModalScreen):
             except Exception as e:
                 errors.append(f"[red]❌ {key_type}[/] — {e}")
 
-        feedback_parts = results + errors
-        feedback = "\n".join(feedback_parts)
-        self.query_one("#api-keys-feedback", Static).update(feedback)
+        self.query_one("#api-keys-feedback", Static).update("\n".join(results + errors))
 
         if results and not errors:
-            self.app.notify(f"✅ {len(results)} key(s) updated successfully", severity="information")
-            self.on_mount()
+            self.app.notify(
+                f"✅ {len(results)} key(s) updated successfully",
+                severity="information",
+            )
+            self._refresh_key_status()
+            # Clear password fields after successful save
+            for fid in (
+                "input-gemini-key",
+                "input-vv-token",
+                "input-xai-key",
+                "input-openai-key",
+                "input-anthropic-key",
+                "input-openrouter-key",
+            ):
+                self.query_one(f"#{fid}", Input).value = ""
+            if self._bootstrap:
+                await self._rebuild_coa_section()
+
+    def _set_coa_model(self) -> None:
+        from agitop.coa_bootstrap import assign_coa_model
+
+        feedback = self.query_one("#api-keys-feedback", Static)
+        model = self._selected_model
+        try:
+            sel = self.query_one("#coa-model-select", Select)
+            if sel.value != Select.BLANK:
+                model = str(sel.value)
+        except Exception:
+            pass
+        if not model:
+            feedback.update(
+                "[yellow]Save a provider key first, then select a Recommended COA model.[/]"
+            )
+            return
+        ok, msg = assign_coa_model(model)
+        if not ok:
+            feedback.update(f"[red]{msg}[/]")
+            return
+        self.app.notify(msg, severity="information")
+        self.dismiss("done")

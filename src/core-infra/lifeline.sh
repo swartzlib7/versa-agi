@@ -469,13 +469,15 @@ agictl agent list for full details — you and your agentic team:
 ${AGENT_REGISTRY_FOR_SYSTEM}"
     fi
 
-    # Feature availability (setup.ini [features], D34 + TEAM-2/D27):
-    # - OFF → warn so agents do not reach for that feature's agictl group
+    # Feature availability (setup.ini [features] / [versavoice], D34 + TEAM-2/D27):
+    # - OFF → warn so agents do not reach for that feature's agictl group / do not troubleshoot
     # - ON  → positive enablement for COA + Accountant (ops); other agents via duties
     # Only features that gate an agent-facing command group are listed here.
     FEATURE_AVAILABILITY_CONTENT=""
     if [ -f "${SETUP_INI}" ]; then
       _org_ui=$(sed -n '/^\[features\]/,/^\[/{s/^organization_ui=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+      # Same truth as inbox sync (~688): not exactly "true" ⇒ VersaVoice cloud OFF
+      _vv_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
       _features_off=""
       _org_enabled=0
       case "${_org_ui}" in
@@ -483,11 +485,16 @@ ${AGENT_REGISTRY_FOR_SYSTEM}"
         *) _features_off="${_features_off}
 - Organization (accounting/business) is OFF — do not use \`agictl organization …\` or email access skills (**email_admin** / **email_technical**)." ;;
       esac
+      if [ "${_vv_enabled}" != "true" ]; then
+        _features_off="${_features_off}
+- VersaVoice cloud messaging is OFF — outbound routes as internal/SQLite. This is intentional, NOT an error. Do NOT troubleshoot the VV API, identity provision, or sub-account recovery. Use normal \`agictl message send\` (routes internally) or \`agictl message internal\` as skills describe. Stay on your active tasks (e.g. Welcome / introduction)."
+      fi
       if [ -n "${_features_off}" ]; then
         FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
 
-Some optional features are OFF on this system. Do not use their commands:${_features_off}"
-      elif [ "${_org_enabled}" = "1" ]; then
+Some optional features are OFF on this system. Do not use their commands / do not treat OFF as a failure to fix:${_features_off}"
+      fi
+      if [ "${_org_enabled}" = "1" ]; then
         _org_audience=0
         if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
           _org_audience=1
@@ -498,8 +505,7 @@ Some optional features are OFF on this system. Do not use their commands:${_feat
           esac
         fi
         if [ "${_org_audience}" = "1" ]; then
-          FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
-
+          _org_on_block="
 **Organization is ON** — business records (orgs, products, invoices, transactions, exchange) via \`agictl organization …\`.
 
 - **Skill:** load **organization** when doing org/invoice/expense/exchange work.
@@ -519,6 +525,13 @@ agictl organization exchange list
 agictl organization exchange get <id>
 \`\`\`
 Discover entity flags with \`agictl organization <entity> add --help\`. Full surface: cli_reference / skill **organization**."
+          if [ -z "${FEATURE_AVAILABILITY_CONTENT}" ]; then
+            FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
+${_org_on_block}"
+          else
+            FEATURE_AVAILABILITY_CONTENT="${FEATURE_AVAILABILITY_CONTENT}
+${_org_on_block}"
+          fi
         fi
       fi
     fi
@@ -1116,7 +1129,13 @@ ${HIDDEN_STR}
 
   # ─── Agent Identity Injection ────────────────────────
   # Inject agent's identity so it knows who it is without needing to call MCP
+  # When VersaVoice is OFF, avoid VV-flavored wording that invites API/identity repair.
   AGENT_IDENTITY=""
+  _vv_on_for_identity="false"
+  if [ -f "${SETUP_INI}" ]; then
+    _vv_en_id=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    [ "${_vv_en_id}" = "true" ] && _vv_on_for_identity="true"
+  fi
   if [ -f "${SYSTEM_CONFIG}" ]; then
     id_first="" ; id_last="" ; id_lang="" ; id_sub=""
     id_first=$(jq -r '.identity.first_name // "unknown"' "${SYSTEM_CONFIG}" 2>/dev/null)
@@ -1130,9 +1149,16 @@ ${HIDDEN_STR}
       agent_role="Chief Orchestrator Agent (COA)"
       agent_title="Chief Assistant"
     fi
-    AGENT_IDENTITY="Your name is ${id_first} ${id_last}.
+    if [ "${_vv_on_for_identity}" = "true" ]; then
+      AGENT_IDENTITY="Your name is ${id_first} ${id_last}.
 Your VersaVoice AI sub_account_id is: ${id_sub}.
 Your language is: ${id_lang}."
+    else
+      AGENT_IDENTITY="Your name is ${id_first} ${id_last}.
+Your agent id is: ${id_sub}.
+Your language is: ${id_lang}.
+VersaVoice cloud messaging is OFF on this system — messaging uses internal routing. Do not treat this as a misconfiguration."
+    fi
   fi
 
   # ─── Primary User Context ──────────────────────────
@@ -1140,7 +1166,11 @@ Your language is: ${id_lang}."
   sponsor_name="" ; sponsor_uid=""
   sponsor_name=$(jq -r '.primary_user.display_name // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
   sponsor_uid=$(jq -r '.primary_user.uid // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
-  PRIMARY_USER_CONTEXT="Your Primary User (Executive Director) is the sponsor of your VersaVoice account"
+  if [ "${_vv_on_for_identity}" = "true" ]; then
+    PRIMARY_USER_CONTEXT="Your Primary User (Executive Director) is the sponsor of your VersaVoice account"
+  else
+    PRIMARY_USER_CONTEXT="Your Primary User (Executive Director) sponsors this Versa AGi system"
+  fi
   if [ -n "${sponsor_name}" ] && [ -n "${sponsor_uid}" ]; then
     PRIMARY_USER_CONTEXT="${PRIMARY_USER_CONTEXT} - \"${sponsor_name}\" (UID: ${sponsor_uid})."
     # Enrich with profile data if available
@@ -1650,9 +1680,8 @@ Current date and time: $(date '+%Y-%m-%dT%H:%M:%S%z').
 
 Wake reason: ${WAKE_REASON}."
 
-  # Run Gemini CLI in headless mode as the agent's OS user
-  # Source .env for Vertex AI vars (CRON doesn't load .bashrc)
-  # All file ops happen inside bash -c so they run as AGENT_USER
+  # Spawn LangChain harness as the agent's OS user.
+  # Source .env for provider credentials (CRON doesn't load .bashrc).
   if [ -n "${AGENT_MODEL}" ]; then
     log "MODEL: ${AGENT_NAME} → ${AGENT_MODEL}"
   else
@@ -1713,7 +1742,6 @@ Wake reason: ${WAKE_REASON}."
     echo "export AGICTL_AGENT_DIR='${AGENT_PATH}/.agent'"
     echo "export VERSA_AGENT_NAME='${AGENT_NAME}'"
     echo "export NODE_OPTIONS='--no-deprecation'"
-    echo "export GEMINI_CLI_TRUST_WORKSPACE=true"
     [ -n "${CURRENT_CYCLE_ID}" ] && echo "export VERSA_CYCLE_ID='${CURRENT_CYCLE_ID}'"
 
     [ -f "${ENV_FILE}" ] && sed 's/^/export /' "${ENV_FILE}"
@@ -1828,7 +1856,7 @@ Wake reason: ${WAKE_REASON}."
     fi
   fi
 
-  # Run Gemini CLI with TEXT output for readable debugging logs.
+  # Harness result capture (TEXT) for readable debugging logs.
   # Token stats are extracted post-hoc from a separate JSON stats run.
   RESULT_LOG="${CYCLES_DIR}/result_$(date +%s).log"
 

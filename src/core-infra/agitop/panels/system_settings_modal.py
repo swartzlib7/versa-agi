@@ -1048,7 +1048,8 @@ class SystemSettingsModal(ModalScreen):
 
         um_enabled = _read_ini_value("utility_models", "enabled", "true").lower() == "true"
         um_write_manifest = _read_ini_value("utility_models", "write_manifest", "true").lower() == "true"
-        vv_enabled = _read_ini_value("versavoice", "enabled", "true").lower() == "true"
+        # Parked (VV required): vv_enabled = _read_ini_value("versavoice", "enabled", "true").lower() == "true"
+        vv_enabled = True  # checkbox locked on; local-only path parked
 
         _browser_label = "Disable" if browser_enabled else "Enable"
         _browser_variant = "error" if browser_enabled else "success"
@@ -1114,13 +1115,20 @@ class SystemSettingsModal(ModalScreen):
                                     with Vertical(classes="settings-section-box"):
                                         yield Static("[bold cyan]VersaVoice API[/]")
                                         yield Static(
-                                            "[dim]Turn off messages delivery to VersaVoice AI (API) - messages do "
-                                            "not leave the system and must be handled locally.[/]"
+                                            "[dim]VersaVoice is required. Local-only (disable) path is parked "
+                                            "until downstream gaps are fixed.[/]"
                                         )
+                                        # Parked: allow turning VV off from dashboard
+                                        # yield ClearCheckbox(
+                                        #     "Use VersaVoice API",
+                                        #     id="chk-vv-enabled",
+                                        #     value=vv_enabled,
+                                        # )
                                         yield ClearCheckbox(
-                                            "Use VersaVoice API",
+                                            "Use VersaVoice API (required)",
                                             id="chk-vv-enabled",
-                                            value=vv_enabled,
+                                            value=True,
+                                            disabled=True,
                                         )
 
                                 with Vertical(classes="settings-general-col"):
@@ -1807,8 +1815,11 @@ class SystemSettingsModal(ModalScreen):
                 ok4 = _write_ini_value("search", "enabled", "true" if search_enabled else "false")
                 ok5 = _write_ini_value("search", "searxng_url", searxng_url) if searxng_url else True
 
-                vv_enabled = self.query_one("#chk-vv-enabled", Checkbox).value
-                ok_vv = _write_ini_value("versavoice", "enabled", "true" if vv_enabled else "false")
+                # VV required — always persist enabled=true (checkbox is locked on).
+                # Parked: vv_enabled = self.query_one("#chk-vv-enabled", Checkbox).value
+                # Parked: ok_vv = _write_ini_value("versavoice", "enabled", "true" if vv_enabled else "false")
+                vv_enabled = True
+                ok_vv = _write_ini_value("versavoice", "enabled", "true")
 
                 # ── COA Autonomous ──
                 coa_autonomous = self.query_one("#chk-coa-autonomous", Checkbox).value

@@ -1,0 +1,415 @@
+"""COA first-login provider + model bootstrap helpers (WU-02 / WU-03).
+
+Pure helpers used by ApiKeysModal (bootstrap mode) and agitop on_mount tripwire.
+Persistence lives under /etc/versa-agi/ (version-safe JSON).
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+_CORE = Path(__file__).resolve().parents[1]
+if str(_CORE) not in sys.path:
+    sys.path.insert(0, str(_CORE))
+
+# ── Persistence ─────────────────────────────────────────────────────────────
+STATE_PATH = Path("/etc/versa-agi/coa_bootstrap.json")
+PATHS_ENV = Path("/etc/versa-agi/paths.env")
+AGENTS_DB = Path("/var/lib/versa-agi/agents.db")
+SETUP_INI = Path("/etc/versa-agi/setup.ini")
+COA_ENV = Path("/etc/versa-agi/coa.env")
+GCP_VAULT = Path("/etc/versa-agi/vault/gcp-credentials.json")
+
+# ── Recommended COA models per provider (locked product lists) ──────────────
+# Values are catalog keys. Labels are for modal display.
+RECOMMENDED: dict[str, list[tuple[str, str]]] = {
+    # (catalog_key, UI label)
+    "xai": [
+        ("grok-4.20-reasoning", "Grok 4.5"),
+    ],
+    "anthropic": [
+        ("claude-fable-5", "Fable 5"),
+        ("claude-opus-4-8", "Opus 4.8"),
+        ("claude-sonnet-4-6", "Sonnet 4.6"),
+    ],
+    "openrouter": [
+        ("x-ai/grok-4.5", "Grok 4.5 (OpenRouter)"),
+        ("google/gemini-3-flash-preview", "Gemini 3 Flash Preview (OpenRouter)"),
+        ("z-ai/glm-5.2", "GLM 5.2 (OpenRouter)"),
+    ],
+    "google": [
+        ("gemini-3-flash-preview", "Gemini 3 Flash Preview"),
+        ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
+        ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ],
+    "openai": [
+        ("gpt-5.5-2026-04-23", "GPT-5.5"),
+        ("gpt-5.4-2026-03-05", "GPT-5.4"),
+        ("gpt-5.4-mini-2026-03-17", "GPT-5.4 Mini"),
+    ],
+}
+
+PROVIDER_LABELS = {
+    "google": "Google Gemini",
+    "xai": "xAI",
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "openrouter": "OpenRouter",
+}
+
+# Bootstrap Step A chip → set-key slug
+PROVIDER_SETKEY = {
+    "google": "gemini",
+    "xai": "xai",
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "openrouter": "openrouter",
+}
+
+
+def recommended_keys(provider: str) -> list[str]:
+    """Catalog keys Recommended for COA for a provider slug."""
+    return [k for k, _ in RECOMMENDED.get(provider, [])]
+
+
+def recommended_options(provider: str) -> list[tuple[str, str]]:
+    """(label, catalog_key) for Select widgets."""
+    return [(label, key) for key, label in RECOMMENDED.get(provider, [])]
+
+
+def all_recommended_keys() -> set[str]:
+    keys: set[str] = set()
+    for items in RECOMMENDED.values():
+        keys.update(k for k, _ in items)
+    return keys
+
+
+# ── State I/O ───────────────────────────────────────────────────────────────
+def load_bootstrap_state(path: Path | None = None) -> dict:
+    p = path or STATE_PATH
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_bootstrap_state(state: dict, path: Path | None = None) -> None:
+    p = path or STATE_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(p)
+
+
+def mark_bootstrap_done(path: Path | None = None) -> None:
+    state = load_bootstrap_state(path)
+    state["done"] = True
+    state.pop("remind_later", None)
+    save_bootstrap_state(state, path)
+
+
+def mark_bootstrap_remind_later(path: Path | None = None) -> None:
+    state = load_bootstrap_state(path)
+    state["remind_later"] = True
+    state["done"] = False
+    save_bootstrap_state(state, path)
+
+
+def is_bootstrap_done(path: Path | None = None) -> bool:
+    return bool(load_bootstrap_state(path).get("done"))
+
+
+def is_remind_later(path: Path | None = None) -> bool:
+    return bool(load_bootstrap_state(path).get("remind_later"))
+
+
+# ── Environment probes ──────────────────────────────────────────────────────
+def _read_paths_env(key: str, default: str = "", paths_env: Path | None = None) -> str:
+    p = paths_env or PATHS_ENV
+    try:
+        with p.open(encoding="utf-8") as f:
+            for line in f:
+                if line.startswith(f"{key}="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return default
+
+
+def _read_setup_ini(section: str, key: str, default: str = "", setup_ini: Path | None = None) -> str:
+    p = setup_ini or SETUP_INI
+    try:
+        import configparser
+        cfg = configparser.ConfigParser()
+        cfg.read(p)
+        return cfg.get(section, key, fallback=default).strip()
+    except Exception:
+        return default
+
+
+def gemini_enabled(setup_ini: Path | None = None) -> bool | None:
+    """Return True/False when [gemini] enabled= is set; None when unset (legacy)."""
+    raw = _read_setup_ini("gemini", "enabled", "", setup_ini=setup_ini).lower()
+    if not raw:
+        return None
+    if raw in ("true", "1", "yes", "on"):
+        return True
+    if raw in ("false", "0", "no", "off"):
+        return False
+    return None
+
+
+def gemini_credentials_present(
+    *,
+    coa_env: Path | None = None,
+    vault: Path | None = None,
+) -> bool:
+    coa = coa_env or COA_ENV
+    try:
+        if coa.is_file():
+            for line in coa.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("GEMINI_API_KEY="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val and not val.startswith("#"):
+                        return True
+    except OSError:
+        pass
+    return (vault or GCP_VAULT).is_file()
+
+
+def gemini_usable(
+    *,
+    coa_env: Path | None = None,
+    vault: Path | None = None,
+    setup_ini: Path | None = None,
+) -> bool:
+    """True when Gemini credentials exist and provider is enabled.
+
+    Legacy installs with no ``enabled=`` key: credentials alone count as usable.
+    """
+    if not gemini_credentials_present(coa_env=coa_env, vault=vault):
+        return False
+    flag = gemini_enabled(setup_ini=setup_ini)
+    if flag is None:
+        return True
+    return flag
+
+
+def usable_providers(
+    *,
+    setup_ini: Path | None = None,
+    coa_env: Path | None = None,
+    vault: Path | None = None,
+) -> list[str]:
+    """Catalog provider slugs that can run COA models (keyed; Gemini also enabled)."""
+    out: list[str] = []
+    if gemini_usable(coa_env=coa_env, vault=vault, setup_ini=setup_ini):
+        out.append("google")
+
+    try:
+        from provider_catalog import configured_providers
+        keyed = set(configured_providers())
+    except Exception:
+        keyed = set()
+
+    for slug in ("xai", "openai", "anthropic", "openrouter"):
+        if slug in keyed:
+            out.append(slug)
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            ordered.append(s)
+    return ordered
+
+
+def _coa_model(agents_db: Path | None = None) -> str:
+    db = agents_db or AGENTS_DB
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute(
+                "SELECT model FROM agents WHERE name='coa' LIMIT 1"
+            ).fetchone()
+            return (row[0] or "").strip() if row else ""
+        finally:
+            con.close()
+    except Exception:
+        return ""
+
+
+def provider_for_model(model: str) -> str:
+    """Best-effort catalog provider for a model key."""
+    if not model:
+        return ""
+    for prov, items in RECOMMENDED.items():
+        if any(k == model for k, _ in items):
+            return prov
+    if model.startswith("gemini-"):
+        return "google"
+    if model.startswith("grok-"):
+        return "xai"
+    if model.startswith("gpt-"):
+        return "openai"
+    if model.startswith("claude-"):
+        return "anthropic"
+    if "/" in model:
+        return "openrouter"
+    return ""
+
+
+def needs_coa_bootstrap(
+    *,
+    state_path: Path | None = None,
+    agents_db: Path | None = None,
+    paths_env: Path | None = None,
+    setup_ini: Path | None = None,
+    coa_env: Path | None = None,
+    vault: Path | None = None,
+) -> bool:
+    """True when first-login bootstrap should run.
+
+    False when COA has an explicit model on a keyed provider (healthy),
+    regardless of the done flag. Remind-later does not clear need.
+    """
+    usable = usable_providers(setup_ini=setup_ini, coa_env=coa_env, vault=vault)
+    coa_model = _coa_model(agents_db)
+    default_model = _read_paths_env("VERSA_DEFAULT_MODEL", "", paths_env=paths_env)
+
+    # Healthy: explicit COA model on a keyed provider
+    if coa_model:
+        prov = provider_for_model(coa_model)
+        if prov and prov in usable:
+            return False
+        # Explicit model but provider not keyed → still need bootstrap
+        return True
+
+    # No usable provider → always need bootstrap
+    if not usable:
+        return True
+
+    # Empty COA model — fall through to system default
+    if not default_model:
+        return True
+    prov = provider_for_model(default_model)
+    if not prov or prov not in usable:
+        return True
+
+    # Default is on a keyed provider and COA inherits it — still nudge once
+    # unless already marked done (user completed bootstrap earlier).
+    return not is_bootstrap_done(state_path)
+
+
+def should_auto_prompt_bootstrap(**kwargs) -> bool:
+    """Tripwire: need bootstrap and not dismissed via remind-later."""
+    if not needs_coa_bootstrap(**kwargs):
+        return False
+    if is_remind_later(kwargs.get("state_path")):
+        return False
+    return True
+
+
+def should_show_remind_banner(**kwargs) -> bool:
+    """System panel banner while remind-later and still needs bootstrap."""
+    return is_remind_later(kwargs.get("state_path")) and needs_coa_bootstrap(**kwargs)
+
+
+def sync_system_default_model(
+    model: str,
+    *,
+    paths_env: Path | None = None,
+    setup_ini: Path | None = None,
+) -> list[str]:
+    """Write VERSA_DEFAULT_MODEL + setup.ini [gemini] model=. Returns updated paths."""
+    updated: list[str] = []
+    model = (model or "").strip()
+    paths = paths_env or PATHS_ENV
+    if paths.is_file() or paths.parent.is_dir():
+        try:
+            lines = paths.read_text(encoding="utf-8").splitlines() if paths.is_file() else []
+            out, found = [], False
+            for line in lines:
+                if line.startswith("VERSA_DEFAULT_MODEL="):
+                    out.append(f'VERSA_DEFAULT_MODEL="{model}"')
+                    found = True
+                else:
+                    out.append(line)
+            if not found:
+                out.append(f'VERSA_DEFAULT_MODEL="{model}"')
+            paths.parent.mkdir(parents=True, exist_ok=True)
+            paths.write_text("\n".join(out) + "\n", encoding="utf-8")
+            updated.append(str(paths))
+        except OSError:
+            pass
+
+    setup = setup_ini or SETUP_INI
+    if setup.is_file():
+        try:
+            lines = setup.read_text(encoding="utf-8").splitlines()
+            section = None
+            replaced = False
+            for i, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    section = s[1:-1]
+                    continue
+                if section == "gemini" and s.startswith("model="):
+                    lines[i] = f"model={model}"
+                    replaced = True
+                    break
+            if replaced:
+                setup.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                updated.append(str(setup))
+        except OSError:
+            pass
+    return updated
+
+
+def assign_coa_model(model: str) -> tuple[bool, str]:
+    """Run ``agictl agent set-model coa <model>`` and sync system default.
+
+    Returns (ok, message).
+    """
+    import json as _json
+    import subprocess
+
+    model = (model or "").strip()
+    if not model:
+        return False, "Model required"
+    try:
+        proc = subprocess.run(
+            ["sudo", "agictl", "agent", "set-model", "coa", model],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        result = _json.loads(proc.stdout) if proc.stdout.strip() else {}
+        if not result.get("success"):
+            err = result.get("error") or proc.stderr.strip() or "set-model failed"
+            return False, err
+    except Exception as exc:
+        return False, str(exc)
+
+    sync_system_default_model(model)
+    mark_bootstrap_done()
+    return True, f"COA model set to {model}"
+
+
+def read_role_model(role_ini_path: str | Path) -> str:
+    """Read [model] model= from a role.ini (blank = inherit system default)."""
+    import configparser
+
+    cfg = configparser.ConfigParser()
+    try:
+        cfg.read(role_ini_path)
+    except Exception:
+        return ""
+    if cfg.has_option("model", "model"):
+        return cfg.get("model", "model").strip()
+    return ""

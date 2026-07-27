@@ -539,7 +539,11 @@ class SystemReader:
         return [m.strip() for m in raw.split(",") if m.strip()] if raw else []
 
     def get_cloud_models(self) -> list[str]:
-        """Get comma-separated cloud model list from paths.env."""
+        """Configured cloud (Gemini) models from paths.env.
+
+        Empty when Gemini credentials are absent — same enable semantics as
+        VERSA_THIRD_PARTY_MODELS (membership only for keyed/enabled providers).
+        """
         raw = self._read_paths_env("VERSA_CLOUD_MODELS", "")
         return [m.strip() for m in raw.split(",") if m.strip()] if raw else []
 
@@ -627,6 +631,10 @@ class SystemReader:
         if raw:
             return [m.strip() for m in raw.split(",") if m.strip()]
         return self.get_cloud_models()
+
+    def get_default_model(self) -> str:
+        """System default model from paths.env (lifeline fallback when agents.model empty)."""
+        return self._read_paths_env("VERSA_DEFAULT_MODEL", "")
 
     def get_tunnel_host(self) -> str:
         """Get the remote inference server hostname from client_config.json.

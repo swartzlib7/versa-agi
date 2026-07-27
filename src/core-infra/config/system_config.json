@@ -3,13 +3,6 @@
   "_version": "0.2.0",
   "agent": "coa",
   "generated": null,
-  "gemini_cli": {
-    "auth_type": "api_key",
-    "timeout": "1h",
-    "model": null,
-    "approval_mode": "yolo",
-    "output_format": "json"
-  },
   "identity": {
     "first_name": "Versa",
     "last_name": "(COA)",

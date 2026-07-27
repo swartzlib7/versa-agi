@@ -166,7 +166,7 @@ else
   echo "This will:"
   echo "  • Stop the Sentinel service and remove the CRON entry"
   echo "  • Remove the CRON entry for the Lifeline"
-  echo "  • Kill any active agent (Gemini CLI) processes"
+  echo "  • Kill any active agent harness processes"
   echo "  • Remove workspace symlinks"
   echo "  • Optionally remove OS users (watchdog, coa)"
   echo ""

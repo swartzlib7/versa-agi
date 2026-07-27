@@ -199,7 +199,7 @@ echo -e "  ${DGRAY}─── ${WHITE}${BOLD}Step 3${RESET}${DGRAY} — Agent .ba
 echo ""
 
 for user in "${AGENT_USERS[@]}"; do
-  # Skip watchdog — it doesn't run Gemini CLI interactively
+  # Skip watchdog — it does not run agent harness interactively
   [ "${user}" = "watchdog" ] && continue
 
   home_dir=$(eval echo "~${user}" 2>/dev/null)

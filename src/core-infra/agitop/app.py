@@ -5,10 +5,12 @@ Main Textual application with live data panels.
 
 import json
 from pathlib import Path
+from typing import Iterable
 
 from textual import on
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.containers import VerticalScroll, Vertical, Horizontal
+from textual.screen import Screen
 from textual.widgets import Header, Footer, TabbedContent, TabPane, Collapsible, Static
 from textual.binding import Binding
 
@@ -16,7 +18,7 @@ from agitop.data import AgentReader, MessageReader, TasksReader, OrganizationRea
 from agitop.data.status_reader import StatusReader
 from agitop.data.system_reader import SystemReader
 from agitop.data.config_reader import ConfigReader
-from agitop.panels.system import SystemPanel, ControlsPanel
+from agitop.panels.system import SystemPanel
 from agitop.panels.agents import AgentsPanel
 from agitop.panels.tasks import TasksPanel
 from agitop.panels.messages import MessagesPanel
@@ -30,6 +32,21 @@ from agitop.feature_flags import ORGANIZATION_UI_VISIBLE
 from agitop.version import read_product_version
 
 VERSION = read_product_version()
+
+# Themes offered in Ctrl+T picker (builtins outside this set are unregistered).
+# solarized-light omitted — poor contrast with agitop's cyan/hardcoded styles;
+# fixing it would require global markup changes that alter every dark theme.
+_ALLOWED_THEMES = frozenset({
+    "dracula",
+    "flexoki",
+    "gruvbox",
+    "monokai",
+    "nord",
+    "rose-pine",
+    "solarized-dark",
+    "textual-dark",
+    "tokyo-night",
+})
 
 # Persisted UI state (collapsed regions, etc.) — survives agitop restarts. agitop
 # runs as root; /var/lib/versa-agi is the standard writable state dir.
@@ -59,20 +76,33 @@ class AgitopApp(App):
 
     TITLE = f"agitop — Versa AGi Mission Control v{VERSION}"
     CSS_PATH = "agitop.tcss"
-    # theme = "textual-light"
+    # Do NOT set `theme = "…"` as a class attribute — that shadows App's
+    # Reactive descriptor and theme picker selections never refresh CSS.
+    # Default / persisted theme is applied in __init__ via self.theme = …
 
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("r", "refresh_all", "Refresh", show=True),
         Binding("g", "show_registration", "Registration", show=True),
+        Binding("b", "show_coa_bootstrap", "API Keys / COA", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
     ]
+
+    # Textual built-ins we keep out of the Ctrl+P palette.
+    _PALETTE_HIDDEN = frozenset({"Maximize", "Minimize", "Screenshot"})
+
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        """Command palette without Maximize / Minimize / Screenshot."""
+        for command in super().get_system_commands(screen):
+            if command.title not in self._PALETTE_HIDDEN:
+                yield command
 
     def __init__(self, agents_db_path: str = "", messages_db_path: str = "",
                  tasks_db_path: str = "", cycles_db_path: str = "",
                  config_path: str = "", cycle_id_path: str = "",
                  organization_db_path: str = ""):
         super().__init__()
+        self._configure_themes()
         self.config_path = config_path
         # Initialize data readers
         self.agent_reader = AgentReader(agents_db_path, cycles_db_path, messages_db_path, tasks_db_path) if agents_db_path and cycles_db_path else None
@@ -93,19 +123,46 @@ class AgitopApp(App):
         self.system = SystemReader()
         self.config = ConfigReader(config_path) if config_path else None
         self._prev_tab = "messages-tab"
+        self._prev_sys_tab = "sys-system-tab"
         # Guard: the Collapsible reactive fires during initial mount. We only
         # persist toggle events once the app is fully mounted, otherwise the
         # init event overwrites the loaded state with the default value.
         self._ui_ready = False
 
+    # Dummy system-tabs panes that open modals / run ops (org-tab pattern).
+    _SYSTEM_LAUNCHERS = frozenset({
+        "sys-launch-settings",
+        "sys-launch-game",
+        "sys-launch-api-keys",
+        "sys-launch-models",
+        "sys-launch-routing",
+    })
+
+    def _configure_themes(self) -> None:
+        """Keep a curated dark-theme set for the Ctrl+T picker."""
+        for name in list(self.available_themes):
+            if name not in _ALLOWED_THEMES:
+                self.unregister_theme(name)
+        saved = _load_ui_state().get("theme", "gruvbox")
+        self.theme = saved if saved in _ALLOWED_THEMES else "gruvbox"
+
+    def watch_theme(self, theme_name: str) -> None:
+        """Persist theme choice across agitop restarts."""
+        if not getattr(self, "_ui_ready", False):
+            return
+        state = _load_ui_state()
+        if state.get("theme") == theme_name:
+            return
+        state["theme"] = theme_name
+        _save_ui_state(state)
+
     def compose(self) -> ComposeResult:
         """Create the dashboard layout."""
         ui_state = _load_ui_state()
         _sys_tab = ui_state.get("system_tabs_active", "sys-system-tab")
-        if _sys_tab not in (
-            "sys-system-tab", "sys-controls-tab", "sys-agents-tab",
-        ):
+        if _sys_tab not in ("sys-system-tab", "sys-agents-tab"):
             _sys_tab = "sys-system-tab"
+        self._prev_sys_tab = _sys_tab
         yield Header()
 
         with VerticalScroll(id="dashboard-scroll", can_focus=False):
@@ -124,14 +181,21 @@ class AgitopApp(App):
                                 self.system, self.config, self.status,
                                 self.agent_reader, id="system-panel",
                             )
-                        with TabPane("Controls", id="sys-controls-tab"):
-                            yield ControlsPanel(
-                                self.system, self.agent_reader, id="controls-panel",
-                            )
                         with TabPane("Agents", id="sys-agents-tab"):
                             yield AgentsPanel(
                                 self.agent_reader, self.system, id="agents-panel",
                             )
+                        # Launcher tabs (always visible) — open modals / run ops
+                        with TabPane("⚙ Settings", id="sys-launch-settings"):
+                            yield Static("Opening Settings…")
+                        with TabPane("🎯 Game of Life", id="sys-launch-game"):
+                            yield Static("Opening Game of Life…")
+                        with TabPane("🔑 API Keys", id="sys-launch-api-keys"):
+                            yield Static("Opening API Keys…")
+                        with TabPane("🧩 Models", id="sys-launch-models"):
+                            yield Static("Opening Model Manager…")
+                        with TabPane("🔀 Routing", id="sys-launch-routing"):
+                            yield Static("Opening Model Routing…")
                 yield FooterStatsPanel(
                     self.agent_reader, tasks_reader=self.tasks_reader, id="footer-stats-panel",
                 )
@@ -180,17 +244,23 @@ class AgitopApp(App):
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        """Persist system tabs; open Organization modal from work-tabs."""
-        # Remember System / Controls / Agents selection
+        """Persist content tabs; fire launcher tabs (Settings/Game/… / Organizations)."""
         try:
             system_tabs = self.query_one("#system-tabs", TabbedContent)
         except Exception:
             system_tabs = None
         if system_tabs is not None and event.tabbed_content is system_tabs:
-            if self._ui_ready and event.pane and event.pane.id:
-                state = _load_ui_state()
-                state["system_tabs_active"] = event.pane.id
-                _save_ui_state(state)
+            pane_id = event.pane.id if event.pane else None
+            if pane_id in self._SYSTEM_LAUNCHERS:
+                system_tabs.active = self._prev_sys_tab
+                self._run_system_launcher(pane_id)
+                return
+            if pane_id in ("sys-system-tab", "sys-agents-tab"):
+                self._prev_sys_tab = pane_id
+                if self._ui_ready:
+                    state = _load_ui_state()
+                    state["system_tabs_active"] = pane_id
+                    _save_ui_state(state)
             return
 
         tabbed_content = self.query_one("#work-tabs", TabbedContent)
@@ -213,6 +283,24 @@ class AgitopApp(App):
         else:
             self._prev_tab = event.pane.id
 
+    def _run_system_launcher(self, pane_id: str) -> None:
+        """Handle System & Controls launcher tabs (modals / one-shot ops)."""
+        if pane_id == "sys-launch-settings":
+            from agitop.panels.system_settings_modal import SystemSettingsModal
+            self.push_screen(SystemSettingsModal())
+        elif pane_id == "sys-launch-game":
+            from agitop.panels.strategy_modal import StrategyModal
+            self.push_screen(StrategyModal(self.tasks_reader))
+        elif pane_id == "sys-launch-api-keys":
+            from agitop.panels.api_keys_modal import ApiKeysModal
+            self.push_screen(ApiKeysModal())
+        elif pane_id == "sys-launch-models":
+            from agitop.panels.model_manager_modal import ModelManagerModal
+            self.push_screen(ModelManagerModal())
+        elif pane_id == "sys-launch-routing":
+            from agitop.panels.model_routing_modal import ModelRoutingModal
+            self.push_screen(ModelRoutingModal())
+
     def on_mount(self) -> None:  # type: ignore[override]
         """Start periodic refresh timer and background install registration tripwire."""
         self._ui_ready = True  # allow toggle-state persistence from here on
@@ -220,9 +308,37 @@ class AgitopApp(App):
         if self._should_prompt_registration(status):
             display_status = self._fetch_registration_status() or status
             self.call_after_refresh(
-                lambda: self._open_registration_modal(display_status)
+                lambda: self._open_registration_then_bootstrap(display_status)
             )
+        else:
+            self.call_after_refresh(self._maybe_open_coa_bootstrap)
         self._start_refresh_timer()
+
+    def _open_registration_then_bootstrap(self, status: dict) -> None:
+        from agitop.panels.registration_modal import RegistrationModal
+
+        def _after_reg(_result=None) -> None:
+            self._maybe_open_coa_bootstrap()
+
+        self.push_screen(RegistrationModal(status), _after_reg)
+
+    def _maybe_open_coa_bootstrap(self) -> None:
+        try:
+            from agitop.coa_bootstrap import should_auto_prompt_bootstrap
+            from agitop.panels.api_keys_modal import ApiKeysModal
+
+            if should_auto_prompt_bootstrap():
+                self.push_screen(ApiKeysModal(bootstrap=True))
+        except Exception as exc:
+            import sys
+            print(f"[agitop] COA bootstrap tripwire: {exc}", file=sys.stderr)
+
+    def action_show_coa_bootstrap(self) -> None:
+        """Open API Keys modal in COA bootstrap mode (banner / b binding)."""
+        from agitop.coa_bootstrap import needs_coa_bootstrap
+        from agitop.panels.api_keys_modal import ApiKeysModal
+
+        self.push_screen(ApiKeysModal(bootstrap=needs_coa_bootstrap()))
 
     def _should_prompt_registration(self, status: dict) -> bool:
         """Auto-prompt only for actionable version gates — not every failed registration retry."""
@@ -233,11 +349,6 @@ class AgitopApp(App):
         if status.get("update_available"):
             return True
         return False
-
-    def _open_registration_modal(self, status: dict) -> None:
-        from agitop.panels.registration_modal import RegistrationModal
-
-        self.push_screen(RegistrationModal(status))
 
     def _fetch_registration_status(self) -> dict:
         """Refresh registration display data for the modal."""
@@ -274,10 +385,10 @@ class AgitopApp(App):
         self.push_screen(RegistrationModal(self._fetch_registration_status()))
 
     def _start_refresh_timer(self) -> None:
-        """Create data refresh timer based on ControlsPanel's interval setting."""
+        """Create data refresh timer based on SystemPanel's interval setting."""
         if hasattr(self, '_data_timer') and self._data_timer:
             self._data_timer.stop()
-        interval = self.query_one("#controls-panel", ControlsPanel).get_refresh_seconds()
+        interval = self.query_one("#system-panel", SystemPanel).get_refresh_seconds()
         self._data_timer = self.set_interval(interval, self._refresh_all_data)
 
     def _refresh_all_data(self) -> None:
@@ -292,10 +403,10 @@ class AgitopApp(App):
         self.query_one("#footer-stats-panel", FooterStatsPanel).refresh_data()
 
     def action_update_refresh_interval(self) -> None:
-        """Called by ControlsPanel when user cycles the refresh rate."""
+        """Called by SystemPanel when user cycles the refresh rate."""
         self._start_refresh_timer()
-        controls = self.query_one("#controls-panel", ControlsPanel)
-        interval_label = ControlsPanel.REFRESH_INTERVALS[controls._refresh_idx][0]
+        panel = self.query_one("#system-panel", SystemPanel)
+        interval_label = SystemPanel.REFRESH_INTERVALS[panel._refresh_idx][0]
         self.notify(f"Refresh interval: {interval_label}", title="agitop")
 
     def action_refresh_all(self) -> None:

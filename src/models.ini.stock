@@ -1,0 +1,319 @@
+# ─────────────────────────────────────────────────
+# Versa AGi — Model Registry (STOCK TEMPLATE)
+# ─────────────────────────────────────────────────
+# Authority for stock catalog metadata on EVERY install and --update.
+# setup.sh scaffolds models.ini from this file when missing; reconcile-config
+# regenerates /etc/versa-agi/models.ini from it (user layers preserved).
+# Do not put custom/dashboard edits here — those live in [catalog_custom] etc.
+#
+[providers]           — Provider registry baseline
+#   [catalog_library]     — Stock metadata for all known models (not live UI)
+#   [catalog]             — Live baseline; migrate injects only activated providers
+#
+#   USER LAYER (owned by the CLI / dashboard — never touched by migrate):
+#   [providers_custom]    — Added/overridden providers
+#   [catalog_custom]      — Added/overridden models
+#
+#   The loaders merge USER over BASELINE per key (whole-row override). So
+#   setup.ini edits propagate via the baseline, while CLI/dashboard edits in the
+#   custom layer always survive and win.
+#
+#   MODEL PARAMS (generation defaults — temperature, reasoning, passthrough):
+#   [model_params]        — Baseline defaults (regenerated from template)
+#   [model_params_custom] — User overrides (CLI / dashboard; never touched by migrate)
+#   Keys: default | model:<catalog_key>
+#   Value: JSON object, e.g. {"temperature":0.2,"reasoning_effort":"none"}
+#           or {"reasoning_effort":"high","extra":{"top_p":0.9}}
+#           or {"allowed_reasoning_efforts":["none","low","high","xhigh"]}
+#           or {"think_mode":"boolean","extra":{"top_p":0.95,"top_k":20}}
+#
+#   Pipeline (three layers — config vs adapter):
+#
+#     models.ini JSON  →  normalized params  →  to_native_kwargs()  →  LangChain / API
+#          (data)              (stable)              (adapter code)
+#
+#   - Data: [model_params] + [model_params_custom] + optional agents.db overrides.
+#   - Stable vocabulary: temperature, reasoning_effort, reasoning_max_tokens,
+#     allowed_reasoning_efforts, think_mode, extra (passthrough bag).
+#   - Adapter: harness/model_params.py to_native_kwargs() — provider-family translation
+#     only; API quirks (e.g. Opus 4.7+ no temperature) live here, not in INI rows.
+#   - TD-PARAM-001 (backlog): catalog param_profile to move adapter rules into data.
+#
+#   think_mode (provider=ollama only — ignored on llamacpp):
+#           boolean | levels — maps reasoning_effort → ChatOllama reasoning (Ollama think API)
+#   Local catalog rows use provider ``ollama`` (ChatOllama) or ``llamacpp`` (ChatOpenAI
+#   → llama-server). ``agictl model migrate`` assigns the slug from setup.ini gpu_backend.
+#   On topology=client, gpu_backend describes the remote server's stack; paths.env
+#   VERSA_GPU_BACKEND=remote is connectivity only.
+#   Each catalog model should declare allowed_reasoning_efforts in model:<key>.
+#   Agent overrides (agents.db) inherit from model → default layers.
+#
+#   LOCAL PIPELINE (owned by the local-model pipeline / registry — not by sync):
+#   [local_models]        — Local AI model display labels (Ollama / SYCL)
+#   [context_windows]     — Local context windows + conservative cloud prefixes
+#   [sycl_models]         — Intel SYCL GGUF registry (repo,file,size_gb)
+#
+#   Cloud + third-party metadata (labels + context windows) lives SOLELY in
+#   [catalog] — there are no separate [models]/[third_party_models] sections.
+#   `agictl model migrate` re-selects which models ship from setup.ini and carries
+#   their label/context from the [catalog] template above (the stock-metadata source).
+#
+# Format:
+#   [providers*]       slug = enabled|Display Name|langchain_class
+#   [catalog*]         key  = class|provider|enabled|coa_approved|ctx_recommended|ctx_max|work_modality|input_modalities|output_modalities|router_eligible|Display Label
+#                            class ∈ {cloud, third_party, local}
+#                            work_modality ∈ {fast, balanced, reasoning, code, local}
+#                            input/output_modalities: CSV of text,image,audio,video
+#   [local_models]     key = Display Label
+#   [context_windows]  key = recommended,max
+#   [sycl_models]      key = hf_repo,gguf_filename,size_gb
+#
+# Cloud models have ctx_recommended = 0 (managed server-side); ctx_max drives the
+# harness trim budget. Local models without a context window default to 4096.
+#
+# Managed via: agictl model catalog add/update/remove   (writes [catalog_custom])
+#              agictl provider add/enable/disable/remove (writes [providers_custom])
+#              agictl model migrate                      (regenerate baseline from setup.ini)
+#              agictl model sync                         (regenerate derived sections + paths.env)
+#              agictl model registry add/update/remove   (SYCL GGUF metadata; legacy alias)
+#         or: ./manage_registry.sh (interactive)
+# ─────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────
+# Provider Registry — BASELINE (regenerated from setup.ini by `agictl model migrate`)
+# slug = enabled|Display Name|langchain_class
+#
+# DO NOT hand-edit — changes here are overwritten on the next `setup.sh` run.
+# Add or override providers via `agictl provider …` (writes [providers_custom]).
+#
+# `enabled` is non-secret. The API key lives in setup.ini [third_party].{slug}_api_key
+# (or the Gemini key for google). A third-party model is available at runtime only
+# when its model row is enabled AND its provider is enabled AND a key is present.
+# ─────────────────────────────────────────────────
+
+[providers]
+# Google enabled only after Gemini credentials exist (migrate rewrites this flag).
+google    = false|Google Gemini|ChatGoogleGenerativeAI
+xai       = false|xAI (Grok)|ChatOpenAI
+openai    = false|OpenAI (GPT)|ChatOpenAI
+anthropic = false|Anthropic (Claude)|ChatAnthropic
+openrouter = false|OpenRouter|ChatOpenAI
+ollama    = false|Local (Ollama)|ChatOllama
+llamacpp  = false|Local (llama.cpp / SYCL)|ChatOpenAI
+
+# ─────────────────────────────────────────────────
+# Provider Registry — USER LAYER (owned by `agictl provider` / the dashboard)
+# Overlays [providers] per slug. Never touched by `agictl model migrate`.
+# ─────────────────────────────────────────────────
+
+[providers_custom]
+
+# ─────────────────────────────────────────────────
+# Catalog Library — STOCK METADATA (not live Models tab)
+# Full row format matches [catalog]. `agictl model migrate` reads this for
+# labels/context when injecting models for *activated* providers only.
+# Live [catalog] stays empty until Google / TP / Local AI is configured.
+# ─────────────────────────────────────────────────
+
+[catalog_library]
+# Cloud Native (Gemini)
+gemini-2.5-pro                = cloud|google|true|true|0|1000000|reasoning|text,image|text|true|Gemini 2.5 Pro — Flagship reasoning, 1M context
+gemini-2.5-flash              = cloud|google|true|true|0|1000000|balanced|text,image|text|true|Gemini 2.5 Flash — Fast, cost-efficient
+gemini-3-pro-preview          = cloud|google|true|true|0|1000000|reasoning|text,image|text|true|Gemini 3 Pro Preview — Advanced reasoning
+gemini-3-flash-preview        = cloud|google|true|true|0|1000000|balanced|text,image|text|true|Gemini 3 Flash Preview — Frontier-class reduced cost
+gemini-3.1-pro-preview        = cloud|google|true|true|0|1000000|reasoning|text,image|text|true|Gemini 3.1 Pro Preview — Next-gen flagship reasoning
+gemini-3.1-flash-lite-preview = cloud|google|true|false|0|1000000|fast|text,image|text|true|Gemini 3.1 Flash Lite — Ultra-fast, lowest cost
+
+# Third-Party Cloud Providers
+grok-4-1-fast-reasoning       = third_party|xai|true|true|0|2000000|fast|text,image|text|true|Grok 4.1 Fast — Cost-efficient reasoning, 2M context (xAI)
+grok-4.20-reasoning           = third_party|xai|true|true|0|1000000|reasoning|text,image|text|true|Grok 4.20 — Flagship xAI reasoning
+gpt-5.5-2026-04-23            = third_party|openai|true|true|0|1000000|reasoning|text,image|text|true|GPT-5.5 — Flagship reasoning (OpenAI)
+gpt-5.4-2026-03-05            = third_party|openai|true|true|0|131072|reasoning|text,image|text|true|GPT-5.4 — Previous gen reasoning (OpenAI)
+gpt-5.4-mini-2026-03-17       = third_party|openai|true|true|0|131072|fast|text,image|text|true|GPT-5.4 Mini — Cost-efficient (OpenAI)
+claude-fable-5                = third_party|anthropic|true|true|0|1000000|reasoning|text,image|text|true|Claude Fable 5 — Highest capability widely released (Anthropic)
+claude-opus-4-8               = third_party|anthropic|true|true|0|200000|reasoning|text,image|text|true|Claude Opus 4.8 — Flagship reasoning (Anthropic)
+claude-sonnet-4-6             = third_party|anthropic|true|true|0|200000|balanced|text,image|text|true|Claude Sonnet 4.6 — Fast reasoning (Anthropic)
+x-ai/grok-4.5                 = third_party|openrouter|true|true|0|131072|reasoning|text,image|text|true|Grok 4.5 — xAI flagship (via OpenRouter)
+google/gemini-3-flash-preview = third_party|openrouter|true|true|0|1000000|balanced|text,image|text|true|Gemini 3 Flash Preview (via OpenRouter)
+moonshotai/kimi-k2.7-code    = third_party|openrouter|true|true|0|262144|code|text,image|text|true|Kimi K2.7 Code — Moonshot AI (via OpenRouter)
+deepseek/deepseek-v4-flash   = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Flash (via OpenRouter)
+deepseek/deepseek-v4-pro     = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Pro (via OpenRouter)
+z-ai/glm-5.2                 = third_party|openrouter|true|true|0|1048576|code|text|text|true|Z.ai: GLM 5.2 — Code-focused, 1M context (via OpenRouter)
+
+# Local AI — provider col regenerated by migrate from setup.ini gpu_backend
+# (standard→ollama, intel→llamacpp). Shipped template matches setup.ini (intel).
+qwen3.6:35b                   = local|llamacpp|true|false|32768|131072|local|text|text|false|Qwen 3.6 35B — MoE reasoning, 128K context (text-only GGUF; no mmproj)
+gemma4:26b                    = local|llamacpp|true|false|32768|262144|local|text|text|false|Gemma 4 26B — MoE (4B active), 256K context
+gemma4:e4b                    = local|llamacpp|true|false|32768|131072|local|text|text|false|Gemma 4 E4B — Edge optimized, 128K context
+gemma4:e2b                    = local|llamacpp|true|false|16384|131072|local|text|text|false|Gemma 4 E2B — Edge ultra-light, 128K context
+gemma4:31b                    = local|llamacpp|true|false|32768|262144|local|text|text|false|Gemma 4 31B — Dense flagship, 256K context
+
+# ─────────────────────────────────────────────────
+# Unified Model Catalog — USER LAYER (owned by `agictl model catalog` / the dashboard)
+# Overlays [catalog] per key (whole-row override). Never touched by migrate.
+# Disabling a baseline model writes a here-override with enabled=false.
+# ─────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────
+# Unified Model Catalog — BASELINE (injected by `agictl model migrate`)
+# key = class|provider|enabled|coa_approved|ctx_recommended|ctx_max|work_modality|input_modalities|output_modalities|router_eligible|Display Label
+#
+# EMPTY in stock on purpose. Migrate copies rows from [catalog_library] into
+# this section only for enabled providers (Gemini credentials, TP *_enabled,
+# or local_ai + hybrid/local mode). Add/override via [catalog_custom].
+# ─────────────────────────────────────────────────
+
+[catalog]
+# (populated at migrate when a provider / local AI is activated)
+
+# ─────────────────────────────────────────────────
+# Unified Model Catalog — USER LAYER (owned by `agictl model catalog` / the dashboard)
+# Overlays [catalog] per key (whole-row override). Never touched by migrate.
+# Disabling a baseline model writes a here-override with enabled=false.
+# ─────────────────────────────────────────────────
+
+[catalog_custom]
+
+# ─────────────────────────────────────────────────
+# Catalog Pricing — USER LAYER (OpenRouter API enrichment, TD-COST-001)
+# key = prompt_per_m|completion_per_m|image_per_m|reasoning_per_m|cache_read_per_m|fetched_at
+# USD per million tokens (list rates). Populated by `agictl model openrouter patch-template`
+# for all non-local catalog keys (direct API + OpenRouter), best-effort OR ID match.
+# Never touched by `agictl model migrate`.
+# ─────────────────────────────────────────────────
+
+[catalog_pricing]
+
+# ─────────────────────────────────────────────────
+# Model Parameters — BASELINE (shipped defaults)
+# Keys: default | model:<catalog_key>
+# JSON: temperature, reasoning_effort, reasoning_max_tokens, extra,
+#       allowed_reasoning_efforts (required per model for UI + harness clamping)
+# Customize via agictl model params (writes [model_params_custom]).
+# ─────────────────────────────────────────────────
+
+[model_params]
+default = {"temperature":0.2,"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
+# Cloud — Google Gemini
+model:gemini-2.5-pro                = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
+model:gemini-2.5-flash              = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
+model:gemini-3-pro-preview          = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
+model:gemini-3-flash-preview        = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
+model:gemini-3.1-pro-preview        = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
+model:gemini-3.1-flash-lite-preview = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
+# Third-party — xAI
+model:grok-4-1-fast-reasoning       = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
+model:grok-4.20-reasoning           = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
+# Third-party — OpenAI
+model:gpt-5.5-2026-04-23            = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
+model:gpt-5.4-2026-03-05            = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
+model:gpt-5.4-mini-2026-03-17       = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
+# Third-party — Anthropic (Opus 4.7+ / Fable 5 reject temperature — steer via effort / prompting)
+model:claude-fable-5                = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max","xhigh"]}
+model:claude-opus-4-8               = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max","xhigh"]}
+model:claude-sonnet-4-6             = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
+# Third-party — OpenRouter
+model:x-ai/grok-4.5                 = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
+model:google/gemini-3-flash-preview = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
+model:moonshotai/kimi-k2.7-code    = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","xhigh"]}
+model:deepseek/deepseek-v4-flash   = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","xhigh"]}
+model:deepseek/deepseek-v4-pro     = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","xhigh"]}
+model:z-ai/glm-5.2                 = {"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
+# Local
+model:qwen3.6:35b                   = {"reasoning_effort":"none","think_mode":"boolean","allowed_reasoning_efforts":["none","low","medium","high"],"extra":{"top_p":0.95,"top_k":20,"repeat_penalty":1,"presence_penalty":1.5}}
+model:gemma4:26b                    = {"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
+model:gemma4:e4b                    = {"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
+model:gemma4:e2b                    = {"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
+model:gemma4:31b                    = {"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
+
+# ─────────────────────────────────────────────────
+# Model Parameters — USER LAYER (owned by CLI / dashboard)
+# Overlays [model_params] per key. Never touched by migrate.
+# ─────────────────────────────────────────────────
+
+[model_params_custom]
+# USER OVERRIDES — written by `agictl model params set` and Model Manager → Edit Model.
+# Merge onto baseline [model_params]; omit a key to inherit from the layer below.
+#
+# Examples:
+#   model:qwen3.6:35b = {"reasoning_effort":"high","extra":{"top_p":0.95,"top_k":20}}
+#   model:deepseek/deepseek-v4-flash = {"reasoning_effort":"medium","allowed_reasoning_efforts":["none","low","medium","high","xhigh"]}
+#   model:claude-opus-4-8 = {"reasoning_effort":"high"}
+#     (Opus 4.7+ — no temperature; harness maps effort → Anthropic adaptive thinking)
+#
+# Clear one model layer:  agictl model params clear model:<catalog_key>
+
+# ═════════════════════════════════════════════════
+# LOCAL PIPELINE SEED — [local_models] (labels) + [context_windows] + [sycl_models]
+# remain owned by the local-model pipeline / registry and are consumed by
+# `agictl model migrate` to derive the LOCAL [catalog] rows. Cloud/third-party
+# metadata now lives SOLELY in [catalog] above — there are no parallel
+# [models]/[third_party_models] sections.
+# To onboard a shipped CLOUD/third-party model: add its key to the relevant
+# setup.ini list AND a [catalog] row above, then run `setup.sh --update`.
+# ═════════════════════════════════════════════════
+
+[local_models]
+qwen3.6:35b               = Qwen 3.6 35B — MoE reasoning, 128K context
+gemma4:26b                = Gemma 4 26B — MoE (4B active), 256K context
+gemma4:e4b                = Gemma 4 E4B — Edge optimized, 128K context
+gemma4:e2b                = Gemma 4 E2B — Edge ultra-light, 128K context
+gemma4:31b                = Gemma 4 31B — Dense flagship, 256K context
+
+# ─────────────────────────────────────────────────
+# Context Windows (tokens)
+# Format: model_key = recommended_num_ctx,max_num_ctx
+#
+# recommended = operational default (balances quality vs VRAM)
+# max         = model's actual capacity ceiling
+#
+# Cloud models: recommended=0 (managed server-side), max=actual limit (for trimmer)
+# Local models without entry: defaults to 4096 (Ollama default)
+#
+# Updated via: agictl model add (auto-registers known models)
+# ─────────────────────────────────────────────────
+
+[context_windows]
+# Per-model cloud/third-party context windows now live SOLELY in [catalog]
+# (ctx_recommended,ctx_max columns). This section keeps only the conservative
+# generic prefix fallbacks (for unseen cloud variants) plus the pipeline-owned
+# local-model entries. model_context.py reads [catalog] as authoritative and
+# overlays this section underneath to fill gaps.
+
+# Generic Cloud Fallbacks (prefix matching — conservative)
+gemini                    = 0,1000000
+grok                      = 0,1000000
+gpt                       = 0,131072
+claude                    = 0,200000
+
+# Qwen 3 family
+qwen3.6:35b  = 32768,131072
+
+# Gemma 4 family
+gemma4:26b   = 32768,262144
+gemma4:e4b   = 32768,131072
+gemma4:e2b   = 16384,131072
+gemma4:31b   = 32768,262144
+
+# ─────────────────────────────────────────────────
+# SYCL Model Registry (Intel ARC / llama-server)
+#
+# Format: model_key = hf_repo,gguf_filename,size_gb
+#
+# hf_repo   — HuggingFace repository for GGUF download
+# gguf_file — Exact filename to download and load
+# size_gb   — Approximate GGUF file size in GB (used for concurrency calculation)
+#
+# The max usable context is computed dynamically at setup time from:
+#   Available VRAM = Total GPU VRAM - Model GGUF Size
+#   Usable Context = f(Available VRAM, Parallel Slots, KV cache per token)
+#
+# Managed via: agictl model registry add/update/remove
+#         or: ./manage_registry.sh (interactive)
+# ─────────────────────────────────────────────────
+
+[sycl_models]
+gemma4:e4b   = unsloth/gemma-4-E4B-it-GGUF,gemma-4-E4B-it-Q4_K_M.gguf,5
+gemma4:26b   = unsloth/gemma-4-26B-A4B-it-GGUF,gemma-4-26B-A4B-it-UD-Q4_K_M.gguf,16
+gemma4:31b   = unsloth/gemma-4-31B-it-GGUF,gemma-4-31B-it-Q4_K_M.gguf,18
+qwen3.6:35b  = unsloth/Qwen3.6-35B-A3B-GGUF,Qwen3.6-35B-A3B-UD-Q4_K_M.gguf,21

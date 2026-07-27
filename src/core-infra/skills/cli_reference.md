@@ -2,7 +2,7 @@
 
 > **Trigger (COA):** Load on demand when doing model/provider catalog work, admin commands, or anything not in **`cli_reference_agent.md`**. This file is **not** auto-injected — all agents receive the agent subset at spawn instead.
 >
-> **Load via harness:** tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/cli_reference.md"`**
+> **Load via harness:** tool **`agictl_execute`**, argument **`bash "cat .agent/skills/cli_reference.md"`**
 
 ## Why agictl?
 

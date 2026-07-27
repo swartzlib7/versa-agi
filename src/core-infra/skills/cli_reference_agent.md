@@ -3,7 +3,7 @@
 > **Spawn injection:** This file is **always injected** every cycle for all agents.
 >
 > **COA — full operator manual:** `cli_reference.md` covers model catalog, provider CRUD, and admin-only commands. It is **not** auto-injected (token budget). Load when needed:
-> - tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/cli_reference.md"`**
+> - tool **`agictl_execute`**, argument **`bash "cat .agent/skills/cli_reference.md"`**
 
 agictl is the **only authorized interface** to your data layer. Never use `sqlite3` directly or read config files. If you need data — use agictl.
 
@@ -331,7 +331,7 @@ sudo agictl agent set-model <name> <catalog-key>      # Assign model (COA or PU 
 sudo agictl agent set-model <name> --clear            # Clear → inherit default
 ```
 
-> **Access**: Sub-agents see their assigned model via `system whoami` only. **COA** can assign models with `agent set-model` (must be `coa_approved` when assigning to COA). Full catalog/params/provider CRUD is in **`cli_reference.md`** — load on demand via tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/cli_reference.md"`** (see top of this file).
+> **Access**: Sub-agents see their assigned model via `system whoami` only. **COA** can assign models with `agent set-model` (must be `coa_approved` when assigning to COA). Full catalog/params/provider CRUD is in **`cli_reference.md`** — load on demand via tool **`agictl_execute`**, argument **`bash "cat .agent/skills/cli_reference.md"`** (see top of this file).
 
 ## 16. pkg — System Package Registry
 

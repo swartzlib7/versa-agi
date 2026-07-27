@@ -1369,7 +1369,11 @@ def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = No
     if model_name.startswith("gemini"):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY is required for Gemini models.")
+            raise ValueError(
+                "Google Gemini API key is missing for this model. "
+                "Connect a provider via agitop (press b for COA Setup, or API Keys) "
+                "or: sudo agictl system set-key gemini <key>"
+            )
         gkwargs = {"model": model_name, "google_api_key": api_key}
         if "temperature" in native:
             gkwargs["temperature"] = native["temperature"]
@@ -1381,14 +1385,22 @@ def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = No
     if model_name.startswith("gpt"):
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("OPENAI_API_KEY is required for OpenAI models. Set via: sudo agictl system set-key openai <key>")
+            raise ValueError(
+                "OpenAI API key is missing for this model. "
+                "Connect a provider via agitop (API Keys / press b for COA Setup) "
+                "or: sudo agictl system set-key openai <key>"
+            )
         return _openai_compat(model=model_name, api_key=api_key)
 
     # ── Anthropic (Claude) — direct API ──
     if model_name.startswith("claude"):
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY is required for Anthropic models. Set via: sudo agictl system set-key anthropic <key>")
+            raise ValueError(
+                "Anthropic API key is missing for this model. "
+                "Connect a provider via agitop (API Keys / press b for COA Setup) "
+                "or: sudo agictl system set-key anthropic <key>"
+            )
         akwargs = {"model": model_name, "api_key": api_key}
         if native.get("model_kwargs"):
             akwargs.update(native["model_kwargs"])
@@ -1400,7 +1412,11 @@ def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = No
     if model_name.startswith("grok"):
         api_key = os.getenv("XAI_API_KEY")
         if not api_key:
-            raise ValueError("XAI_API_KEY is required for xAI models. Set via: sudo agictl system set-key xai <key>")
+            raise ValueError(
+                "xAI API key is missing for this model. "
+                "Connect a provider via agitop (API Keys / press b for COA Setup) "
+                "or: sudo agictl system set-key xai <key>"
+            )
         return _openai_compat(base_url="https://api.x.ai/v1", model=model_name, api_key=api_key)
 
     # ── OpenRouter (namespaced vendor/model IDs) — direct API ──
@@ -1408,8 +1424,9 @@ def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = No
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             raise ValueError(
-                "OPENROUTER_API_KEY is required for OpenRouter models. "
-                "Set via: sudo agictl system set-key openrouter <key>"
+                "OpenRouter API key is missing for this model. "
+                "Connect a provider via agitop (API Keys / press b for COA Setup) "
+                "or: sudo agictl system set-key openrouter <key>"
             )
         return _openai_compat(
             base_url="https://openrouter.ai/api/v1",
@@ -1510,10 +1527,10 @@ def main():
                 "\n\n---\n## ── COA: FULL CLI REFERENCE (load on demand) ──\n"
                 "This spawn includes **cli_reference_agent.md** only. For model catalog, provider CRUD, "
                 "admin commands, and operator-only groups, load the full manual **before** that work:\n"
-                "- tool **`agictl_execute`**, argument **`bash \"cat ~/.agent/skills/cli_reference.md\"`**\n"
+                "- tool **`agictl_execute`**, argument **`bash \"cat .agent/skills/cli_reference.md\"`**\n"
                 "Sub-agents do not have this file — never reference it to them.\n"
             )
-            tlog("CLI REFERENCE (full): on-demand via ~/.agent/skills/cli_reference.md")
+            tlog("CLI REFERENCE (full): on-demand via .agent/skills/cli_reference.md")
 
     # ── Always-Inject: Skill Authoring (COA-exclusive) ──
     # skill_authoring.md is injected only for COA — sub-agents never see it.
@@ -1755,14 +1772,15 @@ def main():
                                         break
                         except Exception:
                             pass
-                    manifest_lines.append(f"- **{skill_name}** → `~/.agent/skills/{skill_name}` — {desc}")
+                    manifest_lines.append(f"- **{skill_name}** → `.agent/skills/{skill_name}` — {desc}")
                     tlog(f"SKILL MANIFEST: {skill_name} (lazy)")
 
                 if manifest_lines:
                     skill_content = (
                         "\n\n---\n## ── SKILLS AVAILABLE ──\n\n"
                         "**Load these skills BEFORE performing related work.** "
-                        "Command: `agictl execute bash \"cat <path>\"`\n\n"
+                        "Command: `agictl execute bash \"cat .agent/skills/<name>\"` "
+                        "(or `cat \"$AGICTL_AGENT_DIR/skills/<name>\"` — env root–absolute).\n\n"
                         + "\n".join(manifest_lines)
                     )
             else:

@@ -24,7 +24,7 @@ from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual.widgets import Static, Button, Input, Label, DataTable, Select, Checkbox, TabbedContent, TabPane
 from agitop.widgets.clear_checkbox import ClearCheckbox
 
-from agitop.panels.modality_format import format_io_modalities
+from agitop.panels.modality_format import format_modality_labels
 from agitop.widgets.provider_brand_icon import provider_brand_class, provider_import_button_label
 
 
@@ -92,6 +92,17 @@ def _run_agictl(args, timeout=25):
     if not ok:
         err = data.get("error") or (proc.stderr.strip() or "Unknown error")
     return ok, data, err
+
+
+def _fmt_per_m(value) -> str:
+    """Format $/M token price for display (catalog provider rates)."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if n <= 0:
+        return "—"
+    return f"{n:.3g}"
 
 
 def _configured_source_providers():
@@ -417,7 +428,10 @@ class ModelManagerModal(ModalScreen):
     def on_mount(self) -> None:
         mt = self.query_one("#mm-models-table", DataTable)
         mt.cursor_type = "row"
-        mt.add_columns("Label", "Key", "Type", "Work", "Rtr", "En", "COA", "Rsn", "I/O", "$/M")
+        mt.add_columns(
+            "Label", "Key", "Type", "Work", "Rtr", "En", "COA", "Rsn",
+            "Input", "Input Price", "Output", "Output Price",
+        )
         pt = self.query_one("#mm-providers-table", DataTable)
         pt.cursor_type = "row"
         pt.add_columns("Label", "Slug", "Type", "En", "LangChain Class")
@@ -440,10 +454,8 @@ class ModelManagerModal(ModalScreen):
         for m in sorted(models, key=lambda r: (_CLASS_ORDER.get(r["class"], 9), r["key"])):
             pin = m.get("prompt_per_m")
             pout = m.get("completion_per_m")
-            if pin or pout:
-                price = f"{pin:.3g}/{pout:.3g}" if pin and pout else (f"{pin:.3g}/—" if pin else f"—/{pout:.3g}")
-            else:
-                price = "—"
+            price_in = f"{pin:.3g}" if pin else "—"
+            price_out = f"{pout:.3g}" if pout else "—"
             mt.add_row(
                 m.get("label", ""),
                 m["key"],
@@ -453,17 +465,17 @@ class ModelManagerModal(ModalScreen):
                 _enabled_val(m.get("enabled", False)),
                 _yn(m["coa"]),
                 m.get("reasoning_effort", "none"),
-                format_io_modalities(
-                    m.get("input_modalities", "text"),
-                    m.get("output_modalities", "text"),
-                ),
-                price,
+                format_modality_labels(m.get("input_modalities", "text")),
+                price_in,
+                format_modality_labels(m.get("output_modalities", "text")),
+                price_out,
                 key=m["key"],
             )
 
         pt = self.query_one("#mm-providers-table", DataTable)
         pt.clear()
         for p in sorted(providers, key=lambda r: r["slug"]):
+            # Stock providers are always listed (En=· until keyed / opted-in).
             pt.add_row(
                 p.get("label", ""),
                 p["slug"],
@@ -775,11 +787,23 @@ class CatalogFormModal(ModalScreen):
                         )
                 with Horizontal(classes="mm-form-row"):
                     with Vertical(classes="mm-form-col"):
-                        yield Static("[b]Input modalities[/]  [dim](CSV: text,image,audio,video)[/]")
-                        yield Input(value=e.get("input_modalities", "text") or "text", id="f-input-modalities")
+                        yield Static("[b]Input[/]  [dim](CSV: text,image,audio,video)[/]")
+                        yield Input(
+                            value=e.get("input_modalities", "text") or "text",
+                            id="f-input-modalities",
+                        )
+                    with Vertical(classes="mm-form-col-price"):
+                        yield Static("[b]Input Price[/]  [dim]($/M)[/]")
+                        yield Static(_fmt_per_m(e.get("prompt_per_m")), id="f-price-in")
                     with Vertical(classes="mm-form-col"):
-                        yield Static("[b]Output modalities[/]  [dim](CSV: text,image,audio,video)[/]")
-                        yield Input(value=e.get("output_modalities", "text") or "text", id="f-output-modalities")
+                        yield Static("[b]Output[/]  [dim](CSV: text,image,audio,video)[/]")
+                        yield Input(
+                            value=e.get("output_modalities", "text") or "text",
+                            id="f-output-modalities",
+                        )
+                    with Vertical(classes="mm-form-col-price"):
+                        yield Static("[b]Output Price[/]  [dim]($/M)[/]")
+                        yield Static(_fmt_per_m(e.get("completion_per_m")), id="f-price-out")
 
                 yield Static("[bold cyan]Default Generation Params[/]  [dim](optional — writes model:<key> layer)[/]")
                 if e.get("class") == "local" and reasoning_ctx == "llamacpp":
@@ -847,6 +871,15 @@ class CatalogFormModal(ModalScreen):
         self.query_one("#f-output-modalities", Input).value = (
             prefill.get("output_modalities") or "text"
         )
+        try:
+            self.query_one("#f-price-in", Static).update(
+                _fmt_per_m(prefill.get("prompt_per_m"))
+            )
+            self.query_one("#f-price-out", Static).update(
+                _fmt_per_m(prefill.get("completion_per_m"))
+            )
+        except Exception:
+            pass
 
         model_class = prefill.get("class") or "third_party"
         provider = prefill.get("provider") or ""

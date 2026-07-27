@@ -1,4 +1,4 @@
-"""Checkbox with distinct on/off glyphs (✓ vs empty).
+"""Checkbox with distinct on/off glyphs (✓ vs □).
 
 Textual's stock Checkbox uses BUTTON_INNER="X" for both states and only
 changes color (green vs dim), which reads as "always checked."
@@ -12,10 +12,10 @@ from textual.widgets import Checkbox
 
 
 class ClearCheckbox(Checkbox):
-    """Checkbox that shows a checkmark when on and a blank when off."""
+    """Checkbox that shows a checkmark when on and an empty box when off."""
 
     BUTTON_INNER_ON = "✓"
-    BUTTON_INNER_OFF = " "
+    BUTTON_INNER_OFF = "□"
 
     @property
     def _button(self) -> Content:

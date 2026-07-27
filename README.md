@@ -370,9 +370,11 @@ Alternatively, the **agitop** dashboard provides a **🔑 API KEYS** button (pur
 
 ---
 
-## Model Reference — Gemini 3 Flash Preview
+## Model Reference — System default & Gemini
 
-**Default model:** `gemini-3-flash-preview` (set in `setup.ini` → `[gemini].model`)
+**Stock system default:** `z-ai/glm-5.2` (OpenRouter — set in `setup.ini` → `[gemini].model` → `VERSA_DEFAULT_MODEL`). Gemini remains an optional provider; the section below documents Gemini models when selected.
+
+### Gemini 3 Flash Preview (optional)
 
 ### Capabilities
 
@@ -410,23 +412,23 @@ Gemini 3 replaces the legacy `thinking_budget` (integer) with `thinking_level` (
 
 ### Configuration
 
-**INI (system default):**
+**INI (Gemini thinking defaults when a Gemini model is assigned):**
 
 ```ini
 [gemini]
-model=gemini-3-flash-preview
-# Default thinking level for agent spawns
+model=z-ai/glm-5.2
+# Default thinking level for Gemini 3+ agent spawns
 # Values: minimal, low, medium, high (default: high)
 thinking_level=high
 ```
 
-**Environment variable override:**
+**Environment variable override (Gemini CLI legacy):**
 
 ```bash
 export GEMINI_MODEL="gemini-3-flash-preview"
 ```
 
-**Available models** (set via `[gemini].model` in `setup.ini`):
+**Available Gemini models** (assign via dashboard / `agictl agent set-model`; system default is OpenRouter GLM above):
 
 | Model | Tier | Notes |
 |---|---|---|

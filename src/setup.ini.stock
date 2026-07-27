@@ -1,0 +1,408 @@
+# ═══════════════════════════════════════════════
+# Versa AGi — Setup Configuration (STOCK TEMPLATE)
+# ═══════════════════════════════════════════════
+# Authority for structure + stock model lists on EVERY install and --update.
+# setup.sh scaffolds setup.ini from this file when missing; reconcile-config
+# regenerates /etc/versa-agi/setup.ini from it (user-owned keys/tokens preserved).
+# Do not put API keys or secrets here — those are collected at install / agitop.
+#
+[versavoice]
+# VersaVoice cloud messaging — REQUIRED for install (2026-07).
+# Optional disable path is parked; do not set false without revisiting local-only gaps.
+# When false (parked), agent communication is local-only (SQLite internal messages).
+# api_token must verify via GET /account before install/update/set-key accepts it.
+enabled=true
+api_token=
+
+[gemini]
+# Auth method: exactly one of "api_key" or "vertex" (optional — Gemini is not required).
+# Runtime uses the LangChain harness — not the Gemini CLI.
+auth_method=api_key
+api_key=
+# Provider registry flag (WU-07). Stock false — Step 9b / set-key flip to true.
+# Unset on legacy installs is treated as credentials-gated (compat).
+enabled=false
+
+# Execution mode: "cloud", "local", or "hybrid"
+#   cloud  — cloud models (Gemini and/or other providers — keys optional per provider)
+#   local  — Local AI only via Ollama (no cloud keys needed)
+#   hybrid — Both cloud and local agents available
+mode=cloud
+
+# Tracked cloud model registry. Used by Lifeline for backend resolution.
+# STOCK LIST — owned by the shipped template: regenerated from it on every
+# setup.sh run (reconcile-config). Hand-edits here do not stick; add or disable
+# models via the dashboard/CLI (writes the models.ini custom layer).
+cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite-preview
+
+# System default model (catalog key). Written to paths.env as VERSA_DEFAULT_MODEL.
+# Stock blank until first-login COA bootstrap assigns one (WU-02/03).
+# Empty agents.model falls back here. Per-agent overrides: agitop / set-model.
+model=
+
+# COA-approved models — only these models appear in the Dashboard model picker
+# for the COA agent. Weaker models lack reliable tool-calling and structured output
+# required for orchestration. Sub-agents are not restricted by this list.
+# STOCK LIST — regenerated from the shipped template on every setup.sh run;
+# toggle COA eligibility per-model via the dashboard/CLI instead.
+coa_approved_models=z-ai/glm-5.2,x-ai/grok-4.20,google/gemini-3-flash-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4-1-fast-reasoning,grok-4.20-reasoning,gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,claude-fable-5,claude-opus-4-8,claude-sonnet-4-6,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash
+
+# Default thinking level for agent spawns (Gemini 3+ only).
+# Replaces legacy thinking_budget. Cannot mix with thinking_budget.
+#   minimal  — Fewest tokens for thinking. Low-complexity tasks, fastest response.
+#   low      — Fewer tokens. Simple instruction-following, high-throughput.
+#   medium   — Balanced. Moderate complexity tasks. (Gemini 3 Flash only)
+#   high     — Deep reasoning. Multi-step planning, code gen. (Default for Gemini 3 Flash)
+thinking_level=high
+
+[local_ai]
+# Enable local AI backend (Inference Endpoint + backend).
+# Run setup_local.sh to install, or uninstall_local.sh to remove.
+# Agents are assigned to local execution by setting their model
+# to a value from local_models (via Dashboard or agictl).
+enabled=false
+
+# GPU backend for local inference (stack type — on-box or on the remote server when topology=client):
+#   standard — Ollama (NVIDIA CUDA / AMD ROCm, or remote Ollama on port 11434)
+#   intel    — Intel ARC via Docker SYCL / llama-server (or remote llama-server on port 8080)
+# The user is responsible for ensuring their hardware and drivers are
+# configured before running setup. No auto-detection is performed.
+# Note: topology=client sets VERSA_GPU_BACKEND=remote in paths.env (connectivity only).
+# Provider slug (ollama vs llamacpp) is derived from this key, not from "remote".
+gpu_backend=intel
+
+# Inference Endpoint port (shared by both backends)
+proxy_port=4000
+
+# Default local model for new locally-assigned agents.
+# Recommended: gemma4:e4b (≤8GB VRAM), gemma4:26b (≤12GB), gemma4:31b (≥16GB)
+default_model=qwen3.6:35b
+
+# Tracked local model registry. These appear in the Dashboard model picker.
+# For 'standard': models are pulled via Ollama (ollama pull <name>)
+# For 'intel': models are downloaded as GGUFs from HuggingFace (hf download <repo>)
+local_models=gemma4:e4b,gemma4:26b,gemma4:31b,qwen3.6:35b
+
+# Auto-download default model during setup (downloads can be 2-20GB)
+auto_pull_model=true
+
+# ── Standard backend only (gpu_backend=standard) ──
+# Ollama host URL. Only used when gpu_backend=standard.
+ollama_host=http://localhost:11434
+
+# ── Intel backend only (gpu_backend=intel) ──
+# Card count: number of identical Intel ARC GPUs installed.
+# Device ID: PCI device ID. Obtain via: lspci -nn | grep -i "VGA\|Display"
+#   Example: 8086:e223 = Intel ARC Pro B70 (Battlemage)
+#   Example: 8086:e212 = Intel ARC Pro B50 (Battlemage)
+# Same card models are recommended. Mixed GPU configurations are untested.
+intel_card_count=1
+intel_device_id=8086:e223
+# Docker llama-server port
+sycl_port=8080
+# Active model for single-mode policy (set by 'agictl model activate').
+# Used only when model_loading_strategy=single. All local agents are synced to this model.
+# In router mode, agents use per-agent model assignments and this key is ignored.
+sycl_active_model=qwen3.6:35b
+# Maximum models resident in VRAM simultaneously (llama-server --models-max).
+# The server uses LRU eviction when loaded count exceeds this value.
+# Calculation: (VRAM - KV_cache - 2GB_headroom) / avg_model_size_gb
+#   Example (32GB VRAM, 2 slots × 16K): Available=28GB → 1 for 20GB models, 4 for 4GB models.
+# To run N models concurrently, you need BOTH parallel >= N AND models-max >= N.
+sycl_models_max=1
+# HuggingFace token for model downloads (prompted during setup)
+hf_token=
+# llama.cpp version tag for Docker image builds (pinned for reproducibility)
+sycl_llama_cpp_tag=b9082
+# Total GPU VRAM in GB (auto-detected during setup, used for concurrency calculation)
+sycl_vram_gb=32
+#
+# ── Concurrency (Intel SYCL only) ──
+# Concurrent inference slots (llama-server --parallel N).
+# Each slot is an independent inference session with its own KV cache.
+#
+# IMPORTANT: llama-server --ctx-size is TOTAL context shared across all slots.
+# sycl_ctx_size below is the DESIRED PER-SLOT context. The system multiplies
+# it by sycl_parallel when launching Docker (total = per_slot × parallel).
+#
+# Calculation:
+#   Available VRAM  = Total GPU VRAM - Model GGUF Size
+#   KV per slot     ≈ 256MB (at ctx_size 4096), scales linearly with context
+#   Max slots       ≈ (Available VRAM - 2GB headroom) / KV per slot
+#
+# Headroom (2GB): Reserved for SYCL runtime (~500MB), activation buffers (~500MB),
+#   memory fragmentation (~500MB), and display compositor (~200-500MB if GPU drives a monitor).
+#   Without headroom, the server may OOM intermittently under multi-slot load.
+#
+# KV Cache at different configurations (per-slot × parallel = total):
+#   4 slots × 4K  = 16K total → 1GB KV  → 8GB remaining  ✓ Safe (default)
+#   4 slots × 8K  = 32K total → 2GB KV  → 7GB remaining  ✓ Safe (tool-calling)
+#   4 slots × 16K = 64K total → 4GB KV  → 5GB remaining  ✓ Safe (longer conversations)
+#   2 slots × 32K = 64K total → 4GB KV  → 5GB remaining  ✓ Safe (fewer agents, deeper context)
+#   4 slots × 32K = 128K total → 8GB KV → 1GB remaining  ⚠ Tight
+#
+# Use 'sudo agictl model activate <model>' to recalculate when switching models.
+sycl_parallel=4
+# Context window size PER SLOT in tokens.
+# Each agent request uses one slot with this context size.
+# The server allocates total KV cache = sycl_ctx_size × sycl_parallel.
+# Default 4096. Increase to 8192 or 16384 if VRAM allows (see trade-offs above).
+sycl_ctx_size=4096
+
+# ── Deployment Topology ──
+# Controls how this machine participates in the local AI setup:
+#   local  — Agents on this machine (stock default → install type 1, Cloud AI only)
+#   server — Inference-only (Docker/Ollama + Inference Server, no agents, serves to LAN)
+#   client — Agents here, inference on a remote server (install type 2)
+# Install prompt maps: local→1, client→2, server→3. Selection overrides these values.
+topology=local
+
+# Remote inference server URL (only used when topology=client)
+# LAN:  http://192.168.1.100:11434
+# DDNS: https://myserver.duckdns.org:11434
+remote_inference_url=http://192.168.4.114:8080
+
+# Inference Server master key for API authentication.
+# Auto-generated during server setup; must match on client.
+# Not needed for topology=local (localhost-only, not exposed).
+inference_master_key=versa-sk
+
+# Model loading strategy — client-side policy for agent model assignment:
+#   single   — All local agents share one model (sycl_active_model). 'model activate' syncs all agents.
+#   router   — Each agent can use a different local model. 'model activate' updates default_model only.
+# The Docker container always runs in directory-scanning mode (--models-dir) regardless of this setting.
+# This controls client behavior only — the inference server handles any model on demand.
+model_loading_strategy=single
+
+[third_party]
+# Third-Party Cloud Providers backend — route non-Google cloud models through Inference Server.
+# Each provider follows the same 3-key pattern: {slug}_enabled, {slug}_api_key, {slug}_models.
+# Run setup_proxy.sh to install, or uninstall_proxy.sh to remove.
+#
+# To add a new provider:
+#   1. Add provider slug to 'providers' CSV below
+#   2. Add {slug}_enabled, {slug}_api_key, {slug}_models keys
+#   3. Add configure_{slug}() function in setup_proxy.sh
+#   4. Add a [catalog] row per model in models.ini (label + context windows)
+#   5. Re-run setup.sh --update (runs model migrate + sync)
+enabled=false
+
+# Provider registry — CSV list of provider slugs.
+# STOCK LISTS — 'providers' and every '{slug}_models' key are owned by the
+# shipped template and regenerated on every setup.sh run (reconcile-config).
+# '{slug}_enabled' and '{slug}_api_key' are user-owned and always preserved.
+providers=xai,openai,anthropic,openrouter
+
+# ── xAI (Grok) ──────────────────────────────────────
+xai_enabled=false
+xai_api_key=
+xai_models=grok-4-1-fast-reasoning,grok-4.20-reasoning
+
+# ── OpenAI (GPT) ────────────────────────────────────
+openai_enabled=false
+openai_api_key=
+openai_models=gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17
+
+# ── Anthropic (Claude) ──────────────────────────────
+anthropic_enabled=false
+anthropic_api_key=
+anthropic_models=claude-fable-5,claude-opus-4-8,claude-sonnet-4-6
+
+# ── OpenRouter (multi-vendor aggregator) ─────────────
+openrouter_enabled=false
+openrouter_api_key=
+openrouter_models=x-ai/grok-4.5,google/gemini-3-flash-preview,z-ai/glm-5.2,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-pro
+
+[gcp]
+# Only needed for vertex auth. If service_account_key is set, it's used;
+# otherwise falls back to Application Default Credentials (ADC).
+project=versavoice-s777
+location=us-central1
+service_account_key=
+
+[agent]
+cron_interval=1
+# File monitor: reactive file watcher (inotifywait). Set to false when using
+# the post-cycle linger check instead (simpler, avoids race conditions).
+file_mon_enabled=false
+
+# Maximum allowed runtime for an agent work cycle (in minutes).
+# Stock default 45 — also seeds COA/new agents via agents.db column defaults.
+timeout_minutes=45
+
+# Maximum allowed output lines before an agent session is killed (runaway detection).
+# If the result file exceeds this threshold during execution, the agent is terminated,
+# its tasks are frozen, and the Primary User is notified via VersaVoice.
+# Stock default 2500. Configurable per-agent via dashboard after initial setup.
+runaway_threshold=2500
+
+# Circuit Breaker — auto-freeze agents that repeatedly fail on spawn.
+# Only breaker-eligible exit codes count: 1 (error), 42 (input error), 99 (runaway).
+# Excluded: 0 (success), 53 (turn limit), 124 (timeout).
+# Configurable via agitop ⚙ System Settings modal.
+circuit_breaker_consecutive=5
+circuit_breaker_hourly=20
+
+# Task Management — overdue task auto-freeze (Lifeline spawn_attempts budget).
+# Overdue planned and repeatedly-waking waiting tasks retry this many lifeline
+# wake cycles before auto-freeze and Primary User notification. Counter resets
+# only when the task transitions to done or cancelled.
+# Configurable via agitop ⚙ System Settings modal.
+task_max_spawn_attempts=3
+
+# Message flood guard: auto-lift PU messaging suppression after N hours without
+# a new outbound message. Override via VERSA_FLOOD_GUARD_TIMEOUT_HOURS env var.
+flood_guard_timeout_hours=3
+
+# Auto model routing default for newly registered agents (agents.db column is authoritative per agent)
+model_routing_enabled=false
+# pool = triage picks from router-eligible candidates; preferred = triage classifies work_modality only
+model_routing_mode=preferred
+
+# COA VersaVoice identity (used by identity provision / setup prompts)
+# call_sign = bare 6-char (or custom) identifier; last_name is always (call_sign).
+# Setup derives call_sign from the required install email (first3+last3 of local-part)
+# and prompts to confirm/override. Do not use a literal (COA) last name on new installs.
+first_name=Versa
+call_sign=
+last_name=(COA)
+# Language: ISO 639-1 code (en, es, fr, de, ja, ko, zh, pt, ar, hi, etc.)
+language=en
+# Country: Full name as shown in VersaVoice app (optional, leave blank if unsure)
+# Examples: United States, Mexico, Japan, Germany, Brazil, South Africa
+country=United States
+# Voice: male or female
+voice=female
+# Role: Agent primary role (seeded as first ability)
+role=Chief Orchestrator Agent
+
+[model_routing]
+# Preferred catalog key per work_modality (PU-owned; reconcile carries forward user values).
+# Empty key = fall back to pool mode for that modality when model_routing_mode=preferred.
+fast=deepseek/deepseek-v4-flash
+balanced=deepseek/deepseek-v4-flash
+reasoning=deepseek/deepseek-v4-pro
+code=z-ai/glm-5.2
+local=qwen3.6:35b
+
+[output_routing]
+# Preferred catalog key per output delivery modality (PU-owned; reconcile carries forward).
+# Used by utility agents / generation runners (Phase F) — not wired to chat spawn routing yet.
+# Model must declare matching output_modality in catalog (e.g. output_modities=image).
+# Empty = no system default for that output type.
+image=
+audio=
+video=
+
+[logging]
+# Lifeline log output: true = write to /var/log/versa-agi-lifeline.log, false = silent (/dev/null)
+enabled=true
+
+[users]
+watchdog=watchdog
+coa=coa
+
+[git]
+# Platforms configured with SSH keys (comma-separated): github, gitlab, both, none
+# After setup, the COA generates a dedicated SSH keypair (versa_agi_ed25519)
+# and shares the public key with the Primary User via the workspace symlink
+# for manual platform configuration (deploy key or SSH key).
+platforms=none
+
+# Primary User's workspace access path (symlink to .agent/workspace/)
+# This is always created — the Primary User needs filesystem visibility.
+workspace_link=
+
+[search]
+# Web search provider for agent research capabilities.
+# Powered by SearXNG (Docker container via providers/searxng.sh — requires docker).
+# Agents access via: agictl search web "<query>"
+enabled=true
+engine=searxng
+searxng_url=http://localhost:8888
+
+[browser]
+# Headless browser automation for agents (Playwright + Chromium).
+# Enables: agictl browser goto/click/fill/screenshot/extract
+# Install via: setup.sh prompt, agitop System Settings, or manually: sudo ./providers/playwright.sh
+# Per-agent control: agitop dashboard → Agent Settings → Browser Usage
+enabled=true
+# Page load timeout in seconds (default: 30). Editable via agitop System Settings.
+timeout=30
+
+[image_processing]
+# Harness policy applied before VIEW INJECT (agictl view / agictl_view_image).
+# Edit via agitop → System Settings → Image Processing.
+enabled=true
+format=jpeg
+jpeg_quality=80
+jpeg_dpi=72
+max_width=2048
+max_height=2048
+
+[audio_processing]
+# Defaults for Utility Model audio generation. Edit via agitop → System Settings
+# → Audio Processing. Streaming audio is always received as PCM16 and packaged
+# locally: 'wav' is native, 'ogg'/'mp3'/'flac' require ffmpeg (falls back to wav).
+# A Utility Model's config_json may override 'format'/'voice' per-profile.
+enabled=true
+format=ogg
+voice=female
+
+[utility_models]
+# Phase F — Utility Model global defaults (PU-owned; reconcile carries forward).
+enabled=true
+default_output_subdir=.agent/attachments/utility
+max_concurrent_runs=1
+artifact_retention_days=30
+write_manifest=true
+utility_start_alert_default=false
+utility_stop_alert_default=true
+
+[script_tasks]
+# TD-SCRIPT-001 — deterministic, agent-authored scripts run on a schedule or as a
+# future once-off by lifeline (NO agent spawn, NO LLM). Scripts live in the shared
+# AGi-Tools repository and run as the owning agent; lifeline captures the return
+# code and sends rc-driven VersaVoice alerts to the PU per the task's start/stop
+# alert flags. PU-owned; reconcile carries values forward (new keys arrive from the
+# template on --update).
+enabled=true
+# Hard runtime cap per script run (seconds). A timeout is treated as failure (rc 124).
+max_runtime_seconds=600
+# Concurrent runs of the same script/task — enforced by a per-task run-lock
+# (/var/lib/versa-agi/script-runs). One run at a time per task.
+max_concurrent_runs=1
+# Lines of stdout/stderr captured into the task progress journal + PU alert.
+output_tail_lines=20
+
+[features]
+# Optional dashboard feature surfaces (TD-ORG-001 et al). Each is prompted at
+# install / --update, DEFAULTS DISABLED, and persists here (PU-owned; reconcile
+# carries the operator's choice forward). Three readers meet here: setup.sh
+# (prompts), feature_flags.py (agitop), and lifeline.sh (agent context — tells
+# agents which agictl command groups are unavailable when a feature is off).
+#   organization_ui — EXPERIMENTAL business/accounting workspace. agitop runs as
+#   root and Organization writes use the same tools agents use, so anyone with
+#   `sudo` on this machine can read/change this data and control Versa AGi. A
+#   prominent disclaimer + second confirmation is shown when enabling it.
+organization_ui=false
+utility_models_ui=false
+script_tasks_ui=false
+output_routing_ui=false
+
+[registration]
+# Runtime submission state (endpoint + key: core-infra/registration.conf)
+acceptance_file=/etc/versa-agi/install-acceptance.json
+registration_submitted=false
+registration_submitted_at=2026-07-24T06:03:42Z
+registration_last_heartbeat_at=2026-07-19T04:38:04Z
+registration_last_error=
+registration_attempt_count=0
+
+[coa]
+# COA privilege level:
+#   standard   — COA uses only sudo agictl (default, recommended)
+#   autonomous — COA has full sudo access (for gifted/dedicated hardware only)
+# WARNING: autonomous grants root-equivalent access to the COA user.
+# Only enable on hardware you have explicitly dedicated to this system.
+autonomous=false

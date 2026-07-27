@@ -130,10 +130,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_CORE_INFRA="${SCRIPT_DIR}/core-infra"
 SRC_COA_ENV="${SCRIPT_DIR}/coa-env"
 
+# Repo-tree configs (next to setup.sh) are Primary User–owned. setup runs as root
+# via sudo — restore SUDO_USER ownership after scaffold/sync writes.
+# Deployed /etc/versa-agi/* stays watchdog:agi_agents (System Design filesystem).
+chown_repo_config() {
+  local path="$1"
+  local mode="${2:-}"
+  [ -e "${path}" ] || return 0
+  if [ -n "${mode}" ]; then
+    chmod "${mode}" "${path}" 2>/dev/null || true
+  fi
+  if [ -n "${SUDO_USER:-}" ]; then
+    chown "${SUDO_USER}:${SUDO_USER}" "${path}" 2>/dev/null || true
+  fi
+}
+
 # ─── INI File Parser ────────────────────────────────
-# The source setup.ini (next to setup.sh) is the master configuration.
-# The deployed copy at /etc/versa-agi/ is a runtime sync target used as
-# fallback for values that may only exist there (e.g., set by agictl post-install).
+# Source setup.ini (next to setup.sh) holds install-time values (may include keys).
+# setup.ini.stock is the secret-free authority for structure + stock model lists
+# (fresh scaffold + reconcile-config on every run including --update).
+# Deployed /etc/versa-agi/setup.ini is the runtime sync target / fallback.
 INI_FILE_FALLBACK=""
 if [ -f "${SCRIPT_DIR}/setup.ini" ]; then
   INI_FILE="${SCRIPT_DIR}/setup.ini"
@@ -142,210 +158,32 @@ if [ -f "${SCRIPT_DIR}/setup.ini" ]; then
     INI_FILE_FALLBACK="/etc/versa-agi/setup.ini"
   fi
 else
-  # No source setup.ini — scaffold a blank template
+  # No source setup.ini — scaffold from the stock template (same file --update
+  # reconcile uses). Keeps fresh install and update model lists in lockstep.
   INI_FILE="${SCRIPT_DIR}/setup.ini"
-  warn "setup.ini not found — scaffolding a blank template at ${INI_FILE}"
-  cat > "${INI_FILE}" <<'TEMPLATE'
-# ═══════════════════════════════════════════════
-# Versa AGi — Setup Configuration
-# ═══════════════════════════════════════════════
-# Pre-populate setup values to avoid manual input.
-# Canonical location: /etc/versa-agi/setup.ini
-# All values are optional — setup will prompt for missing ones.
-
-[versavoice]
-api_token=
-
-[gemini]
-# Pinned Gemini CLI version. The system is validated against this version.
-# Changing this requires re-testing session format, token parsing, and auth.
-gemini_cli_version=0.40.0
-# Auth method: "api_key" or "vertex" (optional — Gemini is not required)
-auth_method=api_key
-# Gemini API key — optional at install (same as other cloud providers). Empty = skipped.
-api_key=
-
-# Execution mode: "cloud", "local", or "hybrid"
-#   cloud  — cloud models (Gemini and/or other providers — keys optional per provider)
-#   local  — Local AI only via Ollama (no cloud keys needed)
-#   hybrid — Both cloud and local agents available
-mode=cloud
-
-# Tracked cloud model registry. Used by Lifeline for backend resolution.
-cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite-preview
-
-# Default Gemini CLI model (--model flag). Per-agent overrides possible in registry.
-# Available models (gemini --model <value>):
-#   gemini-2.5-pro            — Flagship. Complex reasoning, coding, multimodal. 1M context.
-#   gemini-2.5-flash          — Fast, cost-efficient. Good for chatbots and production.
-#   gemini-2.5-flash-lite     — Ultra-fast, lightweight. High-volume, low-cost.
-#   gemini-2.0-flash          — Previous gen. General-purpose multimodal.
-#   gemini-2.0-flash-lite     — Previous gen. Simple, high-frequency tasks.
-#   gemini-3-pro-preview      — Next gen preview. Advanced reasoning, 1M context.
-#   gemini-3-flash-preview    — Next gen preview. Frontier-class at reduced cost.
-#   gemini-3.1-pro-preview    — Next gen preview. Enhanced reasoning, extended context.
-#   gemini-3.1-flash-lite-preview — Next gen lite. Ultra-fast, lowest cost. Monitoring/simple tasks.
-model=gemini-3-flash-preview
-
-# COA-approved models — only these models appear in the Dashboard model picker
-# for the COA agent. Weaker models lack reliable tool-calling and structured output
-# required for orchestration. Sub-agents are not restricted by this list.
-coa_approved_models=gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4-1-fast-reasoning,grok-4.20-reasoning
-
-# Default thinking level for agent spawns (Gemini 3+ only).
-# Replaces legacy thinking_budget. Cannot mix with thinking_budget.
-#   minimal  — Fewest tokens for thinking. Low-complexity tasks, fastest response.
-#   low      — Fewer tokens. Simple instruction-following, high-throughput.
-#   medium   — Balanced. Moderate complexity tasks. (Gemini 3 Flash only)
-#   high     — Deep reasoning. Multi-step planning, code gen. (Default for Gemini 3 Flash)
-thinking_level=high
-
-[local_ai]
-# Local AI backend (Ollama + Inference Endpoint). Run setup_local.sh to install.
-enabled=false
-# GPU backend: standard (NVIDIA/AMD), intel (Intel ARC via IPEX-LLM SYCL), or remote (client topology)
-gpu_backend=standard
-ollama_host=http://localhost:11434
-proxy_port=4000
-default_model=gemma4:e4b
-local_models=gemma4:e4b,gemma4:26b,gemma4:31b
-auto_pull_model=true
-# Intel ARC IPEX config (only used when gpu_backend=intel)
-intel_card_count=1
-intel_device_id=8086:e223
-# Docker llama-server port (Intel SYCL only)
-sycl_port=8080
-# Active model for single-mode policy (set by 'agictl model activate').
-# Used only when model_loading_strategy=single. All local agents are synced to this model.
-# In router mode, agents use per-agent model assignments and this key is ignored.
-sycl_active_model=
-# Maximum models resident in VRAM simultaneously (llama-server --models-max).
-# The server uses LRU eviction when loaded count exceeds this value.
-sycl_models_max=1
-# HuggingFace token for Intel SYCL model downloads (prompted during setup)
-hf_token=
-# llama.cpp version tag for Docker image builds (pinned for reproducibility)
-sycl_llama_cpp_tag=b9082
-# Total GPU VRAM in GB (auto-detected during setup, used for concurrency calculation)
-sycl_vram_gb=32
-# Concurrent inference slots (llama-server --parallel N)
-sycl_parallel=2
-# Context window size PER SLOT in tokens (total = sycl_ctx_size × sycl_parallel)
-sycl_ctx_size=65536
-# Deployment topology: local (default), server, or client
-topology=local
-remote_inference_url=
-inference_master_key=
-# Model loading strategy — client-side policy for agent model assignment:
-#   single   — All local agents share one model (sycl_active_model). 'model activate' syncs all.
-#   router   — Each agent can use a different local model. 'model activate' updates default_model only.
-# The Docker container always runs in directory-scanning mode regardless of this setting.
-model_loading_strategy=router
-
-[gcp]
-# Only needed for vertex auth. If service_account_key is set, it's used;
-# otherwise falls back to Application Default Credentials (ADC).
-project=
-location=us-central1
-service_account_key=
-
-[agent]
-cron_interval=1
-# File monitor: reactive file watcher (inotifywait). Set to false when using
-# the post-cycle linger check instead (simpler, avoids race conditions).
-file_mon_enabled=false
-
-# Maximum allowed runtime for an agent work cycle (in minutes)
-# Default is 60. Set lower (e.g. 30) for stricter runaway protection.
-timeout_minutes=60
-
-# Maximum allowed output lines before an agent session is killed (runaway detection).
-# If the result file exceeds this threshold during execution, the agent is terminated,
-# its tasks are frozen, and the Primary User is notified via VersaVoice.
-# Default is 300. Configurable per-agent via dashboard after initial setup.
-runaway_threshold=300
-
-# Circuit Breaker — auto-freeze agents that repeatedly fail on spawn.
-# Only breaker-eligible exit codes count: 1 (error), 42 (input error), 99 (runaway).
-# Excluded: 0 (success), 53 (turn limit), 124 (timeout).
-# Configurable via agitop ⚙ System Settings modal.
-circuit_breaker_consecutive=5
-circuit_breaker_hourly=20
-
-# Task Management — overdue task auto-freeze (Lifeline spawn_attempts budget).
-# Overdue planned and repeatedly-waking waiting tasks retry this many lifeline
-# wake cycles before auto-freeze and Primary User notification. Counter resets
-# only when the task transitions to done or cancelled.
-# Configurable via agitop ⚙ System Settings modal.
-task_max_spawn_attempts=3
-
-# Message flood guard: auto-lift PU messaging suppression after N hours without
-# a new outbound message. Override via VERSA_FLOOD_GUARD_TIMEOUT_HOURS env var.
-flood_guard_timeout_hours=3
-
-# COA VersaVoice identity (identity provision / setup prompts)
-# call_sign bare; last_name always (call_sign). Derived from install email at setup.
-first_name=Versa
-call_sign=
-last_name=(COA)
-# Language: ISO 639-1 code (en, es, fr, de, ja, ko, zh, pt, ar, hi, etc.)
-language=en
-# Country: Full name as shown in VersaVoice app (optional, leave blank if unsure)
-# Examples: United States, Mexico, Japan, Germany, Brazil, South Africa
-country=United States
-# Voice: male or female
-voice=female
-# Role: Agent primary role (seeded as first ability)
-role=Chief Orchestrator Agent
-
-[logging]
-# Lifeline log output: true = write to /var/log/versa-agi-lifeline.log, false = silent (/dev/null)
-enabled=true
-
-[users]
-watchdog=watchdog
-coa=coa
-
-[git]
-# Platforms configured with SSH keys (comma-separated): github, gitlab, both, none
-# After setup, the COA generates a dedicated SSH keypair (versa_agi_ed25519)
-# and shares the public key with the Primary User via the workspace symlink
-# for manual platform configuration (deploy key or SSH key).
-platforms=none
-
-# Primary User's workspace access path (symlink to .agent/workspace/)
-# This is always created — the Primary User needs filesystem visibility.
-workspace_link=
-
-[search]
-# Web search provider for agent research capabilities.
-# Powered by SearXNG (Docker container via providers/searxng.sh — requires docker).
-# Agents access via: agictl search web "<query>"
-enabled=true
-engine=searxng
-searxng_url=http://localhost:8888
-
-[browser]
-# Headless browser automation for agents (Playwright + Chromium).
-# Enables: agictl browser goto/click/fill/screenshot/extract
-# Install via: setup.sh prompt, agitop System Settings, or manually: sudo ./providers/playwright.sh
-# Per-agent control: agitop dashboard → Agent Settings → Browser Usage
-enabled=false
-# Page load timeout in seconds (default: 30). Editable via agitop System Settings.
-timeout=30
-
-[registration]
-# Runtime submission state (endpoint + key: core-infra/registration.conf)
-acceptance_file=/etc/versa-agi/install-acceptance.json
-registration_submitted=false
-registration_submitted_at=
-registration_last_heartbeat_at=
-registration_last_error=
-registration_attempt_count=0
-TEMPLATE
-  chmod 600 "${INI_FILE}"
+  STOCK_INI="${SCRIPT_DIR}/setup.ini.stock"
+  if [ ! -f "${STOCK_INI}" ]; then
+    error "setup.ini.stock missing next to setup.sh — cannot scaffold setup.ini"
+  fi
+  warn "setup.ini not found — scaffolding from setup.ini.stock at ${INI_FILE}"
+  cp -f "${STOCK_INI}" "${INI_FILE}"
+  chown_repo_config "${INI_FILE}" 600
   echo ""
   info "Generated blank setup.ini at ${INI_FILE}. Dropping into interactive configuration mode."
+fi
+
+# models.ini is required for Providers/Models tabs (migrate writes [catalog]/
+# [providers] into it). Same stock pattern as setup.ini: omit models.ini from a
+# clean installer tree and we scaffold from models.ini.stock.
+if [ ! -f "${SCRIPT_DIR}/models.ini" ]; then
+  STOCK_MODELS="${SCRIPT_DIR}/models.ini.stock"
+  if [ ! -f "${STOCK_MODELS}" ]; then
+    error "models.ini.stock missing next to setup.sh — cannot scaffold models.ini"
+  fi
+  warn "models.ini not found — scaffolding from models.ini.stock"
+  cp -f "${STOCK_MODELS}" "${SCRIPT_DIR}/models.ini"
+  chown_repo_config "${SCRIPT_DIR}/models.ini" 644
+  info "Generated models.ini from stock (catalog metadata for migrate/sync)"
 fi
 
 ini_get() {
@@ -377,6 +215,116 @@ ini_get() {
   echo "${value:-${default}}"
 }
 
+# Same gate as agictl _gemini_credentials_present / migrate google enablement.
+# setup.ini [gemini] cloud_models= is membership only — do not publish to
+# VERSA_CLOUD_MODELS unless credentials exist (parity with third_party_*_enabled).
+gemini_credentials_present() {
+  if [ -f "/etc/versa-agi/coa.env" ] \
+     && grep -qE '^[[:space:]]*GEMINI_API_KEY=[^[:space:]#]+' "/etc/versa-agi/coa.env" 2>/dev/null; then
+    return 0
+  fi
+  if [ -f "/etc/versa-agi/vault/gcp-credentials.json" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# VersaVoice API — used for token validation + sponsor identity.
+VV_API_BASE="${VV_API_BASE:-https://us-central1-versavoice-s777.cloudfunctions.net/api/v1}"
+
+# Validate a sponsor API token against GET /account (fail closed).
+# Returns: 0 valid · 1 invalid/unauthorized · 2 network/unreachable
+validate_vv_api_token() {
+  local token="$1"
+  local tmp http_code body uid
+  if [ -z "${token}" ]; then
+    return 1
+  fi
+  tmp="$(mktemp)"
+  http_code="$(curl -sS -o "${tmp}" -w "%{http_code}" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Accept: application/json" \
+    --connect-timeout 10 --max-time 20 \
+    "${VV_API_BASE}/account" 2>/dev/null || echo "000")"
+  body="$(cat "${tmp}" 2>/dev/null || true)"
+  rm -f "${tmp}"
+  case "${http_code}" in
+    200)
+      uid="$(echo "${body}" | jq -r '.uid // empty' 2>/dev/null || true)"
+      if [ -n "${uid}" ]; then
+        return 0
+      fi
+      return 1
+      ;;
+    000)
+      return 2
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Same instruction block shown on first ask and every retry.
+_vv_token_instruction_block() {
+  echo ""
+  echo -e "All agents share the Primary User's (sponsor's) $(_install_acceptance_brand) API token."
+  echo -e "Get yours from: $(_install_acceptance_brand) App → Settings → System (tap label 5 times) → Generate API Token"
+  echo -e "The token is verified live against the VersaVoice API as soon as you enter it."
+  echo -e "  ${DGRAY}Press Ctrl+C to cancel and quit the installation.${RESET}"
+  echo ""
+}
+
+# Prompt until a live-validated VV sponsor token is provided.
+# Validates immediately after each entry; on failure re-prints the instruction
+# block and asks again. Optional $1 = prefill (e.g. from setup.ini) — checked
+# first without a prompt; if invalid, falls through to the interactive loop.
+prompt_valid_vv_api_token() {
+  local candidate="${1:-}"
+  local rc
+  VV_TOKEN=""
+
+  if [ -n "${candidate}" ]; then
+    info "Validating VersaVoice API token from setup.ini…"
+    if validate_vv_api_token "${candidate}"; then
+      VV_TOKEN="${candidate}"
+      ok "VersaVoice API token verified"
+      return 0
+    fi
+    rc=$?
+    if [ "${rc}" -eq 2 ]; then
+      warn "Cannot reach VersaVoice API (${VV_API_BASE}/account) — enter the token again when ready"
+    else
+      warn "VersaVoice API token in setup.ini is invalid"
+    fi
+  fi
+
+  while true; do
+    _vv_token_instruction_block
+    echo -e -n "  Enter your $(_install_acceptance_brand) API Token (sponsor token): "
+    read -r VV_TOKEN
+    if [ -z "${VV_TOKEN}" ]; then
+      echo -e "${RED}A VersaVoice API token is required. Enter a token, or press Ctrl+C to cancel.${NC}"
+      continue
+    fi
+    # Validate immediately — do not continue setup until this succeeds.
+    info "Validating VersaVoice API token…"
+    if validate_vv_api_token "${VV_TOKEN}"; then
+      ok "VersaVoice API token verified"
+      return 0
+    fi
+    rc=$?
+    echo ""
+    if [ "${rc}" -eq 2 ]; then
+      echo -e "${RED}Cannot reach VersaVoice API (${VV_API_BASE}/account). Check network and try again.${NC}"
+    else
+      echo -e "${RED}Invalid VersaVoice API token — that value was not accepted.${NC}"
+    fi
+    echo -e "  ${DGRAY}Press Ctrl+C to cancel and quit the installation.${RESET}"
+    VV_TOKEN=""
+  done
+}
+
 if [ -f "${INI_FILE}" ]; then
   ok "Loaded configuration from: ${INI_FILE}"
 else
@@ -404,15 +352,14 @@ INI_AGENT_LANGUAGE="$(ini_get agent language en)"
 INI_AGENT_COUNTRY="$(ini_get agent country)"
 INI_AGENT_VOICE="$(ini_get agent voice female)"
 INI_AGENT_ROLE="$(ini_get agent role)"
-INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 60)"
-INI_RUNAWAY_THRESHOLD="$(ini_get agent runaway_threshold 300)"
+INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 45)"
+INI_RUNAWAY_THRESHOLD="$(ini_get agent runaway_threshold 2500)"
 INI_GIT_PLATFORMS="$(ini_get git platforms none)"
 INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
-INI_GEMINI_CLI_VERSION="$(ini_get gemini gemini_cli_version 0.40.0)"
-INI_GEMINI_MODEL="$(ini_get gemini model gemini-3-flash-preview)"
+INI_GEMINI_MODEL="$(ini_get gemini model '')"
 INI_EXECUTION_MODE="$(ini_get gemini mode cloud)"
 INI_CLOUD_MODELS="$(ini_get gemini cloud_models)"
-INI_COA_APPROVED_MODELS="$(ini_get gemini coa_approved_models 'gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4-1-fast-reasoning,grok-4.20-reasoning')"
+INI_COA_APPROVED_MODELS="$(ini_get gemini coa_approved_models 'z-ai/glm-5.2,x-ai/grok-4.20,google/gemini-3-flash-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4-1-fast-reasoning,grok-4.20-reasoning,gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,claude-fable-5,claude-opus-4-8,claude-sonnet-4-6,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash')"
 INI_LOCAL_AI_ENABLED="$(ini_get local_ai enabled false)"
 INI_GPU_BACKEND="$(ini_get local_ai gpu_backend standard)"
 INI_LOCAL_AI_DEFAULT_MODEL="$(ini_get local_ai default_model gemma4:e4b)"
@@ -754,6 +701,7 @@ if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
       chmod 755 "${DEPLOYED_CORE_INFRA}/bin/${f}"
     fi
   done
+  mkdir -p /etc/versa-agi
   if [ -f "${SCRIPT_DIR}/models.ini" ]; then
     cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
     chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/models.ini" 2>/dev/null || true
@@ -912,6 +860,7 @@ if [ "${UPDATE_MODE}" = false ]; then
         fi
       done
       # Config (models.ini — canonical + local copy)
+      mkdir -p /etc/versa-agi
       if [ -f "${SCRIPT_DIR}/models.ini" ]; then
         cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
         chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/models.ini" 2>/dev/null || true
@@ -1193,10 +1142,20 @@ check_command "inotifywait" "sudo apt install inotify-tools"
 check_command "curl" "sudo apt install curl"
 check_command "rsync" "sudo apt install rsync"
 
-
-
 echo ""
 fi  # end UPDATE_MODE=false guard (Step 2)
+
+# agitop clipboard (Copy All) — soft install on fresh and --update; not required for agents
+if command -v xclip &>/dev/null || command -v xsel &>/dev/null; then
+  ok "clipboard: $(command -v xclip 2>/dev/null || command -v xsel)"
+else
+  info "Installing xclip (agitop clipboard / Copy All)..."
+  if command -v apt-get &>/dev/null && apt-get install -y -qq xclip 2>/dev/null && command -v xclip &>/dev/null; then
+    ok "xclip installed"
+  else
+    warn "xclip not installed — agitop Copy All needs: sudo apt install xclip"
+  fi
+fi
 
 # ─── Step 3: Deploy Files to User Home Dirs ──────────
 section "Step 3 — Deploy Files"
@@ -1241,6 +1200,8 @@ fi
 # `agictl system reconcile-config` (template body + preserved [catalog_custom]/
 # [providers_custom] user layer + registry-added local rows), then
 # `agictl model migrate` rebuilds the [catalog]/[providers] baseline.
+# /etc/versa-agi is also created in Step 13; create it here so Step 3 can seed.
+mkdir -p /etc/versa-agi
 if [ -f "${SCRIPT_DIR}/models.ini" ]; then
   if [ -f "/etc/versa-agi/models.ini" ]; then
     ok "models.ini preserved (existing file kept — runtime edits retained)"
@@ -1264,32 +1225,16 @@ echo ""
 
 if declare -F install_acceptance_vv_prompt >/dev/null 2>&1; then
   install_acceptance_vv_prompt "${INI_VV_ENABLED}"
-  ENABLE_VV="${ENABLE_VV:-false}"
-else
-  ENABLE_VV="${INI_VV_ENABLED}"
 fi
+# VV required for install (optional skip parked in install_acceptance_vv_prompt).
+ENABLE_VV="true"
 
-if [ "${ENABLE_VV}" = "true" ]; then
-  echo -e "All agents share the Primary User's (sponsor's) $(_install_acceptance_brand) API token."
-  echo -e "Get yours from: $(_install_acceptance_brand) App → Settings → System (tap label 5 times) → Generate API Token"
-  echo ""
-
-  if [ -n "${INI_VV_TOKEN}" ]; then
-    VV_TOKEN="${INI_VV_TOKEN}"
-    ok "VersaVoice token loaded from setup.ini"
-  else
-    echo -e -n "  Enter your $(_install_acceptance_brand) API Token (sponsor token): "
-    read -r VV_TOKEN
-    while [ -z "${VV_TOKEN}" ]; do
-      echo -e "${RED}A VersaVoice API token is required when VV is enabled.${NC}"
-      echo -e -n "  Enter your $(_install_acceptance_brand) API Token (sponsor token): "
-      read -r VV_TOKEN
-    done
-    ok "VersaVoice token captured"
-  fi
-else
-  VV_TOKEN=""
-fi
+# Collect + live-validate immediately (instruction block + re-ask on failure).
+prompt_valid_vv_api_token "${INI_VV_TOKEN}"
+# Parked: install without VV token
+# else
+#   VV_TOKEN=""
+# fi
 
 # Write enabled state to setup.ini (both source and deployed)
 # IMPORTANT: sed must be scoped to [versavoice] section — enabled= exists in multiple sections
@@ -1425,12 +1370,17 @@ if [ -f "${AGENTS_INIT}" ]; then
   chown "${WATCHDOG_USER}:${COA_USER}" "${AGENTS_DB}"
   chmod 660 "${AGENTS_DB}"
 
-  # Seed protected agents
+  # Seed protected agents (harness defaults: graph 400, tool out 5000, resume on/25)
   sqlite3 "${AGENTS_DB}" \
-    "INSERT OR IGNORE INTO agents (name, os_user, workspace, role, timeout_minutes, runaway_threshold, inactive, protected, requested_by)
+    "INSERT OR IGNORE INTO agents (
+       name, os_user, workspace, role, timeout_minutes, runaway_threshold,
+       max_session_turns, tool_output_token_budget, resume_enabled, resume_max_messages,
+       inactive, protected, requested_by)
      VALUES
-       ('coa', '${COA_USER}', '${DEPLOYED_COA_ENV}', 'Chief Orchestrator Agent', ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 0, 1, 'setup'),
-       ('watchdog', '${WATCHDOG_USER}', '${WATCHDOG_HOME}', 'System Watchdog', ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 0, 1, 'setup');"
+       ('coa', '${COA_USER}', '${DEPLOYED_COA_ENV}', 'Chief Orchestrator Agent',
+        ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 400, 5000, 1, 25, 0, 1, 'setup'),
+       ('watchdog', '${WATCHDOG_USER}', '${WATCHDOG_HOME}', 'System Watchdog',
+        ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 400, 5000, 1, 25, 0, 1, 'setup');"
   ok "agents.db initialized at ${AGENTS_DB} (watchdog:${COA_USER} 660)"
 else
   error "agents.db init script not found at ${AGENTS_INIT}"
@@ -1544,6 +1494,14 @@ if [ -n "${_PATHS_PROVIDERS}" ]; then
   done
 fi
 
+# Cloud (Gemini) models — same enable gate as TP: credentials required.
+# setup.ini cloud_models= stays as stock membership; paths.env only lists
+# runnable cloud models. Model Catalog sync re-derives this after Step 9b.
+_PATHS_CLOUD_MODELS=""
+if gemini_credentials_present; then
+  _PATHS_CLOUD_MODELS="${INI_CLOUD_MODELS}"
+fi
+
 cat > "${PATHS_ENV}" <<PATHSEOF
 # Versa AGi — INI-derived system paths
 # Generated by setup.sh — do not edit manually.
@@ -1554,10 +1512,9 @@ VERSA_CORE_INFRA="${DEPLOYED_CORE_INFRA}"
 VERSA_COA_ENV="${DEPLOYED_COA_ENV}"
 VERSA_AGENTS_DB="${AGENTS_DB}"
 VERSA_DEFAULT_MODEL="${INI_GEMINI_MODEL}"
-VERSA_GEMINI_CLI_VERSION="${INI_GEMINI_CLI_VERSION}"
 VERSA_LOGGING_ENABLED="$(ini_get logging enabled true)"
 VERSA_EXECUTION_MODE="${INI_EXECUTION_MODE}"
-VERSA_CLOUD_MODELS="${INI_CLOUD_MODELS}"
+VERSA_CLOUD_MODELS="${_PATHS_CLOUD_MODELS}"
 VERSA_COA_APPROVED_MODELS="${INI_COA_APPROVED_MODELS}"
 VERSA_LOCAL_AI_ENABLED="${INI_LOCAL_AI_ENABLED}"
 VERSA_GPU_BACKEND="${_PATHS_GPU_BACKEND}"
@@ -1718,7 +1675,7 @@ if [ -f "${POISE_SOURCE}" ]; then
 
   # ── Inject Primary User identity into poise ──
   # Resolve sponsor (Primary User) name and UID from VersaVoice API
-  VV_API_BASE="https://us-central1-versavoice-s777.cloudfunctions.net/api/v1"
+  # (token already validated in Step 4 / update path)
   SPONSOR_DATA=""
   if [ -n "${VV_TOKEN:-}" ]; then
     SPONSOR_DATA=$(curl -sf -H "Authorization: Bearer ${VV_TOKEN}" \
@@ -2004,9 +1961,16 @@ if [ -f "${SYSCONFIG_SOURCE}" ]; then
         mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
       fi
     fi
+    # Drop legacy Gemini CLI block (runtime is LangChain harness only).
+    if jq 'del(.gemini_cli)' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2" 2>/dev/null; then
+      mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+    fi
     mv "${SYSCONFIG_DEST}.tmp" "${SYSCONFIG_DEST}"
   else
     cp "${SYSCONFIG_SOURCE}" "${SYSCONFIG_DEST}"
+    if jq 'del(.gemini_cli)' "${SYSCONFIG_DEST}" > "${SYSCONFIG_DEST}.tmp" 2>/dev/null; then
+      mv "${SYSCONFIG_DEST}.tmp" "${SYSCONFIG_DEST}"
+    fi
   fi
   
   chown "${WATCHDOG_USER}:${COA_USER}" "${SYSCONFIG_DEST}"
@@ -2110,7 +2074,7 @@ else
   warn "Product README not found at ${PRODUCT_README_SRC} — COA docs/versa_agi_readme.md not updated"
 fi
 
-# Cycles: stored outside .agent/ so Gemini CLI doesn't scan them
+# Cycles: stored outside .agent/ (agent workspace hygiene)
 # Owned by coa — agent writes freely, watchdog reads for audit when needed
 CYCLES_DIR="/var/lib/versa-agi/coa/cycles"
 mkdir -p "${CYCLES_DIR}"
@@ -2230,7 +2194,7 @@ if [ -f "${DB_FILE}" ]; then
     sqlite3 "${DB_FILE}" \
       "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
         'Initial Welcome Sequence',
-        'FIRST CONTACT: This is the most important message you will ever send. Your Primary User has just provisioned Versa AGi — they built the infrastructure, created your identity, connected your communication channel, and started the system. You are now alive on their hardware. Follow the self_introduction.md skill exactly. This must be a voice message — use SPEAK mode if the Primary User speaks English, or SPEAK_TRANSLATED if they speak another language. Keep it short, warm, and memorable — three beats: The Moment, The Partnership, The Invitation. Do NOT list features or capabilities in this message. After sending your welcome, ask the Primary User if they would like to work together and clarify basic operating principles (communication style, work hours, priorities). Store their preferences in global system memory using agictl memory system set. DO NOT mark this task as done! You MUST change this task status to waiting and set its due_date to 24 hours in the future to await their initial feedback before acting further.',
+        'FIRST CONTACT: This is an important message to send. Your Primary User has just provisioned Versa AGi — they built the infrastructure, created your identity, and started the system. You are now alive on their hardware. Follow the self_introduction.md skill exactly (speak/speak_translated when VersaVoice is enabled; typed when VersaVoice is disabled — trust FEATURE AVAILABILITY; do NOT troubleshoot VV or setup). Keep it short, warm, and memorable — three beats: The Moment, The Partnership, The Invitation. Do NOT list features or capabilities in this message. Do NOT investigate providers, API keys, or system configuration before completing this introduction. After sending your welcome, ask the Primary User if they would like to work together and clarify basic operating principles (communication style, work hours, priorities). Store their preferences in global system memory using agictl memory system set. DO NOT mark this task as done! You MUST change this task status to waiting and set its due_date to 24 hours in the future to await their initial feedback before acting further.',
         'planned',
         'urgent',
         'coa',
@@ -2351,112 +2315,129 @@ configure_ai_auth() {
   local bashrc="${home_dir}/.bashrc"
   local vault_dir="/etc/versa-agi/vault"
   local vault_creds="${vault_dir}/gcp-credentials.json"
+  local default_choice="1"
+  local DETECTED_TZ
+  DETECTED_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
 
-  # ── Determine auth method ──
-  AUTH_METHOD=""
-  if [ -n "${INI_AUTH_METHOD}" ]; then
-    if [ "${INI_AUTH_METHOD}" = "api_key" ]; then
-      AUTH_METHOD="1"
-      ok "Auth method loaded from setup.ini: Gemini API Key"
-    elif [ "${INI_AUTH_METHOD}" = "vertex" ]; then
-      AUTH_METHOD="2"
-      ok "Auth method loaded from setup.ini: Vertex AI"
-    fi
+  # Exactly one method — always ask (INI is only a default hint, never silent).
+  if [ "${INI_AUTH_METHOD:-}" = "vertex" ]; then
+    default_choice="2"
   fi
+  echo ""
+  echo "  Gemini auth — choose exactly one (not both):"
+  echo "    1. Gemini API Key  — Google AI Studio / API key"
+  echo "    2. Vertex AI       — GCP project + SA key or ADC"
+  if [ -n "${INI_AUTH_METHOD:-}" ]; then
+    echo "  Current setup.ini auth_method=${INI_AUTH_METHOD}"
+  fi
+  echo ""
+  AUTH_METHOD=""
+  while [ "${AUTH_METHOD}" != "1" ] && [ "${AUTH_METHOD}" != "2" ]; do
+    read -p "Select auth method [1/2] (default ${default_choice}): " AUTH_METHOD
+    AUTH_METHOD="${AUTH_METHOD:-${default_choice}}"
+    if [ "${AUTH_METHOD}" != "1" ] && [ "${AUTH_METHOD}" != "2" ]; then
+      echo -e "${RED}Enter 1 (API key) or 2 (Vertex).${NC}"
+    fi
+  done
 
-  if [ -z "${AUTH_METHOD}" ]; then
-    echo "How should the AI backend authenticate?"
-    echo "  1. Gemini API Key — simplest, no GCP project needed"
-    echo "  2. Vertex AI — Service Account Key or Application Default Credentials"
-    echo ""
-    read -p "Select auth method [1/2]: " AUTH_METHOD
+  # Strip the other method from agent .bashrc when switching.
+  if [ -f "${bashrc}" ]; then
+    sed -i '/# ─── Versa AGi: Gemini API Key ─────/,+1d' "${bashrc}" 2>/dev/null || true
+    sed -i '/# ─── Versa AGi: Vertex AI Configuration ─────/,+3d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GEMINI_API_KEY=/d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GOOGLE_CLOUD_PROJECT=/d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GOOGLE_CLOUD_LOCATION=/d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GOOGLE_APPLICATION_CREDENTIALS=/d' "${bashrc}" 2>/dev/null || true
   fi
 
   # ════════════════════════════════════════════════
-  # Option 1: Gemini API Key
+  # Option 1: Gemini API Key (exclusive — no Vertex env)
   # ════════════════════════════════════════════════
   if [ "${AUTH_METHOD}" = "1" ]; then
     api_key=""
-    if [ -n "${INI_API_KEY}" ]; then
-      api_key="${INI_API_KEY}"
-      ok "API key loaded from setup.ini"
+    gcp_project=""
+    gcp_location=""
+    echo ""
+    echo "  Enter your Gemini API key (required)."
+    if [ -n "${INI_API_KEY:-}" ] && [ "${INI_API_KEY}" != "YOUR_KEY" ]; then
+      echo "  A key is already in setup.ini — paste a new one, or press Enter to keep it."
+      read -p "Gemini API Key: " api_key
+      if [ -z "${api_key}" ]; then
+        api_key="${INI_API_KEY}"
+        ok "Keeping existing API key from setup.ini"
+      fi
     else
-      read -p "Enter your Gemini API Key: " api_key
-      while [ -z "${api_key}" ]; do
-        echo -e "${RED}An API key is required.${NC}"
-        read -p "Enter your Gemini API Key: " api_key
-      done
+      read -p "Gemini API Key: " api_key
     fi
+    while [ -z "${api_key}" ] || [ "${api_key}" = "YOUR_KEY" ]; do
+      echo -e "${RED}A real Gemini API key is required.${NC}"
+      read -p "Gemini API Key: " api_key
+    done
 
-    # Write .env with GEMINI_API_KEY + TZ (in /etc/versa-agi/, watchdog-owned)
-    DETECTED_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+    # API-only env — do not leave Vertex vars alongside the key.
     cat > "${env_file}" << ENVEOF
 GEMINI_API_KEY=${api_key}
 TZ=${DETECTED_TZ}
 ENVEOF
     chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${env_file}"
     chmod 640 "${env_file}"
-    ok "Created ${env_file} (watchdog:watchdog 640)"
+    ok "Created ${env_file} (API key auth — Vertex vars cleared)"
 
-    # Add to .bashrc for interactive use
-    if ! grep -q "GEMINI_API_KEY" "${bashrc}" 2>/dev/null; then
-      sudo -u "${user}" bash -c "cat >> '${bashrc}' << BASHEOF
+    sudo -u "${user}" bash -c "cat >> '${bashrc}' << BASHEOF
 
 # ─── Versa AGi: Gemini API Key ─────
 export GEMINI_API_KEY=\"${api_key}\"
 BASHEOF"
-      ok "GEMINI_API_KEY added to ${user}'s .bashrc"
-    fi
+    ok "GEMINI_API_KEY set in ${user}'s .bashrc"
+    ok "Auth method: Gemini API Key"
 
   # ════════════════════════════════════════════════
-  # Option 2: Vertex AI (SA Key or ADC → vault)
+  # Option 2: Vertex AI (exclusive — no GEMINI_API_KEY)
   # ════════════════════════════════════════════════
   else
-    # Collect GCP project/location for Vertex AI
+    api_key=""
     gcp_project=""
     gcp_location=""
 
     if [ -n "${INI_GCP_PROJECT}" ]; then
-      gcp_project="${INI_GCP_PROJECT}"
-      ok "GCP Project loaded from setup.ini: ${gcp_project}"
+      echo "  GCP project in setup.ini: ${INI_GCP_PROJECT}"
+      read -p "Google Cloud Project ID [Enter to keep]: " gcp_project
+      gcp_project="${gcp_project:-${INI_GCP_PROJECT}}"
     else
       read -p "Enter your Google Cloud Project ID: " gcp_project
-      while [ -z "${gcp_project}" ]; do
-        echo -e "${RED}A Google Cloud Project ID is required.${NC}"
-        read -p "Enter your Google Cloud Project ID: " gcp_project
-      done
     fi
+    while [ -z "${gcp_project}" ]; do
+      echo -e "${RED}A Google Cloud Project ID is required.${NC}"
+      read -p "Enter your Google Cloud Project ID: " gcp_project
+    done
 
     if [ -n "${INI_GCP_LOCATION}" ]; then
-      gcp_location="${INI_GCP_LOCATION}"
-      ok "GCP Location loaded from setup.ini: ${gcp_location}"
+      read -p "Google Cloud Location [Enter=${INI_GCP_LOCATION}]: " gcp_location
+      gcp_location="${gcp_location:-${INI_GCP_LOCATION}}"
     else
       read -p "Enter your Google Cloud Location (default: us-central1): " gcp_location
       gcp_location="${gcp_location:-us-central1}"
     fi
 
-    # ── Resolve credential source ──
-    # Priority: setup.ini SA key > existing vault cred > ADC copy > gcloud login
     local creds_resolved=false
+    mkdir -p "${vault_dir}"
 
-    # Try service account key from setup.ini
     if [ -n "${INI_SA_KEY_PATH}" ] && [ -f "${INI_SA_KEY_PATH}" ]; then
       cp "${INI_SA_KEY_PATH}" "${vault_creds}"
       chown "${WATCHDOG_USER}:${user}" "${vault_creds}"
       chmod 440 "${vault_creds}"
-      ok "Service account key deployed → ${vault_creds} (watchdog:${user} 440)"
+      ok "Service account key deployed → ${vault_creds}"
       creds_resolved=true
-
-    # Check if vault cred already exists
     elif [ -f "${vault_creds}" ]; then
-      ok "GCP credentials already in vault: ${vault_creds}"
-      creds_resolved=true
+      if confirm "Reuse existing vault GCP credentials?" "y"; then
+        ok "GCP credentials already in vault: ${vault_creds}"
+        creds_resolved=true
+      fi
+    fi
 
-    # Try to find ADC from the sudo user
-    else
+    if [ "${creds_resolved}" = false ]; then
       local sudo_user="${SUDO_USER:-}"
       local adc_source=""
-
       if [ -n "${sudo_user}" ]; then
         local sudo_home
         sudo_home=$(eval echo "~${sudo_user}")
@@ -2464,111 +2445,108 @@ BASHEOF"
           adc_source="${sudo_home}/.config/gcloud/application_default_credentials.json"
         fi
       fi
-
       if [ -n "${adc_source}" ]; then
-        echo "Found existing ADC credentials from user '${sudo_user}'."
-        read -p "Copy ADC credentials to vault? [Y/n] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        echo "Found ADC credentials from user '${sudo_user}'."
+        if confirm "Copy ADC credentials to vault?" "y"; then
           cp "${adc_source}" "${vault_creds}"
           chown "${WATCHDOG_USER}:${user}" "${vault_creds}"
           chmod 440 "${vault_creds}"
-          ok "ADC credentials deployed → ${vault_creds} (watchdog:${user} 440)"
+          ok "ADC credentials deployed → ${vault_creds}"
           creds_resolved=true
-        fi
-      fi
-
-      # Last resort: gcloud login
-      if [ "${creds_resolved}" = false ]; then
-        if command -v gcloud &>/dev/null; then
-          echo "No credentials found. Running gcloud auth for ${user}..."
-          local temp_adc="${home_dir}/.config/gcloud/application_default_credentials.json"
-          sudo -u "${user}" bash -c "mkdir -p '${home_dir}/.config/gcloud' && gcloud auth application-default login --project '${gcp_project}'" || true
-          if [ -f "${temp_adc}" ]; then
-            # Move to vault immediately
-            mv "${temp_adc}" "${vault_creds}"
-            chown "${WATCHDOG_USER}:${user}" "${vault_creds}"
-            chmod 440 "${vault_creds}"
-            rm -rf "${home_dir}/.config/gcloud" 2>/dev/null || true
-            ok "ADC configured and moved to vault"
-            creds_resolved=true
-          else
-            warn "ADC setup may not have completed."
-            warn "Run manually: sudo -u ${user} gcloud auth application-default login"
-          fi
-        else
-          warn "No GCP credentials found and gcloud CLI not installed."
-          warn "Provide a service_account_key path in setup.ini, or install gcloud."
         fi
       fi
     fi
 
-    # Write .env with Vertex AI vars + credential path
+    if [ "${creds_resolved}" = false ]; then
+      if command -v gcloud &>/dev/null; then
+        echo "No credentials found. Running gcloud auth for ${user}..."
+        local temp_adc="${home_dir}/.config/gcloud/application_default_credentials.json"
+        sudo -u "${user}" bash -c "mkdir -p '${home_dir}/.config/gcloud' && gcloud auth application-default login --project '${gcp_project}'" || true
+        if [ -f "${temp_adc}" ]; then
+          mv "${temp_adc}" "${vault_creds}"
+          chown "${WATCHDOG_USER}:${user}" "${vault_creds}"
+          chmod 440 "${vault_creds}"
+          rm -rf "${home_dir}/.config/gcloud" 2>/dev/null || true
+          ok "ADC configured and moved to vault"
+          creds_resolved=true
+        else
+          warn "ADC setup may not have completed."
+          warn "Run manually: sudo -u ${user} gcloud auth application-default login"
+        fi
+      else
+        warn "No GCP credentials found and gcloud CLI not installed."
+        warn "Provide a service_account_key path in setup.ini, or install gcloud."
+      fi
+    fi
+
+    # Vertex-only env — do not leave GEMINI_API_KEY alongside Vertex.
     {
       echo "GOOGLE_CLOUD_PROJECT=${gcp_project}"
       echo "GOOGLE_CLOUD_LOCATION=${gcp_location}"
       if [ -f "${vault_creds}" ]; then
         echo "GOOGLE_APPLICATION_CREDENTIALS=${vault_creds}"
       fi
+      echo "TZ=${DETECTED_TZ}"
     } > "${env_file}"
     chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${env_file}"
     chmod 640 "${env_file}"
-    ok "Created ${env_file} (watchdog:watchdog 640)"
+    ok "Created ${env_file} (Vertex auth — API key cleared)"
 
-    # Set env vars in .bashrc for interactive use
-    if ! grep -q "GOOGLE_CLOUD_PROJECT" "${bashrc}" 2>/dev/null; then
-      local bashrc_block="
+    local bashrc_block="
 # ─── Versa AGi: Vertex AI Configuration ─────
 export GOOGLE_CLOUD_PROJECT=\"${gcp_project}\"
 export GOOGLE_CLOUD_LOCATION=\"${gcp_location}\""
-      if [ -f "${vault_creds}" ]; then
-        bashrc_block="${bashrc_block}
+    if [ -f "${vault_creds}" ]; then
+      bashrc_block="${bashrc_block}
 export GOOGLE_APPLICATION_CREDENTIALS=\"${vault_creds}\""
-      fi
-      sudo -u "${user}" bash -c "cat >> '${bashrc}' << BASHEOF
+    fi
+    sudo -u "${user}" bash -c "cat >> '${bashrc}' << BASHEOF
 ${bashrc_block}
 BASHEOF"
-      ok "Vertex AI env vars added to ${user}'s .bashrc"
-    fi
+    ok "Vertex AI env vars set in ${user}'s .bashrc"
 
-    # Clean up any old credentials from agent home (security hardening)
     if [ -d "${home_dir}/.config/gcloud" ]; then
       rm -rf "${home_dir}/.config/gcloud"
       ok "Removed old ${home_dir}/.config/gcloud/ (credentials now in vault)"
     fi
+    ok "Auth method: Vertex AI"
   fi
 }
 
   _gemini_env="/etc/versa-agi/${COA_USER}.env"
-  _gemini_has_key=false
-  if [ -n "${INI_API_KEY}" ]; then
-    _gemini_has_key=true
-  elif [ -f "${_gemini_env}" ] && grep -qE '^GEMINI_API_KEY=.+' "${_gemini_env}" 2>/dev/null; then
-    _gemini_has_key=true
+  # "Configured" = live credentials or a real (non-placeholder) API key in INI.
+  _gemini_configured=false
+  if gemini_credentials_present; then
+    _gemini_configured=true
+  elif [ -n "${INI_API_KEY:-}" ] && [ "${INI_API_KEY}" != "YOUR_KEY" ]; then
+    _gemini_configured=true
   fi
 
   _run_gemini_auth=false
-  if [ "${_gemini_has_key}" = true ]; then
-    echo "  Current status: configured"
-    # Line-based confirm (same as ui_lib / OrbStack-safe) — not read -n 1.
+  GEMINI_PROVIDER_ENABLED=false
+  if [ "${_gemini_configured}" = true ]; then
+    echo "  Current status: configured (auth_method=${INI_AUTH_METHOD:-unknown})"
     if confirm "Keep Gemini enabled?" "y"; then
+      GEMINI_PROVIDER_ENABLED=true
       if confirm "Update Gemini credentials?" "n"; then
         _run_gemini_auth=true
       else
         ok "Gemini — kept (no credential change)"
       fi
     else
-      info "Gemini left as-is — clear the key via agitop / setup.ini if you want it off"
+      GEMINI_PROVIDER_ENABLED=false
+      info "Gemini left disabled — clear the key via agitop / setup.ini if you want it off"
     fi
   else
     echo "  Current status: not configured"
     if confirm "Enable Gemini (Google)?" "n"; then
       _run_gemini_auth=true
+      GEMINI_PROVIDER_ENABLED=true
     else
+      GEMINI_PROVIDER_ENABLED=false
       info "Gemini provider skipped"
-      warn "Default COA models are often Gemini — assign a non-Gemini model in agitop,"
-      warn "or add a Gemini key later, before expecting cloud Gemini cycles to work."
-      # Ensure a minimal agent env exists (TZ) without forcing an empty API key
+      info "Stock system default is blank until first-login COA bootstrap."
+      info "Enable a provider in Step 9d (or add a key later via agitop API Keys / bootstrap)."
       _tz="$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")"
       if [ ! -f "${_gemini_env}" ]; then
         printf 'TZ=%s\n' "${_tz}" > "${_gemini_env}"
@@ -2581,7 +2559,38 @@ BASHEOF"
 
   if [ "${_run_gemini_auth}" = true ]; then
     configure_ai_auth "${COA_USER}" "${DEPLOYED_COA_ENV}"
+    if gemini_credentials_present; then
+      GEMINI_PROVIDER_ENABLED=true
+    fi
   fi
+
+  # Persist [gemini] enabled= (+ auth when Step 9b collected it). --update does not
+  # re-run fresh Step 13 inject, so auth_method/api_key must be written here.
+  _gemini_auth_label=""
+  _gemini_api_persist=""
+  if [ "${AUTH_METHOD:-}" = "1" ]; then
+    _gemini_auth_label="api_key"
+    _gemini_api_persist="${api_key:-}"
+  elif [ "${AUTH_METHOD:-}" = "2" ]; then
+    _gemini_auth_label="vertex"
+    _gemini_api_persist=""
+  fi
+  for _ini_file in "${SCRIPT_DIR}/setup.ini" "/etc/versa-agi/setup.ini"; do
+    if [ -f "${_ini_file}" ] && grep -q '^\[gemini\]' "${_ini_file}" 2>/dev/null; then
+      sed -i "/^\[gemini\]/,/^\[/{s/^enabled=.*/enabled=${GEMINI_PROVIDER_ENABLED:-false}/}" "${_ini_file}" 2>/dev/null || true
+      if ! awk '/^\[gemini\]/{s=1;next} /^\[/{s=0} s && /^enabled=/{f=1} END{exit !f}' "${_ini_file}"; then
+        sed -i "/^\[gemini\]/a enabled=${GEMINI_PROVIDER_ENABLED:-false}" "${_ini_file}" 2>/dev/null || true
+      fi
+      if [ -n "${_gemini_auth_label}" ]; then
+        sed -i "/^\[gemini\]/,/^\[/{s/^auth_method=.*/auth_method=${_gemini_auth_label}/}" "${_ini_file}" 2>/dev/null || true
+        # Escape &/| for sed replacement of api_key value
+        _api_esc=$(printf '%s' "${_gemini_api_persist}" | sed -e 's/[&|\\]/\\&/g')
+        sed -i "/^\[gemini\]/,/^\[/{s|^api_key=.*|api_key=${_api_esc}|}" "${_ini_file}" 2>/dev/null || true
+      fi
+      # Drop deprecated Gemini CLI pin if still present (harness-only runtime).
+      sed -i '/^gemini_cli_version=/d' "${_ini_file}" 2>/dev/null || true
+    fi
+  done
 fi  # end of cloud/hybrid Gemini block
 
 # ── 9c: Local AI Setup (local or hybrid mode) ──
@@ -2742,6 +2751,54 @@ if [ -d "${PROVIDERS_DIR}" ]; then
   else
     ok "${_PROVIDER_COUNT} provider(s) configured"
   fi
+
+  # If Gemini was skipped but a third-party provider is keyed, move the system
+  # default off the stock Gemini model so Agents/Provider UI and lifeline match.
+  if ! gemini_credentials_present; then
+    _picked_default=""
+    _coa_csv="$(ini_get gemini coa_approved_models '')"
+    for _slug in openrouter xai openai anthropic; do
+      _en="$(ini_get third_party "${_slug}_enabled" false)"
+      _mods="$(ini_get third_party "${_slug}_models" '')"
+      [ "${_en}" = "true" ] && [ -n "${_mods}" ] || continue
+      _first=""
+      IFS=',' read -ra _mod_arr <<< "${_mods}"
+      for _m in "${_mod_arr[@]}"; do
+        _m="$(echo "${_m}" | xargs)"
+        [ -n "${_m}" ] || continue
+        [ -z "${_first}" ] && _first="${_m}"
+        if [ -n "${_coa_csv}" ] && echo ",${_coa_csv}," | grep -qF ",${_m},"; then
+          _picked_default="${_m}"
+          break
+        fi
+      done
+      if [ -z "${_picked_default}" ] && [ -n "${_first}" ]; then
+        _picked_default="${_first}"
+      fi
+      [ -n "${_picked_default}" ] && break
+    done
+    if [ -n "${_picked_default}" ]; then
+      PATHS_ENV="${PATHS_ENV:-/etc/versa-agi/paths.env}"
+      if [ -f "${PATHS_ENV}" ]; then
+        if grep -q '^VERSA_DEFAULT_MODEL=' "${PATHS_ENV}" 2>/dev/null; then
+          sed -i "s|^VERSA_DEFAULT_MODEL=.*|VERSA_DEFAULT_MODEL=\"${_picked_default}\"|" "${PATHS_ENV}"
+        else
+          echo "VERSA_DEFAULT_MODEL=\"${_picked_default}\"" >> "${PATHS_ENV}"
+        fi
+      fi
+      for _ini_df in "/etc/versa-agi/setup.ini" "${SCRIPT_DIR}/setup.ini"; do
+        if [ -f "${_ini_df}" ]; then
+          sed -i "/^\[gemini\]/,/^\[/{s|^model=.*|model=${_picked_default}|}" "${_ini_df}" 2>/dev/null || true
+        fi
+      done
+      INI_GEMINI_MODEL="${_picked_default}"
+      if [ -f "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" ]; then
+        sqlite3 "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" \
+          "UPDATE agents SET model='${_picked_default}' WHERE name='coa' AND (model IS NULL OR TRIM(model)='');" 2>/dev/null || true
+      fi
+      ok "Default/COA model set to ${_picked_default} (Gemini not configured; using enabled provider)"
+    fi
+  fi
 else
   info "No providers directory found — skipping Step 9d"
 fi
@@ -2827,7 +2884,7 @@ if [ "${UPDATE_MODE}" = true ]; then
       ok "Added resume_enabled column to agents table" || \
       info "resume_enabled column already exists"
     # v0.13.0: resume_max_messages — trim checkpoint state on resume (0 = unlimited)
-    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN resume_max_messages INTEGER DEFAULT 0;" 2>/dev/null && \
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN resume_max_messages INTEGER DEFAULT 25;" 2>/dev/null && \
       ok "Added resume_max_messages column to agents table" || \
       info "resume_max_messages column already exists"
     # v0.14.0: browser_enabled column for headless browser automation (Playwright)
@@ -2887,39 +2944,44 @@ if [ "${UPDATE_MODE}" = true ]; then
   # poise logic here.
 
   # ─── 5b-U: Inject VersaVoice API Token ──────────────
-  # Token lives in setup.ini; inject into all agent configs.
+  # Token lives in setup.ini; must validate live before injecting.
   section "Update — VV Token Injection"
   VV_TOKEN_UPDATE="$(ini_get versavoice api_token)"
 
   if [ "${DRY_RUN}" = true ]; then
     if [ -n "${VV_TOKEN_UPDATE}" ]; then
-      dry "Would inject VV API token into all agent configs"
+      dry "Would validate + inject VV API token into all agent configs"
     else
-      dry "No VV token in setup.ini — would skip"
+      dry "No VV token in setup.ini — would prompt for a valid token"
     fi
   else
-    if [ -n "${VV_TOKEN_UPDATE}" ]; then
-      for agent_config in /etc/versa-agi/*_config.json; do
-        [ -f "${agent_config}" ] || continue
-        local_agent_name=$(basename "${agent_config}" _config.json)
-        if jq -e '.versavoice' "${agent_config}" >/dev/null 2>&1; then
-          jq --arg token "${VV_TOKEN_UPDATE}" '.versavoice.api_token = $token' \
-            "${agent_config}" > "${agent_config}.tmp" && \
-            mv "${agent_config}.tmp" "${agent_config}"
-          ok "VV API token injected into ${local_agent_name}_config.json"
-          # Restore correct ownership: watchdog:{agent} 640 (System Design §IX)
-          if [ "${local_agent_name}" = "coa" ]; then
-            chown "${WATCHDOG_USER}:${COA_USER}" "${agent_config}"
-          else
-            chown "${WATCHDOG_USER}:${local_agent_name}" "${agent_config}" 2>/dev/null || \
-              chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${agent_config}"
-          fi
-          chmod 640 "${agent_config}"
+    # Collect + live-validate immediately (same instruction/retry UX as fresh install).
+    prompt_valid_vv_api_token "${VV_TOKEN_UPDATE}"
+    VV_TOKEN_UPDATE="${VV_TOKEN}"
+    # Persist verified token back to setup.ini (source + deployed)
+    for _ini_vv_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+      if [ -f "${_ini_vv_file}" ]; then
+        sed -i '/^\[versavoice\]/,/^\[/{s|^api_token=.*|api_token='"${VV_TOKEN_UPDATE}"'|}' "${_ini_vv_file}" 2>/dev/null || true
+      fi
+    done
+    for agent_config in /etc/versa-agi/*_config.json; do
+      [ -f "${agent_config}" ] || continue
+      local_agent_name=$(basename "${agent_config}" _config.json)
+      if jq -e '.versavoice' "${agent_config}" >/dev/null 2>&1; then
+        jq --arg token "${VV_TOKEN_UPDATE}" '.versavoice.api_token = $token' \
+          "${agent_config}" > "${agent_config}.tmp" && \
+          mv "${agent_config}.tmp" "${agent_config}"
+        ok "VV API token injected into ${local_agent_name}_config.json"
+        # Restore correct ownership: watchdog:{agent} 640 (System Design §IX)
+        if [ "${local_agent_name}" = "coa" ]; then
+          chown "${WATCHDOG_USER}:${COA_USER}" "${agent_config}"
+        else
+          chown "${WATCHDOG_USER}:${local_agent_name}" "${agent_config}" 2>/dev/null || \
+            chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${agent_config}"
         fi
-      done
-    else
-      warn "No VV API token in setup.ini — skipping injection"
-    fi
+        chmod 640 "${agent_config}"
+      fi
+    done
   fi
   echo ""
 
@@ -2928,12 +2990,14 @@ if [ "${UPDATE_MODE}" = true ]; then
     section "Update — Model Registry Sync"
 
     # ── Cloud Models (Gemini) ──
-    # Stock list read from setup.ini (the shipped template via ini_get) — the
-    # previous hardcoded duplication was removed. The deployed setup.ini is
-    # regenerated by `agictl system reconcile-config` in the universal Model
-    # Catalog step below, and `agictl model sync` then re-derives
-    # VERSA_CLOUD_MODELS from the merged catalog (authoritative).
-    CURRENT_CLOUD_MODELS="$(ini_get gemini cloud_models '')"
+    # Membership lives in setup.ini cloud_models=; paths.env only lists models
+    # when Gemini credentials exist (same gate as third_party_*_enabled).
+    # `agictl model sync` re-derives VERSA_CLOUD_MODELS from the catalog after
+    # migrate (authoritative).
+    CURRENT_CLOUD_MODELS=""
+    if gemini_credentials_present; then
+      CURRENT_CLOUD_MODELS="$(ini_get gemini cloud_models '')"
+    fi
 
     # ── Local AI settings ──
     PATHS_ENV="/etc/versa-agi/paths.env"
@@ -3252,9 +3316,10 @@ _heal_keyed_third_party_providers() {
     if [ -z "${has_key}" ] && [ -f "${deployed}" ]; then
       has_key="$(_heal_ini_get third_party "${slug}_api_key" "${deployed}" "")"
     fi
-    if [ -z "${has_key}" ]; then
-      has_key="$(ini_get third_party "${slug}_api_key" "")"
-    fi
+    # Do NOT fall back to source-tree setup.ini / ini_get() here. Multipass and
+    # other mounts often keep a developer setup.ini with live keys next to
+    # setup.sh; reading those would auto-enable every provider on a "skip-all"
+    # QT box. Only runtime key stores count: provider_keys.env + /etc setup.ini.
     [ -n "${has_key}" ] || continue
 
     enabled="$(_heal_ini_get third_party "${ini_key}" "${deployed}" false)"
@@ -3325,10 +3390,21 @@ except Exception:
       warn "OpenRouter template patch skipped (non-fatal — API may be unreachable)"
     fi
   fi
-  if [ -f "${SCRIPT_DIR}/setup.ini" ] && [ -f "${SCRIPT_DIR}/models.ini" ]; then
+  # Prefer *.stock (secret-free stock authority) so fresh scaffold and
+  # --update regenerate identical structure/lists. Fall back to the working
+  # copies when stock files are absent (older trees).
+  _SETUP_TEMPLATE="${SCRIPT_DIR}/setup.ini.stock"
+  if [ ! -f "${_SETUP_TEMPLATE}" ]; then
+    _SETUP_TEMPLATE="${SCRIPT_DIR}/setup.ini"
+  fi
+  _MODELS_TEMPLATE="${SCRIPT_DIR}/models.ini.stock"
+  if [ ! -f "${_MODELS_TEMPLATE}" ]; then
+    _MODELS_TEMPLATE="${SCRIPT_DIR}/models.ini"
+  fi
+  if [ -f "${_SETUP_TEMPLATE}" ] && [ -f "${_MODELS_TEMPLATE}" ]; then
     if agictl system reconcile-config \
-        --setup-template "${SCRIPT_DIR}/setup.ini" \
-        --models-template "${SCRIPT_DIR}/models.ini" >/dev/null 2>&1; then
+        --setup-template "${_SETUP_TEMPLATE}" \
+        --models-template "${_MODELS_TEMPLATE}" >/dev/null 2>&1; then
       ok "Config reconciled from shipped templates (user content preserved)"
     else
       warn "Config reconcile skipped (non-fatal)"
@@ -3337,10 +3413,38 @@ except Exception:
   # After reconcile: re-heal in case template carry missed a flag, then migrate
   # so [providers] baseline gets openrouter=true|OpenRouter|...
   _heal_keyed_third_party_providers
-  if agictl model migrate >/dev/null 2>&1; then
+  _MIGRATE_ERR="$(mktemp)"
+  if agictl model migrate >"${_MIGRATE_ERR}" 2>&1; then
     ok "Model catalog baseline regenerated from setup.ini (custom layer preserved)"
   else
-    warn "Model catalog migrate skipped (non-fatal)"
+    warn "Model catalog migrate failed (non-fatal) — $(head -c 200 "${_MIGRATE_ERR}" | tr '\n' ' ')"
+  fi
+  rm -f "${_MIGRATE_ERR}"
+  # Safety net: Providers tab must never be empty after install. If migrate
+  # failed or wrote nothing, re-seed [providers] from models.ini.stock and retry.
+  _PROV_COUNT=0
+  if [ -f "/etc/versa-agi/models.ini" ]; then
+    _PROV_COUNT="$(awk '
+      /^\[providers\]/ { s=1; next }
+      /^\[/ { s=0 }
+      s && /^[a-zA-Z0-9_-]+[[:space:]]*=/ { n++ }
+      END { print n+0 }
+    ' /etc/versa-agi/models.ini 2>/dev/null || echo 0)"
+  fi
+  if [ "${_PROV_COUNT}" -lt 1 ]; then
+    warn "models.ini [providers] empty after migrate — re-seeding from models.ini.stock"
+    if [ -f "${SCRIPT_DIR}/models.ini.stock" ]; then
+      cp -f "${SCRIPT_DIR}/models.ini.stock" "/etc/versa-agi/models.ini"
+      chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/models.ini" 2>/dev/null || true
+      chmod 640 "/etc/versa-agi/models.ini"
+      if agictl model migrate >/dev/null 2>&1; then
+        ok "Providers registry restored via stock re-seed + migrate"
+      else
+        warn "Migrate still failed — stock [providers] left in place for Model Manager"
+      fi
+    else
+      error "models.ini.stock missing — cannot restore Providers registry"
+    fi
   fi
   # After migrate: ensure providers_custom enable overlay (idempotent)
   _heal_keyed_third_party_providers
@@ -3761,12 +3865,9 @@ echo ""
 HEALTH_LIB="${DEPLOYED_CORE_INFRA}/scripts/health_checks.sh"
 if [ -f "${HEALTH_LIB}" ]; then
   source "${HEALTH_LIB}"
-  run_health_checks
-
-  echo ""
-  echo "  ───────────────────────────────────"
-  echo "  Results: ${HEALTH_PASS} passed, ${HEALTH_FAIL} failed"
-  if [ "${HEALTH_FAIL}" -gt 0 ]; then
+  # set -e: health failures must WARN, not abort setup (same as restore.sh).
+  run_health_checks || true
+  if [ "${HEALTH_FAIL:-0}" -gt 0 ]; then
     warn "Health check completed with ${HEALTH_FAIL} failure(s) — review items above"
   else
     ok "All health checks passed"
@@ -3833,7 +3934,8 @@ api_token=
 auth_method=api_key
 api_key=
 mode=cloud
-model=gemini-3-flash-preview
+model=
+enabled=false
 [agent]
 cron_interval=1
 [users]
@@ -3846,10 +3948,23 @@ MINSEED
   _ini_set_in() { local s="$1" k="$2" v="$3"; sed -i "/^\[${s}\]/,/^\[/ s|^${k}=.*|${k}=${v}|" "${INI_FILE}"; }
 
   _ini_set "api_token"  "${VV_TOKEN:-}"
-  _ini_set "auth_method" "$( [ "${AUTH_METHOD:-}" = "1" ] && echo "api_key" || echo "vertex" )"
-  _ini_set "api_key"    "${api_key:-}"
+  # Step 4 wrote enabled= to source/etc early; this cp from template can restore
+  # enabled=true from the shipped setup.ini — re-apply the install choice.
+  _ini_set_in "versavoice" "enabled" "${ENABLE_VV:-true}"
+  # AUTH_METHOD is "1"/"2" only when Step 9b ran configure_ai_auth (or local
+  # stub). Skip / keep-without-update leaves it unset — do NOT default to
+  # vertex or wipe api_key (that was flipping auth_method=api_key → vertex).
+  if [ "${AUTH_METHOD:-}" = "1" ]; then
+    _ini_set_in "gemini" "auth_method" "api_key"
+    _ini_set_in "gemini" "api_key" "${api_key:-}"
+  elif [ "${AUTH_METHOD:-}" = "2" ]; then
+    _ini_set_in "gemini" "auth_method" "vertex"
+    # Exclusive with API key — do not leave a stale key beside Vertex.
+    _ini_set_in "gemini" "api_key" ""
+  fi
   _ini_set_in "gemini" "mode" "${SELECTED_EXEC_MODE:-cloud}"
-  _ini_set "model"      "${INI_GEMINI_MODEL:-gemini-3-flash-preview}"
+  _ini_set "model"      "${INI_GEMINI_MODEL:-}"
+  _ini_set_in "gemini" "enabled" "${GEMINI_PROVIDER_ENABLED:-false}"
   _ini_set "thinking_level" "$(ini_get gemini thinking_level high)"
   _ini_set_in "local_ai" "enabled" "${INI_LOCAL_AI_ENABLED:-false}"
   _ini_set "ollama_host" "${INI_OLLAMA_HOST:-http://localhost:11434}"
@@ -3875,8 +3990,8 @@ MINSEED
   _ini_set "service_account_key" "${INI_SA_KEY_PATH:-}"
   _ini_set "cron_interval" "${CRON_INTERVAL:-1}"
   _ini_set "file_mon_enabled" "$(ini_get agent file_mon_enabled false)"
-  _ini_set "timeout_minutes" "${INI_AGENT_TIMEOUT:-60}"
-  _ini_set "runaway_threshold" "${INI_RUNAWAY_THRESHOLD:-300}"
+  _ini_set "timeout_minutes" "${INI_AGENT_TIMEOUT:-45}"
+  _ini_set "runaway_threshold" "${INI_RUNAWAY_THRESHOLD:-2500}"
   _ini_set "circuit_breaker_consecutive" "$(ini_get agent circuit_breaker_consecutive 5)"
   _ini_set "circuit_breaker_hourly" "$(ini_get agent circuit_breaker_hourly 20)"
   _ini_set "first_name" "${INI_AGENT_FIRST_NAME:-Versa}"
@@ -3901,7 +4016,7 @@ MINSEED
   SOURCE_SETUP_INI="${SCRIPT_DIR}/setup.ini"
   if [ -f "${SOURCE_SETUP_INI}" ] && [ "$(realpath "${INI_FILE}" 2>/dev/null)" != "$(realpath "${SOURCE_SETUP_INI}" 2>/dev/null)" ]; then
     cp "${INI_FILE}" "${SOURCE_SETUP_INI}"
-    chmod 600 "${SOURCE_SETUP_INI}"
+    chown_repo_config "${SOURCE_SETUP_INI}" 600
     ok "Source setup.ini synced at ${SOURCE_SETUP_INI}"
   fi
 fi
@@ -3920,7 +4035,7 @@ if declare -F install_acceptance_record_full >/dev/null 2>&1 \
     _install_acceptance_sync_source_ini
   elif [ -f "${SCRIPT_DIR}/setup.ini" ] && [ "$(realpath "${INI_FILE}" 2>/dev/null)" != "$(realpath "${SCRIPT_DIR}/setup.ini" 2>/dev/null)" ]; then
     cp "${INI_FILE}" "${SCRIPT_DIR}/setup.ini"
-    chmod 600 "${SCRIPT_DIR}/setup.ini"
+    chown_repo_config "${SCRIPT_DIR}/setup.ini" 600
     ok "Source setup.ini synced at ${SCRIPT_DIR}/setup.ini"
   fi
   echo ""
@@ -3945,6 +4060,18 @@ if [ "${UPDATE_MODE}" != true ] && [ -f "${SCRIPT_DIR}/setup.ini" ] && [ "${SCRI
   chmod 640 "${INI_FILE}"
   chown "${WATCHDOG_USER}:agi_agents" "${INI_FILE}"
   ok "Synced setup.ini: source → deployed"
+fi
+
+# Safety net: sudo writes must not leave repo-tree configs owned by root.
+chown_repo_config "${SCRIPT_DIR}/setup.ini" 600
+chown_repo_config "${SCRIPT_DIR}/models.ini" 644
+
+# Final word for optional features: Step 13 + source→deployed sync can restore
+# stock/source [features]=true after earlier persist. Re-apply Enter/N answers.
+if [ "${UPDATE_MODE}" != true ] \
+   && declare -F install_acceptance_persist_features >/dev/null 2>&1; then
+  install_acceptance_persist_features \
+    || warn "Feature flag re-persist after Step 13 skipped (non-fatal)"
 fi
 
 if [ -f "${REGISTRATION_CONF_SRC}" ]; then

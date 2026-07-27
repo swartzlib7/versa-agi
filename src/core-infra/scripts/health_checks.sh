@@ -134,17 +134,24 @@ run_health_checks() {
   echo "  ── Security ──"
   health_check "Config deployed" "[ -f '/etc/versa-agi/coa_config.json' ]"
   health_check "Poise deployed" "[ -f '/etc/versa-agi/poise/coa.md' ]"
-  # Auth-method-aware credential check
-  local auth_method=""
-  if [ -f "/etc/versa-agi/coa.env" ]; then
-    if grep -q "GEMINI_API_KEY" "/etc/versa-agi/coa.env" 2>/dev/null; then
-      auth_method="api_key"
-    fi
+  # Gemini credentials are optional (Step 9b opt-in). Assert only what is
+  # present — never FAIL (and abort setup) when Gemini was skipped.
+  # Bug: missing GEMINI_API_KEY used to fall through to "GCP credentials exist".
+  local has_gemini_key=false
+  local has_gcp=false
+  if [ -f "/etc/versa-agi/coa.env" ] \
+     && grep -qE '^[[:space:]]*GEMINI_API_KEY=[^[:space:]#]+' "/etc/versa-agi/coa.env" 2>/dev/null; then
+    has_gemini_key=true
   fi
-  if [ "$auth_method" = "api_key" ]; then
-    health_check "API key configured" "grep -q 'GEMINI_API_KEY' '/etc/versa-agi/coa.env'"
+  if [ -f "/etc/versa-agi/vault/gcp-credentials.json" ]; then
+    has_gcp=true
+  fi
+  if [ "${has_gemini_key}" = true ]; then
+    health_check "Gemini API key configured" "true"
+  elif [ "${has_gcp}" = true ]; then
+    health_check "GCP credentials exist" "true"
   else
-    health_check "GCP credentials exist" "[ -f '/etc/versa-agi/vault/gcp-credentials.json' ]"
+    echo -e "  ⏳ SKIP  Gemini credentials (optional — not configured)"
   fi
 
   echo ""

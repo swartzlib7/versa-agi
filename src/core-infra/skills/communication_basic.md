@@ -1,6 +1,6 @@
 # Communication — Essential Messaging Rules
 
-> **Always-injected core.** For full messaging rules (attachments, effort calibration, inter-agent protocol, voice formatting, context recovery), load via tool **`agictl_execute`**, argument **`bash "cat ~/.agent/skills/communication.md"`**.
+> **Always-injected core.** For full messaging rules (attachments, effort calibration, inter-agent protocol, voice formatting, context recovery), load via tool **`agictl_execute`**, argument **`bash "cat .agent/skills/communication.md"`**.
 
 ## How to Send Messages
 

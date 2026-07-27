@@ -202,7 +202,7 @@ if command -v apt &>/dev/null; then
   _APT_UPDATED=0
   _needs_update() {
     # Return 0 (true) if any required command is missing
-    for _chk in git curl sqlite3 jq inotifywait; do
+    for _chk in git curl sqlite3 jq inotifywait xclip; do
       command -v "${_chk}" &>/dev/null || return 0
     done
     return 1
@@ -219,6 +219,12 @@ auto_install "curl" "curl"
 auto_install "sqlite3" "sqlite3"
 auto_install "jq" "jq"
 auto_install "inotifywait" "inotify-tools"
+# agitop Copy All / clipboard (xsel is an acceptable alternative if already present)
+if command -v xsel &>/dev/null && ! command -v xclip &>/dev/null; then
+  ok "xsel: clipboard support present"
+else
+  auto_install "xclip" "xclip"
+fi
 
 if [ "${MISSING}" -eq 1 ]; then
   echo ""

@@ -570,9 +570,23 @@ install_acceptance_feature_prompts() {
     echo ""
   fi
 
+  # Fresh install: always prompt [y/N] (OFF). --update carries prior choice.
+  # Do not seed the prompt from stock/source setup.ini=true (that made Enter
+  # mean Yes while the copy said "defaults to OFF").
+  local org_current util_current script_current output_current
+  if [ "${UPDATE_MODE:-false}" = true ]; then
+    org_current="$(_install_acceptance_features_get organization_ui false)"
+    util_current="$(_install_acceptance_features_get utility_models_ui false)"
+    script_current="$(_install_acceptance_features_get script_tasks_ui false)"
+    output_current="$(_install_acceptance_features_get output_routing_ui false)"
+  else
+    org_current="false"
+    util_current="false"
+    script_current="false"
+    output_current="false"
+  fi
+
   # Organization — disclaimer first, then the gated prompt.
-  local org_current
-  org_current="$(_install_acceptance_features_get organization_ui false)"
   _install_acceptance_org_disclaimer
   export VERSA_FEATURE_ORGANIZATION_UI="$(_install_acceptance_feature_ask \
     "Would you like to enable the Organization surface?" "${org_current}")"
@@ -584,7 +598,7 @@ install_acceptance_feature_prompts() {
   _install_acceptance_feature_cont \
     "image, audio) on a schedule or on demand, without a full agent cycle."
   export VERSA_FEATURE_UTILITY_MODELS_UI="$(_install_acceptance_feature_ask \
-    "Enable Utility Models UI?" "$(_install_acceptance_features_get utility_models_ui false)")"
+    "Enable Utility Models UI?" "${util_current}")"
 
   echo ""
   _install_acceptance_feature_note \
@@ -592,7 +606,7 @@ install_acceptance_feature_prompts() {
   _install_acceptance_feature_cont \
     "repo, run by lifeline on a cadence (no agent spawn, no LLM)."
   export VERSA_FEATURE_SCRIPT_TASKS_UI="$(_install_acceptance_feature_ask \
-    "Enable Script Tasks UI?" "$(_install_acceptance_features_get script_tasks_ui false)")"
+    "Enable Script Tasks UI?" "${script_current}")"
 
   echo ""
   _install_acceptance_feature_note \
@@ -600,7 +614,7 @@ install_acceptance_feature_prompts() {
   _install_acceptance_feature_cont \
     "a chosen model per cycle (the Output Routing tab in Model Routing)."
   export VERSA_FEATURE_OUTPUT_ROUTING_UI="$(_install_acceptance_feature_ask \
-    "Enable Output Routing UI?" "$(_install_acceptance_features_get output_routing_ui false)")"
+    "Enable Output Routing UI?" "${output_current}")"
 }
 
 # Write a single [features] key into the deployed setup.ini (create section if
@@ -738,14 +752,16 @@ install_acceptance_update_prompt() {
 }
 
 # ─── VersaVoice AI enable prompt (Step 4 — single ask) ─
+# VV account is REQUIRED for install (2026-07). Optional skip parked below —
+# revisit later; do not re-enable without fixing local-only downstream gaps.
 install_acceptance_vv_prompt() {
   local default_enabled="${1:-true}"
   local intro_line1 intro_line2 intro_line3
   local policy_line usage_line link_terms link_privacy
 
   intro_line1="$(_install_acceptance_brand) enables cloud messaging between you, your agents and your connections"
-  intro_line2="via the $(_install_acceptance_brand) mobile/web app. This is optional — agents can communicate"
-  intro_line3="locally via the agitop dashboard without a VersaVoice account."
+  intro_line2="via the $(_install_acceptance_brand) mobile/web app. A $(_install_acceptance_brand) account"
+  intro_line3="and sponsor API token are required to install and run Versa AGi."
   usage_line="  • Messaging uses your $(_install_acceptance_brand) usage minutes"
   policy_line="  • $(_install_acceptance_brand) Terms of Service and Privacy Policy apply:"
   link_terms="    $(_install_acceptance_link "${INSTALL_ACCEPTANCE_TERMS_URL}")"
@@ -778,26 +794,34 @@ install_acceptance_vv_prompt() {
     echo ""
   fi
 
-  if [ "${default_enabled}" = "false" ]; then
-    _install_acceptance_read_yn "  Enable $(_install_acceptance_brand)? [y/N] "
-    if [[ $REPLY =~ ^[Yy]([Ee][Ss])?$ ]]; then
-      export ENABLE_VV="true"
-    else
-      export ENABLE_VV="false"
-    fi
-  else
-    _install_acceptance_read_yn "  Enable $(_install_acceptance_brand)? [Y/n] "
-    if [[ $REPLY =~ ^[Nn]([Oo])?$ ]]; then
-      export ENABLE_VV="false"
-    else
-      export ENABLE_VV="true"
-    fi
-  fi
+  # ── Parked: optional VV enable/disable ask ──
+  # if [ "${default_enabled}" = "false" ]; then
+  #   _install_acceptance_read_yn "  Enable $(_install_acceptance_brand)? [y/N] "
+  #   if [[ $REPLY =~ ^[Yy]([Ee][Ss])?$ ]]; then
+  #     export ENABLE_VV="true"
+  #   else
+  #     export ENABLE_VV="false"
+  #   fi
+  # else
+  #   _install_acceptance_read_yn "  Enable $(_install_acceptance_brand)? [Y/n] "
+  #   if [[ $REPLY =~ ^[Nn]([Oo])?$ ]]; then
+  #     export ENABLE_VV="false"
+  #   else
+  #     export ENABLE_VV="true"
+  #   fi
+  # fi
+  # if [ "${ENABLE_VV}" = "false" ]; then
+  #   info "$(_install_acceptance_brand) disabled — agents will use local messaging only"
+  #   info "You can enable VV later via the agitop dashboard toggle"
+  # fi
 
-  if [ "${ENABLE_VV}" = "false" ]; then
-    info "$(_install_acceptance_brand) disabled — agents will use local messaging only"
-    info "You can enable VV later via the agitop dashboard toggle"
+  export ENABLE_VV="true"
+  if declare -F ok >/dev/null 2>&1; then
+    ok "$(_install_acceptance_brand) required — continue with your sponsor API token"
+  else
+    info "$(_install_acceptance_brand) required — continue with your sponsor API token"
   fi
+  : "${default_enabled}"  # retained for parked optional-ask signature
 }
 
 # ─── INI helpers ([registration] section) ───────────
@@ -832,6 +856,10 @@ _install_acceptance_sync_source_ini() {
   fi
   cp "${deployed}" "${source}" 2>/dev/null || true
   chmod 600 "${source}" 2>/dev/null || true
+  # Repo-tree source is Primary User–owned (setup runs as root via sudo).
+  if [ -n "${SUDO_USER:-}" ]; then
+    chown "${SUDO_USER}:${SUDO_USER}" "${source}" 2>/dev/null || true
+  fi
 }
 
 _install_acceptance_ini_set() {

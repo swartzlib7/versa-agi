@@ -8,6 +8,7 @@ All effectful commands return JSON confirming what occurred.
 import os
 import sys
 import json
+import re
 import time
 import sqlite3
 import shutil
@@ -250,6 +251,39 @@ def system_config_set_ini(section, key, value):
         json_response(False, error=str(e))
         sys.exit(1)
 
+def _validate_versavoice_api_token(token: str) -> tuple[bool, str]:
+    """Live-check sponsor token via GET /account. Fail closed on auth/network errors."""
+    import urllib.error
+    import urllib.request
+
+    url = "https://us-central1-versavoice-s777.cloudfunctions.net/api/v1/account"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "Versa-AGi/set-key",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, (
+                "Invalid VersaVoice API token. Generate a sponsor token in the "
+                "VersaVoice app (Settings → System → Generate API Token)."
+            )
+        return False, f"VersaVoice API rejected token (HTTP {exc.code})"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Could not verify VersaVoice token (network): {exc}"
+
+    if not isinstance(data, dict) or not (data.get("uid") or "").strip():
+        return False, "VersaVoice API returned no account uid for this token"
+    return True, ""
+
+
 @system.command("set-key", hidden=True)
 @click.argument("key_type", type=click.Choice(["gemini", "versavoice", "xai", "openai", "anthropic", "openrouter"]))
 @click.argument("value")
@@ -259,6 +293,7 @@ def system_set_key(key_type, value):
     Key types:
       gemini     - Gemini API Key → coa.env, *.env, .bashrc, setup.ini
       versavoice - VersaVoice API Token → coa_config.json, *_config.json, setup.ini
+                   (live-validated against GET /account before write)
       xai        - xAI API Key → provider_keys.env, setup.ini
       openai     - OpenAI API Key → provider_keys.env, setup.ini
       anthropic  - Anthropic API Key → provider_keys.env, setup.ini
@@ -304,24 +339,39 @@ def system_set_key(key_type, value):
             return False
 
     def _ini_set(section, key, val):
-        """Update a key in setup.ini preserving format."""
+        """Update or insert a key in setup.ini preserving format."""
         if not os.path.isfile(setup_ini):
             return
         try:
             with open(setup_ini, "r") as f:
                 lines = f.readlines()
             in_section = False
+            section_start = -1
+            found = False
             for i, line in enumerate(lines):
                 stripped = line.strip()
                 if stripped.startswith("[") and stripped.endswith("]"):
+                    if in_section and not found:
+                        # Insert before next section
+                        lines.insert(i, f"{key}={val}\n")
+                        found = True
+                        break
                     in_section = (stripped == f"[{section}]")
+                    if in_section:
+                        section_start = i
                 elif in_section and stripped.startswith(f"{key}="):
                     lines[i] = f"{key}={val}\n"
+                    found = True
                     break
-            with open(setup_ini, "w") as f:
-                f.writelines(lines)
-            updated_files.append(setup_ini)
-            _sync_ini_to_source(setup_ini)
+            if in_section and not found:
+                # Append at end of file while still in section
+                lines.append(f"{key}={val}\n")
+                found = True
+            if found:
+                with open(setup_ini, "w") as f:
+                    f.writelines(lines)
+                updated_files.append(setup_ini)
+                _sync_ini_to_source(setup_ini)
         except Exception as e:
             errors.append(f"setup.ini: {e}")
 
@@ -349,13 +399,23 @@ def system_set_key(key_type, value):
         if _sed_replace(bashrc, r'^export GEMINI_API_KEY=".*"$', f'export GEMINI_API_KEY="{value}"'):
             updated_files.append(bashrc)
 
-        # 4. setup.ini
+        # 4. setup.ini — key + provider registry enable (WU-07)
         _ini_set("gemini", "api_key", value)
+        _ini_set("gemini", "enabled", "true")
+
+        # 5. Enable Google provider in models.ini (same pattern as TP set-key)
+        _activate_google_provider_on_key(updated_files, errors)
 
     # ════════════════════════════════════════════════
     # VERSAVOICE API TOKEN
     # ════════════════════════════════════════════════
     elif key_type == "versavoice":
+        # Live-validate against GET /account before writing (reject fakes).
+        ok_vv, vv_err = _validate_versavoice_api_token(value.strip())
+        if not ok_vv:
+            json_response(False, error=vv_err or "Invalid VersaVoice API token")
+            sys.exit(1)
+
         # 1. Update all *_config.json files
         for config_file in glob.glob("/etc/versa-agi/*_config.json"):
             try:
@@ -817,10 +877,13 @@ def _ini_section_body_lines(path, section):
 def _is_stock_setup_key(section, key):
     """True for setup.ini keys owned by the shipped template (never carried forward).
 
-    These are the stock model-selection lists — the release decides them; the
-    operator customizes models via the dashboard/CLI custom layer instead.
+    These are the stock model-selection lists and the system default model — the
+    release decides them; the operator customizes models via the dashboard/CLI
+    custom layer (and per-agent overrides in agents.db) instead.
     """
-    if section == "gemini" and key in ("cloud_models", "coa_approved_models"):
+    if section == "gemini" and key in (
+        "cloud_models", "coa_approved_models", "model",
+    ):
         return True
     if section == "third_party" and (key == "providers" or key.endswith("_models")):
         return True
@@ -871,9 +934,10 @@ def _reconcile_models_ini(template, deployed):
     Preserved across regeneration:
       - [catalog_custom] / [providers_custom] / [model_params_custom] bodies verbatim (the user layer)
       - deployed-only keys in the shared local sections (registry-added models)
-    Everything else (header comments, [catalog]/[providers] stock, shipped local
-    rows) comes fresh from the template; `model migrate` rebuilds the baseline
-    from setup.ini right after.
+    Everything else (header comments, [catalog_library], empty [catalog],
+    [providers] stubs, shipped local pipeline rows) comes fresh from the
+    template; `model migrate` injects live [catalog] rows for activated
+    providers from setup.ini right after.
     """
     custom_bodies = {
         sec: _ini_section_body_lines(deployed, sec)
@@ -903,7 +967,7 @@ def _reconcile_models_ini(template, deployed):
 
 @system.command("reconcile-config", hidden=True)
 @click.option("--setup-template", required=True, type=click.Path(exists=True),
-              help="Shipped setup.ini template (installer directory)")
+              help="Shipped stock template (prefer setup.ini.stock)")
 @click.option("--models-template", required=True, type=click.Path(exists=True),
               help="Shipped models.ini template (installer directory)")
 def system_reconcile_config(setup_template, models_template):
@@ -1280,7 +1344,11 @@ def _sync_catalog():
     for key, m in catalog.items():
         cls = m["class"]
         if cls == "cloud":
-            if m["enabled"]:
+            # Same gate as third_party: model enabled AND provider enabled.
+            # Google stays En=· until Gemini credentials exist (migrate / set-key).
+            prov = providers.get(m["provider"], {})
+            available = m["enabled"] and prov.get("enabled", False)
+            if available:
                 cloud.append(key)
                 if m["coa"]:
                     coa.append(key)
@@ -3080,28 +3148,105 @@ def source_refresh_cmd(provider, models_ini):
 
 
 def _catalog_baseline_meta(ini):
-    """Parse [catalog] baseline into {key: full row dict for migrate merge}."""
+    """Parse stock metadata for migrate inject ({key: full row dict}).
+
+    Prefers ``[catalog_library]`` (shipped metadata; not the live Models tab),
+    then falls back to ``[catalog]`` for older trees that still embed stock rows
+    in the live baseline.
+    """
     meta = {}
-    if not ini.has_section("catalog"):
-        return meta
-    for key, raw in ini.items("catalog"):
-        parsed = parse_catalog_row(raw)
-        if parsed:
-            meta[key.strip()] = parsed
+    for section in ("catalog_library", "catalog"):
+        if not ini.has_section(section):
+            continue
+        for key, raw in ini.items(section):
+            k = key.strip()
+            if k in meta:
+                continue
+            parsed = parse_catalog_row(raw)
+            if parsed:
+                meta[k] = parsed
     return meta
 
 
+def _gemini_credentials_present() -> bool:
+    """True when Gemini API key or GCP vault credentials are configured."""
+    coa_env = "/etc/versa-agi/coa.env"
+    try:
+        if os.path.isfile(coa_env):
+            with open(coa_env, "r", encoding="utf-8") as f:
+                for line in f:
+                    m = re.match(r"^\s*GEMINI_API_KEY=(.+)$", line)
+                    if m:
+                        val = m.group(1).strip().strip('"').strip("'")
+                        if val and not val.startswith("#"):
+                            return True
+    except Exception:
+        pass
+    if os.path.isfile("/etc/versa-agi/vault/gcp-credentials.json"):
+        return True
+    # Do not treat setup.ini api_key alone as "enabled" — the shipped template
+    # may carry a placeholder/stale value while Step 9b skipped writing coa.env.
+    return False
+
+
+def _gemini_provider_enabled() -> bool:
+    """[gemini] enabled= gate. Unset → True (legacy installs keyed without flag)."""
+    try:
+        import configparser
+        cfg = configparser.ConfigParser()
+        for p in (SETUP_INI_CANONICAL, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "setup.ini",
+        )):
+            if os.path.isfile(p):
+                cfg.read(p)
+                break
+        else:
+            return True
+        if not cfg.has_option("gemini", "enabled"):
+            return True
+        return cfg.get("gemini", "enabled", fallback="true").strip().lower() in (
+            "true", "1", "yes", "on",
+        )
+    except Exception:
+        return True
+
+
+def _activate_google_provider_on_key(updated_files=None, errors=None):
+    """Setting a Gemini key implies Google provider enable + inject cloud models."""
+    updated_files = updated_files if updated_files is not None else []
+    errors = errors if errors is not None else []
+    try:
+        value = "true|Google Gemini|ChatGoogleGenerativeAI"
+        for path in _models_ini_write_targets():
+            _upsert_models_ini_entry(path, "providers_custom", "google", value)
+            if path not in updated_files:
+                updated_files.append(path)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"models.ini provider enable (google): {e}")
+    # Inject setup.ini cloud_models into live [catalog] (same as TP activate).
+    if not os.environ.get("AGICTL_AGENT_USER", ""):
+        try:
+            _migrate_catalog_baseline(force=False)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"model migrate on activate (google): {e}")
+    try:
+        _sync_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _build_migration_rows(target):
-    """Derive ([providers], [catalog]) rows from setup.ini + the template catalog.
+    """Derive ([providers], [catalog]) rows from setup.ini + catalog library.
 
     Returns (provider_rows, catalog_rows) as ordered lists of (key, value).
 
-    Edition 2.x (reconciled): setup.ini decides *membership* (which models ship)
-    plus COA eligibility and provider enablement. Cloud/third-party *metadata*
-    (display label + context windows) is sourced from the [catalog] baseline of
-    the ``target`` models.ini — the shipped template's catalog — which is the sole
-    stock-metadata source. Local rows remain sourced from the pipeline-owned
-    [local_models]/[context_windows] sections (intentionally left untouched).
+    Providers are always prefaced (En=· until keyed). Live [catalog] rows are
+    injected only for *activated* backends:
+      - Google cloud_models when Gemini credentials exist
+      - third_party {slug}_models when {slug}_enabled=true
+      - local_models when local_ai.enabled and mode is local/hybrid
+    Metadata (labels/ctx) comes from [catalog_library] (or legacy [catalog]).
     """
     import configparser
     mini = _models_ini_parser()
@@ -3131,6 +3276,7 @@ def _build_migration_rows(target):
     cloud_models = _read_ini_csv("gemini", "cloud_models")[0]
     local_models = _read_ini_csv("local_ai", "local_models")[0]
     tp_providers = _read_ini_csv("third_party", "providers")[0]
+    google_enabled = _gemini_credentials_present() and _gemini_provider_enabled()
 
     or_index: dict = {}
     try:
@@ -3140,38 +3286,47 @@ def _build_migration_rows(target):
 
     catalog_rows = []
 
-    # ── Cloud (metadata from the [catalog] template; default if unseen) ──
-    for k in cloud_models:
-        m = cat_meta.get(k, {})
-        lbl = m.get("label", k)
-        rec = m.get("ctx_recommended", 0)
-        mx = m.get("ctx_max", 1000000) or 1000000
-        coa = "true" if k in coa_approved else "false"
-        row = {
-            "class": "cloud", "provider": "google", "enabled": True, "coa": coa == "true",
-            "ctx_recommended": rec, "ctx_max": mx,
-            "work_modality": m.get("work_modality", "balanced"),
-            "input_modalities": m.get("input_modalities", "text"),
-            "output_modalities": m.get("output_modalities", "text"),
-            "router_eligible": m.get("router_eligible", False),
-            "label": lbl,
-        }
-        catalog_rows.append((k, catalog_row_to_value(row)))
+    # ── Cloud: inject only when Gemini credentials + enabled= ──
+    if google_enabled:
+        for k in cloud_models:
+            m = cat_meta.get(k, {})
+            lbl = m.get("label", k)
+            rec = m.get("ctx_recommended", 0)
+            mx = m.get("ctx_max", 1000000) or 1000000
+            coa = "true" if k in coa_approved else "false"
+            row = {
+                "class": "cloud", "provider": "google", "enabled": True, "coa": coa == "true",
+                "ctx_recommended": rec, "ctx_max": mx,
+                "work_modality": m.get("work_modality", "balanced"),
+                "input_modalities": m.get("input_modalities", "text"),
+                "output_modalities": m.get("output_modalities", "text"),
+                "router_eligible": m.get("router_eligible", False),
+                "label": lbl,
+            }
+            catalog_rows.append((k, catalog_row_to_value(row)))
 
-    # ── Third-party (per provider; metadata from the [catalog] template) ──
+    # ── Providers: always prefill stock cloud providers (enabled = keyed/opted-in).
+    # Skip-all installs still get Google/xAI/OpenAI/Anthropic/OpenRouter in the
+    # Providers tab so Add Model has a provider dropdown; En=· until configured.
     provider_rows = [
-        ("google", "true|Google Gemini|ChatGoogleGenerativeAI"),
+        ("google", f"{'true' if google_enabled else 'false'}|Google Gemini|ChatGoogleGenerativeAI"),
     ]
     cls_map = {"xai": "ChatOpenAI", "openai": "ChatOpenAI",
                "anthropic": "ChatAnthropic", "openrouter": "ChatOpenAI"}
     label_map = {"xai": "xAI (Grok)", "openai": "OpenAI (GPT)",
                  "anthropic": "Anthropic (Claude)", "openrouter": "OpenRouter"}
-    for slug in tp_providers:
+    # setup.ini [third_party] providers= plus stock slugs (never leave the registry empty)
+    _stock_tp = ("xai", "openai", "anthropic", "openrouter")
+    _tp_slugs = list(dict.fromkeys([*(tp_providers or []), *_stock_tp]))
+    for slug in _tp_slugs:
         raw_enabled = _read_ini_value("third_party", f"{slug}_enabled", "false")
         p_enabled = "true" if raw_enabled.strip().lower() == "true" else "false"
         p_cls = cls_map.get(slug, "ChatOpenAI")
         p_label = label_map.get(slug, slug)
         provider_rows.append((slug, f"{p_enabled}|{p_label}|{p_cls}"))
+        # Inject {slug}_models into live [catalog] only when that provider is on.
+        if p_enabled != "true":
+            continue
         for k in _read_ini_csv("third_party", f"{slug}_models")[0]:
             m = cat_meta.get(k, {})
             lbl = m.get("label", k)
@@ -3195,8 +3350,7 @@ def _build_migration_rows(target):
     local_provider = local_provider_for_backend(gpu_backend)
     is_llamacpp = local_provider == "llamacpp"
     # Cloud-only Client (install type 1) sets local_ai.enabled=false + mode=cloud.
-    # Local models / Ollama / llama.cpp belong only in Local AI topologies
-    # (local, client+local AI / hybrid, server).
+    # Local / Ollama / llama.cpp catalog rows only when Local AI topology is on.
     local_ai_enabled = (
         _read_ini_value("local_ai", "enabled", "false").strip().lower() == "true"
     )
@@ -3306,6 +3460,92 @@ def _clear_ini_section(path, section):
         _replace_ini_section_body(path, section, [])
 
 
+def _seed_models_ini_if_missing() -> str | None:
+    """Create /etc/versa-agi/models.ini from a shipped stock/template if absent.
+
+    Returns the seeded path. Used so ``model migrate`` can populate
+    Providers/Models after a clean install that omitted models.ini
+    (setup.sh normally scaffolds from models.ini.stock first).
+    """
+    canonical = _MODELS_INI_PATHS[0]
+    if os.path.exists(canonical):
+        return canonical
+    # core-infra/agictl → ../../models.ini.stock (installer src/)
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_root = os.path.abspath(os.path.join(here, "..", ".."))
+    candidates = [
+        os.path.join(src_root, "models.ini.stock"),
+        os.path.join(src_root, "models.ini"),
+        os.path.join(here, "..", "config", "models.ini"),
+    ]
+    os.makedirs(os.path.dirname(canonical), exist_ok=True)
+    for c in candidates:
+        c = os.path.abspath(c)
+        if os.path.isfile(c):
+            shutil.copyfile(c, canonical)
+            return canonical
+    # Last resort: empty shell with required section headers so migrate can write.
+    with open(canonical, "w") as f:
+        f.write(
+            "# Seeded empty models.ini — baseline filled by model migrate\n"
+            "[providers]\n\n[providers_custom]\n\n[catalog_library]\n\n"
+            "[catalog]\n\n[catalog_custom]\n\n[model_params]\n\n"
+            "[model_params_custom]\n\n[local_models]\n\n[context_windows]\n\n"
+            "[sycl_models]\n"
+        )
+    return canonical
+
+
+def _migrate_catalog_baseline(force: bool = False) -> dict:
+    """Rebuild models.ini [catalog]/[providers] baseline from setup.ini CSVs.
+
+    Returns a stats dict. Raises FileNotFoundError / PermissionError on failure.
+    Used by ``agictl model migrate`` and by set-key / provider enable so stock
+    OpenRouter (etc.) rows appear when a provider is activated without a full
+    setup --update.
+    """
+    target = _resolve_models_ini_path()
+    if not target:
+        target = _seed_models_ini_if_missing()
+    if not target:
+        raise FileNotFoundError("models.ini not found")
+
+    provider_rows, catalog_rows = _build_migration_rows(target)
+    write_targets = _models_ini_write_targets() or [target]
+    google_baseline_enabled = any(
+        k == "google" and str(v).split("|", 1)[0].strip().lower() == "true"
+        for k, v in provider_rows
+    )
+
+    custom_io_refreshed = 0
+    for path in write_targets:
+        _write_full_ini_section(path, "providers", provider_rows,
+                                header_comment=_BASELINE_PROVIDERS_HEADER)
+        _write_full_ini_section(path, "catalog", catalog_rows,
+                                header_comment=_BASELINE_CATALOG_HEADER)
+        if not force:
+            custom_io_refreshed += _refresh_catalog_custom_io_from_baseline(path, catalog_rows)
+            # Drop stale providers_custom google=true when Gemini was skipped
+            # (custom layer would otherwise keep Google enabled over baseline false).
+            if not google_baseline_enabled:
+                try:
+                    _remove_ini_entry(path, "providers_custom", "google")
+                except Exception:  # noqa: BLE001
+                    pass
+        if force:
+            _clear_ini_section(path, "providers_custom")
+            _clear_ini_section(path, "catalog_custom")
+            _clear_ini_section(path, "model_params_custom")
+
+    return {
+        "models": len(catalog_rows),
+        "providers": len(provider_rows),
+        "custom_io_refreshed": custom_io_refreshed,
+        "files": write_targets,
+        "mode": "force-reset" if force else "baseline",
+    }
+
+
 @model.command("migrate")
 @click.option("--force", is_flag=True,
               help="Factory reset: also wipe [catalog_custom]/[providers_custom] (discards all CLI/dashboard edits)")
@@ -3337,36 +3577,20 @@ def model_migrate(force):
         )
         sys.exit(1)
 
-    target = _resolve_models_ini_path()
-    if not target:
-        json_response(False, error="models.ini not found")
-        sys.exit(1)
-
-    provider_rows, catalog_rows = _build_migration_rows(target)
-    write_targets = _models_ini_write_targets() or [target]
-
-    custom_io_refreshed = 0
     try:
-        for path in write_targets:
-            _write_full_ini_section(path, "providers", provider_rows,
-                                    header_comment=_BASELINE_PROVIDERS_HEADER)
-            _write_full_ini_section(path, "catalog", catalog_rows,
-                                    header_comment=_BASELINE_CATALOG_HEADER)
-            if not force:
-                custom_io_refreshed += _refresh_catalog_custom_io_from_baseline(path, catalog_rows)
-            if force:
-                _clear_ini_section(path, "providers_custom")
-                _clear_ini_section(path, "catalog_custom")
-                _clear_ini_section(path, "model_params_custom")
+        stats = _migrate_catalog_baseline(force=force)
+    except FileNotFoundError as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
 
     json_response(True, changed=True,
-                  mode="force-reset" if force else "baseline",
-                  models=len(catalog_rows), providers=len(provider_rows),
-                  custom_io_refreshed=custom_io_refreshed,
-                  files=write_targets,
+                  mode=stats["mode"],
+                  models=stats["models"], providers=stats["providers"],
+                  custom_io_refreshed=stats["custom_io_refreshed"],
+                  files=stats["files"],
                   message=(("Reset baseline and cleared the custom layer from setup.ini. "
                             if force else
                             "Regenerated [catalog]/[providers] baseline from setup.ini "
@@ -4188,6 +4412,15 @@ def _activate_third_party_on_key(slug, updated_files=None, errors=None):
                     updated_files.append(path)
     except Exception as e:  # noqa: BLE001
         errors.append(f"models.ini provider enable ({slug}): {e}")
+    # Re-migrate stock {slug}_models from setup.ini into the catalog baseline,
+    # then sync paths.env — otherwise enabling a key only flips the provider
+    # flag and agitop never sees shipped OpenRouter rows (e.g. z-ai/glm-5.2).
+    # Skip when an agent is the caller (same guard as `model migrate`).
+    if not os.environ.get("AGICTL_AGENT_USER", ""):
+        try:
+            _migrate_catalog_baseline(force=False)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"model migrate on activate ({slug}): {e}")
     try:
         _sync_catalog()
     except Exception:  # noqa: BLE001
@@ -4220,6 +4453,18 @@ def _provider_set_enabled(slug, enabled, no_sync):
                     _update_ini_key(path, "third_party", "enabled", "true")
             except Exception:  # noqa: BLE001
                 pass
+    # Enable or disable: rebuild live [catalog] so stock CSV models appear only
+    # while the provider is on (and drop when disabled).
+    if slug in _THIRD_PARTY_SETUP_SLUGS and not os.environ.get("AGICTL_AGENT_USER", ""):
+        try:
+            _migrate_catalog_baseline(force=False)
+        except Exception:  # noqa: BLE001
+            pass
+    if slug == "google" and not os.environ.get("AGICTL_AGENT_USER", ""):
+        try:
+            _migrate_catalog_baseline(force=False)
+        except Exception:  # noqa: BLE001
+            pass
     _auto_sync_and_respond(
         {"provider": slug, "enabled": enabled, "origin": info.get("origin"),
          "message": f"Provider '{slug}' {'enabled' if enabled else 'disabled'}."},
@@ -4633,8 +4878,8 @@ def agent_add(name, role):
             cfg = configparser.ConfigParser()
             try:
                 cfg.read(role_ini)
-                if cfg.has_option("gemini", "model"):
-                    _m = cfg.get("gemini", "model").strip()
+                if cfg.has_option("model", "model"):
+                    _m = cfg.get("model", "model").strip()
                     if _m:
                         role_model = _m
                 if cfg.has_option("poise", "anchor_style"):
@@ -4644,9 +4889,13 @@ def agent_add(name, role):
             except Exception:
                 pass
 
-        # ── Read defaults from setup.ini ──
-        default_timeout = 60
-        default_runaway = 300
+        # ── Read defaults from setup.ini (stock harness defaults when absent) ──
+        default_timeout = 45
+        default_runaway = 2500
+        default_max_turns = 400
+        default_tool_budget = 5000
+        default_resume_enabled = 1
+        default_resume_max = 25
         # Canonical location: /etc/versa-agi/setup.ini
         setup_ini = "/etc/versa-agi/setup.ini"
         if not os.path.isfile(setup_ini):
@@ -4677,9 +4926,14 @@ def agent_add(name, role):
 
         # ── INSERT into agents DB (pending approval) ──
         conn.execute(
-            "INSERT INTO agents (name, os_user, workspace, role, model, status, inactive, protected, requested_by, timeout_minutes, runaway_threshold, anchor_style, num_ctx) "
-            "VALUES (?, ?, ?, ?, ?, 'pending_approval', 1, 0, ?, ?, ?, ?, ?)",
-            (name, name, agent_root, role_label, role_model, get_agent_name(), default_timeout, default_runaway, role_anchor_style, role_num_ctx)
+            "INSERT INTO agents (name, os_user, workspace, role, model, status, inactive, "
+            "protected, requested_by, timeout_minutes, runaway_threshold, "
+            "max_session_turns, tool_output_token_budget, resume_enabled, "
+            "resume_max_messages, anchor_style, num_ctx) "
+            "VALUES (?, ?, ?, ?, ?, 'pending_approval', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, name, agent_root, role_label, role_model, get_agent_name(),
+             default_timeout, default_runaway, default_max_turns, default_tool_budget,
+             default_resume_enabled, default_resume_max, role_anchor_style, role_num_ctx)
         )
         conn.commit()
         conn.close()
@@ -4719,8 +4973,8 @@ def agent_list_roles():
                         cfg.read(ini_path)
                         if cfg.has_option("role", "description"):
                             role_data["description"] = cfg.get("role", "description")
-                        if cfg.has_option("gemini", "model"):
-                            model_val = cfg.get("gemini", "model").strip()
+                        if cfg.has_option("model", "model"):
+                            model_val = cfg.get("model", "model").strip()
                             if model_val:
                                 role_data["model"] = model_val
                     except Exception:
@@ -5910,7 +6164,7 @@ def agent_get_active():
         runaway_size = a.get("runaway_size_threshold", 512)
         injection_mode = a.get("context_injection_mode") or "relevant"
         token_budget = a.get("token_budget", 0)
-        max_turns = a.get("max_session_turns", 50)
+        max_turns = a.get("max_session_turns", 400)
         ov = agent_overrides.get(a["name"], {})
         tool_budget = ov.get("tool_output_token_budget")
         if tool_budget is None:
@@ -5919,8 +6173,8 @@ def agent_get_active():
         anchor_style = a.get("anchor_style") or "compact"
         num_ctx = a.get("num_ctx", 0)
         convo_depth = a.get("conversation_depth", 10)
-        resume_enabled = a.get("resume_enabled", 0)
-        resume_max_msgs = a.get("resume_max_messages", 0)
+        resume_enabled = a.get("resume_enabled", 1)
+        resume_max_msgs = a.get("resume_max_messages", 25)
         skill_mode = a.get("skill_injection_mode") or "hybrid"
         temperature = a.get("temperature")
         temperature_str = "" if temperature is None else str(temperature)
@@ -9401,6 +9655,15 @@ def memory_system_rename(old_key, new_key):
 # 9. EXECUTE — Code execution
 # ═══════════════════════════════════════════════════════
 
+def _exec_env_root() -> str | None:
+    """Environment root (parent of AGICTL_AGENT_DIR) for execute cwd, if known."""
+    agent_dir = os.environ.get("AGICTL_AGENT_DIR", "").strip()
+    if not agent_dir:
+        return None
+    root = os.path.dirname(agent_dir)
+    return root if root and os.path.isdir(root) else None
+
+
 def _get_exec_cmd(interpreter: str, script_path: str) -> list:
     """Build execution command, dropping back to the agent user if available.
 
@@ -9412,12 +9675,23 @@ def _get_exec_cmd(interpreter: str, script_path: str) -> list:
     Note: Agent users have /usr/sbin/nologin as their shell, so we cannot
     use 'sudo -i' (login shell). Instead we use 'sudo -u' and explicitly
     invoke the interpreter, which works regardless of the user's shell.
+
+    AGICTL_AGENT_DIR is re-injected via `env` so nested scripts can use
+    `$AGICTL_AGENT_DIR/skills/...` even when sudo resets the environment.
     """
     agent_user = os.environ.get("AGICTL_AGENT_USER")
     caller = os.environ.get("USER", "")
+    agent_dir = os.environ.get("AGICTL_AGENT_DIR", "").strip()
     if agent_user and agent_user not in ("root", "watchdog", caller):
-        # Drop back to agent user — sudo -u initializes supplementary groups
-        return ["sudo", "-u", agent_user, interpreter, script_path]
+        # Drop back to agent user — sudo -u initializes supplementary groups.
+        # Use `env` (not sudo SETENV) so AGICTL_AGENT_DIR survives reliably.
+        cmd = ["sudo", "-u", agent_user, "env"]
+        if agent_dir:
+            cmd.append(f"AGICTL_AGENT_DIR={agent_dir}")
+        cmd.extend([interpreter, script_path])
+        return cmd
+    if agent_dir:
+        return ["env", f"AGICTL_AGENT_DIR={agent_dir}", interpreter, script_path]
     return [interpreter, script_path]
 
 
@@ -9436,7 +9710,9 @@ def _execute_bash_script(script: str) -> None:
     os.chmod(temp_name, 0o644)
     try:
         cmd = _get_exec_cmd("bash", temp_name)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, cwd=_exec_env_root(),
+        )
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
@@ -9475,7 +9751,9 @@ def execute_python(script):
     os.chmod(temp_name, 0o644)
     try:
         cmd = _get_exec_cmd("python3", temp_name)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, cwd=_exec_env_root(),
+        )
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
@@ -9689,7 +9967,9 @@ def _run_playwright_script(script: str, timeout_ms: int):
     try:
         cmd = _get_exec_cmd("python3", temp_name)
         timeout_sec = max(timeout_ms // 1000 + 10, 30)  # subprocess timeout = page timeout + 10s buffer
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_sec, cwd=_exec_env_root(),
+        )
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr

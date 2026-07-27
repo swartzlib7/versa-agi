@@ -568,7 +568,7 @@ if [ "${TOPOLOGY}" != "server" ]; then
     # Inference master key auth block removed
 
     # ── SSH Tunnel Setup ──────────────────────────────
-    # Gemini CLI requires HTTPS for non-localhost URLs.
+    # Non-localhost inference URLs should use HTTPS.
     # We create an SSH tunnel: localhost:{port} → server:{port}
     # This provides encryption AND satisfies the localhost check.
     echo ""

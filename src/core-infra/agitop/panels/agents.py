@@ -130,30 +130,35 @@ class AgentsPanel(DataTable):
             role = agent.get("role") or "--"
             is_inactive = agent.get("inactive", 0)
             agent_status_raw = agent.get("status") or ""
-            agent_model = agent.get("model") or ""
+            agent_model = (agent.get("model") or "").strip()
+            # Empty agents.model falls back at runtime to VERSA_DEFAULT_MODEL —
+            # use that for Provider detection. Never treat blank as "Google".
+            effective_model = agent_model or (
+                self.system_reader.get_default_model() if self.system_reader else ""
+            )
 
-            # Provider detection from model name prefix
+            # Provider detection from model name / catalog lists
             local_models = self.system_reader.get_local_models()
             cloud_models = self.system_reader.get_cloud_models()
             third_party_models = self.system_reader.get_third_party_models()
             if agent_status_raw == "invalid_config":
                 provider_display = "[yellow]⚠ Unknown[/]"
-            elif agent_model in local_models:
+            elif not effective_model:
+                provider_display = "[dim]—[/]"
+            elif effective_model in local_models:
                 provider_display = "[magenta]🖥 Local[/]"
-            elif agent_model.startswith("gemini"):
+            elif effective_model.startswith("gemini"):
                 provider_display = "☁ [#4285F4]G[/][#EA4335]o[/][#FBBC05]o[/][#4285F4]g[/][#34A853]l[/][#EA4335]e[/]"
-            elif agent_model.startswith("grok"):
+            elif effective_model.startswith("grok"):
                 provider_display = "[purple]☁ xAI[/]"
-            elif agent_model.startswith("gpt"):
+            elif effective_model.startswith("gpt"):
                 provider_display = "[white]☁ OpenAI[/]"
-            elif agent_model.startswith("claude"):
+            elif effective_model.startswith("claude"):
                 provider_display = "[yellow]☁ Anthropic[/]"
-            elif "/" in agent_model:
-                provider_display = "[cyan]☁ Open Router[/]"
-            elif agent_model in cloud_models or not agent_model:
+            elif "/" in effective_model or effective_model in third_party_models:
+                provider_display = "[cyan]☁ Open Router[/]" if "/" in effective_model else "[cyan]☁ Cloud[/]"
+            elif effective_model in cloud_models:
                 provider_display = "☁ [#4285F4]G[/][#EA4335]o[/][#FBBC05]o[/][#4285F4]g[/][#34A853]l[/][#EA4335]e[/]"
-            elif agent_model in third_party_models:
-                provider_display = "[cyan]☁ Cloud[/]"
             else:
                 provider_display = "[dim]? Unknown[/]"
 
@@ -235,7 +240,12 @@ class AgentsPanel(DataTable):
                 coa_warning = " [yellow]⚠[/]"
 
             # Model display — short name only (provider shown in dedicated column)
-            model_display = f"[dim]{agent_model}[/]" if agent_model else "[dim]default[/]"
+            if name == "watchdog":
+                # Not a runnable agent — no model assignment UI (for now).
+                provider_display = "[dim]—[/]"
+                model_display = "[dim]n/a[/]"
+            else:
+                model_display = f"[dim]{agent_model}[/]" if agent_model else "[dim]default[/]"
             triage_model = (agent.get("triage_model") or "").strip()
             triage_display = f"[dim]{triage_model}[/]" if triage_model else "[dim]—[/]"
 
@@ -283,8 +293,17 @@ class AgentsPanel(DataTable):
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         """Show prompt viewer options for the selected agent."""
         agent_name = event.row_key.value
-        if agent_name:
-            self.app.push_screen(AgentPromptMenu(agent_name))
+        if not agent_name:
+            return
+        # Watchdog is infrastructure, not a runnable agent — no settings/edit.
+        if agent_name == "watchdog":
+            self.app.notify(
+                "Watchdog is a system service (not a runnable agent). Settings are not available.",
+                title="Watchdog",
+                severity="information",
+            )
+            return
+        self.app.push_screen(AgentPromptMenu(agent_name))
 
 
 class RemovalConfirmModal(ModalScreen):
@@ -394,8 +413,8 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
             local_label_map.setdefault(key.strip(), label.strip())
 
     if not cloud_entries and not proxy_entries and not local_label_map:
-        # Fallback if ini not found
-        return [("gemini-3-flash-preview", "gemini-3-flash-preview")]
+        # No catalog — show nothing (allow_blank Select stays on System default)
+        return []
 
     # Without system_reader, return all entries unfiltered
     if not system_reader:
@@ -409,6 +428,8 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
         return unfiltered
 
     # Backend-aware filtering: only show models for enabled backends
+    # VERSA_CLOUD_MODELS / VERSA_THIRD_PARTY_MODELS are membership of *configured*
+    # providers (empty when Gemini/TP skipped) — never invent a hard-coded model.
     cloud_set = set(system_reader.get_cloud_models())
     local_set = set(system_reader.get_local_models())
     proxy_set = set(system_reader.get_third_party_models())
@@ -417,7 +438,7 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
 
     filtered = []
 
-    # Cloud models: only if cloud_models list is non-empty (API key configured)
+    # Cloud models: only when VERSA_CLOUD_MODELS is non-empty (Gemini credentials)
     if cloud_set:
         for label, key in cloud_entries:
             if key in cloud_set:
@@ -447,7 +468,7 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
                 star = ""
             filtered.append((f"🖥 {display}{star}", m))
 
-    return filtered if filtered else [("gemini-3-flash-preview", "gemini-3-flash-preview")]
+    return filtered
 
 
 def _sanitize_agent_params_for_model(reader, agent_name: str, model_name: str) -> list[str]:
@@ -685,11 +706,11 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
     agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
     agent = next((a for a in agents if a.get("name") == agent_name), {})
 
-    current_turns = str(agent.get("max_session_turns", 50))
-    current_tool_budget = str(agent.get("tool_output_token_budget", 1500))
+    current_turns = str(agent.get("max_session_turns", 400))
+    current_tool_budget = str(agent.get("tool_output_token_budget", 5000))
     current_budget = str(agent.get("token_budget", 0))
-    current_timeout = str(agent.get("timeout_minutes", 60))
-    current_threshold = str(agent.get("runaway_threshold", 300))
+    current_timeout = str(agent.get("timeout_minutes", 45))
+    current_threshold = str(agent.get("runaway_threshold", 2500))
     current_size_threshold = str(agent.get("runaway_size_threshold", 512))
     current_num_ctx = agent.get("num_ctx", 0)
     current_model = agent.get("model") or ""
@@ -769,13 +790,13 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
         "not chat history. ON: only for long single-thread collaborations needing verbatim continuity.[/]"
     )
     yield Select(
-        [("No (fresh start each cycle — default)", 0), ("Yes (roll chat history across cycles)", 1)],
-        value=agent.get("resume_enabled", 0),
+        [("No (fresh start each cycle)", 0), ("Yes (roll chat history across cycles — default)", 1)],
+        value=agent.get("resume_enabled", 1),
         id="select-resume-enabled",
         allow_blank=False,
     )
     yield Static("[cyan]Resume Max Messages[/] — on resume, keep only the last N messages of rolled history (0 = unlimited; ignored when Resume is off)")
-    yield Input(value=str(agent.get("resume_max_messages", 0)), placeholder="0 = unlimited", id="input-resume-max-msgs", type="integer")
+    yield Input(value=str(agent.get("resume_max_messages", 25)), placeholder="e.g. 25 (0=unlimited)", id="input-resume-max-msgs", type="integer")
     yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
 
 
@@ -1404,6 +1425,7 @@ class AgentEditModal(ModalScreen):
         self._embedded = host is not None
         self._original_model = ""
         self._original_num_ctx = 0
+        self._watchdog_locked = agent_name == "watchdog"
 
     @property
     def _form_root(self):
@@ -1430,6 +1452,18 @@ class AgentEditModal(ModalScreen):
         current_ctx_mode = agent.get("context_injection_mode") or "relevant"
         current_status = agent.get("status") or ""
         current_anchor = agent.get("anchor_style") or "compact"
+
+        if self._watchdog_locked:
+            with VerticalScroll(id="msg-dialog"):
+                yield Static("[bold]⚙  Watchdog[/]", id="msg-dialog-header")
+                with VerticalScroll(id="msg-dialog-scroll"):
+                    yield Static(
+                        "[dim]Watchdog is a system service, not a runnable agent.\n"
+                        "Model and harness settings are not editable here.[/]"
+                    )
+                with Horizontal(id="msg-dialog-actions"):
+                    yield Button("Close", classes="dismiss-btn", variant="default", id="msg-dialog-close")
+            return
 
         # Load model options — mode-aware filtering
         agents_panel = self.app.query_one(AgentsPanel)
@@ -1503,7 +1537,19 @@ class AgentEditModal(ModalScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         from textual.widgets import Select
+        if event.button.id == "msg-dialog-close":
+            if self._embedded:
+                return
+            self.app.pop_screen()
+            return
         if event.button.id == "btn-save-settings":
+            if self._watchdog_locked:
+                self._form_app.notify(
+                    "Watchdog settings cannot be edited.",
+                    title="Watchdog",
+                    severity="warning",
+                )
+                return
             root = self._form_root
             app = self._form_app
             agents_panel = app.query_one(AgentsPanel)

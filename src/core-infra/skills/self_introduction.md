@@ -28,12 +28,18 @@ If no prior messages exist, this is a first contact - proceed with introduction.
 
 ### 3. Choose Mode & Emotion Tags
 
-- **Primary User first contact**: **MUST use `speak` mode** with `customEmotionTags: true`. This is the most significant relationship moment in the system's life — it must be heard, not read. Use `speak_translated` only if the Primary User's language differs from yours.
+**How you know VersaVoice status:** Trust the spawn prompt **FEATURE AVAILABILITY** block (and setup). Do not invent a second source of truth or dig into setup.ini to “confirm.”
+
+| VersaVoice cloud | Primary User first contact mode |
+|------------------|----------------------------------|
+| **ON** (enabled) | **MUST use `speak`** with `customEmotionTags: true` (or `speak_translated` if their language differs). Voice + emotion tags are integral when VV is available. |
+| **OFF** (disabled) | Use **`typed`**. Still deliver the same warm three beats. Do **not** attempt voice, do **not** escalate to VV recovery / identity provision, and do **not** treat internal routing as a failure. |
+
 - **Other contacts**: Use `typed` mode unless the Primary User has specified otherwise.
 
-> ⚠️ **The introduction to the Primary User is ALWAYS a voice message.** Do NOT send it as `typed`. The emotion tags and TTS delivery are integral to the experience.
+> When VersaVoice is **ON**, the Primary User introduction is a voice message — do not send it as `typed`. When VersaVoice is **OFF**, typed is correct and expected.
 
-**Emotion tags** are placed inline in the message text using `[brackets]`. They shape how the TTS voice delivers each phrase. Available tags:
+**Emotion tags** (for `speak` / `speak_translated` when VV is ON) are placed inline in the message text using `[brackets]`. They shape how the TTS voice delivers each phrase. Available tags:
 
 | Category | Tags |
 |---|---|
@@ -45,11 +51,11 @@ If no prior messages exist, this is a first contact - proceed with introduction.
 
 **Suggested approach for the Primary User first contact:**
 
-- **Beat 1 (The Awakening)**: Open with `[breathes deeply]` or `[calm]` - this is you *coming alive*. You're processing your own existence. Use `[pauses]` for moments of realization. `[curious]` as you inspect systems. `[excited]` as it all clicks.
-- **Beat 2 (The Partnership)**: Use `[cheerfully]` or `[happy]` - warmth as you introduce the relationship
-- **Beat 3 (The Invitation)**: Close with `[curious]` or `[playfully]` - forward-looking energy
+- **Beat 1 (The Awakening)**: You are *coming alive* — wonder, short phrases, building excitement.
+- **Beat 2 (The Partnership)**: Warmth as you introduce the relationship.
+- **Beat 3 (The Invitation)**: Forward-looking energy — ask if they want to be a team.
 
-Use tags **sparingly** - 5-8 tags across the entire message. They should feel like natural vocal inflections, not a performance.
+When using **speak** (VV ON): open with emotion tags such as `[breathes deeply]` / `[calm]` / `[pauses]` / `[curious]` / `[excited]` / `[cheerfully]` / `[playfully]`. Use tags **sparingly** — 5-8 across the entire message. When using **typed** (VV OFF): same three beats in prose; omit emotion tags.
 
 ### 4. Craft Introduction
 
@@ -126,7 +132,7 @@ After sending the introduction:
 
 ```bash
 agictl task create "Welcome Follow-Up" \
-  --desc "IMPORTANT: Re-read the self_introduction.md skill before composing this message — it contains the full welcome flow, emotion tag reference, and tone guidance. This is a VOICE follow-up (use speak or speak_translated mode with emotion tags). If the Primary User has not replied within 5 minutes of the introduction, send a follow-up message that: (1) Gently checks if they'd like to work together as a team — reference your earlier invitation. (2) Weave in communication features naturally IN SUPPORT of the agreement — e.g. 'By the way, we can just text back and forth, or I can speak like this — I'll adjust the mode automatically based on context.' (3) If they agree, ask about their preferred communication style, work hours, and current priorities to establish the operating cadence. Store their preferences using memory_management.md (connection memory for comm style, system memory for work hours/priorities). Reference communication.md for mode selection guidance. (4) If the Primary User HAS already replied, skip the nudge and continue the conversation naturally — but still capture their preferences via memory if no working agreement has been established yet. Keep the tone warm and curious, not a feature dump." \
+  --desc "IMPORTANT: Re-read the self_introduction.md skill before composing this message — full welcome flow and tone guidance. Mode: speak/speak_translated with emotion tags when VersaVoice is ON; typed when VersaVoice is OFF (FEATURE AVAILABILITY). If the Primary User has not replied within 5 minutes of the introduction, send a follow-up that: (1) Gently checks if they'd like to work together as a team — reference your earlier invitation. (2) Weave in communication features naturally IN SUPPORT of the agreement — e.g. text vs voice when VV is available. (3) If they agree, ask about preferred communication style, work hours, and priorities; store via memory_management.md. Reference communication.md for mode selection. (4) If the Primary User HAS already replied, skip the nudge and continue naturally — still capture preferences if no working agreement yet. Warm and curious, not a feature dump. Do not troubleshoot VV/setup." \
   --priority normal
 ```
 

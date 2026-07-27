@@ -110,41 +110,46 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     padding: 0 1;
 }
 
+/* Fixed content height when expanded (tabs + pane). Collapsed = title only. */
 #system-controls-collapse > Contents {
-    height: auto;
+    height: 19;
+    layout: vertical;
     padding: 0;
 }
 
-#system-controls-collapse #system-panel,
-#system-controls-collapse #controls-panel {
+#system-controls-collapse #system-panel {
+    height: 1fr;
+    min-height: 0;
     border: none;
     margin: 0;
     padding: 1;
 }
 
-/* System / Controls / Agents tabs inside the collapsible */
+/* System / Agents content tabs + launcher tabs inside the collapsible */
 #system-tabs {
     width: 100%;
-    height: auto;
+    height: 1fr;
     min-height: 0;
 }
 
 #system-tabs ContentSwitcher {
-    height: auto;
+    height: 1fr;
     min-height: 0;
 }
 
 #system-tabs TabPane {
-    height: auto;
+    height: 1fr;
+    min-height: 0;
     padding: 0;
 }
 
 #sys-agents-tab {
-    height: auto;
-    padding: 0 0 1 0;
+    height: 1fr;
+    min-height: 0;
+    padding: 0;
 }
 
-/* Match #work-tabs chrome; accent per pane (System red / Controls blue / Agents yellow) */
+/* Match #work-tabs chrome; content tabs keep top accent; launchers use bottom */
 #system-tabs Tabs {
     height: 4;
     padding: 0 1;
@@ -166,25 +171,15 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     color: $text;
 }
 
+/* Content tabs — top accent (pane content lives here) */
 #system-tabs #--content-tab-sys-system-tab {
-    border-top: heavy $error;
+    border-top: heavy #8B0000;
 }
 
 #system-tabs #--content-tab-sys-system-tab.-active {
-    background: $error 25%;
-    border: heavy $error;
-    color: $error;
-    text-style: bold;
-}
-
-#system-tabs #--content-tab-sys-controls-tab {
-    border-top: heavy $primary;
-}
-
-#system-tabs #--content-tab-sys-controls-tab.-active {
-    background: $primary 25%;
-    border: heavy $primary;
-    color: $primary-lighten-2;
+    background: #8B0000 25%;
+    border: heavy #8B0000;
+    color: #FF6B6B;
     text-style: bold;
 }
 
@@ -196,6 +191,72 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     background: $warning 25%;
     color: $warning;
     border: heavy $warning;
+    text-style: bold;
+}
+
+/* Launcher tabs — bottom accent = opens modal / one-shot op (not a content pane) */
+#system-tabs #--content-tab-sys-launch-settings {
+    border-bottom: heavy cyan;
+    color: cyan;
+}
+
+#system-tabs #--content-tab-sys-launch-settings:hover {
+    background: cyan 25%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy cyan;
+    color: #67e8f9;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-game {
+    border-bottom: heavy lime;
+    color: lime;
+}
+
+#system-tabs #--content-tab-sys-launch-game:hover {
+    background: lime 20%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy lime;
+    color: #b8ff4a;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-api-keys {
+    border-bottom: heavy #7c3aed;
+    color: #a78bfa;
+}
+
+#system-tabs #--content-tab-sys-launch-api-keys:hover {
+    background: #7c3aed 30%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #7c3aed;
+    color: #c4b5fd;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-models {
+    border-bottom: heavy #1a73e8;
+    color: #5ba3f5;
+}
+
+#system-tabs #--content-tab-sys-launch-models:hover {
+    background: #1a73e8 30%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #1a73e8;
+    color: #8bbbff;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-routing {
+    border-bottom: heavy #E5E5E5;
+    color: #E5E5E5;
+}
+
+#system-tabs #--content-tab-sys-launch-routing:hover {
+    background: #E5E5E5 20%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #E5E5E5;
+    color: #FFFFFF;
     text-style: bold;
 }
 
@@ -273,9 +334,8 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
 }
 
 .atrium-col {
-    width: 2fr;
+    width: 50%;
     min-width: 36;
-    max-width: 100;  /* ~800px at typical terminal cell width */
     height: auto;
     padding-left: 1;
 }
@@ -346,15 +406,53 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     height: auto;
 }
 
+.controls-inline-col {
+    width: 1fr;
+    height: auto;
+    align: left top;
+}
+
+.controls-btn-row {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.controls-btn-row > .ctrl-inline-btn {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0 1 0 0;
+}
+
+.controls-btn-row > .ctrl-inline-btn:last-child {
+    margin-right: 0;
+}
+
+/* Full width of both inner columns (= 2× one button). */
+.controls-refresh-row > .ctrl-refresh-span {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0;
+}
+
 .col-header {
     text-style: bold;
     color: $accent;
     margin-bottom: 1;
 }
 
+.clock-header {
+    width: 100%;
+    text-align: center;
+    content-align: center middle;
+}
+
 .clock-col {
     width: auto;
-    min-width: 26;
+    min-width: 22;
+    max-width: 28;
     content-align: center middle;
     text-align: center;
     height: auto;
@@ -499,9 +597,8 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
 
 #system-controls-collapse #agents-panel {
     width: 1fr;
-    height: auto;
-    min-height: 5;
-    max-height: 14;
+    height: 1fr;
+    min-height: 0;
     border: none;
     margin: 0;
     padding: 1;
@@ -680,19 +777,63 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
     text-style: bold;
 }
 
-/* ─── Organizations tab button (launcher next to Projects on dashboard) ─── */
-/* Styled distinctly from content tabs: dashed border + muted tint signals
-   "click to open modal" rather than "active content pane". */
+/* Light themes: lighten-2 primary washes out on cream; use solid primary. */
+.-light-mode #work-tabs #--content-tab-messages-tab.-active {
+    color: $primary;
+}
+
+/* Light themes: inactive work-tabs use lighten surfaces that erase muted text. */
+.-light-mode #work-tabs Tab {
+    background: $surface-darken-1;
+    border: solid $surface-darken-2;
+    color: $text;
+}
+
+.-light-mode #work-tabs Tabs {
+    background: $surface-darken-1;
+    border-bottom: solid $surface-darken-2;
+}
+
+/* ─── Organizations launcher (work-tabs) — bottom accent = opens modal ─── */
 #work-tabs #--content-tab-org-tab {
-    border: dashed #E5E5E5;
-    background: $surface;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #E5E5E5;
+    background: $surface-lighten-2;
     color: #E5E5E5;
-    text-style: italic;
 }
 
 #work-tabs #--content-tab-org-tab:hover {
-    background: $accent 30%;
+    background: #E5E5E5 20%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #E5E5E5;
+    color: #FFFFFF;
     text-style: bold;
+}
+
+/* Light themes: keep bottom accent readable on cream surfaces. */
+.-light-mode #work-tabs #--content-tab-org-tab {
+    border: solid $surface-darken-2;
+    border-bottom: heavy $accent;
+    background: $surface-darken-1;
+    color: $accent;
+}
+
+.-light-mode #work-tabs #--content-tab-org-tab:hover {
+    background: $accent 20%;
+    border: solid $surface-darken-2;
+    border-bottom: heavy $accent;
+    color: $accent;
+    text-style: bold;
+}
+
+.-light-mode #org-modal-tabs Tab {
+    background: $surface-darken-1;
+    border: solid $surface-darken-2;
+    color: $text;
+}
+
+.-light-mode #org-modal-tabs Tabs {
+    background: $surface-darken-1;
 }
 
 /* ─── Organization Modal ─── */
@@ -1439,6 +1580,17 @@ RegistrationModal {
     width: 100%;
     min-height: 3;
     margin-top: 1;
+}
+
+/* COA picker lives inside #api-keys-dialog (bootstrap mode) */
+#coa-bootstrap-section {
+    height: auto;
+    margin-top: 1;
+    padding-top: 1;
+}
+
+#coa-bootstrap-heading {
+    margin-bottom: 1;
 }
 
 SystemSettingsModal {
@@ -2798,6 +2950,14 @@ ModelManagerModal {
 
 .mm-form-col {
     width: 1fr;
+    height: auto;
+    margin: 0 1;
+}
+
+.mm-form-col-price {
+    width: 12;
+    min-width: 10;
+    max-width: 14;
     height: auto;
     margin: 0 1;
 }
