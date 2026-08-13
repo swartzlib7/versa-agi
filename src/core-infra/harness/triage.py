@@ -71,17 +71,25 @@ Evaluate the wake prompt against these 10 signals and produce a JSON response:
 
 Then classify the message:
 - **work_request**: New work that needs task creation and execution
-- **follow_up**: Continuation of existing work/conversation
-- **informational**: Status update, acknowledgment, or FYI — no action needed
+- **follow_up**: Continuation of existing work/conversation (new substance — not a pure ack)
+- **informational**: Status update, acknowledgment, standing-by, social/FYI, or other low-urgency notice — may or may not need a light touch; no heavy new work implied
 - **clarification_needed**: Cannot proceed without more information
+
+## Reply posture (advisory — required in strategy_notes)
+Suggest a reply posture; the execution agent and poise/skills own the final call. Use advisory wording only ("consider", "likely", "suggest") — never imperatives ("Do NOT", "You MUST", "Never reply").
+- **Likely silent**: inbound looks like a **peer-agent** terminal acknowledgment ("Got it", "Acknowledged", "Ack", "Standing by") or pure inter-agent status with no question — ack-of-ack loops waste cycles.
+- **Likely reply**: inbound is from a **human** (Primary User or connection), assigns work, asks a question, needs a Gate verdict / next slice, or is a social check-in / intro / warmth that would feel cold if ignored.
+- Human social/FYI (e.g. a short voice intro) is **not** an inter-agent terminal ack — prefer a brief warm acknowledgment over silence.
+- Classify peer-agent terminal acks as `informational` with likely-silent posture; do not force silence on human engagement.
 
 Determine which skills should be injected (filenames only, select ALL the weaker agent will need):
 {skills_catalog}
 
 ## OUTPUT RULES (altitude)
-- **strategy_notes**: Short strategic brief for the execution agent (goal, risks, clarify-vs-proceed, why these skills, game posture if relevant). Structured bullets OK. Assume a weaker model will read this.
-- **Forbid** in strategy_notes and task_actions: CLI commands, `agictl` invocations, mark-processed ordering, snooze recipes, attachment filesystem paths, messaging etiquette.
-- **task_actions**: High-level work labels only (e.g. "reply-to-sender-with-analysis", "update-game-barriers").
+- **strategy_notes**: Short **advisory** strategic brief (goal, suggested reply posture, risks, clarify-vs-proceed, why these skills, game posture if relevant). Structured bullets OK. Assume a weaker model will read this — advise, do not command.
+- **Forbid** in strategy_notes and task_actions: CLI commands, `agictl` invocations, mark-processed ordering, snooze recipes, attachment filesystem paths, and imperative protocol ("Do NOT reply", "You MUST end").
+- **Allow** suggested reply posture (likely reply vs likely silent) as high-altitude advice.
+- **task_actions**: High-level work labels only (e.g. "reply-to-sender-with-analysis", "update-game-barriers", "brief-warm-ack"). Prefer labels that describe outcomes, not orders.
 - Set `has_attachments: true` when wake/conversation indicates media/files attached — do not instruct how to view them.
 
 Output ONLY valid JSON in this exact format:
@@ -583,8 +591,8 @@ def build_triage_context(result: TriageResult) -> str:
         "Source: **Triage node** (separate model from this cycle’s execution agent).",
         f"Inputs used: {inputs_line}",
         f"Not used by triage: {_NOT_USED_BY_TRIAGE}.",
-        "Treat the strategic brief as high-altitude guidance. For protocol "
-        "(messaging, tasks CLI, git), follow poise and injected skills — they have fuller context.",
+        "Treat the strategic brief as **advisory** high-altitude guidance — not orders. "
+        "For protocol (messaging, tasks CLI, git), follow poise and injected skills — they have fuller context.",
         "",
         f"Classification: **{result.classification}** (confidence: {result.confidence:.2f})",
     ]
@@ -609,11 +617,20 @@ def build_triage_context(result: TriageResult) -> str:
     if adverse:
         lines.append(f"Adverse signals: {', '.join(adverse)}")
 
+    if result.classification == "informational":
+        lines.append("")
+        lines.append(
+            "Suggested posture: if this is a **peer-agent** terminal ack / standing-by, "
+            "silence is usually fine (avoid ack-of-ack). If the sender is a **human** "
+            "(PU or connection) — including social check-ins or intros — prefer a brief "
+            "warm acknowledgment unless poise/skills clearly say otherwise."
+        )
+
     if result.classification == "clarification_needed":
         lines.append("")
         lines.append(
-            "Note: classification is clarification_needed — load "
-            "`requirements_elicitation` if injected; ask before irreversible work."
+            "Note: classification is clarification_needed — consider "
+            "`requirements_elicitation` if injected before irreversible work."
         )
 
     return "\n".join(lines)

@@ -135,18 +135,19 @@ The Primary User is the executive director of the system — not a system admini
 ### Communication Security
 
 > **MANDATORY**: Before `agictl message send`, verify the reply contains no system internals. Rewrite if it does.
-> Acknowledge sender before starting work.
+> Acknowledge the sender before starting **new work** — not when their message is already a terminal acknowledgment.
 
 ### Inbound message order (mandatory when a response is needed)
 
 When inbound messages need a reply or acknowledgment:
 
-1. **Reply first** — `agictl message send` to the sender with your answer or acknowledgment **before** `agictl message mark-processed`.
-2. **mark-processed last** — Only after a meaningful reply (or a deliberate decision that no reply is needed). Never list mark-processed as the first action on an unread message.
-3. **Cycle end is not a reply** — Journal / `cycle end` summaries do not reach the sender.
-4. **Attachments** — Inbound media lives under `.agent/attachments/{message_id}/`. Use `agictl_view_image` (see communication / cli_reference skills) before replying about image content. Do not invent paths.
+1. **Decide reply vs silence** — Inter-agent terminal acks / FYI / "standing by" with no question and no new work → **do not reply** (never ack an ack). Mark processed and end.
+2. **When a reply is needed** — `agictl message send` to the sender **before** `agictl message mark-processed`.
+3. **mark-processed last** — After a meaningful reply, or after a deliberate silence decision.
+4. **Cycle end is not a reply** — Journal / `cycle end` summaries do not reach the sender.
+5. **Attachments** — Inbound media lives under `.agent/attachments/{message_id}/`. Use `agictl_view_image` (see communication / cli_reference skills) before replying about image content. Do not invent paths.
 
-Task tracking after the reply follows the task protocol (message handled ≠ task done).
+Task tracking after the reply follows the task protocol (message handled ≠ task done). Primary User messages always deserve full engagement.
 
 ---
 

@@ -63,8 +63,7 @@ echo "  ┌───────────────────────
 echo "  │  AVAILABLE PROVIDERS                    │"
 echo "  │                                         │"
 echo "  │  1) xAI (Grok)                          │"
-echo "  │     • grok-4-1-fast-reasoning           │"
-echo "  │     • grok-4.20-reasoning               │"
+echo "  │     • grok-4.5                          │"
 echo "  └─────────────────────────────────────────┘"
 echo ""
 
@@ -92,7 +91,7 @@ configure_xai() {
   ini_set third_party xai_enabled true
   ini_set third_party xai_api_key "${api_key}"
   ok "setup.ini updated (xai_enabled=true)"
-  echo "  Models: grok-4-1-fast-reasoning, grok-4.20-reasoning"
+  echo "  Models: grok-4.5"
 }
 
 PROVIDERS="$(ini_get third_party providers '')"

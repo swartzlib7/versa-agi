@@ -40,7 +40,12 @@ if [ "${1:-}" = "--uninstall" ]; then
       SET status='invalid_config',
           status_message='xAI provider was removed. Reassign model via agitop.',
           updated_at=datetime('now')
-      WHERE model IN ('grok-4-1-fast-reasoning', 'grok-4.20-reasoning')
+      WHERE model IN (
+        'grok-4.5',
+        'grok-4.3',
+        'grok-4.20-reasoning',
+        'grok-4-1-fast-reasoning'
+      )
         AND status != 'invalid_config';
     " 2>/dev/null || true
     ok "Agents using xAI models marked as invalid_config"
@@ -58,7 +63,7 @@ echo ""
 echo "  ─── xAI Provider — Configure ───────────────"
 echo ""
 echo "  Provider: xAI (Grok)"
-echo "  Models:   grok-4-1-fast-reasoning, grok-4.20-reasoning"
+echo "  Models:   grok-4.5"
 echo ""
 
 if [ -z "${VERSA_SETUP_PARENT:-}" ]; then
@@ -84,7 +89,7 @@ fi
 provider_ini_set third_party xai_enabled true
 provider_ini_set third_party xai_api_key "${api_key}"
 ok "setup.ini updated (xai_enabled=true)"
-echo "  Models: grok-4-1-fast-reasoning, grok-4.20-reasoning"
+echo "  Models: grok-4.5"
 
 # Update paths.env
 if [ -f "${PATHS_ENV}" ]; then

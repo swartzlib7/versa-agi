@@ -67,22 +67,27 @@ def _load_router_model_choices(current_key: str = "") -> list[tuple[str, str]]:
 
 
 def _load_output_model_choices(output_modality: str, current_key: str = "") -> list[tuple[str, str]]:
-    """Enabled COA-approved models that declare the given output_modality."""
+    """Enabled Models with an exact executable output DriverAdapter."""
     choices: list[tuple[str, str]] = [("(none — no system default)", "")]
     seen = {""}
     for m in sorted(_catalog_list(), key=lambda r: r.get("key", "")):
-        if not m.get("enabled") or not m.get("coa"):
+        if not m.get("enabled"):
             continue
         outs = {x.strip() for x in (m.get("output_modalities") or "text").split(",") if x.strip()}
         if output_modality not in outs:
             continue
+        driver_outputs = set(
+            (m.get("driver_coverage") or {}).get("output") or []
+        )
+        if output_modality not in driver_outputs:
+            continue
         key = m["key"]
         label = m.get("label") or key
-        choices.append((f"{key} — {label}", key))
+        choices.append((f"{key} — {label} ◆{output_modality}", key))
         seen.add(key)
     current_key = (current_key or "").strip()
     if current_key and current_key not in seen:
-        choices.append((f"{current_key} — (output mismatch)", current_key))
+        choices.append((f"{current_key} — (no exact output driver)", current_key))
     return choices
 
 

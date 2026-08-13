@@ -7,7 +7,11 @@ import db_connect
 import os
 import sqlite3
 
-from model_drivers.message_adapters import IMAGE_EXTENSIONS, _guess_image_mime, read_image_base64
+from model_drivers.libraries.chat_image_in_content_parts import (
+    _guess_image_mime,
+    read_image_base64,
+)
+from model_drivers.message_adapters import IMAGE_EXTENSIONS
 
 AGENTS_DB = os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
 

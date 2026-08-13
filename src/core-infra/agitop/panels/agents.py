@@ -589,6 +589,7 @@ def compose_model_generation_fields(agents_panel, agent_name) -> ComposeResult:
             f"[dim]Assigned model ({current_model or 'none'}): "
             f"input={catalog_hints['input_modalities']} · "
             f"output={catalog_hints['output_modalities']} · "
+            f"drivers={catalog_hints['driver_summary']} · "
             f"tier={catalog_hints['work_modality']}[/]"
         )
     if think_ollama_only:

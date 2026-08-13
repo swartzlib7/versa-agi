@@ -66,6 +66,31 @@ class TestBuildTriageContext(unittest.TestCase):
         self.assertIn("attachment", text.lower())
         self.assertIn("poise", text.lower())
 
+    def test_informational_advisory_distinguishes_human_vs_peer(self):
+        result = TriageResult(
+            classification="informational",
+            confidence=0.95,
+            strategy_notes="Likely peer-agent standing-by; consider silence.",
+            inputs_used=["wake", "conversation(last-N)", "skills-catalog"],
+        )
+        text = build_triage_context(result)
+        self.assertIn("advisory", text.lower())
+        self.assertIn("Suggested posture:", text)
+        self.assertIn("human", text.lower())
+        self.assertIn("peer-agent", text.lower())
+        self.assertNotIn("Do not send", text)
+        self.assertNotIn("mark-processed", text.lower())
+
+    def test_preamble_says_advisory_not_orders(self):
+        result = TriageResult(
+            classification="follow_up",
+            confidence=0.9,
+            strategy_notes="Suggest brief warm ack to human sender.",
+            inputs_used=["wake", "skills-catalog"],
+        )
+        text = build_triage_context(result)
+        self.assertIn("not orders", text.lower())
+
 
 class TestRecordInputsUsed(unittest.TestCase):
     def test_games_and_routing_flags(self):

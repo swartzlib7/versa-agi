@@ -28,7 +28,7 @@ GCP_VAULT = Path("/etc/versa-agi/vault/gcp-credentials.json")
 RECOMMENDED: dict[str, list[tuple[str, str]]] = {
     # (catalog_key, UI label)
     "xai": [
-        ("grok-4.20-reasoning", "Grok 4.5"),
+        ("grok-4.5", "Grok 4.5"),
     ],
     "anthropic": [
         ("claude-fable-5", "Fable 5"),

@@ -19,7 +19,7 @@ from agitop import coa_bootstrap as cb  # noqa: E402
 
 class RecommendedMap(unittest.TestCase):
     def test_xai_is_grok_45_only(self):
-        self.assertEqual(cb.recommended_keys("xai"), ["grok-4.20-reasoning"])
+        self.assertEqual(cb.recommended_keys("xai"), ["grok-4.5"])
 
     def test_anthropic_three(self):
         self.assertEqual(
@@ -59,7 +59,7 @@ class RecommendedMap(unittest.TestCase):
 
     def test_options_label_first(self):
         opts = cb.recommended_options("xai")
-        self.assertEqual(opts, [("Grok 4.5", "grok-4.20-reasoning")])
+        self.assertEqual(opts, [("Grok 4.5", "grok-4.5")])
 
 
 class BootstrapDetection(unittest.TestCase):
@@ -192,7 +192,7 @@ class RoleModelSection(unittest.TestCase):
 
     def test_ignores_legacy_gemini_section(self):
         with tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False) as f:
-            f.write("[gemini]\nmodel=gemini-3.1-flash-lite-preview\n")
+            f.write("[gemini]\nmodel=legacy-model\n")
             path = f.name
         try:
             self.assertEqual(cb.read_role_model(path), "")

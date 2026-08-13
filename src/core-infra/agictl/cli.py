@@ -141,6 +141,7 @@ else:
     agent_reader = message_reader = tasks_reader = None
 
 console = Console()
+error_console = Console(stderr=True)
 
 def json_response(success, **kwargs):
     """Standard JSON response for effectful commands."""
@@ -2917,7 +2918,12 @@ def openrouter_add_cmd(model_id, coa_approved, router_eligible, no_sync):
                 _update_ini_key(ini, "third_party", "openrouter_models", ",".join(existing))
             except Exception:
                 pass
-    payload = {"action": "openrouter_add", "key": model_id, "label": summary["label"]}
+    payload = {
+        "action": "openrouter_add",
+        "key": model_id,
+        "label": summary["label"],
+        "driver_hints": _driver_hints_for_model(model_id, row),
+    }
     _auto_sync_and_respond(payload, not no_sync)
 
 
@@ -3119,7 +3125,13 @@ def source_add_cmd(provider, model_id, coa_approved, router_eligible, no_sync):
         _append_setup_csv("gemini", "cloud_models", model_id)
     else:
         _append_setup_csv("third_party", f"{provider}_models", model_id)
-    payload = {"action": "source_add", "provider": provider, "key": model_id, "label": summary["label"]}
+    payload = {
+        "action": "source_add",
+        "provider": provider,
+        "key": model_id,
+        "label": summary["label"],
+        "driver_hints": _driver_hints_for_model(model_id, row),
+    }
     _auto_sync_and_respond(payload, not no_sync)
 
 
@@ -3620,6 +3632,30 @@ def _auto_sync_and_respond(base_payload, do_sync):
     json_response(True, **base_payload)
 
 
+def _driver_hints_for_model(key, model):
+    """Return non-blocking COA hints for declared non-text capability gaps."""
+
+    from model_drivers.registry import advise_driver_gaps
+
+    catalog = _load_catalog()
+    catalog[key] = dict(model)
+    return advise_driver_gaps(
+        key,
+        input_modalities=[
+            item.strip()
+            for item in str(model.get("input_modalities") or "").split(",")
+            if item.strip()
+        ],
+        output_modalities=[
+            item.strip()
+            for item in str(model.get("output_modalities") or "").split(",")
+            if item.strip()
+        ],
+        catalog=catalog,
+        providers=_load_providers(),
+    )
+
+
 @model.group()
 def catalog():
     """Manage the unified model catalog (cloud, third-party, local)."""
@@ -3635,13 +3671,23 @@ def catalog_list(model_class, as_table):
     """List catalog entries, optionally filtered by class."""
     from model_catalog import load_catalog_pricing
     from harness.model_params import resolve_model_params
+    from model_drivers.registry import catalog_driver_enrichment
     cat = _load_catalog()
+    providers = _load_providers()
     pricing = load_catalog_pricing()
     rows = []
     for key, m in cat.items():
         if model_class and m["class"] != model_class:
             continue
         row = {"key": key, **m}
+        row.update(
+            catalog_driver_enrichment(
+                key,
+                m,
+                catalog=cat,
+                providers=providers,
+            )
+        )
         resolved = resolve_model_params(key)
         row["reasoning_effort"] = resolved.get("reasoning_effort") or "none"
         pr = pricing.get(key)
@@ -3654,7 +3700,7 @@ def catalog_list(model_class, as_table):
         if not rows:
             click.echo("No catalog entries.")
             return
-        click.echo(f"{'KEY':<32} {'CLASS':<12} {'WORK':<10} {'EN':<3} {'COA':<4} {'RTR':<4} {'$/M in':<8} {'$/M out':<8} {'I/O':<14} LABEL")
+        click.echo(f"{'KEY':<32} {'CLASS':<12} {'WORK':<10} {'EN':<3} {'COA':<4} {'RTR':<4} {'$/M in':<8} {'$/M out':<8} {'I/O':<14} {'DRIVERS':<28} LABEL")
         for r in rows:
             io = f"{r.get('input_modalities','text')}→{r.get('output_modalities','text')}"
             pin = r.get("prompt_per_m")
@@ -3663,7 +3709,8 @@ def catalog_list(model_class, as_table):
             pout_s = f"{pout:.4g}" if pout else "—"
             click.echo(f"{r['key']:<32} {r['class']:<12} {r.get('work_modality','balanced'):<10} "
                        f"{'✓' if r['enabled'] else '·':<3} {'✓' if r['coa'] else '·':<4} "
-                       f"{'✓' if r.get('router_eligible') else '·':<4} {pin_s:<8} {pout_s:<8} {io:<14} {r['label']}")
+                       f"{'✓' if r.get('router_eligible') else '·':<4} {pin_s:<8} {pout_s:<8} "
+                       f"{io:<14} {r['driver_summary']:<28} {r['label']}")
         return
     json_response(True, count=len(rows), models=rows)
 
@@ -3714,13 +3761,14 @@ def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
         json_response(False, error="models.ini not found")
         sys.exit(1)
 
-    value = catalog_row_to_value({
+    model_row = {
         "class": model_class, "provider": provider, "enabled": enabled, "coa": coa_approved,
         "ctx_recommended": ctx_recommended, "ctx_max": ctx_max,
         "work_modality": work_modality, "input_modalities": input_modalities,
         "output_modalities": output_modalities, "router_eligible": router_eligible,
         "label": label,
-    })
+    }
+    value = catalog_row_to_value(model_row)
     try:
         for path in targets:
             # User additions live in the custom overlay — never clobbered by migrate.
@@ -3740,7 +3788,8 @@ def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
         sys.exit(1)
 
     payload = {"model": key, "class": model_class, "provider": provider,
-               "message": f"Added '{key}' to catalog."}
+               "message": f"Added '{key}' to catalog.",
+               "driver_hints": _driver_hints_for_model(key, model_row)}
     if model_class == "local":
         payload["hint"] = f"Run 'sudo agictl model add {key}' to download/enable at runtime."
     _auto_sync_and_respond(payload, do_sync=not no_sync)
@@ -3807,8 +3856,15 @@ def catalog_update(key, label, provider, model_class, ctx_recommended, ctx_max,
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
 
-    _auto_sync_and_respond({"model": key, "origin": m.get("origin"),
-                            "message": f"Updated '{key}'."}, do_sync=not no_sync)
+    _auto_sync_and_respond(
+        {
+            "model": key,
+            "origin": m.get("origin"),
+            "message": f"Updated '{key}'.",
+            "driver_hints": _driver_hints_for_model(key, m),
+        },
+        do_sync=not no_sync,
+    )
 
 
 @catalog.command("remove")
@@ -5565,11 +5621,12 @@ def agent_share_skill(skill_path, target_agent):
 @click.argument("name")
 @click.argument("duties_file", type=click.Path(exists=True))
 def agent_set_duties(name, duties_file):
-    """Copy a duties file to a sub-agent's .agent/duties.md.
+    """Copy a duties file to /var/lib/versa-agi/<name>/duties.md.
 
     COA authors the duties markdown and uses this command (via sudo agictl)
-    to provision it before the agent's first wake cycle.
-    Requires root privileges.
+    to provision it before the agent's first wake cycle. This is the only
+    supported writer of live duties — do not edit home/.agent/duties.md
+    (that path is not injected by Lifeline). Requires root privileges.
     """
     import shutil
     name = name.lower()
@@ -6844,8 +6901,23 @@ def message_get(agent_uid, unread, last_n_minutes, last_n_count, limit, contact)
     try:
         conn = db_connect.connect_compat(messages_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        conditions = ["(to_user_id=? OR from_user_id=?)"]
-        params = [agent_uid, agent_uid]
+        aliases = [agent_uid]
+        config = get_config()
+        configured_uid = str(
+            config.get("versavoice", {}).get("sub_account_id") or ""
+        ).strip()
+        current_agent = get_agent_name()
+        if agent_uid in (configured_uid, current_agent):
+            for alias in (configured_uid, current_agent):
+                if alias and alias not in aliases:
+                    aliases.append(alias)
+
+        identity_placeholders = ",".join("?" for _ in aliases)
+        conditions = [
+            f"(to_user_id IN ({identity_placeholders}) "
+            f"OR from_user_id IN ({identity_placeholders}))"
+        ]
+        params = aliases + aliases
         if unread:
             conditions.append("status='unprocessed'")
         if last_n_minutes:
@@ -7086,6 +7158,29 @@ def message_blacklisted(sub_account):
         bad_senders = message_reader.get_unprocessed_from(sub_account, blocked_uids)
         if bad_senders:
             print("\n".join(bad_senders))
+
+@message.command("outbound-streak")
+@click.argument("sub_account")
+@click.argument("contact_uid")
+@click.option("--agent-name", default="", help="Internal agent-name identity alias.")
+@click.option("--limit", default=10, type=click.IntRange(min=1), help="Recent rows to inspect.")
+def message_outbound_streak(sub_account, contact_uid, agent_name, limit):
+    """Return the identity-aware consecutive outbound streak for one contact."""
+    if message_reader is None:
+        json_response(False, error="Message reader unavailable")
+        raise click.exceptions.Exit(1)
+    try:
+        result = message_reader.get_outbound_streak(
+            sub_account,
+            contact_uid,
+            agent_name=agent_name,
+            limit=limit,
+        )
+    except Exception as exc:
+        json_response(False, error=f"Could not calculate outbound streak: {exc}")
+        raise click.exceptions.Exit(1)
+    print(json.dumps(result))
+
 
 @message.command("conversation-context")
 @click.argument("sub_account")
@@ -7437,15 +7532,16 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
             output += f"  [{dt}] {prefix}: {text}\n"
 
         # ── Consecutive outbound flood detection ──
-        # Count how many of the most recent messages are outbound with no reply.
-        # history is chronological (oldest first), so reverse to count from newest.
+        # Include unread inbound rows and both runtime identities when deciding
+        # whether a reply reset the streak; displayed history intentionally
+        # excludes unread rows because they are injected below as new mail.
         _FLOOD_THRESHOLD = 3
-        consecutive_outbound = 0
-        for _msg in reversed(history):
-            if _msg["direction"] == "sent":
-                consecutive_outbound += 1
-            else:
-                break  # An inbound message breaks the streak
+        consecutive_outbound = message_reader.get_outbound_streak(
+            sub_account,
+            uid,
+            agent_name=agent_name,
+            limit=max(10, depth),
+        )["count"]
         if consecutive_outbound >= _FLOOD_THRESHOLD:
             output += (
                 f"\n⚠ OUTBOUND STREAK: You have sent {consecutive_outbound} consecutive "
@@ -7470,17 +7566,12 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
     _FLOOD_THRESHOLD_GLOBAL = 3
     flood_warnings = []
     for uid, data in memory_only_contacts.items():
-        recent = message_reader.get_contact_history(
-            sub_account, uid, limit=10, agent_name=agent_name
-        )
-        if not recent:
-            continue
-        consec = 0
-        for _msg in reversed(recent):
-            if _msg["direction"] == "sent":
-                consec += 1
-            else:
-                break
+        consec = message_reader.get_outbound_streak(
+            sub_account,
+            uid,
+            agent_name=agent_name,
+            limit=10,
+        )["count"]
         if consec >= _FLOOD_THRESHOLD_GLOBAL:
             flood_warnings.append(
                 f"  ⚠ {data['name']}: {consec} consecutive outbound messages with no reply — "
@@ -7620,8 +7711,10 @@ def cycle_end(summary, agent_name):
         pass
 
     if awareness_warning:
-        console.print("[yellow]⚠ AWARENESS NOT RECORDED — no conclusions or actions logged this cycle. "
-                      "Review your work and persist awareness before ending.[/yellow]", stderr=True)
+        error_console.print(
+            "[yellow]⚠ AWARENESS NOT RECORDED — no conclusions or actions logged this cycle. "
+            "Review your work and persist awareness before ending.[/yellow]"
+        )
 
     console.print(f"🛑 Cycle ended: {sum_text}")
     # Exit the tool subprocess cleanly. The parent harness detects this output
@@ -9857,7 +9950,7 @@ def view():
 )
 def view_image(path, execution_model):
     """Validate a local image path and return metadata for multimodal inject."""
-    from model_catalog import execution_model_supports_input
+    from model_drivers.registry import resolve_model_driver
     from model_drivers.view_paths import ViewPathError, inspect_image_for_view
 
     agent_name = get_agent_name()
@@ -9871,14 +9964,14 @@ def view_image(path, execution_model):
         sys.exit(1)
 
     if execution_model:
-        if not execution_model_supports_input(execution_model, "image"):
+        if resolve_model_driver(execution_model, "input", "image") is None:
             json_response(
                 False,
                 error=(
-                    f"Execution model '{execution_model}' does not support image input "
-                    "(catalog input_modalities lacks 'image')"
+                    f"Execution model '{execution_model}' has no exact executable "
+                    "image-input ModelDriver"
                 ),
-                code="modality_unsupported",
+                code="no_driver",
                 execution_model=execution_model,
                 path=result.get("path"),
             )

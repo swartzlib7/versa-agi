@@ -428,19 +428,18 @@ thinking_level=high
 export GEMINI_MODEL="gemini-3-flash-preview"
 ```
 
-**Available Gemini models** (assign via dashboard / `agictl agent set-model`; system default is OpenRouter GLM above):
+**Available Gemini models** (stock `[gemini] cloud_models`; assign via dashboard / `agictl agent set-model`; system default is OpenRouter GLM above):
 
 | Model | Tier | Notes |
 |---|---|---|
-| `gemini-3-pro-preview` | Pro | Next gen preview. Advanced reasoning, 1M context. |
-| `gemini-3-flash-preview` | Flash | Next gen preview. Frontier-class at reduced cost. |
 | `gemini-3.1-pro-preview` | Pro | Next gen preview. Enhanced reasoning, extended context. |
-| `gemini-3.1-flash-lite-preview` | Flash | Next gen lite. Ultra-fast, lowest cost. Monitoring/simple tasks. |
+| `gemini-3-flash-preview` | Flash | Next gen preview. Frontier-class at reduced cost. |
+| `gemini-3.1-flash-lite` | Flash | Stable lite. Ultra-fast, lowest cost. Monitoring/simple tasks. |
+| `gemini-3.1-flash-image` | Flash | Native chat image **output** (exact ModelDriver ◆). |
 | `gemini-2.5-pro` | Pro | Flagship. Complex reasoning, coding, multimodal. 1M context. |
 | `gemini-2.5-flash` | Flash | Fast, cost-efficient. Good for chatbots and production. |
-| `gemini-2.5-flash-lite` | Flash | Ultra-fast, lightweight. High-volume, low-cost. |
-| `gemini-2.0-flash` | Flash | Previous gen. General-purpose multimodal. |
-| `gemini-2.0-flash-lite` | Flash | Previous gen. Simple, high-frequency tasks. |
+
+**Other stock cloud Providers (examples):** direct xAI `grok-4.5`; OpenRouter `x-ai/grok-4.5`; OpenAI `gpt-5.5-2026-04-23` / `gpt-audio-1.5`; Anthropic `claude-sonnet-4-6`. Non-text image/audio **support** requires an exact ModelDriver binding (◆ in Model Manager) — declared capability alone (◇) is not enough. See [Model Driver Build Guide](design/Versa%20AGi%20-%20Model%20Driver%20Build%20Guide.md).
 
 > [!IMPORTANT]
 > **COA Model Restriction:** The Chief Orchestrator Agent (COA) requires reliable tool-calling and structured output. Only approved models can be assigned to the COA via the Dashboard. Configured in `setup.ini` → `[gemini].coa_approved_models`. Sub-agents are not restricted.
@@ -618,7 +617,7 @@ Connect the Primary User's GitHub account for agent-driven push/pull:
 - **Context Window Management** — `pre_model_hook` with `trim_messages` enforces a rolling context window (~32k tokens). Full history preserved in checkpoint; only the LLM input is trimmed. Conversation injection depth configurable per-agent (`conversation_depth`, default: 10 messages per contact).
 - **Budget Warnings** — Step budget warnings injected as genuine `HumanMessage` objects at 80%/95% thresholds, with hard termination at 100%.
 - **Local AI Backend** — Native LangChain integration. Three modes (`cloud`, `local`, `hybrid`). Standard backend uses Ollama (NVIDIA/AMD). Intel backend uses Docker SYCL with containerized llama.cpp for Intel ARC GPUs. Per-agent model assignment with ☁/🖥 dashboard indicators.
-- **Third-Party Cloud Models** — Native LangChain integrations for external LLM providers (xAI Grok, OpenAI GPT, Anthropic Claude). Extensible provider pattern — add new providers via the 3-key `setup.ini` convention (`{slug}_enabled`, `{slug}_api_key`, `{slug}_models`). Dashboard shows 🔀 icons.
+- **Third-Party Cloud Models** — Catalog Provider → LangChain/raw clients via `provider_runtime` (xAI Grok, OpenAI GPT, Anthropic Claude, OpenRouter). Extensible 3-key `setup.ini` pattern (`{slug}_enabled`, `{slug}_api_key`, `{slug}_models`). Non-text chat multimodal uses exact ModelDriver bindings over reusable DriverAdapters. Dashboard shows 🔀 icons and ◆/◇ coverage.
 - **Web Search** — Local SearXNG integration for agent research (`agictl search web`). Runs as a Docker container (`searxng` + `searxng-redis`), bound to `127.0.0.1:8888`. LangGraph Tool #12, conditionally registered when enabled. Graceful degradation when disabled.
 - **Headless Browser Automation** — Native integration of Playwright for headless Chromium automation (`agictl browser`). Agents can programmatically navigate pages (`goto`), interact with forms (`click`, `fill`), capture screenshots (`screenshot`), and extract structured page content (`extract`). Controlled via two-layer security validation (system-wide and per-agent toggle) with automated sandbox isolation.
 

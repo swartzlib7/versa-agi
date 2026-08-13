@@ -118,13 +118,20 @@ def _catalog_rows() -> list[dict]:
             "out_csv": out_csv or "—",
             "inputs": {s.strip() for s in in_csv.split(",") if s.strip()},
             "outputs": {s.strip() for s in out_csv.split(",") if s.strip()},
+            "driver_outputs": set(
+                (m.get("driver_coverage") or {}).get("output") or []
+            ),
+            "driver_summary": m.get("driver_summary") or "text-native",
         })
     return rows
 
 
 def _catalog_option_label(row: dict) -> str:
     """'{Vendor} ({model id}) [{input} --> {output}]'."""
-    return f"{row['vendor']} ({row['key']}) [{row['in_csv']} --> {row['out_csv']}]"
+    return (
+        f"{row['vendor']} ({row['key']}) "
+        f"[{row['in_csv']} --> {row['out_csv']}] {row['driver_summary']}"
+    )
 
 
 def _filter_catalog_choices(rows: list[dict], in_mod, out_mod) -> list[tuple[str, str]]:
@@ -134,6 +141,8 @@ def _filter_catalog_choices(rows: list[dict], in_mod, out_mod) -> list[tuple[str
         if in_mod and in_mod not in row["inputs"]:
             continue
         if out_mod and out_mod not in row["outputs"]:
+            continue
+        if out_mod and out_mod != "text" and out_mod not in row["driver_outputs"]:
             continue
         choices.append((_catalog_option_label(row), row["key"]))
     if not choices:

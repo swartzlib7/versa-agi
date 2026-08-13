@@ -4,6 +4,24 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
+## [0.15.0] — 2026-08-10
+
+### Model Drivers — exact multimodal support
+
+#### Added
+- **Model Driver framework** — Non-text image/audio support is now an exact binding per catalog model (input or output), not a family-name guess. Model Manager shows ◆ when a driver is executable and ◇ when a modality is declared but not yet supported.
+- **Chat image & audio Utility output** — Utility Models can generate images and audio through the shipped chat drivers (Google native image, OpenAI-compatible image, streamed PCM16 audio).
+- **COA Model Driver Build Guide** — Evaluation recipe for adding or reusing a driver when a new catalog model needs multimodal support.
+
+#### Changed
+- **Provider routing** — Cloud clients are selected from the catalog Provider for each model (no `/` / `gpt` / `grok` name heuristics).
+- **Stock Grok defaults** — Shipped xAI / OpenRouter Grok keys are `grok-4.5` and `x-ai/grok-4.5`.
+- **Honest unsupported paths** — Models without an exact driver return a clean `no_driver` result instead of a raw provider traceback.
+
+#### Notes
+- Local (Ollama / llama.cpp) vision and dedicated image/video generator APIs remain deferred.
+- Dashboard **Image Processing** settings still control how images are prepared for agent *view* (input), not Utility image *generation* size.
+
 ## [0.14.1] — 2026-06-07
 
 ### System Settings UX & Keyboard Pagination Refinements

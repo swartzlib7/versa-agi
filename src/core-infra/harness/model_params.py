@@ -186,18 +186,29 @@ def get_model_catalog_hints(model_name: str) -> dict[str, str]:
         core_infra = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if core_infra not in sys.path:
             sys.path.insert(0, core_infra)
-        from model_catalog import catalog_entry_for_model
-        row = catalog_entry_for_model(model_name) or {}
+        from model_catalog import catalog_entry_for_model, load_catalog, load_providers
+        from model_drivers.registry import catalog_driver_enrichment
+
+        catalog = load_catalog()
+        row = catalog_entry_for_model(model_name, catalog) or {}
+        driver_meta = catalog_driver_enrichment(
+            model_name,
+            row,
+            catalog=catalog,
+            providers=load_providers(),
+        )
         return {
             "work_modality": row.get("work_modality", "balanced") or "balanced",
             "input_modalities": row.get("input_modalities", "text") or "text",
             "output_modalities": row.get("output_modalities", "text") or "text",
+            "driver_summary": driver_meta["driver_summary"],
         }
     except Exception:
         return {
             "work_modality": "balanced",
             "input_modalities": "text",
             "output_modalities": "text",
+            "driver_summary": "text-native",
         }
 
 
@@ -366,13 +377,6 @@ def detect_provider_family(
     provider_slug: str | None = None,
 ) -> str:
     """Return one of: openai_compat, anthropic, google, local."""
-    if model_name.startswith("gemini"):
-        return "google"
-    if model_name.startswith("claude"):
-        return "anthropic"
-    if model_name.startswith("gpt") or model_name.startswith("grok") or "/" in model_name:
-        return "openai_compat"
-
     slug = provider_slug or _load_catalog_provider(model_name)
     cls = _load_provider_cls(slug) or _LOCAL_PROVIDER_CLASSES.get(slug or "", "")
     if cls == "ChatAnthropic":
@@ -381,6 +385,14 @@ def detect_provider_family(
         return "google"
     if cls in ("ChatOpenAI", "ChatOllama"):
         return "openai_compat" if cls == "ChatOpenAI" else "local"
+
+    # Compatibility fallback for callers evaluating a Model before catalog add.
+    if model_name.startswith("gemini"):
+        return "google"
+    if model_name.startswith("claude"):
+        return "anthropic"
+    if model_name.startswith(("gpt", "grok")) or "/" in model_name:
+        return "openai_compat"
     return "local"
 
 
@@ -496,10 +508,11 @@ def to_native_kwargs(
             model_kwargs["thinking_budget"] = budget or _effort_budget(effort)
     elif family == "openai_compat":
         is_local_llamacpp = slug == "llamacpp"
-        if temp is not None and not (thinking_on and "/" not in model_name):
+        is_openrouter = slug == "openrouter"
+        if temp is not None and not (thinking_on and not is_openrouter):
             if not (is_local_llamacpp and _ollama_think_mode(model_name)):
                 kwargs["temperature"] = temp
-        if "/" in model_name and thinking_on:
+        if is_openrouter and thinking_on:
             reasoning: dict[str, Any] = {}
             if effort != "none":
                 reasoning["effort"] = effort

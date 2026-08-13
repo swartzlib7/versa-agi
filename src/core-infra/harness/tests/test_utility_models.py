@@ -24,7 +24,9 @@ import modality_maps  # noqa: E402
 import utility_store  # noqa: E402
 from harness import generation as gen  # noqa: E402
 from harness.utility_runner import UtilityRunError  # noqa: E402
+from model_drivers.errors import DriverError  # noqa: E402
 from model_drivers.output import get_output_driver, has_real_driver  # noqa: E402
+from provider_runtime import ProviderRuntimeError, resolve_provider_route  # noqa: E402
 
 try:
     import openai  # noqa: F401
@@ -235,7 +237,7 @@ class TestGenerationParsers(unittest.TestCase):
         self.assertEqual(mime, "image/png")
 
     def test_decode_data_url_rejects_plain_url(self):
-        with self.assertRaises(UtilityRunError):
+        with self.assertRaises(DriverError):
             gen._decode_data_url("https://example.com/x.png")
 
     def test_parse_image(self):
@@ -249,7 +251,7 @@ class TestGenerationParsers(unittest.TestCase):
         self.assertIsNone(transcript)
 
     def test_parse_image_no_images(self):
-        with self.assertRaises(UtilityRunError) as c:
+        with self.assertRaises(DriverError) as c:
             gen._parse_image({"images": []})
         self.assertEqual(c.exception.code, "no_artifact")
 
@@ -263,7 +265,7 @@ class TestGenerationParsers(unittest.TestCase):
         self.assertEqual(transcript, "hi")
 
     def test_parse_audio_no_data(self):
-        with self.assertRaises(UtilityRunError) as c:
+        with self.assertRaises(DriverError) as c:
             gen._parse_audio({"audio": {}}, "wav")
         self.assertEqual(c.exception.code, "no_artifact")
 
@@ -281,24 +283,22 @@ class TestGenerationParsers(unittest.TestCase):
         self.assertEqual(parts[1]["type"], "image_url")
         self.assertIn("data:image/png;base64,", parts[1]["image_url"]["url"])
 
-    def test_resolve_provider_openrouter(self):
-        prev = os.environ.get("OPENROUTER_API_KEY")
-        os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
-        try:
-            base, key, headers = gen._resolve_openai_compatible("google/gemini-3.1-flash-image")
-            self.assertIn("openrouter.ai", base)
-            self.assertEqual(key, "sk-or-test")
-            self.assertIn("X-Title", headers)
-        finally:
-            if prev is None:
-                os.environ.pop("OPENROUTER_API_KEY", None)
-            else:
-                os.environ["OPENROUTER_API_KEY"] = prev
+    def test_generation_provider_error_is_normalized(self):
+        original = gen.resolve_provider_route
+        original_driver = gen.resolve_model_driver
 
-    def test_resolve_provider_unsupported(self):
-        with self.assertRaises(UtilityRunError) as c:
-            gen._resolve_openai_compatible("gemini-2.5-flash")  # direct Google, no '/'
-        self.assertEqual(c.exception.code, "provider_unsupported")
+        def fail(_catalog_model):
+            raise ProviderRuntimeError("provider_unsupported", "not wired")
+
+        gen.resolve_provider_route = fail
+        gen.resolve_model_driver = lambda *args, **kwargs: object()
+        try:
+            with self.assertRaises(UtilityRunError) as raised:
+                gen.generate_media("model", "image", prompt="test")
+        finally:
+            gen.resolve_provider_route = original
+            gen.resolve_model_driver = original_driver
+        self.assertEqual(raised.exception.code, "provider_unsupported")
 
 
 @unittest.skipUnless(_HAS_OPENAI, "openai SDK not installed")
@@ -307,15 +307,53 @@ class TestGenerateMediaMocked(unittest.TestCase):
 
     def setUp(self):
         self._real = openai.OpenAI
+        self._real_resolve_route = gen.resolve_provider_route
         self._prev_key = os.environ.get("OPENROUTER_API_KEY")
+        self._prev_openai_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
+        os.environ["OPENAI_API_KEY"] = "sk-openai-test"
+
+        def resolve_test_route(catalog_model):
+            provider = (
+                "openai"
+                if catalog_model == "gpt-audio-1.5"
+                else "openrouter"
+            )
+            return resolve_provider_route(
+                catalog_model,
+                catalog={
+                    catalog_model: {
+                        "provider": provider,
+                        "enabled": True,
+                        "input_modalities": "text",
+                        "output_modalities": "text,image,audio",
+                    }
+                },
+                providers={
+                    "openai": {
+                        "cls": "ChatOpenAI",
+                        "enabled": True,
+                    },
+                    "openrouter": {
+                        "cls": "ChatOpenAI",
+                        "enabled": True,
+                    },
+                },
+            )
+
+        gen.resolve_provider_route = resolve_test_route
 
     def tearDown(self):
         openai.OpenAI = self._real
+        gen.resolve_provider_route = self._real_resolve_route
         if self._prev_key is None:
             os.environ.pop("OPENROUTER_API_KEY", None)
         else:
             os.environ["OPENROUTER_API_KEY"] = self._prev_key
+        if self._prev_openai_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = self._prev_openai_key
 
     def _patch_client(self, payload: dict) -> dict:
         captured: dict = {}
@@ -367,45 +405,88 @@ class TestGenerateMediaMocked(unittest.TestCase):
 
         class _Client:
             def __init__(self, **kw):
+                captured["_client_kwargs"] = kw
                 self.chat = _Chat()
 
         openai.OpenAI = lambda **kw: _Client(**kw)
         return captured
 
-    def test_generate_image(self):
+    def test_generate_each_openrouter_image_binding(self):
         raw = b"\x89PNG-data"
         url = "data:image/png;base64," + _b64.b64encode(raw).decode()
-        captured = self._patch_client({"images": [{"image_url": {"url": url}}], "content": "done"})
-        data, ext, mime, transcript = gen.generate_media(
-            "google/gemini-3.1-flash-image", "image", prompt="a cat"
-        )
-        self.assertEqual(data, raw)
-        self.assertEqual(ext, "png")
-        self.assertIsNone(transcript)
-        self.assertEqual(captured["extra_body"]["modalities"], ["image", "text"])
+        for catalog_model in (
+            "google/gemini-3.1-flash-image",
+            "openai/gpt-5.4-image-2",
+        ):
+            with self.subTest(catalog_model=catalog_model):
+                captured = self._patch_client(
+                    {
+                        "images": [{"image_url": {"url": url}}],
+                        "content": "done",
+                    }
+                )
+                data, ext, mime, transcript = gen.generate_media(
+                    catalog_model,
+                    "image",
+                    prompt="a cat",
+                )
+                self.assertEqual(data, raw)
+                self.assertEqual(ext, "png")
+                self.assertIsNone(transcript)
+                self.assertEqual(
+                    captured["extra_body"]["modalities"],
+                    ["image", "text"],
+                )
+                self.assertEqual(
+                    captured["_client_kwargs"]["base_url"],
+                    "https://openrouter.ai/api/v1",
+                )
 
-    def test_generate_audio(self):
+    def test_generate_each_pcm16_audio_binding(self):
         raw = b"RIFF-audio-pcm-samples"
-        captured = self._patch_client(
-            {"audio": {"data": _b64.b64encode(raw).decode(), "transcript": "spoken"}}
-        )
-        data, ext, mime, transcript = gen.generate_media(
-            "openai/gpt-audio", "audio", prompt="say hi",
-            config={"audio_format": "wav", "voice": "verse"},
-        )
-        # Streaming audio only supports pcm16; we always request it regardless of
-        # the desired container, then package locally.
-        self.assertEqual(captured["extra_body"]["audio"]["format"], "pcm16")
-        self.assertEqual(captured["extra_body"]["audio"]["voice"], "verse")
-        self.assertTrue(captured.get("stream"), "audio output must be streamed")
-        # WAV is produced natively (no ffmpeg) and must contain the raw PCM.
-        self.assertEqual(ext, "wav")
-        self.assertEqual(mime, "audio/wav")
-        self.assertEqual(transcript, "spoken")
-        import io as _io
-        import wave as _wave
-        with _wave.open(_io.BytesIO(data), "rb") as wf:
-            self.assertEqual(wf.readframes(wf.getnframes()), raw)
+        cases = {
+            "openai/gpt-audio": "https://openrouter.ai/api/v1",
+            "openai/gpt-audio-mini": "https://openrouter.ai/api/v1",
+            "gpt-audio-1.5": "https://api.openai.com/v1",
+        }
+        for catalog_model, endpoint in cases.items():
+            with self.subTest(catalog_model=catalog_model):
+                captured = self._patch_client(
+                    {
+                        "audio": {
+                            "data": _b64.b64encode(raw).decode(),
+                            "transcript": "spoken",
+                        }
+                    }
+                )
+                data, ext, mime, transcript = gen.generate_media(
+                    catalog_model,
+                    "audio",
+                    prompt="say hi",
+                    config={"audio_format": "wav", "voice": "verse"},
+                )
+                # Streaming audio only supports pcm16; always request it and
+                # package the requested file container locally.
+                self.assertEqual(
+                    captured["extra_body"]["audio"]["format"],
+                    "pcm16",
+                )
+                self.assertEqual(
+                    captured["extra_body"]["audio"]["voice"],
+                    "verse",
+                )
+                self.assertTrue(
+                    captured.get("stream"),
+                    "audio output must be streamed",
+                )
+                self.assertEqual(captured["_client_kwargs"]["base_url"], endpoint)
+                self.assertEqual(ext, "wav")
+                self.assertEqual(mime, "audio/wav")
+                self.assertEqual(transcript, "spoken")
+                import io as _io
+                import wave as _wave
+                with _wave.open(_io.BytesIO(data), "rb") as wf:
+                    self.assertEqual(wf.readframes(wf.getnframes()), raw)
 
 
 class TestMediaDrivers(unittest.TestCase):
@@ -438,8 +519,10 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
     def setUp(self):
         super().setUp()
         from harness import utility_runner as runner
+        from model_drivers import registry
 
         self.runner = runner
+        self.registry = registry
         # Permissive output map so validate_output_artifact passes for png/mp3.
         modality_maps.save_modality_map(
             "gen-model",
@@ -454,6 +537,7 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
         self._real_entry = runner.catalog_entry_for_model
         self._real_read = runner.read_setup_value
         self._real_gen = gen.generate_media
+        self._real_resolve_driver = registry.resolve_model_driver
         self._real_chat = runner._invoke_chat_model
         self._real_lock = runner._RUN_LOCK_DIR
         runner.load_catalog = lambda: {}
@@ -465,6 +549,7 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
         runner.read_setup_value = lambda section, key, default="": default
         # Keep the run-lock off the real system path (/var/lib/versa-agi/...).
         runner._RUN_LOCK_DIR = os.path.join(self._dir, "locks")
+        registry.resolve_model_driver = lambda *args, **kwargs: object()
 
     def tearDown(self):
         self.runner.load_catalog = self._real_load
@@ -472,6 +557,7 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
         self.runner.read_setup_value = self._real_read
         self.runner._invoke_chat_model = self._real_chat
         self.runner._RUN_LOCK_DIR = self._real_lock
+        self.registry.resolve_model_driver = self._real_resolve_driver
         gen.generate_media = self._real_gen
         super().tearDown()
 
@@ -540,6 +626,21 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
         self.assertEqual(seen["modality"], "image")
         self.assertEqual(seen["prompt"], "make a thing")
         self.assertEqual(seen["config"].get("voice"), "verse")
+
+    def test_unbound_media_model_returns_no_driver(self):
+        self.registry.resolve_model_driver = lambda *args, **kwargs: None
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("generate_media must not run without an exact driver")
+
+        gen.generate_media = _boom
+        with self.assertRaises(UtilityRunError) as raised:
+            self.runner.run_utility_model(
+                self._add_um("image"),
+                output_dir=self._dir,
+                context_agent="coa",
+            )
+        self.assertEqual(raised.exception.code, "no_driver")
 
     def test_video_um_still_stubs_driver_pending(self):
         # Video has no output model/driver — must raise driver_pending, never

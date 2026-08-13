@@ -74,6 +74,7 @@ run_health_checks() {
   health_check "Lifeline script exists" "[ -x '${DEPLOYED_CORE_INFRA}/lifeline.sh' ]"
   health_check "agictl binary exists" "[ -x '/usr/local/lib/versa-agi/agictl' ]"
   health_check "agictl wrapper exists" "[ -x '/usr/local/bin/agictl' ]"
+  health_check "Provider runtime library deployed" "[ -f '/usr/local/lib/versa-agi/provider_runtime.py' ]"
   health_check "CRON installed for ${WATCHDOG_USER}" "crontab -u ${WATCHDOG_USER} -l 2>/dev/null | grep -q lifeline"
 
   echo ""

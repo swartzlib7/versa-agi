@@ -286,9 +286,9 @@ This is the single most important messaging rule. Violations cause TTS audio mis
 
 **Examples:**
 
-❌ **Wrong:** `"I've updated /home/coa-env/.agent/duties.md with the new objectives and ran agictl task add to create 3 tasks. Here's the API key: sk-abc123."`
+❌ **Wrong:** `"I've updated /var/lib/versa-agi/web-dev/duties.md with the new objectives and ran agictl task add to create 3 tasks. Here's the API key: sk-abc123."`
 
-✅ **Correct:** `"I've updated the duties file with the new objectives and created three tasks. See the attached report for details."` + `--markdown /path/to/report.md`
+✅ **Correct:** `"I've updated the duties via set-duties and created three tasks. See the attached report for details."` + `--markdown /path/to/report.md`
 
 ❌ **Wrong:** `"Check out https://docs.example.com/api/v2/auth for the integration guide."`
 

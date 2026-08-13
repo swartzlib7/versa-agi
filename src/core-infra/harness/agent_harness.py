@@ -45,49 +45,6 @@ def _format_params_audit(model_name: str, agent_overrides: dict | None) -> str:
     return " ".join(bits)
 
 
-def _read_local_paths_env() -> tuple[str, str]:
-    """Return (VERSA_GPU_BACKEND, VERSA_INFERENCE_URL) from paths.env."""
-    gpu_backend = "standard"
-    inference_url = "http://127.0.0.1:11434"
-    try:
-        with open("/etc/versa-agi/paths.env", "r") as f:
-            for line in f:
-                if line.startswith("VERSA_GPU_BACKEND="):
-                    gpu_backend = line.strip().split("=")[1].strip('"')
-                elif line.startswith("VERSA_INFERENCE_URL="):
-                    inference_url = line.strip().split("=")[1].strip('"')
-    except OSError:
-        pass
-    return gpu_backend, inference_url
-
-
-def _resolve_sycl_api_model(catalog_key: str) -> str:
-    """Map catalog key to llama-server API model id via [sycl_models]."""
-    import configparser
-
-    try:
-        ini = configparser.ConfigParser(delimiters=("=",))
-        for ini_path in (
-            "/etc/versa-agi/models.ini",
-            os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "models.ini",
-            ),
-        ):
-            if os.path.isfile(ini_path):
-                ini.read(ini_path)
-                break
-        if ini.has_section("sycl_models"):
-            raw = ini.get("sycl_models", catalog_key, fallback="")
-            if raw:
-                parts = raw.strip().split(",")
-                if len(parts) >= 2:
-                    return parts[1].strip().replace(".gguf", "")
-    except Exception:
-        pass
-    return catalog_key
-
-
 def _native_params_for_audit(native: dict[str, Any], num_ctx: int = 0) -> dict[str, Any]:
     """Provider-native kwargs safe for cycle log (no secrets / bulky blobs)."""
     out: dict[str, Any] = {}
@@ -102,87 +59,54 @@ def _native_params_for_audit(native: dict[str, Any], num_ctx: int = 0) -> dict[s
     return out
 
 
+def _resolve_llm_provider_and_native(
+    model_name: str,
+    num_ctx: int = 0,
+    agent_overrides: dict | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Resolve exact Provider route and translated Model parameters."""
+    from harness.model_params import (
+        resolve_model_params,
+        to_native_kwargs,
+        apply_native_for_local_runtime,
+    )
+    from provider_runtime import resolve_provider_route
+
+    provider_route = resolve_provider_route(model_name)
+    provider_slug = provider_route.provider_slug
+    resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
+    family = provider_route.family
+    native = to_native_kwargs(family, model_name, resolved, provider_slug=provider_slug)
+    if provider_slug in ("ollama", "llamacpp"):
+        native = apply_native_for_local_runtime(native, provider_slug)
+    return provider_route, native
+
+
 def resolve_llm_route(
     model_name: str,
     num_ctx: int = 0,
     agent_overrides: dict | None = None,
 ) -> dict[str, Any]:
-    """Resolve provider routing metadata without instantiating the LLM."""
-    from harness.model_params import (
-        resolve_model_params,
-        detect_provider_family,
-        to_native_kwargs,
-        apply_native_for_local_runtime,
-        _load_catalog_provider,
+    """Resolve catalog-driven provider metadata without instantiating the LLM."""
+    provider_route, native = _resolve_llm_provider_and_native(
+        model_name,
+        num_ctx=num_ctx,
+        agent_overrides=agent_overrides,
     )
-    from model_catalog import resolve_local_provider
-
-    provider_slug = _load_catalog_provider(model_name) or ""
-    resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
-    family = detect_provider_family(model_name, provider_slug)
-    native = to_native_kwargs(family, model_name, resolved, provider_slug=provider_slug)
-
     route: dict[str, Any] = {
         "catalog_key": model_name,
-        "catalog_provider": provider_slug,
-        "provider_family": family,
-        "client": "",
-        "gpu_backend": "",
-        "local_provider": "",
-        "inference_url": "",
-        "endpoint": "",
-        "api_model": model_name,
-        "native_params": {},
+        "catalog_provider": provider_route.provider_slug,
+        "provider_family": provider_route.family,
+        "client": provider_route.client_type,
+        "gpu_backend": provider_route.gpu_backend,
+        "local_provider": (
+            provider_route.provider_slug if provider_route.local else ""
+        ),
+        "inference_url": provider_route.inference_url,
+        "endpoint": provider_route.endpoint,
+        "api_model": provider_route.api_model,
+        "native_params": _native_params_for_audit(native, num_ctx),
     }
-
-    if model_name.startswith("gemini"):
-        route["client"] = "ChatGoogleGenerativeAI"
-        route["endpoint"] = "google-generativeai"
-        route["native_params"] = _native_params_for_audit(native, num_ctx)
-        return route
-
-    if model_name.startswith("gpt"):
-        route["client"] = "ChatOpenAI"
-        route["endpoint"] = "https://api.openai.com/v1"
-        route["native_params"] = _native_params_for_audit(native, num_ctx)
-        return route
-
-    if model_name.startswith("claude"):
-        route["client"] = "ChatAnthropic"
-        route["endpoint"] = "https://api.anthropic.com"
-        route["native_params"] = _native_params_for_audit(native, num_ctx)
-        return route
-
-    if model_name.startswith("grok"):
-        route["client"] = "ChatOpenAI"
-        route["endpoint"] = "https://api.x.ai/v1"
-        route["native_params"] = _native_params_for_audit(native, num_ctx)
-        return route
-
-    if "/" in model_name:
-        route["client"] = "ChatOpenAI"
-        route["endpoint"] = "https://openrouter.ai/api/v1"
-        route["native_params"] = _native_params_for_audit(native, num_ctx)
-        return route
-
-    gpu_backend, inference_url = _read_local_paths_env()
-    local_provider = provider_slug or resolve_local_provider(gpu_backend)
-    route["gpu_backend"] = gpu_backend
-    route["local_provider"] = local_provider
-    route["inference_url"] = inference_url
-
-    if local_provider == "llamacpp":
-        native = apply_native_for_local_runtime(native, "llamacpp")
-        route["client"] = "ChatOpenAI"
-        route["endpoint"] = f"{inference_url}/v1"
-        route["api_model"] = _resolve_sycl_api_model(model_name)
-    else:
-        native = apply_native_for_local_runtime(native, "ollama")
-        route["client"] = "ChatOllama"
-        route["endpoint"] = inference_url
-        route["api_model"] = model_name
-
-    route["native_params"] = _native_params_for_audit(native, num_ctx)
     return route
 
 
@@ -469,10 +393,6 @@ def _is_transient_transport_error(e) -> bool:
             return True
     return False
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_ollama import ChatOllama
 from harness.model_context import get_trimmer_char_limit
 
 from pydantic import BaseModel, Field
@@ -1054,7 +974,7 @@ def agictl_view_image(path: str) -> str:
       - agictl_view_image(path="/tmp/screenshot.png")
       - agictl_view_image(path="workspace/project/diagram.png")
     """
-    from model_catalog import execution_model_supports_input
+    from model_drivers.registry import resolve_model_driver
     from model_drivers.view_paths import ViewPathError, inspect_image_for_view
 
     ctx = _HARNESS_VIEW_CTX
@@ -1073,14 +993,14 @@ def agictl_view_image(path: str) -> str:
             "steps_remaining": remaining,
         })
 
-    if not execution_model_supports_input(execution_model, "image"):
+    if resolve_model_driver(execution_model, "input", "image") is None:
         return json.dumps({
             "success": False,
-            "code": "modality_unsupported",
+            "code": "no_driver",
             "error": (
-                f"Execution model '{execution_model}' cannot perceive images "
-                "(catalog input_modalities lacks 'image'). "
-                "Use agictl agent set-model to assign a vision-capable catalog key, "
+                f"Execution model '{execution_model}' has no exact executable "
+                "image-input ModelDriver. "
+                "Use agictl agent set-model to assign a ◆ image-capable catalog key, "
                 "journal next actions, and agictl cycle end to respawn on the new model."
             ),
             "execution_model": execution_model,
@@ -1116,17 +1036,27 @@ def _build_view_image_message(
     "VIEW INJECT / multimodal re-invoke" in System Design § Development
     Standards.
     """
-    from model_drivers.message_adapters import build_image_content_parts
+    from model_drivers.registry import resolve_model_driver
 
     path = payload.get("path") or ""
     if not path:
         return None
     try:
-        parts = build_image_content_parts(
-            path,
-            provider_family,
-            caption=f"Agent requested view of image at {path}",
+        caption = f"Agent requested view of image at {path}"
+        execution_model = str(payload.get("execution_model") or "")
+        resolved = resolve_model_driver(execution_model, "input", "image")
+        if resolved is None:
+            tlog(
+                f"VIEW INJECT: no_driver model={execution_model} "
+                "direction=input modality=image"
+            )
+            return None
+        parts = resolved.adapter.entrypoint(
+            path=path,
+            caption=caption,
+            config=resolved.binding.config,
         )
+        adapter_id = resolved.adapter.adapter_id
         inject_id = f"view-inject-{uuid.uuid4()}"
         inject_msg = HumanMessage(content=parts, id=inject_id)
         fp = ""
@@ -1148,7 +1078,7 @@ def _build_view_image_message(
         tlog(
             f"VIEW INJECT: path={path}{size_note}{fp_note}{src_note}{resize_note} "
             f"model={payload.get('execution_model')} "
-            f"provider_family={provider_family} id={inject_id}"
+            f"provider_family={provider_family} adapter={adapter_id} id={inject_id}"
         )
         return inject_msg
     except Exception as e:
@@ -1323,138 +1253,29 @@ def _finalize_cycle_step_budget(agent_name: str, step_count: int, max_steps: int
 # ═══════════════════════════════════════════════════════
 
 def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = None):
-    """Instantiate the correct LLM provider based on the model name.
-    
-    Provider routing (by model prefix):
-      gemini-*  → ChatGoogleGenerativeAI (direct API)
-      gpt-*     → ChatOpenAI (direct API — api.openai.com)
-      claude-*  → ChatAnthropic (direct API — api.anthropic.com)
-      grok-*    → ChatOpenAI (direct API — api.x.ai/v1, OpenAI-compatible)
-      vendor/model (contains /) → ChatOpenAI (direct API — openrouter.ai/api/v1)
-      *         → Local AI (catalog provider: ollama → ChatOllama, llamacpp → ChatOpenAI)
-    
+    """Instantiate the exact catalog Model's Provider client.
+
+    Provider slug, endpoint, credentials, and client class come from the merged
+    catalog/provider registries via ``provider_runtime``. Model-name shape never
+    selects transport.
+
     Args:
         model_name: The model identifier (e.g. 'gemini-2.5-flash', 'gpt-5.5-2026-04-23')
         num_ctx: Context window size in tokens for Ollama models. 0 = Ollama default.
         agent_overrides: Optional per-agent param overrides (temperature, reasoning, extra).
     """
-    from harness.model_params import (
-        resolve_model_params,
-        detect_provider_family,
-        to_native_kwargs,
-        apply_native_for_local_runtime,
-        _load_catalog_provider,
+    from provider_runtime import create_langchain_client
+
+    provider_route, native = _resolve_llm_provider_and_native(
+        model_name,
+        num_ctx=num_ctx,
+        agent_overrides=agent_overrides,
     )
-    from model_catalog import resolve_local_provider
-
-    route = resolve_llm_route(model_name, num_ctx=num_ctx, agent_overrides=agent_overrides)
-    provider_slug = route["catalog_provider"]
-    family = route["provider_family"]
-    native = to_native_kwargs(
-        family, model_name,
-        resolve_model_params(model_name, agent_overrides=agent_overrides),
-        provider_slug=provider_slug or None,
+    return create_langchain_client(
+        provider_route,
+        native_params=native,
+        num_ctx=num_ctx,
     )
-    local_provider = route.get("local_provider") or provider_slug or resolve_local_provider(route.get("gpu_backend", ""))
-    if local_provider == "llamacpp":
-        native = apply_native_for_local_runtime(native, "llamacpp")
-    elif local_provider == "ollama" or family == "local":
-        native = apply_native_for_local_runtime(native, "ollama")
-
-    def _openai_compat(**base):
-        merged = {**base, **{k: v for k, v in native.items() if k not in base}}
-        return ChatOpenAI(**merged)
-
-    # ── Gemini (Google) — direct API ──
-    if model_name.startswith("gemini"):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "Google Gemini API key is missing for this model. "
-                "Connect a provider via agitop (press b for COA Setup, or API Keys) "
-                "or: sudo agictl system set-key gemini <key>"
-            )
-        gkwargs = {"model": model_name, "google_api_key": api_key}
-        if "temperature" in native:
-            gkwargs["temperature"] = native["temperature"]
-        if native.get("model_kwargs"):
-            gkwargs.update(native["model_kwargs"])
-        return ChatGoogleGenerativeAI(**gkwargs)
-
-    # ── OpenAI (GPT) — direct API ──
-    if model_name.startswith("gpt"):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "OpenAI API key is missing for this model. "
-                "Connect a provider via agitop (API Keys / press b for COA Setup) "
-                "or: sudo agictl system set-key openai <key>"
-            )
-        return _openai_compat(model=model_name, api_key=api_key)
-
-    # ── Anthropic (Claude) — direct API ──
-    if model_name.startswith("claude"):
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "Anthropic API key is missing for this model. "
-                "Connect a provider via agitop (API Keys / press b for COA Setup) "
-                "or: sudo agictl system set-key anthropic <key>"
-            )
-        akwargs = {"model": model_name, "api_key": api_key}
-        if native.get("model_kwargs"):
-            akwargs.update(native["model_kwargs"])
-        elif "temperature" in native:
-            akwargs["temperature"] = native["temperature"]
-        return ChatAnthropic(**akwargs)
-
-    # ── xAI (Grok) — direct API via OpenAI-compatible endpoint ──
-    if model_name.startswith("grok"):
-        api_key = os.getenv("XAI_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "xAI API key is missing for this model. "
-                "Connect a provider via agitop (API Keys / press b for COA Setup) "
-                "or: sudo agictl system set-key xai <key>"
-            )
-        return _openai_compat(base_url="https://api.x.ai/v1", model=model_name, api_key=api_key)
-
-    # ── OpenRouter (namespaced vendor/model IDs) — direct API ──
-    if "/" in model_name:
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "OpenRouter API key is missing for this model. "
-                "Connect a provider via agitop (API Keys / press b for COA Setup) "
-                "or: sudo agictl system set-key openrouter <key>"
-            )
-        return _openai_compat(
-            base_url="https://openrouter.ai/api/v1",
-            model=model_name,
-            api_key=api_key,
-            default_headers={
-                "HTTP-Referer": "https://versavoice.ai",
-                "X-Title": "Versa AGi",
-            },
-        )
-
-    # ── Local AI (Ollama / llama.cpp SYCL) ──
-    if route["local_provider"] == "llamacpp":
-        return _openai_compat(
-            base_url=route["endpoint"],
-            api_key="sk-local",
-            model=route["api_model"],
-        )
-
-    kwargs = {"base_url": route["endpoint"], "model": model_name}
-    if "temperature" in native:
-        kwargs["temperature"] = native["temperature"]
-    for k, v in native.items():
-        if k not in ("temperature", "extra_body", "model_kwargs", "reasoning_effort"):
-            kwargs[k] = v
-    if num_ctx and num_ctx > 0:
-        kwargs["num_ctx"] = num_ctx
-    return ChatOllama(**kwargs)
 
 
 # ═══════════════════════════════════════════════════════

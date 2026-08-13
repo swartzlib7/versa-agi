@@ -236,9 +236,21 @@ def execution_model_supports_input(
     modality: str,
     cat: dict | None = None,
 ) -> bool:
-    """Check whether the spawn execution model accepts an input modality."""
+    """Check native text or exact executable non-text input support."""
     entry = catalog_entry_for_model(execution_model, cat)
-    return model_supports_input_modality(entry, modality)
+    normalized = (modality or "").strip().lower()
+    if not model_supports_input_modality(entry, normalized):
+        return False
+    if normalized == "text":
+        return True
+    from model_drivers.registry import resolve_model_driver
+
+    return resolve_model_driver(
+        execution_model,
+        "input",
+        normalized,
+        catalog=cat,
+    ) is not None
 
 
 def validate_preferred_output_key(key: str, output_modality: str, cat: dict | None = None) -> tuple[bool, str]:
@@ -250,14 +262,24 @@ def validate_preferred_output_key(key: str, output_modality: str, cat: dict | No
     m = cat.get(key)
     if not m:
         return False, f"Output model '{key}' for {output_modality} is not in catalog"
-    if not m.get("coa"):
-        return False, f"Output model '{key}' for {output_modality} is not COA-approved"
     if not m.get("enabled"):
         return False, f"Output model '{key}' for {output_modality} is disabled"
     if not model_output_includes(m, output_modality):
         return False, (
             f"Output model '{key}' does not declare output_modality '{output_modality}' "
             f"(has: {m.get('output_modalities', 'text')})"
+        )
+    from model_drivers.registry import resolve_model_driver
+
+    if resolve_model_driver(
+        key,
+        "output",
+        output_modality,
+        catalog=cat,
+    ) is None:
+        return False, (
+            f"Output model '{key}' has no exact executable ModelDriver "
+            f"for output {output_modality}"
         )
     return True, ""
 

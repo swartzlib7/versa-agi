@@ -131,6 +131,7 @@ def build_routing_context(
         mode = "pool"
 
     cat = load_catalog()
+    providers = load_providers()
     assigned_meta = cat.get(assigned_model, {})
     assigned_work = assigned_meta.get("work_modality", "balanced")
     req_inputs = required_input_modalities or ["text"]
@@ -157,9 +158,8 @@ def build_routing_context(
             "label": m.get("label", key),
         }
 
-    def _input_ok(m: dict) -> bool:
-        inputs = {x.strip() for x in m.get("input_modalities", "text").split(",") if x.strip()}
-        return all(r in inputs for r in req_inputs)
+    def _input_ok(key: str, m: dict) -> bool:
+        return _model_supports_inputs(key, m, req_inputs, cat, providers)
 
     def _eligible(key: str, m: dict) -> bool:
         if not m.get("enabled") or not m.get("router_eligible"):
@@ -168,7 +168,7 @@ def build_routing_context(
             return False
         if not _provider_available(m.get("provider", ""), m.get("class", "")):
             return False
-        if not _input_ok(m):
+        if not _input_ok(key, m):
             return False
         return True
 
@@ -205,13 +205,59 @@ def build_routing_context(
     }
 
 
-def _validate_catalog_key(key: str | None, cat: dict, is_coa: bool) -> str | None:
+def _model_supports_inputs(
+    key: str,
+    model: dict,
+    required_input_modalities: list[str],
+    catalog: dict,
+    providers: dict,
+) -> bool:
+    inputs = {
+        item.strip()
+        for item in model.get("input_modalities", "text").split(",")
+        if item.strip()
+    }
+    from model_drivers.registry import resolve_model_driver
+
+    return all(
+        modality in inputs
+        and (
+            modality == "text"
+            or resolve_model_driver(
+                key,
+                "input",
+                modality,
+                catalog=catalog,
+                providers=providers,
+            )
+            is not None
+        )
+        for modality in required_input_modalities
+    )
+
+
+def _validate_catalog_key(
+    key: str | None,
+    cat: dict,
+    is_coa: bool,
+    *,
+    required_input_modalities: list[str] | None = None,
+    providers: dict | None = None,
+) -> str | None:
     if not key or key not in cat:
         return None
     m = cat[key]
     if not m.get("enabled"):
         return None
     if is_coa and not m.get("coa"):
+        return None
+    if required_input_modalities and not _model_supports_inputs(
+        key,
+        m,
+        required_input_modalities,
+        cat,
+        providers or load_providers(),
+    ):
         return None
     return key
 
@@ -257,6 +303,7 @@ def resolve_execution_model(
         return assigned_model, "none", None
 
     cat = load_catalog()
+    providers = load_providers()
     is_coa = agent_name == "coa"
     work_modality = getattr(triage_result, "required_work_modality", None)
     recommended = getattr(triage_result, "recommended_model", None)
@@ -272,7 +319,13 @@ def resolve_execution_model(
             work_modality = "code"
 
     def _validate(key: str | None) -> str | None:
-        return _validate_catalog_key(key, cat, is_coa)
+        return _validate_catalog_key(
+            key,
+            cat,
+            is_coa,
+            required_input_modalities=routing.get("required_input_modalities") or ["text"],
+            providers=providers,
+        )
 
     mode = routing.get("mode", "pool")
 
@@ -340,10 +393,12 @@ def resolve_output_model(output_modality: str, agent_name: str = "coa") -> str |
     m = cat.get(key)
     if not m or not m.get("enabled"):
         return None
-    if agent_name == "coa" and not m.get("coa"):
-        return None
     outputs = {x.strip() for x in m.get("output_modalities", "text").split(",") if x.strip()}
     if om not in outputs:
+        return None
+    from model_drivers.registry import resolve_model_driver
+
+    if resolve_model_driver(key, "output", om, catalog=cat) is None:
         return None
     return key
 

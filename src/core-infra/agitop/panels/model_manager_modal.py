@@ -430,7 +430,7 @@ class ModelManagerModal(ModalScreen):
         mt.cursor_type = "row"
         mt.add_columns(
             "Label", "Key", "Type", "Work", "Rtr", "En", "COA", "Rsn",
-            "Input", "Input Price", "Output", "Output Price",
+            "Input", "Input Price", "Output", "Output Price", "Drivers",
         )
         pt = self.query_one("#mm-providers-table", DataTable)
         pt.cursor_type = "row"
@@ -469,6 +469,7 @@ class ModelManagerModal(ModalScreen):
                 price_in,
                 format_modality_labels(m.get("output_modalities", "text")),
                 price_out,
+                m.get("driver_summary", "text-native"),
                 key=m["key"],
             )
 
@@ -507,7 +508,13 @@ class ModelManagerModal(ModalScreen):
         if ok:
             self._dirty = True
             extra = data.get("message", "")
-            self._feedback(f"[green]✅ {success_msg}[/]" + (f"  [dim]{extra}[/]" if extra else ""))
+            hints = data.get("driver_hints") or []
+            hint_text = f"\n[yellow]{' '.join(hints)}[/]" if hints else ""
+            self._feedback(
+                f"[green]✅ {success_msg}[/]"
+                + (f"  [dim]{extra}[/]" if extra else "")
+                + hint_text
+            )
             self._reload()
         else:
             self._feedback(f"[red]❌ {err}[/]")

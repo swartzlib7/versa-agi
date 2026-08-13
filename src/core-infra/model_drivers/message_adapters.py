@@ -2,35 +2,14 @@
 
 from __future__ import annotations
 
-import base64
-import mimetypes
-import os
 from typing import Any
 
+from model_drivers.libraries.chat_image_in_content_parts import (
+    build_image_url_content_parts,
+    read_image_base64,
+)
+
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-
-
-def _guess_image_mime(path: str) -> str:
-    mime, _ = mimetypes.guess_type(path)
-    if mime and mime.startswith("image/"):
-        return mime
-    ext = os.path.splitext(path)[1].lower()
-    fallback = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-    }
-    return fallback.get(ext, "image/png")
-
-
-def read_image_base64(path: str) -> tuple[str, str]:
-    """Return (mime_type, base64_payload) for a local image file."""
-    with open(path, "rb") as f:
-        data = base64.standard_b64encode(f.read()).decode("ascii")
-    return _guess_image_mime(path), data
 
 
 def build_image_content_parts(
@@ -40,25 +19,19 @@ def build_image_content_parts(
     caption: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return LangChain-compatible content parts for one local image."""
+    if provider_family != "local":
+        # Google, OpenAI-compatible, Anthropic, and llama.cpp currently accept
+        # the same nested image_url data-URI shape.
+        return build_image_url_content_parts(path, caption=caption)
+
     mime, b64 = read_image_base64(path)
     data_url = f"data:{mime};base64,{b64}"
     parts: list[dict[str, Any]] = []
     text = caption or f"Image at {path}"
     parts.append({"type": "text", "text": text})
 
-    if provider_family == "google":
-        # Gemini (langchain-google-genai) image input: OpenAI-style image_url
-        # data-URI block — the documented path for still images (the `media`
-        # block is documented for video/PDF/audio). Both decode to identical
-        # inline_data bytes in langchain-google-genai 4.x, so this is the
-        # canonical/documented form, not a behavioral fix.
-        parts.append({"type": "image_url", "image_url": {"url": data_url}})
-    elif provider_family == "local":
-        # ChatOllama — data URI string form
-        parts.append({"type": "image_url", "image_url": data_url})
-    else:
-        # openai_compat, anthropic, llamacpp — OpenAI-style image_url block
-        parts.append({"type": "image_url", "image_url": {"url": data_url}})
+    # ChatOllama uses the data URI string form.
+    parts.append({"type": "image_url", "image_url": data_url})
 
     return parts
 

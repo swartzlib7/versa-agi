@@ -63,7 +63,7 @@ else
   }
 fi
 
-VERSION="3.3.6"
+VERSION="3.3.7"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -359,7 +359,7 @@ INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
 INI_GEMINI_MODEL="$(ini_get gemini model '')"
 INI_EXECUTION_MODE="$(ini_get gemini mode cloud)"
 INI_CLOUD_MODELS="$(ini_get gemini cloud_models)"
-INI_COA_APPROVED_MODELS="$(ini_get gemini coa_approved_models 'z-ai/glm-5.2,x-ai/grok-4.20,google/gemini-3-flash-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4-1-fast-reasoning,grok-4.20-reasoning,gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,claude-fable-5,claude-opus-4-8,claude-sonnet-4-6,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash')"
+INI_COA_APPROVED_MODELS="$(ini_get gemini coa_approved_models 'z-ai/glm-5.2,x-ai/grok-4.5,google/gemini-3-flash-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4.5,gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,claude-fable-5,claude-opus-4-8,claude-sonnet-4-6,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash')"
 INI_LOCAL_AI_ENABLED="$(ini_get local_ai enabled false)"
 INI_GPU_BACKEND="$(ini_get local_ai gpu_backend standard)"
 INI_LOCAL_AI_DEFAULT_MODEL="$(ini_get local_ai default_model gemma4:e4b)"
@@ -1613,9 +1613,10 @@ find "${LIB_DIR}/harness" -type f -exec chmod 644 {} +
 
 # Shared modules the harness imports as top-level (one level above harness/).
 # These live in the core-infra root and must sit next to harness/ so
-# `import model_catalog` / `import db_connect` resolve under
+# `import model_catalog` / `import db_connect` / `import provider_runtime`
+# resolve under
 # PYTHONPATH=${LIB_DIR} (the harness runtime layout).
-for _shared_py in model_catalog.py db_connect.py; do
+for _shared_py in model_catalog.py db_connect.py provider_runtime.py; do
   if [ -f "${DEPLOYED_CORE_INFRA}/${_shared_py}" ]; then
     cp "${DEPLOYED_CORE_INFRA}/${_shared_py}" "${LIB_DIR}/${_shared_py}"
     chown root:root "${LIB_DIR}/${_shared_py}"

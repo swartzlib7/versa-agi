@@ -98,7 +98,7 @@ agictl agent ensure-protected                         # Self-heal: prevent coa/w
 agictl agent toggle-comms <name>                      # Toggle external comms gate (Primary User only)
 agictl agent deploy-skills <name>                     # Re-deploy system skills to sub-agent (root)
 agictl agent share-skill <skill.md> [--agent NAME]    # Share custom skill to sub-agents (root)
-agictl agent set-duties <name> <file>                 # Copy COA-authored duties to sub-agent (root)
+agictl agent set-duties <name> <file>                 # Copy duties → /var/lib/versa-agi/<name>/duties.md (root; only writer)
 agictl agent get-active                               # Pipe format for Lifeline (22 fields — see below)
 ```
 
@@ -122,7 +122,7 @@ Empty temperature/reasoning fields mean inherit from model/provider/system layer
 2. `agictl agent list-roles` → pick role
 3. `agictl agent add <name> --role <id>` → creates DB record (inactive, pending)
 4. Notify Primary User → they approve via **agitop dashboard** (Approve & Provision button)
-5. Post-approval: COA authors duties markdown → `sudo agictl agent set-duties <name> <file>` → provisions duties before first wake
+5. Post-approval: COA authors duties markdown → `sudo agictl agent set-duties <name> <file>` → writes `/var/lib/versa-agi/<name>/duties.md` (Lifeline injects this; home `/.agent/duties.md` is not live)
 
 > **Idempotent Repair**: If a sub-agent's local environment becomes corrupted or missing directories, you (or the Primary User) can run `sudo agictl agent approve <name> --force` to retroactively repair missing OS scaffold directories, securely apply `chown`/`chmod` permissions, and repair SSH keys without resetting their database state.
 

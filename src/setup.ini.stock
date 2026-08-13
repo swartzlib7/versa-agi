@@ -33,7 +33,7 @@ mode=cloud
 # STOCK LIST — owned by the shipped template: regenerated from it on every
 # setup.sh run (reconcile-config). Hand-edits here do not stick; add or disable
 # models via the dashboard/CLI (writes the models.ini custom layer).
-cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite-preview
+cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite,gemini-3.1-flash-image
 
 # System default model (catalog key). Written to paths.env as VERSA_DEFAULT_MODEL.
 # Stock blank until first-login COA bootstrap assigns one (WU-02/03).
@@ -45,7 +45,7 @@ model=
 # required for orchestration. Sub-agents are not restricted by this list.
 # STOCK LIST — regenerated from the shipped template on every setup.sh run;
 # toggle COA eligibility per-model via the dashboard/CLI instead.
-coa_approved_models=z-ai/glm-5.2,x-ai/grok-4.20,google/gemini-3-flash-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-3-pro-preview,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4-1-fast-reasoning,grok-4.20-reasoning,gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,claude-fable-5,claude-opus-4-8,claude-sonnet-4-6,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash
+coa_approved_models=z-ai/glm-5.2,x-ai/grok-4.5,google/gemini-3-flash-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4.5,gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,claude-fable-5,claude-opus-4-8,claude-sonnet-4-6,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash
 
 # Default thinking level for agent spawns (Gemini 3+ only).
 # Replaces legacy thinking_budget. Cannot mix with thinking_budget.
@@ -196,12 +196,12 @@ providers=xai,openai,anthropic,openrouter
 # ── xAI (Grok) ──────────────────────────────────────
 xai_enabled=false
 xai_api_key=
-xai_models=grok-4-1-fast-reasoning,grok-4.20-reasoning
+xai_models=grok-4.5
 
 # ── OpenAI (GPT) ────────────────────────────────────
 openai_enabled=false
 openai_api_key=
-openai_models=gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17
+openai_models=gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,gpt-audio-1.5
 
 # ── Anthropic (Claude) ──────────────────────────────
 anthropic_enabled=false
@@ -211,7 +211,7 @@ anthropic_models=claude-fable-5,claude-opus-4-8,claude-sonnet-4-6
 # ── OpenRouter (multi-vendor aggregator) ─────────────
 openrouter_enabled=false
 openrouter_api_key=
-openrouter_models=x-ai/grok-4.5,google/gemini-3-flash-preview,z-ai/glm-5.2,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-pro
+openrouter_models=x-ai/grok-4.5,google/gemini-3-flash-preview,google/gemini-3.1-flash-image,openai/gpt-audio,openai/gpt-5.6-luna,openai/gpt-5.4-image-2,openai/gpt-audio-mini,z-ai/glm-5.2,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-pro
 
 [gcp]
 # Only needed for vertex auth. If service_account_key is set, it's used;

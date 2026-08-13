@@ -96,6 +96,19 @@ def _model_row_cells(m: dict) -> tuple:
     pr = m.get("pricing") or {}
     pin = pr.get("prompt_per_m", 0)
     pout = pr.get("completion_per_m", 0)
+    driver_gaps = []
+    for direction, field in (
+        ("input", "input_modalities"),
+        ("output", "output_modalities"),
+    ):
+        for modality in sorted(
+            {
+                item.strip()
+                for item in str(m.get(field) or "").split(",")
+                if item.strip() and item.strip() != "text"
+            }
+        ):
+            driver_gaps.append(f"{direction}:{modality}◇")
     return (
         (m.get("label") or "")[:40],
         m["id"],
@@ -106,6 +119,7 @@ def _model_row_cells(m: dict) -> tuple:
         f"{pin:.4g}" if pin else "—",
         f"{pout:.4g}" if pout else "—",
         m.get("work_modality", "balanced"),
+        " ".join(driver_gaps) or "text-native",
     )
 
 
@@ -166,7 +180,7 @@ class ProviderPickModal(ModalScreen):
         table.cursor_type = "row"
         table.add_columns(
             "Label", "Model ID", "In", "Out", "In ctx", "Out ctx",
-            "$/M in", "$/M out", "Work",
+            "$/M in", "$/M out", "Work", "Drivers",
         )
         self._begin_fetch()
 

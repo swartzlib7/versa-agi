@@ -1455,31 +1455,18 @@ ${AWARENESS_TABLE}
   # ignores context-level warnings from conversation-context.
   MSG_FLOOD_GUARD=""
   if [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${sponsor_uid}" ] && [ -f "${MESSAGES_DB}" ]; then
-    # Count CONSECUTIVE outbound ('sent') from newest message backwards.
-    # Stops counting at the first inbound ('received') — a PU reply resets the streak.
-    # Scoped per-agent (SUB_ACCOUNT_ID) per-user (sponsor_uid).
-    CONSEC_OUTBOUND=$(sqlite3 "${MESSAGES_DB}" "
-      WITH recent AS (
-        SELECT direction, ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
-        FROM messages
-        WHERE (from_user_id='${SUB_ACCOUNT_ID}' AND to_user_id='${sponsor_uid}')
-           OR (from_user_id='${sponsor_uid}' AND to_user_id='${SUB_ACCOUNT_ID}')
-        ORDER BY created_at DESC LIMIT 10
-      )
-      SELECT COUNT(*) FROM recent
-      WHERE rn <= COALESCE(
-        (SELECT MIN(rn) FROM recent WHERE direction='received'),
-        11
-      ) - 1
-      AND direction='sent';" 2>/dev/null || echo "0")
+    # Use the shared identity-aware resolver so VV UID and internal agent-name
+    # replies reset both context warnings and this hard guard.
+    STREAK_JSON=$(AGICTL_MESSAGES_DB="${MESSAGES_DB}" \
+      /usr/local/bin/agictl message outbound-streak \
+      "${SUB_ACCOUNT_ID}" "${sponsor_uid}" \
+      --agent-name "${AGENT_NAME}" --limit 10 2>/dev/null \
+      || echo '{"count":0,"latest_outbound_age_hours":null}')
+    CONSEC_OUTBOUND=$(printf '%s' "${STREAK_JSON}" | jq -r '.count // 0' 2>/dev/null || echo "0")
+    LATEST_OUTBOUND_AGE_HOURS=$(printf '%s' "${STREAK_JSON}" | jq -r '.latest_outbound_age_hours // 999' 2>/dev/null || echo "999")
 
     FLOOD_GUARD_ACTIVE="false"
     if [ "${CONSEC_OUTBOUND:-0}" -ge 5 ]; then
-      LATEST_OUTBOUND_AGE_HOURS=$(sqlite3 "${MESSAGES_DB}" "
-        SELECT CAST((julianday('now') - julianday(MAX(created_at))) * 24 AS INTEGER)
-        FROM messages
-        WHERE from_user_id='${SUB_ACCOUNT_ID}' AND to_user_id='${sponsor_uid}'
-          AND direction='sent';" 2>/dev/null || echo "999")
       if [ "${LATEST_OUTBOUND_AGE_HOURS:-999}" -le "${FLOOD_GUARD_TIMEOUT_HOURS}" ] 2>/dev/null; then
         FLOOD_GUARD_ACTIVE="true"
       else

@@ -31,6 +31,15 @@ class MessageReader:
         except Exception:
             return []
 
+    def _query_strict(self, sql: str, params: tuple = ()) -> list[dict]:
+        """Run a read query whose failure must not masquerade as empty state."""
+        conn = db_connect.connect_compat(self.db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+        finally:
+            conn.close()
+
     def _execute(self, sql: str, params: tuple = ()) -> bool:
         try:
             conn = db_connect.connect_compat(self.db_path, timeout=5)
@@ -121,7 +130,7 @@ class MessageReader:
         """Get the most recent conversation history in chronological order for prompt injection.
         When exclude_unprocessed=True, omits unprocessed inbound messages (already injected separately).
         When agent_name is provided, also matches internal messages where to_user_id=agent_name."""
-        unprocessed_filter = "AND NOT (direction = 'received' AND processed_cycle_id IS NULL) " if exclude_unprocessed else ""
+        unprocessed_filter = "AND NOT (direction = 'received' AND status = 'unprocessed') " if exclude_unprocessed else ""
         # Build ID list for matching both VV UID and agent name
         my_ids = [sub_account]
         if agent_name and agent_name != sub_account:
@@ -137,7 +146,7 @@ class MessageReader:
             [contact_uid] + my_ids +  # to=contact AND from IN my_ids
             [limit]
         )
-        return self._query(
+        return self._query_strict(
             "SELECT direction, cleaned_text, created_at FROM ("
             "  SELECT direction, REPLACE(REPLACE(COALESCE(NULLIF(original_text,''), text), CHAR(10), ' '), CHAR(13), '') as cleaned_text, created_at "
             "  FROM messages "
@@ -149,6 +158,58 @@ class MessageReader:
             ") ORDER BY created_at ASC",
             tuple(params)
         )
+
+    def get_outbound_streak(
+        self,
+        sub_account: str,
+        contact_uid: str,
+        *,
+        agent_name: str = "",
+        limit: int = 10,
+    ) -> dict:
+        """Return an identity-aware consecutive outbound streak for one contact.
+
+        Both the VersaVoice sub-account UID and internal agent-name alias identify
+        the same agent. Any inbound on either identity resets the streak.
+        """
+        my_ids = [sub_account]
+        if agent_name and agent_name != sub_account:
+            my_ids.append(agent_name)
+        id_placeholders = ",".join("?" * len(my_ids))
+        params = (
+            my_ids
+            + [contact_uid]
+            + [contact_uid]
+            + my_ids
+            + [max(1, int(limit))]
+        )
+        rows = self._query_strict(
+            "SELECT direction, created_at, "
+            "CAST((julianday('now') - julianday(created_at)) * 24 AS INTEGER) "
+            "AS age_hours "
+            "FROM messages "
+            f"WHERE ((from_user_id IN ({id_placeholders}) AND to_user_id = ?) "
+            f"   OR (from_user_id = ? AND to_user_id IN ({id_placeholders}))) "
+            "ORDER BY created_at DESC, id DESC "
+            "LIMIT ?",
+            tuple(params),
+        )
+
+        count = 0
+        latest_outbound_age_hours = None
+        for row in rows:
+            if row["direction"] == "received":
+                break
+            if row["direction"] != "sent":
+                break
+            if latest_outbound_age_hours is None:
+                latest_outbound_age_hours = row["age_hours"]
+            count += 1
+
+        return {
+            "count": count,
+            "latest_outbound_age_hours": latest_outbound_age_hours,
+        }
 
     def store_inbox_messages(self, messages: list[dict], sub_account: str) -> tuple[int, list[str]]:
         """Stores a list of incoming messages, returning the number inserted and distinct message IDs."""

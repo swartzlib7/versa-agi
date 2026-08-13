@@ -387,6 +387,18 @@ def run_utility_model(
                     "output_mismatch",
                     f"Catalog '{catalog_model}' does not declare output_modality '{output_modality}'",
                 )
+            from model_drivers.registry import resolve_model_driver
+
+            if resolve_model_driver(
+                catalog_model,
+                "output",
+                output_modality,
+            ) is None:
+                raise UtilityRunError(
+                    "no_driver",
+                    f"No exact executable ModelDriver for {catalog_model} "
+                    f"output {output_modality}",
+                )
             if not has_real_driver(output_modality):
                 # Registry dispatch — the stub driver raises 'driver_pending' (video has
                 # no output model and uses a separate async API).

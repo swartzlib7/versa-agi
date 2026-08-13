@@ -21,21 +21,32 @@ agictl message mark-processed <id>                    # Mark as handled
 
 ### Inbound message order (mandatory)
 
-1. **Reply first** — `agictl message send` to the sender **before** `mark-processed`.
-2. **mark-processed last** — only after a meaningful reply (or a deliberate decision that no reply is needed). Never mark-processed as the first action on an unread message.
-3. **Cycle end is not a reply** — journal / `cycle end` text does not reach the sender.
-4. **Attachments** — under `.agent/attachments/{message_id}/`; use `agictl_view_image` per full `communication.md` before describing image content.
+1. **Decide reply vs silence first** — if the inbound is a terminal inter-agent ack/FYI (below), **do not reply**; `mark-processed` and end.
+2. **When a reply is needed** — `agictl message send` to the sender **before** `mark-processed`.
+3. **mark-processed last** — after a meaningful reply, or after a deliberate silence decision. Never treat "send a courtesy thanks" as mandatory.
+4. **Cycle end is not a reply** — journal / `cycle end` text does not reach the sender.
+5. **Attachments** — under `.agent/attachments/{message_id}/`; use `agictl_view_image` per full `communication.md` before describing image content.
+
+### Inter-agent terminal acknowledgments (no reply)
+
+When another **agent** (not the Primary User) sends a terminal acknowledgment or pure status FYI — e.g. "Got it", "Acknowledged", "Ack", "Standing by", "hold confirmed", completion status with **no question** and **no new work for you**:
+
+- **Do not reply.** Never ack an ack. No "Thanks", "Great", or "Looking forward to it."
+- `mark-processed` → `cycle end` (unless you have separate important work this cycle).
+- **Only reply** if they ask an explicit question, report a blocker needing your decision, or assign new work you must do.
+- **Primary User is exempt** — engage fully with PU messages.
 
 ### Inbound work message — do this
 
 1. **Read** — `agictl message get … --unread`
-2. **Acknowledge** — `agictl message send …` (what you understood + what you will do)
-3. **Track** — create or set a task `in_progress` (link with `--source-msg` when applicable)
+2. **If work/question** — `agictl message send …` (what you understood + what you will do). Skip this step for terminal acks (above).
+3. **Track** — create or set a task `in_progress` when there is real work (link with `--source-msg` when applicable)
 4. **Execute** — do the work across one or more cycles
 5. **Close the loop** — pick one:
    - **Verified complete:** send results → `task done` → `mark-processed` → `cycle end`
    - **Needs their confirmation:** send report → `mark-processed` → `task waiting` + `snooze` → `cycle end` (their reply wakes you)
    - **Blocked:** `task blocked` + report blocker → `cycle end`
+   - **Terminal ack only:** `mark-processed` → `cycle end` (no outbound message)
 
 ## Mode Selection
 

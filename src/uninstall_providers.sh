@@ -102,7 +102,7 @@ if [ -f "${AGENTS_DB}" ]; then
     SET status='invalid_config',
         status_message='Cloud proxy was disabled. Change model to a cloud or local variant.',
         updated_at=datetime('now')
-    WHERE model IN ('grok-4-1-fast-reasoning', 'grok-4.20-reasoning',
+    WHERE model IN ('grok-4.5', 'grok-4.3', 'grok-4-1-fast-reasoning', 'grok-4.20-reasoning',
                     'moonshotai/kimi-k2.7-code', 'deepseek/deepseek-v4-flash')
       OR model LIKE 'gpt-%'
       OR model LIKE 'claude-%'
