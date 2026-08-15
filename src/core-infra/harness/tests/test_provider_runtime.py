@@ -413,6 +413,36 @@ class TestProviderFamilyCompatibility(unittest.TestCase):
         self.assertNotIn("extra_body", native)
         self.assertNotIn("temperature", native)
 
+    def test_direct_openai_sends_explicit_none_reasoning_for_tools(self):
+        native = to_native_kwargs(
+            "openai_compat",
+            "gpt-5.6-terra",
+            {
+                "temperature": 0.2,
+                "reasoning_effort": "none",
+                "extra": {},
+            },
+            provider_slug="openai",
+        )
+        self.assertEqual(native["reasoning_effort"], "none")
+        self.assertEqual(native["temperature"], 0.2)
+        self.assertNotIn("extra_body", native)
+
+    def test_openrouter_omits_none_reasoning_body(self):
+        native = to_native_kwargs(
+            "openai_compat",
+            "openai/gpt-5.6-terra",
+            {
+                "temperature": 0.2,
+                "reasoning_effort": "none",
+                "extra": {},
+            },
+            provider_slug="openrouter",
+        )
+        self.assertNotIn("reasoning_effort", native)
+        self.assertNotIn("extra_body", native)
+        self.assertEqual(native["temperature"], 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -402,7 +402,11 @@ from pydantic import BaseModel, Field
 # ═══════════════════════════════════════════════════════
 TOOL_OUTPUT_LIMIT = 6000
 
-def _run_agictl(args_str: str) -> str:
+AGICTL_TOOL_TIMEOUT_SECONDS = 120
+UTILITY_TOOL_TIMEOUT_SECONDS = 900
+
+
+def _run_agictl(args_str: str, timeout: int = AGICTL_TOOL_TIMEOUT_SECONDS) -> str:
     """Internal helper: execute an agictl command and return output."""
     try:
         cmd = ["agictl"] + shlex.split(args_str)
@@ -410,7 +414,7 @@ def _run_agictl(args_str: str) -> str:
         return f"ERROR parsing command syntax: {ve}. Check quotation marks and escaping."
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
@@ -418,7 +422,7 @@ def _run_agictl(args_str: str) -> str:
             output = output[:TOOL_OUTPUT_LIMIT] + f"\n\n[OUTPUT TRUNCATED: Exceeded {TOOL_OUTPUT_LIMIT} chars. Refine your query or paginate.]"
         return output if output else "Command executed successfully with no output."
     except subprocess.TimeoutExpired:
-        return "ERROR: Command timed out after 120 seconds."
+        return f"ERROR: Command timed out after {timeout} seconds."
     except Exception as e:
         return f"Error executing command: {e}"
 
@@ -515,8 +519,9 @@ def agictl_utility(command: str) -> str:
       - 'utility run <um-id>' — run using UM defaults (run-as-agent context)
       - 'utility run <um-id> --input-files path/a.jpg,path/b.pdf'
       - 'utility run <um-id> --dry-run' — validate maps and paths only
+    Image/audio generation may take most of the 900-second tool budget.
     """
-    return _run_agictl(command)
+    return _run_agictl(command, timeout=UTILITY_TOOL_TIMEOUT_SECONDS)
 
 
 # ═══════════════════════════════════════════════════════

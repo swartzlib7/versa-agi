@@ -462,7 +462,20 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 > - **Router Mode** (default) — Multiple models loaded on demand from the GGUF directory. Each agent can use a different local model. The server evicts least-recently-used models when `sycl_models_max` is exceeded.
 > - **Single Mode** — All local agents share one active model. Switch models via `sudo agictl model activate <name>` — concurrency (parallel slots) is automatically recalculated based on your GPU VRAM and model size. Switching to Single Mode automatically sweeps all local agents to the active model.
 >
-> Setup auto-detects Intel GPUs via `lspci` and prompts for confirmation. Model metadata is managed via the `models.ini` registry — add custom models with `sudo agictl model registry add <name> --repo <hf_repo> --file <gguf> --size <gb>`.
+> Setup auto-detects Intel GPUs via `lspci` and prompts for confirmation. **Inspect a Hugging Face source before adding it to SYCL** — a `.gguf` is not always a llama.cpp chat model (image/video pipelines must not go in llama-server storage).
+
+```bash
+# Classify only (no download, no sudo)
+agictl model hf inspect 'hf://unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf'
+
+# Chat GGUF only — Intel local/server. Never auto-activates.
+sudo agictl model sycl import 'hf://unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf' \
+  --name gemma4:e4b --runtime chat
+
+sudo agictl model activate gemma4:e4b   # separate step; single mode confirms agent sweep
+```
+
+Clients: import/activate on the GPU **server**, then `sudo agictl model refresh`. Media GGUFs (Qwen-Image, MiniMax-H3, diffusion/VAE bundles) are refused; local image/video Utility is **TD-LOCAL-MEDIA-001**. Vision projectors are **TD-LOCAL-MMProj-001**. Legacy `agictl model registry add` remains, but also refuses media pipelines.
 
 > [!TIP]
 > **Distributed Setup (Server + Client):** Install as **Server** on your GPU machine to serve inference over LAN. Install as **Client** on your laptop — setup will create an SSH tunnel (`versa-agi-tunnel.service`) for encrypted communication and display a public key to authorize on the server. Local AI traffic routes securely through the tunnel directly to the inference endpoint. Use `sudo agictl model refresh` on the client to pick up model changes and server configuration (context ceiling, concurrency) made on the server.
@@ -476,9 +489,20 @@ export GEMINI_MODEL="gemini-3-flash-preview"
 
 ### Model Registry Management
 
-All SYCL model metadata (HuggingFace repo, GGUF filename, size) is centralized in `models.ini [sycl_models]`. This registry drives the setup menu, model downloads, concurrency calculations, and dashboard context picklists. **Vision projector (`mmproj`) files are not downloaded or wired yet** — future enhancement TD-LOCAL-MMProj-001.
+All SYCL model metadata (HuggingFace repo, GGUF filename, size) is centralized in `models.ini [sycl_models]` (three CSV fields). Import classification and Hub provenance live in `[sycl_model_meta]` (JSON; preserved on reconcile). **Vision projector (`mmproj`) files are not downloaded or wired yet** — TD-LOCAL-MMProj-001. **Media generation GGUFs are not SYCL chat models** — TD-LOCAL-MEDIA-001.
 
-**CLI Commands** (`agictl model registry`):
+**Preferred CLI** (`agictl model hf` / `agictl model sycl`):
+
+```bash
+# Inspect (read-only)
+agictl model hf inspect 'https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_K_M.gguf'
+
+# Import chat GGUF (Intel local/server only; does not activate)
+sudo agictl model sycl import 'hf://unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf' \
+  --name gemma4:e4b --runtime chat
+```
+
+**Legacy registry** (`agictl model registry`) still lists/edits 3-field `[sycl_models]` rows; `registry add` refuses media pipelines:
 
 ```bash
 # List all registered SYCL models

@@ -522,6 +522,14 @@ def to_native_kwargs(
                 extra_body["reasoning"] = reasoning
         elif thinking_on and effort != "none" and not is_local_llamacpp:
             kwargs["reasoning_effort"] = effort
+        elif (
+            slug == "openai"
+            and not is_local_llamacpp
+            and effort == "none"
+        ):
+            # Direct OpenAI Chat Completions + tools: gpt-5.6-terra (and similar)
+            # apply a non-none default unless reasoning_effort=none is explicit.
+            kwargs["reasoning_effort"] = "none"
     elif family == "local":
         if temp is not None:
             kwargs["temperature"] = temp

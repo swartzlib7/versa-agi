@@ -18,6 +18,21 @@ from agitop.panels.utility_model_editor_modal import (  # noqa: E402
     _catalog_option_label,
     _filter_catalog_choices,
 )
+from model_catalog import format_catalog_picker_label  # noqa: E402
+
+
+class TestCatalogPickerLabel(unittest.TestCase):
+    def test_openai_vs_openrouter_twins(self):
+        self.assertEqual(
+            format_catalog_picker_label("OpenAI", "GPT-5.6 Terra", "gpt-5.6-terra"),
+            "OpenAI: GPT-5.6 Terra (gpt-5.6-terra)",
+        )
+        self.assertEqual(
+            format_catalog_picker_label(
+                "OpenRouter", "GPT-5.6 Terra", "openai/gpt-5.6-terra"
+            ),
+            "OpenRouter: GPT-5.6 Terra (openai/gpt-5.6-terra)",
+        )
 
 
 class TestUtilityDriverFiltering(unittest.TestCase):
@@ -25,7 +40,8 @@ class TestUtilityDriverFiltering(unittest.TestCase):
         rows = [
             {
                 "key": "bound",
-                "vendor": "Provider",
+                "label": "Bound",
+                "provider_label": "Provider",
                 "in_csv": "text",
                 "out_csv": "text,image",
                 "inputs": {"text"},
@@ -35,7 +51,8 @@ class TestUtilityDriverFiltering(unittest.TestCase):
             },
             {
                 "key": "hollow",
-                "vendor": "Provider",
+                "label": "Hollow",
+                "provider_label": "Provider",
                 "in_csv": "text",
                 "out_csv": "text,image",
                 "inputs": {"text"},
@@ -47,11 +64,13 @@ class TestUtilityDriverFiltering(unittest.TestCase):
         choices = _filter_catalog_choices(rows, "text", "image")
         self.assertEqual([value for _label, value in choices], ["bound"])
         self.assertIn("output:image◆", _catalog_option_label(rows[0]))
+        self.assertIn("Provider: Bound (bound)", _catalog_option_label(rows[0]))
 
     def test_text_output_remains_native(self):
         row = {
             "key": "text-model",
-            "vendor": "Provider",
+            "label": "Text",
+            "provider_label": "Provider",
             "in_csv": "text",
             "out_csv": "text",
             "inputs": {"text"},
@@ -69,6 +88,7 @@ class TestOutputRoutingDriverFiltering(unittest.TestCase):
             {
                 "key": "bound",
                 "label": "Bound",
+                "provider": "openai",
                 "enabled": True,
                 "coa": False,
                 "output_modalities": "text,image",
@@ -86,9 +106,12 @@ class TestOutputRoutingDriverFiltering(unittest.TestCase):
         with patch(
             "agitop.panels.model_routing_modal._catalog_list",
             return_value=catalog,
+        ), patch(
+            "model_catalog.load_providers",
+            return_value={"openai": {"label": "OpenAI"}},
         ):
             choices = _load_output_model_choices("image")
-        self.assertIn(("bound — Bound ◆image", "bound"), choices)
+        self.assertIn(("OpenAI: Bound (bound) ◆image", "bound"), choices)
         self.assertNotIn("hollow", {value for _label, value in choices})
 
 

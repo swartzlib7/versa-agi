@@ -132,6 +132,31 @@ class TestModelDriverCatalogStock(unittest.TestCase):
                 self.assertFalse(row["coa"])
                 self.assertFalse(row["router_eligible"])
 
+    def test_stock_library_has_local_qwen_image(self) -> None:
+        cfg = _config(self.models_path)
+        section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
+        self.assertTrue(cfg.has_option(section, "qwen-image-2512"))
+        row = parse_catalog_row(cfg.get(section, "qwen-image-2512"))
+        self.assertEqual(row["class"], "local")
+        self.assertEqual(row["provider"], "local_media")
+        self.assertEqual(_csv(row["output_modalities"]), {"image"})
+        self.assertFalse(row["router_eligible"])
+
+    def test_stock_library_has_no_krea2(self) -> None:
+        cfg = _config(self.models_path)
+        section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
+        self.assertFalse(cfg.has_option(section, "krea2-turbo"))
+
+    def test_stock_library_has_local_flux(self) -> None:
+        cfg = _config(self.models_path)
+        section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
+        self.assertTrue(cfg.has_option(section, "flux1-dev"))
+        row = parse_catalog_row(cfg.get(section, "flux1-dev"))
+        self.assertEqual(row["class"], "local")
+        self.assertEqual(row["provider"], "local_media")
+        self.assertEqual(_csv(row["output_modalities"]), {"image"})
+        self.assertFalse(row["router_eligible"])
+
     def test_stock_activation_lists_include_each_output_model(self) -> None:
         cfg = _config(self.setup_path)
         self.assertIn(

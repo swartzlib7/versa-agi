@@ -154,6 +154,30 @@ def load_providers(path: str | None = None) -> dict[str, dict]:
     return out
 
 
+def provider_display_label(
+    slug: str,
+    providers: dict[str, dict] | None = None,
+) -> str:
+    """Human Provider name from merged ``[providers*]``, falling back to the slug."""
+    providers = providers if providers is not None else load_providers()
+    info = providers.get((slug or "").strip()) or {}
+    return (info.get("label") or slug or "?").strip() or "?"
+
+
+def format_catalog_picker_label(
+    provider_label: str,
+    model_label: str,
+    catalog_key: str,
+) -> str:
+    """Picker text: ``{Provider}: {model label} ({catalog_key})``."""
+    key = (catalog_key or "").strip()
+    prov = (provider_label or "").strip() or "?"
+    name = (model_label or "").strip() or key or "?"
+    if not key:
+        return f"{prov}: {name}"
+    return f"{prov}: {name} ({key})"
+
+
 def provider_is_enabled(slug: str, providers: dict[str, dict] | None = None) -> bool:
     """True when slug exists in merged [providers*] and is enabled."""
     providers = providers or load_providers()

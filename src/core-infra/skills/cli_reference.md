@@ -204,7 +204,7 @@ agictl model modality-map seed
 
 **agitop:** System Settings → **Utility Models** tab. Task modal → **Utility Task** tab.
 
-See skill **`utility_models.md`** for mental model, Utility Task callbacks, and artifact handling.
+See skill **`utility_models.md`** for mental model, Utility Task callbacks, artifact handling, and **long image/audio runs** (900s `agictl_utility` budget; snooze and re-check output if the tool times out).
 
 ## 3c. Script Tasks (TD-SCRIPT-001)
 

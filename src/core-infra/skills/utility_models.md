@@ -16,6 +16,9 @@
 
 Use a UM when you need a **deterministic one-shot** (image, audio, text artifact) without spinning a full reasoning cycle. Use a Normal Agent when the work needs judgment, tools, or multi-step coordination.
 
+Local Qwen-Image-2512: read **`local_media_qwen_image_2512.md`** and `agictl model media usage qwen-image-2512` before painting.
+Local FLUX.1-dev: read **`local_media_flux1_dev.md`** and `agictl model media usage flux1-dev` before painting.
+
 ## Listing profiles
 
 ```bash
@@ -45,6 +48,19 @@ agictl utility run brand-hero-square --dry-run
 | `--task-id` | Link to Utility Task; runs as task `assigned_to` |
 
 Artifacts land under the run context agent home (default `.agent/utility`). A `manifest.json` is written when enabled in `setup.ini [utility_models]`.
+
+## Long image / audio runs
+
+`agictl_utility` waits **900 seconds** (other `agictl_*` tools stay at 120). Local image paint on a client SSHs to the GPU host and copies the PNG back into the UM output dir — that path needs the longer budget.
+
+If you see `ERROR: Command timed out after 900 seconds` (or older 180/120s wording):
+
+1. **Do not immediately re-run** the same UM. A run lock (`running`) means generation is still in progress; a second start will fail or collide.
+2. **Check the UM `output_path`** (and `manifest.json` if present) for a new artifact. If a file appeared, treat the run as succeeded and continue (view / send / journal).
+3. If nothing is there yet: journal the expected path, **`agictl task snooze <id> 5`** (minimum 5 minutes), and `agictl cycle end`. On the next wake, inspect the directory again before starting a new run.
+4. Re-run only after the lock is gone **and** no new artifact exists.
+
+`--utility-spawn-agent` (or a follow-up Normal Agent task) is the right way to quality-check an image after it lands — do not burn the current cycle waiting in a tight poll loop.
 
 ## Utility Tasks
 

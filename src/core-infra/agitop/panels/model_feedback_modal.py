@@ -56,8 +56,16 @@ def _catalog_key_choices(preselect: str = "") -> list[tuple[str, str]]:
         if not m.get("enabled"):
             continue
         key = m["key"]
-        label = m.get("label") or key
-        choices.append((f"{key} — {label}", key))
+        from model_catalog import format_catalog_picker_label, provider_display_label
+
+        choices.append((
+            format_catalog_picker_label(
+                provider_display_label(m.get("provider") or ""),
+                m.get("label") or key,
+                key,
+            ),
+            key,
+        ))
         seen.add(key)
     preselect = (preselect or "").strip()
     if preselect and preselect not in seen:

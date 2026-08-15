@@ -28,23 +28,11 @@ _INPUT_MODALITIES = [
 
 _SELECT_NONE = "__none__"
 
-_VENDOR_NAMES = {
-    "google": "Google",
-    "openai": "OpenAI",
-    "xai": "xAI",
-    "anthropic": "Anthropic",
-    "openrouter": "OpenRouter",
-    "ollama": "Ollama",
-    "llamacpp": "llama.cpp",
-}
+def _provider_label(provider: str) -> str:
+    """Catalog Provider display name (not the OpenRouter vendor namespace)."""
+    from model_catalog import provider_display_label
 
-
-def _vendor_name(provider: str, key: str) -> str:
-    """Human vendor label. OpenRouter keys carry a ``vendor/model`` namespace."""
-    prov = (provider or "").strip().lower()
-    if prov == "openrouter" and "/" in key:
-        return key.split("/", 1)[0]
-    return _VENDOR_NAMES.get(prov, prov.title() if prov else "?")
+    return provider_display_label(provider)
 
 # §IX /var/lib/versa-agi/ — staging for agitop → agictl prompt handoff (watchdog-readable).
 _UM_PROMPT_STAGING = "/var/lib/versa-agi/utility-models/staging"
@@ -113,7 +101,7 @@ def _catalog_rows() -> list[dict]:
         rows.append({
             "key": key,
             "label": m.get("label") or key,
-            "vendor": _vendor_name(m.get("provider"), key),
+            "provider_label": _provider_label(m.get("provider") or ""),
             "in_csv": in_csv or "—",
             "out_csv": out_csv or "—",
             "inputs": {s.strip() for s in in_csv.split(",") if s.strip()},
@@ -127,11 +115,15 @@ def _catalog_rows() -> list[dict]:
 
 
 def _catalog_option_label(row: dict) -> str:
-    """'{Vendor} ({model id}) [{input} --> {output}]'."""
-    return (
-        f"{row['vendor']} ({row['key']}) "
-        f"[{row['in_csv']} --> {row['out_csv']}] {row['driver_summary']}"
+    """'{Provider}: {label} ({key}) [{input} --> {output}] {drivers}'."""
+    from model_catalog import format_catalog_picker_label
+
+    base = format_catalog_picker_label(
+        row.get("provider_label") or row.get("vendor") or "",
+        row.get("label") or row.get("key") or "",
+        row.get("key") or "",
     )
+    return f"{base} [{row['in_csv']} --> {row['out_csv']}] {row['driver_summary']}"
 
 
 def _filter_catalog_choices(rows: list[dict], in_mod, out_mod) -> list[tuple[str, str]]:

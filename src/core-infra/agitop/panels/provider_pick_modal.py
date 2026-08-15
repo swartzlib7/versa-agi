@@ -52,6 +52,10 @@ def catalog_prefill_from_source(slug: str, model: dict) -> dict:
         ctx_max = int(ctx)
     except (TypeError, ValueError):
         ctx_max = 131072
+    if slug == "huggingface":
+        from agitop.panels.media_wizard import catalog_prefill_from_hf_recipe
+
+        return catalog_prefill_from_hf_recipe(model)
     model_class = "cloud" if slug == "google" else "third_party"
     return {
         "key": model.get("id") or "",
@@ -140,6 +144,8 @@ class ProviderPickModal(ModalScreen):
         self._spinner_timer = None
 
     def _list_args(self) -> list[str]:
+        if self._slug == "huggingface":
+            return ["model", "media", "recipes"]
         if self._slug == "openrouter":
             return ["model", "openrouter", "list"]
         return ["model", "source", "list", self._slug]
@@ -153,13 +159,21 @@ class ProviderPickModal(ModalScreen):
                     id="provider-pick-title",
                     classes="provider-pick-title",
                 )
-            yield Static(
-                "[dim]Chat-capable models not yet in your catalog. "
-                "In/Out: 📝 text · 🖼 image · 🔊 audio · 🎬 video (icon + name in table). "
-                "Context limits are tokens (provider API; inferred where absent). "
-                "PgUp/PgDn (Mac: Fn+↑/↓ or Ctrl+B/F) to page · select a row · "
-                "Use selected to fill the Add Model form.[/]"
-            )
+            if self._slug == "huggingface":
+                help_text = (
+                    "[dim]Recognized local Hugging Face recipes we can import "
+                    "(not a search of the whole Hub). Select a row, then "
+                    "Use selected — Media Import runs on the GPU host.[/]"
+                )
+            else:
+                help_text = (
+                    "[dim]Chat-capable models not yet in your catalog. "
+                    "In/Out: 📝 text · 🖼 image · 🔊 audio · 🎬 video (icon + name in table). "
+                    "Context limits are tokens (provider API; inferred where absent). "
+                    "PgUp/PgDn (Mac: Fn+↑/↓ or Ctrl+B/F) to page · select a row · "
+                    "Use selected to fill the Add Model form.[/]"
+                )
+            yield Static(help_text)
             yield Static("", id="provider-pick-loading")
             with Vertical(id="provider-pick-scroll", classes="provider-pick-hidden"):
                 yield PaginatedDataTable(

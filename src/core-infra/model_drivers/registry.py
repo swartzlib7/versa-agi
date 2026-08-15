@@ -27,6 +27,7 @@ from model_drivers.libraries import (
     chat_mm_audio_out_pcm16,
     chat_mm_image_out_google_generate_content,
     chat_mm_image_out_openai_compat,
+    local_media_image_out_sdcpp,
 )
 
 
@@ -98,6 +99,12 @@ ADAPTERS: dict[str, DriverAdapter] = {
         direction=chat_mm_image_out_google_generate_content.DIRECTION,
         modality=chat_mm_image_out_google_generate_content.MODALITY,
         entrypoint=chat_mm_image_out_google_generate_content.generate,
+    ),
+    local_media_image_out_sdcpp.ADAPTER_ID: DriverAdapter(
+        adapter_id=local_media_image_out_sdcpp.ADAPTER_ID,
+        direction=local_media_image_out_sdcpp.DIRECTION,
+        modality=local_media_image_out_sdcpp.MODALITY,
+        entrypoint=local_media_image_out_sdcpp.generate,
     ),
 }
 
@@ -175,6 +182,19 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
         direction="output",
         modality="audio",
         adapter_id=chat_mm_audio_out_pcm16.ADAPTER_ID,
+    ),
+    # DR-LOC-02 / MD-4b — local Utility image output (sd-cli).
+    _binding(
+        "qwen-image-2512",
+        direction="output",
+        modality="image",
+        adapter_id=local_media_image_out_sdcpp.ADAPTER_ID,
+    ),
+    _binding(
+        "flux1-dev",
+        direction="output",
+        modality="image",
+        adapter_id=local_media_image_out_sdcpp.ADAPTER_ID,
     ),
 )
 

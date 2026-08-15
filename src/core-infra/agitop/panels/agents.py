@@ -346,8 +346,8 @@ class RemovalConfirmModal(ModalScreen):
             self.app.pop_screen()
 
 
-def _load_catalog_labels(ini) -> dict[str, tuple[str, str]]:
-    """Merge [catalog] + [catalog_custom] → {key: (class, label)} (custom wins).
+def _load_catalog_labels(ini) -> dict[str, tuple[str, str, str]]:
+    """Merge [catalog] + [catalog_custom] → {key: (class, label, provider)} (custom wins).
 
     Uses model_catalog.parse_catalog_row for 7- and 11-field catalog rows.
     """
@@ -359,7 +359,7 @@ def _load_catalog_labels(ini) -> dict[str, tuple[str, str]]:
         sys.path.insert(0, core_infra)
     from model_catalog import parse_catalog_row
 
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str, str, str]] = {}
     for section in ("catalog", "catalog_custom"):
         if not ini.has_section(section):
             continue
@@ -368,14 +368,25 @@ def _load_catalog_labels(ini) -> dict[str, tuple[str, str]]:
             if not row:
                 continue
             k = key.strip()
-            out[k] = (row["class"], (row.get("label") or "").strip() or k)
+            out[k] = (
+                row["class"],
+                (row.get("label") or "").strip() or k,
+                (row.get("provider") or "").strip(),
+            )
     return out
 
 
-def _model_option_label(label: str, key: str) -> str:
-    """Consistent picker display: catalog key + human label."""
-    clean = (label or "").strip() or key
-    return f"{key} — {clean}"
+def _model_option_label(label: str, key: str, provider_label: str = "") -> str:
+    """Consistent picker display: {Provider}: {model label} ({catalog_key})."""
+    import os
+    import sys
+
+    core_infra = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if core_infra not in sys.path:
+        sys.path.insert(0, core_infra)
+    from model_catalog import format_catalog_picker_label
+
+    return format_catalog_picker_label(provider_label, label, key)
 
 
 def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple[str, str]]:
@@ -400,14 +411,27 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
             break
 
     catalog = _load_catalog_labels(ini)
+    import os
+    import sys
+
+    core_infra = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if core_infra not in sys.path:
+        sys.path.insert(0, core_infra)
+    from model_catalog import load_providers, provider_display_label
+
+    providers = load_providers()
+    provider_by_key = {key: slug for key, (_cls, _lbl, slug) in catalog.items()}
+
+    def _prov(key: str, fallback: str = "") -> str:
+        return provider_display_label(provider_by_key.get(key) or fallback, providers)
 
     # Cloud + third-party labels from the catalog (by class)
-    cloud_entries = [(lbl, key) for key, (cls, lbl) in catalog.items() if cls == "cloud"]
-    proxy_entries = [(lbl, key) for key, (cls, lbl) in catalog.items() if cls == "third_party"]
+    cloud_entries = [(lbl, key) for key, (cls, lbl, _slug) in catalog.items() if cls == "cloud"]
+    proxy_entries = [(lbl, key) for key, (cls, lbl, _slug) in catalog.items() if cls == "third_party"]
 
     # Local labels: catalog local rows, overlaid with the pipeline-owned
     # [local_models] section (registry-added models that aren't in the catalog).
-    local_label_map = {key: lbl for key, (cls, lbl) in catalog.items() if cls == "local"}
+    local_label_map = {key: lbl for key, (cls, lbl, _slug) in catalog.items() if cls == "local"}
     if ini.has_section("local_models"):
         for key, label in ini.items("local_models"):
             local_label_map.setdefault(key.strip(), label.strip())
@@ -420,11 +444,11 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
     if not system_reader:
         unfiltered: list[tuple[str, str]] = []
         for label, key in cloud_entries:
-            unfiltered.append((f"☁ {_model_option_label(label, key)}", key))
+            unfiltered.append((f"☁ {_model_option_label(label, key, _prov(key))}", key))
         for label, key in proxy_entries:
-            unfiltered.append((f"☁ {_model_option_label(label, key)}", key))
+            unfiltered.append((f"☁ {_model_option_label(label, key, _prov(key))}", key))
         for key, label in local_label_map.items():
-            unfiltered.append((f"🖥 {_model_option_label(label, key)}", key))
+            unfiltered.append((f"🖥 {_model_option_label(label, key, _prov(key, 'llamacpp'))}", key))
         return unfiltered
 
     # Backend-aware filtering: only show models for enabled backends
@@ -442,13 +466,13 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
     if cloud_set:
         for label, key in cloud_entries:
             if key in cloud_set:
-                filtered.append((f"☁ {_model_option_label(label, key)}", key))
+                filtered.append((f"☁ {_model_option_label(label, key, _prov(key))}", key))
 
     # Third-party models: only if third_party enabled
     if proxy_enabled and proxy_set:
         for label, key in proxy_entries:
             if key in proxy_set:
-                filtered.append((f"☁ {_model_option_label(label, key)}", key))
+                filtered.append((f"☁ {_model_option_label(label, key, _prov(key))}", key))
 
     # Local models: only if local_ai enabled — use labels from models.ini
     # VERSA_LOCAL_MODELS now contains ALL downloaded models on the server
@@ -459,7 +483,7 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
         strategy = system_reader.get_loading_strategy()
         for m in local_set:
             label = local_label_map.get(m, m)
-            display = _model_option_label(label, m)
+            display = _model_option_label(label, m, _prov(m, "llamacpp"))
             # Star indicator: single mode marks the VRAM-resident model;
             # router mode — all models available, no star needed.
             if strategy == "single" and gpu_backend in ("intel", "remote"):

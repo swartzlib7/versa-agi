@@ -53,7 +53,7 @@ RECOMMENDED: dict[str, list[tuple[str, str]]] = {
 }
 
 PROVIDER_LABELS = {
-    "google": "Google Gemini",
+    "google": "Google",
     "xai": "xAI",
     "openai": "OpenAI",
     "anthropic": "Anthropic",
@@ -77,7 +77,13 @@ def recommended_keys(provider: str) -> list[str]:
 
 def recommended_options(provider: str) -> list[tuple[str, str]]:
     """(label, catalog_key) for Select widgets."""
-    return [(label, key) for key, label in RECOMMENDED.get(provider, [])]
+    from model_catalog import format_catalog_picker_label
+
+    prov = PROVIDER_LABELS.get(provider, provider)
+    return [
+        (format_catalog_picker_label(prov, label, key), key)
+        for key, label in RECOMMENDED.get(provider, [])
+    ]
 
 
 def all_recommended_keys() -> set[str]:

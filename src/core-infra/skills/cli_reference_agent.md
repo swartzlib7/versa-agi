@@ -15,7 +15,7 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 |---|---|---|
 | `system` | `agictl_system` | `system whoami` |
 | `model` | `agictl_model` | `model list` |
-| `utility` | `agictl_utility` | `utility run <um-id> --input-files a.jpg` |
+| `utility` | `agictl_utility` | `utility run <um-id> --input-files a.jpg` (900s budget; see `utility_models.md` if it times out) |
 | `agent` | `agictl_agent` | `agent list` |
 | `task` | `agictl_task` | `task snooze 43 1440` |
 | `message` | `agictl_message` | `message send UID "Hello" --mode typed` |

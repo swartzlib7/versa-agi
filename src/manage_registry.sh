@@ -269,6 +269,10 @@ _interactive_add() {
   echo ""
   echo "  ${_BOLD}Add New SYCL Model${_RESET}"
   echo "  ─────────────────────────────────────────"
+  echo "  ${_YELLOW}Prefer inspect-first chat import:${_RESET}"
+  echo "    agictl model hf inspect <hf-url-or-hf://org/repo/file.gguf>"
+  echo "    sudo agictl model sycl import <source> --name <key> --runtime chat"
+  echo "  Media GGUFs (image/video pipelines) must not be added here."
   echo ""
 
   local name repo file size_gb ctx_rec ctx_max label

@@ -51,7 +51,10 @@
 #   LOCAL PIPELINE (owned by the local-model pipeline / registry — not by sync):
 #   [local_models]        — Local AI model display labels (Ollama / SYCL)
 #   [context_windows]     — Local context windows + conservative cloud prefixes
-#   [sycl_models]         — Intel SYCL GGUF registry (repo,file,size_gb)
+#   [sycl_models]         — Intel SYCL GGUF registry (repo,file,size_gb) — keep 3 fields
+#   [sycl_model_meta]     — JSON sidecar per SYCL key (class, source, revision, hash)
+#                            union-preserved on reconcile; never a 4th CSV field
+#   [media_bundles]       — local Utility media inventory (JSON); not llama-server
 #
 #   Cloud + third-party metadata (labels + context windows) lives SOLELY in
 #   [catalog] — there are no separate [models]/[third_party_models] sections.
@@ -67,6 +70,8 @@
 #   [local_models]     key = Display Label
 #   [context_windows]  key = recommended,max
 #   [sycl_models]      key = hf_repo,gguf_filename,size_gb
+#   [sycl_model_meta]  key = JSON {class,runtime,source,repo,file,revision,sha256}
+#   [media_bundles]    key = JSON {recipe,provider,runtime,source,components}
 #
 # Cloud models have ctx_recommended = 0 (managed server-side); ctx_max drives the
 # harness trim budget. Local models without a context window default to 4096.
@@ -93,13 +98,14 @@
 
 [providers]
 # Google enabled only after Gemini credentials exist (migrate rewrites this flag).
-google    = false|Google Gemini|ChatGoogleGenerativeAI
-xai       = false|xAI (Grok)|ChatOpenAI
-openai    = false|OpenAI (GPT)|ChatOpenAI
-anthropic = false|Anthropic (Claude)|ChatAnthropic
+google    = false|Google|ChatGoogleGenerativeAI
+xai       = false|xAI|ChatOpenAI
+openai    = false|OpenAI|ChatOpenAI
+anthropic = false|Anthropic|ChatAnthropic
 openrouter = false|OpenRouter|ChatOpenAI
 ollama    = false|Local (Ollama)|ChatOllama
 llamacpp  = false|Local (llama.cpp / SYCL)|ChatOpenAI
+local_media = false|Local media (sd-cli)|
 
 # ─────────────────────────────────────────────────
 # Provider Registry — USER LAYER (owned by `agictl provider` / the dashboard)
@@ -122,29 +128,28 @@ gemini-2.5-flash              = cloud|google|true|true|0|1000000|balanced|text,i
 gemini-3-flash-preview        = cloud|google|true|true|0|1000000|balanced|text,image|text|true|Gemini 3 Flash Preview — Frontier-class reduced cost
 gemini-3.1-pro-preview        = cloud|google|true|true|0|1000000|reasoning|text,image|text|true|Gemini 3.1 Pro Preview — Next-gen flagship reasoning
 gemini-3.1-flash-lite         = cloud|google|true|false|0|1048576|fast|text,image,audio,video|text|true|Gemini 3.1 Flash Lite — Stable low-latency multimodal
-gemini-3.1-flash-image        = cloud|google|true|false|0|131072|balanced|text,image|text,image|false|Gemini 3.1 Flash Image — Native image generation (Google)
+gemini-3.1-flash-image        = cloud|google|true|false|0|131072|balanced|text,image|text,image|false|Gemini 3.1 Flash Image — Native image generation
 
 # Third-Party Cloud Providers
-grok-4.5                      = third_party|xai|true|true|0|500000|reasoning|text,image|text|true|Grok 4.5 — Flagship coding and agentic reasoning (xAI)
-gpt-5.5-2026-04-23            = third_party|openai|true|true|0|1000000|reasoning|text,image|text|true|GPT-5.5 — Flagship reasoning (OpenAI)
-gpt-5.4-2026-03-05            = third_party|openai|true|true|0|131072|reasoning|text,image|text|true|GPT-5.4 — Previous gen reasoning (OpenAI)
-gpt-5.4-mini-2026-03-17       = third_party|openai|true|true|0|131072|fast|text,image|text|true|GPT-5.4 Mini — Cost-efficient (OpenAI)
-gpt-audio-1.5                 = third_party|openai|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio 1.5 — Audio in/out (OpenAI)
-claude-fable-5                = third_party|anthropic|true|true|0|1000000|reasoning|text,image|text|true|Claude Fable 5 — Highest capability widely released (Anthropic)
-claude-opus-4-8               = third_party|anthropic|true|true|0|200000|reasoning|text,image|text|true|Claude Opus 4.8 — Flagship reasoning (Anthropic)
-claude-sonnet-4-6             = third_party|anthropic|true|true|0|200000|balanced|text,image|text|true|Claude Sonnet 4.6 — Fast reasoning (Anthropic)
-x-ai/grok-4.5                 = third_party|openrouter|true|true|0|131072|reasoning|text,image|text|true|Grok 4.5 — xAI flagship (via OpenRouter)
-google/gemini-3-flash-preview = third_party|openrouter|true|true|0|1000000|balanced|text,image|text|true|Gemini 3 Flash Preview (via OpenRouter)
-google/gemini-3.1-flash-image = third_party|openrouter|true|false|0|131072|balanced|text,image|text,image|false|Gemini 3.1 Flash Image — Image generation (via OpenRouter)
-openai/gpt-audio              = third_party|openrouter|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio — Audio in/out (via OpenRouter)
-openai/gpt-5.6-luna           = third_party|openrouter|true|true|0|1050000|balanced|text,image|text|true|GPT-5.6 Luna — Multimodal agent model (via OpenRouter)
-openai/gpt-5.4-image-2        = third_party|openrouter|true|false|0|272000|balanced|text,image|text,image|false|GPT-5.4 Image 2 — Image generation (via OpenRouter)
-openai/gpt-audio-mini         = third_party|openrouter|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio Mini — Cost-efficient audio in/out (via OpenRouter)
-moonshotai/kimi-k2.7-code    = third_party|openrouter|true|true|0|262144|code|text,image|text|true|Kimi K2.7 Code — Moonshot AI (via OpenRouter)
-deepseek/deepseek-v4-flash   = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Flash (via OpenRouter)
-deepseek/deepseek-v4-pro     = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Pro (via OpenRouter)
-z-ai/glm-5.2                 = third_party|openrouter|true|true|0|1048576|code|text|text|true|Z.ai: GLM 5.2 — Code-focused, 1M context (via OpenRouter)
-
+grok-4.5                      = third_party|xai|true|true|0|500000|reasoning|text,image|text|true|Grok 4.5 — Flagship coding and agentic reasoning
+gpt-5.5-2026-04-23            = third_party|openai|true|true|0|1000000|reasoning|text,image|text|true|GPT-5.5 — Flagship reasoning
+gpt-5.4-2026-03-05            = third_party|openai|true|true|0|131072|reasoning|text,image|text|true|GPT-5.4 — Previous gen reasoning
+gpt-5.4-mini-2026-03-17       = third_party|openai|true|true|0|131072|fast|text,image|text|true|GPT-5.4 Mini — Cost-efficient
+gpt-audio-1.5                 = third_party|openai|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio 1.5 — Audio in/out
+claude-fable-5                = third_party|anthropic|true|true|0|1000000|reasoning|text,image|text|true|Claude Fable 5 — Highest capability widely released
+claude-opus-4-8               = third_party|anthropic|true|true|0|200000|reasoning|text,image|text|true|Claude Opus 4.8 — Flagship reasoning
+claude-sonnet-4-6             = third_party|anthropic|true|true|0|200000|balanced|text,image|text|true|Claude Sonnet 4.6 — Fast reasoning
+x-ai/grok-4.5                 = third_party|openrouter|true|true|0|131072|reasoning|text,image|text|true|Grok 4.5 — xAI flagship
+google/gemini-3-flash-preview = third_party|openrouter|true|true|0|1000000|balanced|text,image|text|true|Gemini 3 Flash Preview
+google/gemini-3.1-flash-image = third_party|openrouter|true|false|0|131072|balanced|text,image|text,image|false|Gemini 3.1 Flash Image — Image generation
+openai/gpt-audio              = third_party|openrouter|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio — Audio in/out
+openai/gpt-5.6-luna           = third_party|openrouter|true|true|0|1050000|balanced|text,image|text|true|GPT-5.6 Luna — Multimodal agent model
+openai/gpt-5.4-image-2        = third_party|openrouter|true|false|0|272000|balanced|text,image|text,image|false|GPT-5.4 Image 2 — Image generation
+openai/gpt-audio-mini         = third_party|openrouter|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio Mini — Cost-efficient audio in/out
+moonshotai/kimi-k2.7-code    = third_party|openrouter|true|true|0|262144|code|text,image|text|true|Kimi K2.7 Code — Moonshot AI
+deepseek/deepseek-v4-flash   = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Flash
+deepseek/deepseek-v4-pro     = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Pro
+z-ai/glm-5.2                 = third_party|openrouter|true|true|0|1048576|code|text|text|true|Z.ai: GLM 5.2 — Code-focused, 1M context
 # Local AI — provider col regenerated by migrate from setup.ini gpu_backend
 # (standard→ollama, intel→llamacpp). Shipped template matches setup.ini (intel).
 qwen3.6:35b                   = local|llamacpp|true|false|32768|131072|local|text|text|false|Qwen 3.6 35B — MoE reasoning, 128K context (text-only GGUF; no mmproj)
@@ -152,6 +157,8 @@ gemma4:26b                    = local|llamacpp|true|false|32768|262144|local|tex
 gemma4:e4b                    = local|llamacpp|true|false|32768|131072|local|text|text|false|Gemma 4 E4B — Edge optimized, 128K context
 gemma4:e2b                    = local|llamacpp|true|false|16384|131072|local|text|text|false|Gemma 4 E2B — Edge ultra-light, 128K context
 gemma4:31b                    = local|llamacpp|true|false|32768|262144|local|text|text|false|Gemma 4 31B — Dense flagship, 256K context
+qwen-image-2512               = local|local_media|true|false|0|0|local|text|image|false|Qwen-Image-2512 — Local sd-cli paint
+flux1-dev                     = local|local_media|true|false|0|0|local|text|image|false|FLUX.1-dev — Local sd-cli paint
 
 # ─────────────────────────────────────────────────
 # Unified Model Catalog — USER LAYER (owned by `agictl model catalog` / the dashboard)
@@ -320,3 +327,11 @@ gemma4:e4b   = unsloth/gemma-4-E4B-it-GGUF,gemma-4-E4B-it-Q4_K_M.gguf,5
 gemma4:26b   = unsloth/gemma-4-26B-A4B-it-GGUF,gemma-4-26B-A4B-it-UD-Q4_K_M.gguf,16
 gemma4:31b   = unsloth/gemma-4-31B-it-GGUF,gemma-4-31B-it-Q4_K_M.gguf,18
 qwen3.6:35b  = unsloth/Qwen3.6-35B-A3B-GGUF,Qwen3.6-35B-A3B-UD-Q4_K_M.gguf,21
+
+# Inspect/import classification + Hub provenance. Keep [sycl_models] at 3 CSV fields.
+# User-imported keys are union-preserved by reconcile-config.
+[sycl_model_meta]
+
+# Local Utility media bundles (TD-LOCAL-MEDIA-001). Never a [sycl_models] row.
+[media_bundles]
+

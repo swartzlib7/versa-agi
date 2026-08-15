@@ -123,6 +123,16 @@ Deterministic scheduled scripts (no LLM). Useful for sync jobs and maintenance. 
 
 When PU asks “which model?”: check agitop Agents / Model Manager; change assignment there or via documented `agictl agent set-model` (with sudo as required). Prefer small changes; don’t reassign COA to an unapproved model.
 
+**Adding a local Hugging Face GGUF (Intel SYCL, on the GPU host):**
+
+1. Inspect first: `agictl model hf inspect '<hf URL or hf://org/repo/file.gguf>'`.
+2. Only **chat** GGUFs may be imported. Image/video “GGUF” files (Qwen-Image, MiniMax-H3, diffusion) are **not** llama-server models — do not download them into SYCL storage.
+3. Import (does not activate): `sudo agictl model sycl import '<source>' --name <key> --runtime chat`.
+4. Activate separately: `sudo agictl model activate <key>` (single mode will ask before sweeping local agents).
+5. On a **client** laptop: do the import on the server, then `sudo agictl model refresh`.
+
+Ollama (`gpu_backend=standard`) still uses `sudo agictl model add <tag>`. Local vision projectors and local image/video Utility models are separate future work.
+
 ---
 
 ## 7. Install topology & local AI

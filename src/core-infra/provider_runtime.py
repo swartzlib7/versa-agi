@@ -193,6 +193,18 @@ def resolve_provider_route(
             default_headers=dict(cloud.default_headers),
         )
 
+    if provider_slug == "local_media":
+        return ProviderRoute(
+            catalog_key=key,
+            model=dict(model),
+            provider_slug=provider_slug,
+            provider=dict(provider),
+            client_type="",
+            endpoint="",
+            api_model=key,
+            local=True,
+        )
+
     expected_local_client = _LOCAL_CLIENT_TYPES.get(provider_slug)
     if expected_local_client is None:
         raise ProviderRuntimeError(

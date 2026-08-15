@@ -10,6 +10,7 @@ here.
 Run:  python -m unittest harness.tests.test_utility_models   (from core-infra)
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -652,6 +653,55 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
         with self.assertRaises(UtilityRunError) as ctx:
             self.runner.run_utility_model(self._add_um("video"), output_dir=self._dir, context_agent="coa")
         self.assertEqual(ctx.exception.code, "driver_pending")
+
+
+class TestUtilityToolTimeout(unittest.TestCase):
+    def test_utility_tool_budget_is_fifteen_minutes(self):
+        from harness.agent_harness import (
+            AGICTL_TOOL_TIMEOUT_SECONDS,
+            UTILITY_TOOL_TIMEOUT_SECONDS,
+        )
+
+        self.assertEqual(AGICTL_TOOL_TIMEOUT_SECONDS, 120)
+        self.assertEqual(UTILITY_TOOL_TIMEOUT_SECONDS, 900)
+
+
+class TestUtilityRunJsonEnvelope(unittest.TestCase):
+    """CLI must wrap runner payloads that already include ``success``."""
+
+    def test_json_response_accepts_runner_success_key(self):
+        import io
+        from contextlib import redirect_stdout
+
+        core_infra = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        agictl_dir = os.path.join(core_infra, "agictl")
+        for path in (agictl_dir, core_infra):
+            if path in sys.path:
+                sys.path.remove(path)
+            sys.path.insert(0, path)
+        for name in list(sys.modules):
+            if name == "agictl" or name.startswith("agictl."):
+                del sys.modules[name]
+        from agictl.cli import json_response  # noqa: E402
+
+        self.assertTrue(
+            json_response.__code__.co_filename.endswith("src/core-infra/agictl/cli.py")
+        )
+        runner_payload = {
+            "success": True,
+            "run_id": "util-test",
+            "utility_model_id": "image-2",
+            "artifacts": [{"path": "/tmp/out.png"}],
+        }
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            json_response(True, **runner_payload)
+        body = json.loads(buf.getvalue())
+        self.assertTrue(body["success"])
+        self.assertEqual(body["run_id"], "util-test")
+        self.assertEqual(body["utility_model_id"], "image-2")
 
 
 if __name__ == "__main__":

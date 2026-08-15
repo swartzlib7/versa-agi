@@ -329,7 +329,9 @@ def register(
                 agent_home=agent_workspace,
                 dry_run=dry_run,
             )
-            json_response(True, **result)
+            payload = dict(result)
+            payload.pop("success", None)
+            json_response(True, **payload)
         except UtilityRunError as e:
             json_response(False, error=e.message, code=e.code)
             sys.exit(1)

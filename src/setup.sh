@@ -660,6 +660,23 @@ print_inference_server_ready_banner() {
   echo ""
 }
 
+# Shared .py next to agictl/ so `import db_connect` / `import model_hf_ingest`
+# resolve on topology=server (subset deploy, not a full core-infra rsync).
+_deploy_server_agictl_shared_py() {
+  local src="${1:?}" dest="${2:?}"
+  local f
+  for f in db_connect.py model_hf_ingest.py model_media_ingest.py model_catalog.py; do
+    if [ -f "${src}/${f}" ]; then
+      cp "${src}/${f}" "${dest}/${f}"
+    fi
+  done
+  # Adapter used by `agictl model media generate` (no cloud client).
+  if [ -d "${src}/model_drivers" ]; then
+    rm -rf "${dest}/model_drivers"
+    cp -r "${src}/model_drivers" "${dest}/model_drivers"
+  fi
+}
+
 # ═══════════════════════════════════════════════════════
 # SERVER TOPOLOGY UPDATE — early exit
 # On server-only installs, the full client/COA agent stack
@@ -714,6 +731,7 @@ if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
     fi
   done
   touch "${DEPLOYED_CORE_INFRA}/harness/__init__.py"
+  _deploy_server_agictl_shared_py "${SOURCE_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}"
   chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}"
   ok "Core infrastructure updated"
 
@@ -737,12 +755,16 @@ if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
     chmod 640 "/etc/versa-agi/setup.ini"
   fi
 
-  # Re-run setup_local.sh (rebuilds Docker image if Dockerfile changed)
+  # Re-run setup_local.sh (rebuilds Docker image if Dockerfile changed).
+  # VERSA_SETUP_PARENT skips the "Already Configured / Reconfigure?" prompt
+  # so --update still installs pinned sd-cli on an existing server.
   section "Server Update — Local AI Engine"
   SETUP_LOCAL_SCRIPT="${SCRIPT_DIR}/setup_local.sh"
   if [ -f "${SETUP_LOCAL_SCRIPT}" ]; then
     chmod +x "${SETUP_LOCAL_SCRIPT}"
+    export VERSA_SETUP_PARENT=1
     bash "${SETUP_LOCAL_SCRIPT}" --topology server
+    bash "${SETUP_LOCAL_SCRIPT}" --ensure-sd-cli --topology server
   fi
 
   # Registration
@@ -876,6 +898,7 @@ if [ "${UPDATE_MODE}" = false ]; then
       if [ -f "${SOURCE_CORE_INFRA}/harness/model_params.py" ]; then
         cp "${SOURCE_CORE_INFRA}/harness/model_params.py" "${DEPLOYED_CORE_INFRA}/harness/"
       fi
+      _deploy_server_agictl_shared_py "${SOURCE_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}"
 
       chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}"
       ok "core-infra deployed to ${DEPLOYED_CORE_INFRA} (server subset)"
@@ -1616,7 +1639,7 @@ find "${LIB_DIR}/harness" -type f -exec chmod 644 {} +
 # `import model_catalog` / `import db_connect` / `import provider_runtime`
 # resolve under
 # PYTHONPATH=${LIB_DIR} (the harness runtime layout).
-for _shared_py in model_catalog.py db_connect.py provider_runtime.py; do
+for _shared_py in model_catalog.py db_connect.py provider_runtime.py model_hf_ingest.py model_media_ingest.py; do
   if [ -f "${DEPLOYED_CORE_INFRA}/${_shared_py}" ]; then
     cp "${DEPLOYED_CORE_INFRA}/${_shared_py}" "${LIB_DIR}/${_shared_py}"
     chown root:root "${LIB_DIR}/${_shared_py}"
@@ -3984,6 +4007,7 @@ MINSEED
   _ini_set "sycl_models_max" "$(ini_get local_ai sycl_models_max 1)"
   _ini_set "hf_token" "$(ini_get local_ai hf_token '')"
   _ini_set "sycl_llama_cpp_tag" "$(ini_get local_ai sycl_llama_cpp_tag b9082)"
+  _ini_set "sd_cpp_tag" "$(ini_get local_ai sd_cpp_tag master-820-de298c2)"
   _ini_set_in "local_ai" "topology" "${INI_TOPOLOGY:-local}"
   _ini_set "model_loading_strategy" "$(ini_get local_ai model_loading_strategy router)"
   _ini_set "project"    "${gcp_project:-$INI_GCP_PROJECT}"

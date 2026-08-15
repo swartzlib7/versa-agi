@@ -13,6 +13,7 @@ import time
 import sqlite3
 import shutil
 import subprocess
+import tempfile
 import click
 from rich.console import Console
 from rich.table import Table
@@ -31,6 +32,43 @@ except ImportError:
 
 from identity import provision_identity
 from comms import fetch_inbox, send_message, mark_message_processed, build_attachments
+from model_hf_ingest import (
+    CLASS_VLM,
+    HfIngestError,
+    activation_block_reason,
+    atomic_move_into,
+    default_hf_download,
+    inspect_hf_source,
+    load_sycl_meta,
+    meta_value,
+    migrate_skip_reason,
+    size_gb_from_bytes,
+    sycl_import_block_reason,
+    topology_import_block_reason,
+    validate_gguf_file,
+)
+from model_media_ingest import (
+    CATALOG_LABELS,
+    MEDIA_STORE,
+    RUNTIME_MEDIA,
+    STOCK_MEDIA_CATALOG_KEYS,
+    bundle_manifest,
+    inspect_media_source,
+    list_hf_media_recipes,
+    load_bundle_manifest,
+    load_media_bundles,
+    media_bundle_value,
+    media_import_block_reason,
+    media_runtime_status,
+    media_usage,
+    plan_media_bundle,
+    recipe_generate_defaults,
+    remove_media_bundle_dir,
+    rename_media_bundle_dir,
+    resolve_bundle_dir,
+    topology_media_import_block_reason,
+    validate_component_file,
+)
 
 try:
     from model_catalog import (
@@ -143,8 +181,17 @@ else:
 console = Console()
 error_console = Console(stderr=True)
 
-def json_response(success, **kwargs):
-    """Standard JSON response for effectful commands."""
+def json_response(*args, **kwargs):
+    """Standard JSON response for effectful commands.
+
+    Runner payloads may already include ``success``. A positional flag wins so
+    ``json_response(True, **result)`` does not raise TypeError at call binding.
+    """
+    if args:
+        success = args[0]
+        kwargs.pop("success", None)
+    else:
+        success = kwargs.pop("success", True)
     result = {"success": success, **kwargs}
     print(json.dumps(result))
     return success
@@ -926,7 +973,9 @@ def _reconcile_setup_ini(template, deployed):
 
 # Shared local sections: shipped rows + registry-added user rows coexist here,
 # so reconciliation is a per-key union (deployed-only keys are preserved).
-_MODELS_UNION_SECTIONS = ("local_models", "context_windows", "sycl_models")
+_MODELS_UNION_SECTIONS = (
+    "local_models", "context_windows", "sycl_models", "sycl_model_meta", "media_bundles",
+)
 
 
 def _reconcile_models_ini(template, deployed):
@@ -1050,12 +1099,14 @@ def _ensure_provider_keys_env_permissions(path: str) -> None:
 # Loaded from models.ini [sycl_models] section.
 # Format: model_key = hf_repo,gguf_filename,size_gb
 
-# Canonical models.ini path (deployed alongside setup.ini)
-# Dev fallback: src/models.ini (next to src/setup.ini)
+# Canonical models.ini path (deployed alongside setup.ini).
+# Server subset also keeps a copy under core-infra/config/.
+# Dev fallback: src/models.ini (parent of core-infra).
+_CORE_INFRA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODELS_INI_PATHS = [
     "/etc/versa-agi/models.ini",
-    os.path.join(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__)))), "models.ini"),
+    os.path.join(_CORE_INFRA_DIR, "config", "models.ini"),
+    os.path.join(os.path.dirname(_CORE_INFRA_DIR), "models.ini"),
 ]
 
 
@@ -1437,6 +1488,36 @@ def _resolve_gpu_backend():
     return "standard"
 
 
+def _resolve_topology():
+    """Read local_ai.topology from setup.ini. Returns local|server|client."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return cfg.get("local_ai", "topology", fallback="local").strip().lower()
+    return "local"
+
+
+def _resolve_hf_cli():
+    """Return huggingface CLI path or None."""
+    search = [
+        "/usr/local/bin/hf", "/usr/local/bin/huggingface-cli",
+        os.path.expanduser("~/.local/bin/hf"), os.path.expanduser("~/.local/bin/huggingface-cli"),
+    ]
+    sudo_user = os.environ.get("SUDO_USER", "")
+    if sudo_user:
+        search.extend([
+            f"/home/{sudo_user}/.local/bin/hf",
+            f"/home/{sudo_user}/.local/bin/huggingface-cli",
+        ])
+    return (
+        shutil.which("hf")
+        or shutil.which("huggingface-cli")
+        or next((p for p in search if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+    )
+
+
 def _resolve_sycl_port():
     """Read sycl_port from setup.ini. Returns port string."""
     import configparser
@@ -1638,42 +1719,57 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
     return False, "Container may not have started"
 
 
-def _update_all_local_agent_models(new_model):
-    """Update all local sub-agents in the agent registry to use the new model.
-    Returns list of (agent_name, old_model) tuples for affected agents."""
-    import configparser
+def _local_model_name_set():
+    registered, _ = _read_ini_csv("local_ai", "local_models")
+    local_names = set(registered)
+    prev_active = _resolve_sycl_active_model()
+    if prev_active:
+        local_names.add(prev_active)
+    return local_names
+
+
+def _preview_local_agent_model_sweep():
+    """List (agent_name, old_model) that single-mode activate would retarget."""
     affected = []
     agents_db = "/var/lib/versa-agi/agents.db"
     if not os.path.isfile(agents_db):
         return affected
-
-    # Read all local model names to identify locally-assigned agents
-    registered, _ = _read_ini_csv("local_ai", "local_models")
-    # Also include the previously active model
-    prev_active = _resolve_sycl_active_model()
-    local_names = set(registered)
-    if prev_active:
-        local_names.add(prev_active)
-
+    local_names = _local_model_name_set()
+    if not local_names:
+        return affected
     try:
         conn = db_connect.connect_compat(agents_db)
         cursor = conn.cursor()
-        # Find agents assigned to any local model
         placeholders = ",".join("?" * len(local_names))
         cursor.execute(
             f"SELECT name, model FROM agents WHERE model IN ({placeholders})",
             list(local_names),
         )
-        rows = cursor.fetchall()
-        for agent_name, old_model in rows:
+        for agent_name, old_model in cursor.fetchall():
             affected.append((agent_name, old_model))
-        # Update all to new model
-        if affected:
-            cursor.execute(
-                f"UPDATE agents SET model = ? WHERE model IN ({placeholders})",
-                [new_model] + list(local_names),
-            )
-            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return affected
+
+
+def _update_all_local_agent_models(new_model):
+    """Update all local sub-agents in the agent registry to use the new model.
+    Returns list of (agent_name, old_model) tuples for affected agents."""
+    affected = _preview_local_agent_model_sweep()
+    agents_db = "/var/lib/versa-agi/agents.db"
+    if not affected or not os.path.isfile(agents_db):
+        return affected
+    local_names = _local_model_name_set()
+    try:
+        conn = db_connect.connect_compat(agents_db)
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(local_names))
+        cursor.execute(
+            f"UPDATE agents SET model = ? WHERE model IN ({placeholders})",
+            [new_model] + list(local_names),
+        )
+        conn.commit()
         conn.close()
     except Exception:
         pass
@@ -2207,6 +2303,688 @@ def model_add(name, no_pull):
         json_response(True, **result_data)
 
 
+@model.group("hf")
+def model_hf():
+    """Inspect Hugging Face sources before any local-model mutation."""
+    pass
+
+
+@model_hf.command("inspect")
+@click.argument("source")
+def model_hf_inspect(source):
+    """Classify a Hugging Face GGUF/source without downloading or writing config.
+
+    Accepts huggingface.co URLs, hf://org/repo/file.gguf, or bare org/repo.
+    """
+    try:
+        result = inspect_hf_source(source)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        json_response(False, error=str(exc), code="inspect_failed")
+        sys.exit(1)
+    json_response(True, **result.to_dict())
+
+
+@model.group("sycl")
+def model_sycl():
+    """Intel SYCL / llama.cpp GGUF import (chat runtime only)."""
+    pass
+
+
+@model_sycl.command("import")
+@click.argument("source")
+@click.option("--name", required=True, help="Local catalog/registry key (e.g. gemma4:e4b)")
+@click.option("--runtime", type=click.Choice(["chat"]), required=True,
+              help="Runtime family. Phase 1: chat only. Media is TD-LOCAL-MEDIA-001.")
+@click.option("--label", default="", help="Display label for local_models / pickers")
+@click.option("--size", "size_gb", type=int, default=None, help="Override size_gb (else Hub bytes)")
+@click.option("--confirm-unknown", is_flag=True,
+              help="Required when Hub classification is unknown")
+@click.option("--dry-run", is_flag=True, help="Inspect and report plan; write nothing")
+def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dry_run):
+    """Download a chat GGUF into SYCL storage and register it. Never activates.
+
+    Refuses media pipelines (image/video/audio bundles). Clients must import on
+    the GPU server, then run `agictl model refresh`.
+    """
+    topo = _resolve_topology()
+    gpu_backend = _resolve_gpu_backend()
+    blocked = topology_import_block_reason(topo, gpu_backend)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, gpu_backend=gpu_backend)
+        sys.exit(1)
+
+    if os.geteuid() != 0 and not dry_run:
+        json_response(False, error="model sycl import requires root. Use: sudo agictl model sycl import ...")
+        sys.exit(1)
+
+    try:
+        inspected = inspect_hf_source(source)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+
+    guard = sycl_import_block_reason(
+        inspected.classification, runtime, confirm_unknown=confirm_unknown,
+    )
+    if guard:
+        json_response(
+            False,
+            error=guard,
+            classification=inspected.classification,
+            reasons=inspected.reasons,
+            next_step=inspected.next_step,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    selected = inspected.selected_file
+    filename = selected.path if selected else inspected.source.filename
+    if not filename:
+        json_response(False, error="Source does not name a GGUF file. Pass hf://org/repo/file.gguf")
+        sys.exit(1)
+    repo = inspected.source.repo_id
+    resolved_size = size_gb if size_gb is not None else size_gb_from_bytes(
+        selected.size if selected else None, fallback=1,
+    )
+    display_label = label or name
+    plan = {
+        "name": name,
+        "runtime": runtime,
+        "classification": inspected.classification,
+        "repo": repo,
+        "file": filename,
+        "size_gb": resolved_size,
+        "sycl_dir": SYCL_MODEL_DIR,
+        "activate": False,
+        "input_modalities": "text",
+    }
+    if inspected.classification == CLASS_VLM:
+        plan["mmproj_warning"] = (
+            "Imported as text-only chat. Image input requires TD-LOCAL-MMProj-001."
+        )
+
+    if dry_run:
+        json_response(True, action="dry_run", plan=plan, inspect=inspected.to_dict(), mutated=False)
+        return
+
+    registry = _load_sycl_registry()
+    dest_path = os.path.join(SYCL_MODEL_DIR, os.path.basename(filename))
+    already = os.path.isfile(dest_path) and name in registry
+    steps = []
+    created_dest = False
+    tmpdir = None
+    try:
+        if already:
+            steps.append(f"already downloaded: {os.path.basename(filename)}")
+        else:
+            hf_cmd = _resolve_hf_cli()
+            if not hf_cmd:
+                json_response(False, error="HuggingFace CLI not found. Install: sudo pipx install huggingface_hub[cli]", mutated=False)
+                sys.exit(1)
+            tmpdir = tempfile.mkdtemp(prefix="versa-sycl-import-")
+            print(f"Downloading: {filename} ...")
+            downloaded = default_hf_download(repo, filename, tmpdir, hf_cmd)
+            validate_gguf_file(downloaded)
+            dest_path = atomic_move_into(downloaded, SYCL_MODEL_DIR)
+            created_dest = True
+            steps.append(f"downloaded:{os.path.basename(dest_path)}")
+
+        entry_value = f"{repo},{os.path.basename(dest_path)},{resolved_size}"
+        meta = {
+            "class": inspected.classification,
+            "runtime": runtime,
+            "source": inspected.source.as_hf_uri(),
+            "repo": repo,
+            "file": os.path.basename(dest_path),
+            "revision": inspected.source.revision or "main",
+            "sha256": (selected.sha256 if selected else None),
+            "confirm_unknown": bool(confirm_unknown),
+        }
+        models_ini_path = _resolve_models_ini_path()
+        if not models_ini_path:
+            raise HfIngestError("models.ini not found", "no_models_ini")
+        _upsert_models_ini_entry(models_ini_path, "sycl_models", name, entry_value)
+        _upsert_models_ini_entry(models_ini_path, "sycl_model_meta", name, meta_value(meta))
+        _upsert_models_ini_entry(models_ini_path, "local_models", name, display_label)
+        steps.append("models.ini updated")
+
+        current_models, ini_path = _read_ini_csv("local_ai", "local_models")
+        if name not in current_models:
+            current_models.append(name)
+            if ini_path and _update_ini_csv("local_ai", "local_models", current_models, ini_path):
+                steps.append("setup.ini updated")
+            else:
+                raise HfIngestError("Failed to update setup.ini local_models", "setup_ini")
+        if _update_paths_env_key("VERSA_LOCAL_MODELS", ",".join(current_models)):
+            steps.append("paths.env updated")
+    except Exception as exc:  # noqa: BLE001
+        if created_dest and dest_path and os.path.isfile(dest_path) and not already:
+            try:
+                os.remove(dest_path)
+                steps.append("rolled back GGUF")
+            except OSError:
+                pass
+        json_response(False, error=str(exc), steps=steps, mutated=False)
+        sys.exit(1)
+    finally:
+        if tmpdir and os.path.isdir(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    json_response(
+        True,
+        action="already_imported" if already else "imported",
+        steps=steps,
+        hint=f"Registered as text-only chat. Activate separately: sudo agictl model activate {name}",
+        **plan,
+    )
+
+
+@model.group("media")
+def model_media():
+    """Local Utility media bundles (not llama-server). Qwen-Image first."""
+    pass
+
+
+@model_media.command("inspect")
+@click.argument("source")
+@click.option("--name", default="", help="Planned bundle key (default qwen-image-2512)")
+def model_media_inspect(source, name):
+    """Classify a Hugging Face source and print the media bundle plan. No download."""
+    try:
+        payload = inspect_media_source(source, dest_key=name)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        json_response(False, error=str(exc), code="inspect_failed")
+        sys.exit(1)
+    json_response(True, **payload)
+
+
+@model_media.command("import")
+@click.argument("source")
+@click.option("--name", required=True, help="Bundle key (e.g. qwen-image-2512)")
+@click.option("--runtime", type=click.Choice(["media"]), required=True,
+              help="Must be media. Chat GGUFs use model sycl import --runtime chat.")
+@click.option("--confirm-unknown", is_flag=True,
+              help="Required when Hub classification is unknown")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+def model_media_import(source, name, runtime, confirm_unknown, dry_run):
+    """Download a media bundle into /opt/versa-agi/media-models. Never a chat model.
+
+    Does not create a Utility Profile or ModelDriver binding. Clients import
+    on the GPU host (topology=local or server).
+    """
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+
+    if os.geteuid() != 0 and not dry_run:
+        json_response(False, error="model media import requires root. Use: sudo agictl model media import ...")
+        sys.exit(1)
+
+    try:
+        inspected = inspect_hf_source(source)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+
+    guard = media_import_block_reason(
+        inspected.classification, runtime, confirm_unknown=confirm_unknown,
+    )
+    if guard:
+        json_response(
+            False,
+            error=guard,
+            classification=inspected.classification,
+            next_step=inspected.next_step,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    plan = plan_media_bundle(inspected, dest_key=name)
+    if plan is None:
+        json_response(
+            False,
+            error=(
+                "No media bundle recipe for this source yet. "
+                "Qwen-Image-2512 is the first supported recipe."
+            ),
+            classification=inspected.classification,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    dest_dir = os.path.join(MEDIA_STORE, name)
+    payload = {
+        "name": name,
+        "runtime": runtime,
+        "classification": inspected.classification,
+        "store_dir": dest_dir,
+        "sycl_dir": SYCL_MODEL_DIR,
+        "bundle": plan.to_dict(),
+        "activate": False,
+        "utility_profile": False,
+        "driver_bound": False,
+    }
+    if dry_run:
+        json_response(True, action="dry_run", **payload, mutated=False)
+        return
+
+    models_ini_path = _resolve_models_ini_path()
+    if not models_ini_path:
+        json_response(False, error="models.ini not found", mutated=False)
+        sys.exit(1)
+
+    hf_cmd = _resolve_hf_cli()
+    if not hf_cmd:
+        json_response(False, error="HuggingFace CLI not found. Install: sudo pipx install huggingface_hub[cli]", mutated=False)
+        sys.exit(1)
+
+    steps = []
+    created = []
+    tmpdir = None
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        tmpdir = tempfile.mkdtemp(prefix="versa-media-import-")
+        for component in plan.components:
+            dest_name = os.path.basename(component.filename)
+            dest_path = os.path.join(dest_dir, dest_name)
+            if os.path.isfile(dest_path):
+                steps.append(f"already:{component.role}:{dest_name}")
+                continue
+            print(f"Downloading {component.role}: {component.filename} ...")
+            downloaded = default_hf_download(
+                component.repo, component.filename, tmpdir, hf_cmd,
+            )
+            validate_component_file(downloaded, component.validate)
+            moved = atomic_move_into(downloaded, dest_dir)
+            created.append(moved)
+            steps.append(f"downloaded:{component.role}:{os.path.basename(moved)}")
+
+        manifest = bundle_manifest(
+            plan, source=inspected.source.as_hf_uri(), revision=inspected.source.revision,
+        )
+        manifest_path = os.path.join(dest_dir, "bundle.json")
+        with open(manifest_path, "w") as fh:
+            json.dump(manifest, fh, indent=2, sort_keys=True)
+        _upsert_models_ini_entry(
+            models_ini_path, "media_bundles", name, media_bundle_value(manifest),
+        )
+        steps.append("models.ini [media_bundles] updated")
+    except Exception as exc:  # noqa: BLE001
+        for path in created:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        json_response(False, error=str(exc), steps=steps, mutated=False)
+        sys.exit(1)
+    finally:
+        if tmpdir and os.path.isdir(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    json_response(
+        True,
+        action="imported",
+        steps=steps,
+        hint=(
+            "Bundle stored. Check usage, then paint: "
+            f"agictl model media usage {name} && "
+            f"agictl model media generate --name {name} --prompt '…' "
+            "(default 768²; add --offload if VRAM is tight). Not a chat model."
+        ),
+        **payload,
+    )
+
+
+@model_media.command("runtime")
+def model_media_runtime():
+    """Report whether pinned sd-cli is installed on this host."""
+    json_response(True, **media_runtime_status())
+
+
+@model_media.command("recipes")
+def model_media_recipes():
+    """List recognized Hugging Face media recipes (not a Hub search)."""
+    json_response(True, models=list_hf_media_recipes())
+
+
+@model_media.command("usage")
+@click.argument("name", required=False, default="")
+def model_media_usage(name):
+    """Print how to use a local media model (VRAM, size, commands). Not token cost."""
+    try:
+        json_response(True, **media_usage(name))
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+
+
+@model_media.command("rename")
+@click.argument("old")
+@click.argument("new")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+def model_media_rename(old, new, dry_run):
+    """Rename a media bundle directory and its [media_bundles] inventory key.
+
+    Does not change catalog rows or Utility Profiles. GPU host only.
+    """
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+
+    try:
+        moved = rename_media_bundle_dir(old, new, dry_run=dry_run)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+
+    models_ini_path = _resolve_models_ini_path()
+    inventory = "unchanged"
+    if models_ini_path:
+        bundles = load_media_bundles(models_ini_path)
+        old_key, new_key = moved["old"], moved["new"]
+        if old_key in bundles and new_key not in bundles:
+            inventory = "rename"
+            if not dry_run:
+                _upsert_models_ini_entry(
+                    models_ini_path,
+                    "media_bundles",
+                    new_key,
+                    media_bundle_value(bundles[old_key]),
+                )
+                _remove_ini_entry(models_ini_path, "media_bundles", old_key)
+        elif new_key in bundles and old_key not in bundles:
+            inventory = "already"
+        elif old_key in bundles and new_key in bundles:
+            json_response(
+                False,
+                error=(
+                    f"[media_bundles] already has both '{old_key}' and '{new_key}'. "
+                    "Remove the stale key by hand."
+                ),
+                code="inventory_collision",
+                mutated=False,
+                **moved,
+            )
+            sys.exit(1)
+        elif old_key not in bundles and new_key not in bundles:
+            try:
+                manifest = load_bundle_manifest(moved["new_dir"])
+            except HfIngestError:
+                inventory = "missing"
+            else:
+                inventory = "register"
+                if not dry_run:
+                    _upsert_models_ini_entry(
+                        models_ini_path,
+                        "media_bundles",
+                        new_key,
+                        media_bundle_value(manifest),
+                    )
+
+    json_response(
+        True,
+        action="renamed" if not dry_run else "dry_run",
+        inventory=inventory,
+        models_ini=models_ini_path,
+        mutated=not dry_run,
+        **moved,
+    )
+
+
+@model_media.command("remove")
+@click.argument("name")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+def model_media_remove(name, dry_run):
+    """Delete a media bundle directory and its [media_bundles] inventory key.
+
+    Does not delete Utility Profiles — on a full-stack host use
+    ``agictl utility model remove <name>``. GPU host only.
+    """
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+
+    try:
+        removed = remove_media_bundle_dir(name, dry_run=dry_run)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+
+    models_ini_path = _resolve_models_ini_path()
+    inventory = "unchanged"
+    if models_ini_path:
+        bundles = load_media_bundles(models_ini_path)
+        key = removed["name"]
+        if key in bundles:
+            inventory = "remove"
+            if not dry_run:
+                _remove_ini_entry(models_ini_path, "media_bundles", key)
+        else:
+            inventory = "missing"
+
+    json_response(
+        True,
+        action="removed" if not dry_run else "dry_run",
+        inventory=inventory,
+        models_ini=models_ini_path,
+        mutated=not dry_run,
+        **removed,
+    )
+
+
+@model_media.command("register")
+@click.argument("name")
+def model_media_register(name):
+    """Write [media_bundles] from an already-imported bundle.json. No download."""
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+    try:
+        bundle_dir = resolve_bundle_dir(name)
+        manifest = load_bundle_manifest(bundle_dir)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+    models_ini_path = _resolve_models_ini_path()
+    if not models_ini_path:
+        json_response(False, error="models.ini not found", mutated=False)
+        sys.exit(1)
+    _upsert_models_ini_entry(
+        models_ini_path, "media_bundles", name, media_bundle_value(manifest),
+    )
+    json_response(
+        True,
+        action="registered",
+        name=name,
+        store_dir=bundle_dir,
+        models_ini=models_ini_path,
+        mutated=True,
+    )
+
+
+@model_media.command("generate")
+@click.option("--name", required=True, help="Bundle key (e.g. qwen-image-2512)")
+@click.option("--usage", "show_usage", is_flag=True,
+              help="Print usage for --name and exit (does not paint)")
+@click.option("--prompt", default="", help="Paint brief (required unless --usage)")
+@click.option("--width", default=None, type=int, help="Width (recipe default if omitted)")
+@click.option("--height", default=None, type=int, help="Height (recipe default if omitted)")
+@click.option("--steps", default=None, type=int, help="Steps (recipe default if omitted)")
+@click.option("--cfg-scale", default=None, type=float, help="CFG (recipe default if omitted)")
+@click.option("--offload", is_flag=True, help="sd-cli --offload-to-cpu if VRAM is tight")
+@click.option("--seed", default=None, type=int, help="RNG seed (random if omitted; sd-cli default is 42)")
+@click.option("--out", "out_path", default="", help="Destination PNG path")
+def model_media_generate(name, prompt, width, height, steps, offload, out_path, show_usage, cfg_scale, seed):
+    """Paint a PNG from a local media bundle. Not llama-server.
+
+    On topology=client, paints on the GPU host over SSH and copies the PNG here.
+    """
+    if show_usage:
+        try:
+            json_response(True, **media_usage(name))
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code)
+            sys.exit(1)
+        return
+
+    if not (prompt or "").strip():
+        json_response(False, error="--prompt is required unless you pass --usage")
+        sys.exit(1)
+
+    topo = _resolve_topology()
+    if topo == "client":
+        dest = out_path.strip() or os.path.join(
+            "/tmp/versa-agi-media-out",
+            f"{name}-{int(time.time())}.png",
+        )
+        from model_media_remote import MediaRemoteError, remote_media_generate
+
+        try:
+            payload = remote_media_generate(
+                name,
+                prompt,
+                dest,
+                width=width,
+                height=height,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                seed=seed,
+                offload=offload,
+                topology="client",
+                on_progress=lambda line: print(line, flush=True),
+            )
+        except MediaRemoteError as exc:
+            json_response(False, error=exc.message, code=exc.code, topology=topo)
+            sys.exit(1)
+        json_response(
+            True,
+            topology=topo,
+            hint=(
+                "Painted on the GPU host; PNG is on this machine. "
+                f"Standing profile: agictl utility run {name}."
+            ),
+            **payload,
+        )
+        return
+
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo)
+        sys.exit(1)
+
+    runtime = media_runtime_status()
+    if not runtime.get("ready"):
+        json_response(
+            False,
+            error=(
+                "Pinned sd-cli is not ready on this host. "
+                "On the GPU host run: sudo ./setup.sh --update"
+            ),
+            runtime=runtime,
+        )
+        sys.exit(1)
+
+    try:
+        bundle_dir = resolve_bundle_dir(name)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+    if not os.path.isdir(bundle_dir):
+        json_response(
+            False,
+            error=f"Bundle directory missing: {bundle_dir}. Import first.",
+            store_dir=bundle_dir,
+        )
+        sys.exit(1)
+
+    dest = out_path.strip() or os.path.join(
+        "/tmp/versa-agi-media-out",
+        f"{name}-{int(time.time())}.png",
+    )
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+
+    warning = ""
+    try:
+        ps = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            check=False, capture_output=True, text=True,
+        )
+        if "versa-agi-sycl" in (ps.stdout or ""):
+            warning = (
+                "llama-server container versa-agi-sycl is running and shares the GPU. "
+                "Q8 plus llama-server may OOM; retry with --offload or stop chat inference first."
+            )
+    except OSError:
+        pass
+
+    from model_drivers.errors import DriverError
+    from model_drivers.libraries.local_media_image_out_sdcpp import generate as paint
+
+    defaults = recipe_generate_defaults(name)
+    width = defaults["width"] if width is None else width
+    height = defaults["height"] if height is None else height
+    steps = defaults["steps"] if steps is None else steps
+    cfg_scale = defaults["cfg_scale"] if cfg_scale is None else cfg_scale
+
+    try:
+        artifact = paint(
+            prompt=prompt,
+            config={
+                "bundle_dir": bundle_dir,
+                "width": width,
+                "height": height,
+                "steps": steps,
+                "cfg_scale": cfg_scale,
+                "offload": offload,
+                "seed": seed,
+                "out_dir": os.path.dirname(dest) or "/tmp/versa-agi-media-out",
+                "out_name": os.path.basename(dest),
+            },
+        )
+    except DriverError as exc:
+        json_response(False, error=exc.message, code=exc.code, warning=warning or None)
+        sys.exit(1)
+
+    if not os.path.isfile(dest):
+        with open(dest, "wb") as fh:
+            fh.write(artifact.data)
+
+    registered = name in load_media_bundles(_resolve_models_ini_path())
+    json_response(
+        True,
+        action="generated",
+        name=name,
+        path=dest,
+        bytes=len(artifact.data),
+        width=width,
+        height=height,
+        steps=steps,
+        cfg_scale=cfg_scale,
+        seed=(artifact.usage or {}).get("seed"),
+        offload=offload,
+        registered=registered,
+        warning=warning or None,
+        hint=(
+            f"Painted without a Utility run. Standing profile: "
+            f"agictl utility run {name}."
+        ),
+    )
+
+
 @model.command("remove")
 @click.argument("name")
 @click.option("--delete", is_flag=True, help="Also delete model weights from Ollama (ollama rm)")
@@ -2421,7 +3199,11 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
               help="Override context window size per slot (e.g. 4096, 8192, 16384, 32768). Persisted to setup.ini.")
 @click.option("--parallel", "parallel_override", type=int, default=None,
               help="Override parallel slot count (1-8). Persisted to setup.ini.")
-def model_activate(name, ctx_override, parallel_override):
+@click.option("--confirm-agent-sweep", is_flag=True,
+              help="Required in single mode when agents would be retargeted and stdin is not a TTY.")
+@click.option("--confirm-unknown", is_flag=True,
+              help="Required to activate a key classified as unknown at import.")
+def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, confirm_unknown):
     """Switch the active/default model on the Intel SYCL backend.
 
     Updates setup.ini and paths.env. In single mode, syncs all local sub-agents.
@@ -2450,6 +3232,14 @@ def model_activate(name, ctx_override, parallel_override):
     registry = _load_sycl_registry()
     if name not in registry:
         json_response(False, error=f"Unknown model '{name}'. Register with: agictl model registry add {name} --repo <hf_repo> --file <gguf> --size <gb>. Known: {', '.join(registry.keys())}")
+        sys.exit(1)
+
+    meta = load_sycl_meta(_resolve_models_ini_path()).get(name)
+    if meta and confirm_unknown:
+        meta = {**meta, "confirm_unknown": True}
+    activate_guard = activation_block_reason(meta)
+    if activate_guard:
+        json_response(False, error=activate_guard, classification=(meta or {}).get("class"))
         sys.exit(1)
 
     # Check model is downloaded
@@ -2493,13 +3283,29 @@ def model_activate(name, ctx_override, parallel_override):
 
     # ── 1. Agent sync (strategy-dependent) ──
     if strategy == "single":
+        preview = _preview_local_agent_model_sweep()
+        if preview:
+            click.echo(f"\n  Single mode will retarget {len(preview)} local agent(s):", err=True)
+            for a, m in preview:
+                click.echo(f"    • {a}: {m} → {name}", err=True)
+            click.echo("", err=True)
+            if not confirm_agent_sweep:
+                if sys.stdin.isatty():
+                    if not click.confirm("Proceed with agent sweep?", default=False):
+                        json_response(False, error="activation cancelled", affected_agents=[
+                            {"agent": a, "previous_model": m} for a, m in preview
+                        ])
+                        sys.exit(1)
+                else:
+                    json_response(
+                        False,
+                        error="Single-mode activate would retarget local agents. Re-run with --confirm-agent-sweep.",
+                        affected_agents=[{"agent": a, "previous_model": m} for a, m in preview],
+                    )
+                    sys.exit(1)
         affected = _update_all_local_agent_models(name)
         if affected:
             steps.append(f"updated {len(affected)} agent(s)")
-            click.echo(f"\n  Affected agents ({len(affected)}):", err=True)
-            for a, m in affected:
-                click.echo(f"    • {a}: {m} → {name}", err=True)
-            click.echo("", err=True)
         else:
             steps.append("no agents affected")
     else:
@@ -3229,7 +4035,7 @@ def _activate_google_provider_on_key(updated_files=None, errors=None):
     updated_files = updated_files if updated_files is not None else []
     errors = errors if errors is not None else []
     try:
-        value = "true|Google Gemini|ChatGoogleGenerativeAI"
+        value = "true|Google|ChatGoogleGenerativeAI"
         for path in _models_ini_write_targets():
             _upsert_models_ini_entry(path, "providers_custom", "google", value)
             if path not in updated_files:
@@ -3321,12 +4127,12 @@ def _build_migration_rows(target):
     # Skip-all installs still get Google/xAI/OpenAI/Anthropic/OpenRouter in the
     # Providers tab so Add Model has a provider dropdown; En=· until configured.
     provider_rows = [
-        ("google", f"{'true' if google_enabled else 'false'}|Google Gemini|ChatGoogleGenerativeAI"),
+        ("google", f"{'true' if google_enabled else 'false'}|Google|ChatGoogleGenerativeAI"),
     ]
     cls_map = {"xai": "ChatOpenAI", "openai": "ChatOpenAI",
                "anthropic": "ChatAnthropic", "openrouter": "ChatOpenAI"}
-    label_map = {"xai": "xAI (Grok)", "openai": "OpenAI (GPT)",
-                 "anthropic": "Anthropic (Claude)", "openrouter": "OpenRouter"}
+    label_map = {"xai": "xAI", "openai": "OpenAI",
+                 "anthropic": "Anthropic", "openrouter": "OpenRouter"}
     # setup.ini [third_party] providers= plus stock slugs (never leave the registry empty)
     _stock_tp = ("xai", "openai", "anthropic", "openrouter")
     _tp_slugs = list(dict.fromkeys([*(tp_providers or []), *_stock_tp]))
@@ -3382,7 +4188,10 @@ def _build_migration_rows(target):
         local_keys = local_models or (
             [k for k, _ in mini.items("local_models")]
             if mini.has_section("local_models") else [])
+        sycl_meta = load_sycl_meta(_resolve_models_ini_path())
         for k in local_keys:
+            if migrate_skip_reason(sycl_meta.get(k)):
+                continue
             rec, mx = _local_ctx(k, 4096)
             m = cat_meta.get(k, {})
             lbl = m.get("label", _local_label(k, k))
@@ -3396,12 +4205,37 @@ def _build_migration_rows(target):
                 "label": lbl,
             }
             catalog_rows.append((k, catalog_row_to_value(row)))
+        provider_rows.append(("local_media", "true|Local media (sd-cli)|"))
+        media_keys = []
+        if mini.has_section("media_bundles"):
+            media_keys = [k for k, _ in mini.items("media_bundles") if k and not k.startswith("#")]
+        for k in dict.fromkeys([*media_keys, *STOCK_MEDIA_CATALOG_KEYS]):
+            m = cat_meta.get(k, {})
+            if k not in STOCK_MEDIA_CATALOG_KEYS and m.get("provider") not in ("local_media", "", None):
+                continue
+            if k not in STOCK_MEDIA_CATALOG_KEYS and not m:
+                continue
+            row = {
+                "class": "local",
+                "provider": "local_media",
+                "enabled": True,
+                "coa": False,
+                "ctx_recommended": int(m.get("ctx_recommended") or 0),
+                "ctx_max": int(m.get("ctx_max") or 0),
+                "work_modality": m.get("work_modality", "local"),
+                "input_modalities": m.get("input_modalities", "text"),
+                "output_modalities": m.get("output_modalities", "image"),
+                "router_eligible": False,
+                "label": m.get("label") or CATALOG_LABELS.get(k) or f"{k} — Local sd-cli paint",
+            }
+            catalog_rows.append((k, catalog_row_to_value(row)))
     else:
         # Keep registry stubs disabled so a later Local AI enable + migrate can flip them.
         provider_rows.append(("ollama", "false|Local (Ollama)|ChatOllama"))
         provider_rows.append(
             ("llamacpp", "false|Local (llama.cpp / SYCL)|ChatOpenAI")
         )
+        provider_rows.append(("local_media", "false|Local media (sd-cli)|"))
 
     return provider_rows, catalog_rows
 
@@ -3752,9 +4586,25 @@ def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
                       f"Add it first: agictl provider add {provider} --label '<name>' --class <ChatX>. "
                       f"Known: {', '.join(providers.keys()) or '(none)'}")
         sys.exit(1)
-    if model_class == "local" and provider not in ("ollama", "llamacpp"):
-        json_response(False, error=f"Local models must use provider 'ollama' or 'llamacpp', not '{provider}'.")
+    if model_class == "local" and provider not in ("ollama", "llamacpp", "local_media"):
+        json_response(False, error=f"Local models must use provider 'ollama', 'llamacpp', or 'local_media', not '{provider}'.")
         sys.exit(1)
+
+    if model_class == "local" and gguf_repo and gguf_file:
+        try:
+            inspected = inspect_hf_source(f"hf://{gguf_repo}/{gguf_file}")
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code, mutated=False)
+            sys.exit(1)
+        if inspected.classification == "media_pipeline":
+            json_response(
+                False,
+                error=inspected.next_step or "Media pipelines cannot be registered as SYCL chat models.",
+                classification=inspected.classification,
+                next_step=inspected.next_step,
+                mutated=False,
+            )
+            sys.exit(1)
 
     targets = _models_ini_write_targets()
     if not targets:
@@ -4681,6 +5531,21 @@ def registry_add(name, repo, gguf_file, size_gb, ctx_recommended, ctx_max, label
     reg = _load_sycl_registry()
     if name in reg:
         json_response(False, error=f"Model '{name}' already exists. Use 'agictl model registry update {name}' instead.")
+        sys.exit(1)
+
+    try:
+        inspected = inspect_hf_source(f"hf://{repo}/{gguf_file}")
+        if inspected.classification == "media_pipeline":
+            json_response(
+                False,
+                error=inspected.next_step or "Media pipelines cannot be registered as SYCL chat models.",
+                classification=inspected.classification,
+                next_step=inspected.next_step,
+                mutated=False,
+            )
+            sys.exit(1)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
         sys.exit(1)
 
     # Write to all models.ini copies

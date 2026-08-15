@@ -62,6 +62,13 @@ PROVIDER_BRAND = {
         "text": "#F1F5F9",
         "accent": "#94A3B8",
     },
+    "huggingface": {
+        "label": "Hugging Face",
+        "border": "#FFD21E",
+        "background": "#FFD21E 22%",
+        "text": "#1A1A1A",
+        "accent": "#FFD21E",
+    },
 }
 
 

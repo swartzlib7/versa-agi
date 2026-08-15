@@ -168,7 +168,7 @@ def _mk_summary(
 ) -> dict[str, Any]:
     name = label or model_id
     suffix = f" ({PROVIDER_LABEL.get(slug, slug)})"
-    disp = name if name.endswith(suffix) else f"{name}{suffix}"
+    disp = name[: -len(suffix)].strip() if name.endswith(suffix) else name
     in_ctx = input_context_limit if input_context_limit is not None else context_length
     return {
         "id": model_id,

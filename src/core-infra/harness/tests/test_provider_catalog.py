@@ -247,5 +247,38 @@ class FetchIndexUsesCache(unittest.TestCase):
         self.assertEqual(calls["n"], 1)  # second call served from cache
 
 
+class ImportDisplayLabels(unittest.TestCase):
+    def test_direct_summary_is_product_name_only(self):
+        s = pc._mk_summary(
+            "openai",
+            "gpt-5.6-terra",
+            "GPT-5.6 Terra",
+            1050000,
+            "text,image",
+            "text",
+            {},
+        )
+        self.assertEqual(s["label"], "GPT-5.6 Terra")
+        self.assertFalse(s["label"].endswith("(OpenAI)"))
+
+    def test_openrouter_label_strips_via_suffix(self):
+        from openrouter_catalog import or_display_label
+
+        self.assertEqual(
+            or_display_label({
+                "id": "openai/gpt-5.6-terra",
+                "name": "OpenAI: GPT-5.6 Terra",
+            }),
+            "OpenAI: GPT-5.6 Terra",
+        )
+        self.assertEqual(
+            or_display_label({
+                "id": "openai/gpt-5.6-terra",
+                "name": "OpenAI: GPT-5.6 Terra (via OpenRouter)",
+            }),
+            "OpenAI: GPT-5.6 Terra",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

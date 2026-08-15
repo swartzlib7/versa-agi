@@ -26,6 +26,8 @@
 #   --watchdog-user USER    Watchdog OS user
 #   --coa-user USER         COA OS user
 #   --paths-env FILE        Path to paths.env
+#   --sd-cpp-tag TAG        stable-diffusion.cpp release tag (sd-cli image)
+#   --ensure-sd-cli         Install/refresh sd-cli only (used by setup.sh --update)
 # ─────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -221,6 +223,10 @@ SYCL_PORT="${SYCL_PORT:-8080}"
 SYCL_CONTAINER="versa-agi-sycl"
 SYCL_IMAGE="versa-agi-sycl"
 SYCL_LLAMA_CPP_TAG="${SYCL_LLAMA_CPP_TAG:-b9082}"
+SD_CPP_TAG="${SD_CPP_TAG:-master-820-de298c2}"
+SDCPP_IMAGE_NAME="versa-agi-sdcpp"
+MEDIA_STORE="/opt/versa-agi/media-models"
+ENSURE_SD_CLI_ONLY=false
 HF_TOKEN="${HF_TOKEN:-}"
 SYCL_PARALLEL="${SYCL_PARALLEL:-1}"
 SYCL_CTX_SIZE="${SYCL_CTX_SIZE:-4096}"
@@ -299,6 +305,92 @@ _calculate_concurrency() {
   return 0
 }
 
+# Install pinned sd-cli (stable-diffusion.cpp) for local Utility media.
+# Must run on --update even when this server is already configured.
+_ensure_sd_cli_runtime() {
+  local backend="${1:-${GPU_BACKEND:-standard}}"
+  local image="${SDCPP_IMAGE_NAME}:${SD_CPP_TAG}"
+  local wrapper_src="${SCRIPT_DIR}/bin/versa-agi-sd-cli"
+  local wrapper_dst="/usr/local/bin/versa-agi-sd-cli"
+
+  mkdir -p "${MEDIA_STORE}" /etc/versa-agi
+  if id "${WATCHDOG_USER}" &>/dev/null; then
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${MEDIA_STORE}" 2>/dev/null || true
+  fi
+
+  if [ "${backend}" != "intel" ]; then
+    info "Pinned sd-cli Docker image is Intel SYCL for now (gpu_backend=${backend}). CUDA/HIP follow-on."
+    return 0
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    warn "Docker not found — cannot build ${image}. Install Docker and re-run: sudo ./setup.sh --update"
+    return 0
+  fi
+
+  if docker image inspect "${image}" >/dev/null 2>&1; then
+    ok "sd-cli image '${image}' already present"
+  else
+    local build_dir="/tmp/sd-cpp-sycl-build-$$"
+    rm -rf "${build_dir}"
+    info "Cloning stable-diffusion.cpp (${SD_CPP_TAG}) — first build can take 10+ minutes..."
+    git clone --depth 1 --branch "${SD_CPP_TAG}" \
+      https://github.com/leejet/stable-diffusion.cpp "${build_dir}" \
+      || error "Failed to clone stable-diffusion.cpp at ${SD_CPP_TAG}"
+    git -C "${build_dir}" submodule update --init --recursive --depth 1 \
+      || error "Failed to fetch stable-diffusion.cpp submodules"
+    if [ ! -f "${SCRIPT_DIR}/docker/intel-sdcpp.Dockerfile" ]; then
+      error "Missing ${SCRIPT_DIR}/docker/intel-sdcpp.Dockerfile"
+    fi
+    cp "${SCRIPT_DIR}/docker/intel-sdcpp.Dockerfile" "${build_dir}/intel-sdcpp.Dockerfile"
+    info "Building ${image} (Intel SYCL sd-cli)..."
+    docker build -t "${image}" \
+      --build-arg="GGML_SYCL_F16=ON" \
+      -f "${build_dir}/intel-sdcpp.Dockerfile" \
+      "${build_dir}" || error "sd-cli Docker image build failed"
+    rm -rf "${build_dir}"
+    ok "Built ${image}"
+  fi
+
+  if [ -f "${wrapper_src}" ]; then
+    install -m 755 "${wrapper_src}" "${wrapper_dst}"
+    ok "Installed ${wrapper_dst}"
+  else
+    warn "Wrapper source missing: ${wrapper_src}"
+  fi
+  printf 'VERSA_SDCPP_IMAGE=%s\n' "${image}" > /etc/versa-agi/sdcpp.env
+  chmod 644 /etc/versa-agi/sdcpp.env
+}
+
+# Watchdog passwordless sudo for remote dashboard ops (SSH, no TTY).
+# Activate was first; Media Import uses the same sudo agictl pattern.
+# Must run on --update even when this server is already configured.
+_ensure_watchdog_model_sudoers() {
+  local sudoers_file="/etc/sudoers.d/versa-agi-model-activate"
+  local tmp p
+  tmp="$(mktemp)"
+  {
+    for p in "$(command -v agictl 2>/dev/null || true)" /usr/local/bin/agictl /usr/bin/agictl; do
+      [ -n "${p}" ] || continue
+      echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: ${p} model activate *"
+      echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: ${p} model media *"
+    done
+  } | awk 'NF && !seen[$0]++' > "${tmp}"
+  if [ ! -s "${tmp}" ]; then
+    echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl model activate *" > "${tmp}"
+    echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl model media *" >> "${tmp}"
+  fi
+  chmod 0440 "${tmp}"
+  if visudo -cf "${tmp}" >/dev/null 2>&1; then
+    mv "${tmp}" "${sudoers_file}"
+    chmod 0440 "${sudoers_file}"
+    ok "Sudoers: ${WATCHDOG_USER} can run 'sudo agictl model activate|media' without password"
+  else
+    rm -f "${tmp}"
+    warn "Sudoers syntax check failed — left ${sudoers_file} unchanged."
+  fi
+}
+
 # ─── Parse Arguments ────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -315,6 +407,8 @@ while [[ $# -gt 0 ]]; do
     --paths-env)          PATHS_ENV="$2"; shift 2 ;;
     --hf-token)           HF_TOKEN="$2"; shift 2 ;;
     --sycl-llama-cpp-tag) SYCL_LLAMA_CPP_TAG="$2"; shift 2 ;;
+    --sd-cpp-tag)         SD_CPP_TAG="$2"; shift 2 ;;
+    --ensure-sd-cli)      ENSURE_SD_CLI_ONLY=true; shift ;;
     --topology)           TOPOLOGY="$2"; shift 2 ;;
     --remote-inference-url) REMOTE_INFERENCE_URL="$2"; shift 2 ;;
     --inference-master-key) INFERENCE_MASTER_KEY="$2"; shift 2 ;;
@@ -337,6 +431,7 @@ if [ -n "${_LOCAL_INI}" ]; then
   [ -z "${INTEL_DEVICE_ID}" ]  && INTEL_DEVICE_ID="$(_ini_val local_ai intel_device_id)"
   [ "${INTEL_CARD_COUNT}" = "1" ] && { _v="$(_ini_val local_ai intel_card_count)"; [ -n "$_v" ] && INTEL_CARD_COUNT="$_v"; }
   [ -z "${SYCL_LLAMA_CPP_TAG}" ] || true  # already has default
+  { _v="$(_ini_val local_ai sd_cpp_tag)"; [ -n "$_v" ] && SD_CPP_TAG="$_v"; }
   # Topology fallback from INI
   if [ "${TOPOLOGY}" = "local" ]; then
     _t="$(_ini_val local_ai topology)"
@@ -349,6 +444,23 @@ if [ -n "${_LOCAL_INI}" ]; then
   [ -z "${SYCL_VRAM_GB}" ] && SYCL_VRAM_GB="$(_ini_val local_ai sycl_vram_gb)"
   [ "${SYCL_MODELS_MAX}" = "1" ] && { _v="$(_ini_val local_ai sycl_models_max)"; [ -n "$_v" ] && SYCL_MODELS_MAX="$_v"; }
   { _v="$(_ini_val local_ai model_loading_strategy)"; [ -n "$_v" ] && MODEL_LOADING_STRATEGY="$_v"; }
+fi
+
+# --ensure-sd-cli: install/refresh sd-cli only (no banner, no reconfigure).
+# Used by setup.sh --update so an already-configured server still gets the image.
+if [ "${ENSURE_SD_CLI_ONLY}" = true ]; then
+  SERVER_STATE_FILE="/etc/versa-agi/server_config.json"
+  if [ -f "${SERVER_STATE_FILE}" ] && command -v jq >/dev/null 2>&1; then
+    _be="$(jq -r '.gpu_backend // empty' "${SERVER_STATE_FILE}" 2>/dev/null || true)"
+    [ -n "${_be}" ] && GPU_BACKEND="${_be}"
+  fi
+  if [ "${GPU_BACKEND}" = "standard" ] && declare -F _ini_val >/dev/null 2>&1; then
+    _v="$(_ini_val local_ai gpu_backend)"
+    [ -n "${_v}" ] && GPU_BACKEND="${_v}"
+  fi
+  _ensure_sd_cli_runtime "${GPU_BACKEND}"
+  _ensure_watchdog_model_sudoers
+  exit 0
 fi
 
 # ─── Banner ─────────────────────────────────────────
@@ -391,10 +503,25 @@ if [ "${TOPOLOGY}" = "server" ]; then
     echo "  │  Master Key:    ${_srv_key_short}$(printf '%*s' $((27 - ${#_srv_key_short})) '')│"
     echo "  ╰─────────────────────────────────────────────╯"
     echo ""
+    if [ "${_srv_backend}" = "unknown" ] || [ -z "${_srv_backend}" ]; then
+      if declare -F _ini_val >/dev/null 2>&1; then
+        _v="$(_ini_val local_ai gpu_backend)"
+        [ -n "${_v}" ] && _srv_backend="${_v}"
+      fi
+    fi
+    # setup.sh --update must not stop here — sd-cli still needs installing.
+    if [ -n "${VERSA_SETUP_PARENT:-}" ]; then
+      _ensure_sd_cli_runtime "${_srv_backend}"
+      _ensure_watchdog_model_sudoers
+      ok "Server configuration unchanged (sd-cli + media sudoers ensured)."
+      exit 0
+    fi
     read -p "  Reconfigure? [y/N]: " -n 1 -r
     echo ""
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      ok "Server configuration unchanged."
+      _ensure_sd_cli_runtime "${_srv_backend}"
+      _ensure_watchdog_model_sudoers
+      ok "Server configuration unchanged (sd-cli + media sudoers ensured)."
       exit 0
     fi
     echo ""
@@ -1196,6 +1323,10 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     ok "Docker image built: ${SYCL_IMAGE}"
   fi
 
+  # ── Step 4b: Pinned sd-cli (local Utility media; not llama-server) ──
+  info "Step 4b: sd-cli (stable-diffusion.cpp SYCL)"
+  _ensure_sd_cli_runtime "intel"
+
   # ── Step 5: Disable stock Ollama service ──
   info "Step 5: Disable stock Ollama service (replaced by Docker SYCL)"
   if systemctl is-active --quiet ollama 2>/dev/null; then
@@ -1522,23 +1653,8 @@ SRVEOF
   chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${SERVER_STATE_FILE}" 2>/dev/null || true
   ok "Server state saved: ${SERVER_STATE_FILE}"
 
-  # ── Sudoers: allow watchdog passwordless 'agictl model activate' ──
-  # This enables remote model activation from client dashboards via SSH.
-  _SUDOERS_FILE="/etc/sudoers.d/versa-agi-model-activate"
-  _AGICTL_PATH=$(command -v agictl 2>/dev/null || echo "/usr/bin/agictl")
-  _SUDOERS_LINE="${WATCHDOG_USER} ALL=(root) NOPASSWD: ${_AGICTL_PATH} model activate *"
-  if [ ! -f "${_SUDOERS_FILE}" ] || ! grep -qF "model activate" "${_SUDOERS_FILE}" 2>/dev/null; then
-    echo "${_SUDOERS_LINE}" > "${_SUDOERS_FILE}"
-    chmod 0440 "${_SUDOERS_FILE}"
-    if visudo -cf "${_SUDOERS_FILE}" >/dev/null 2>&1; then
-      ok "Sudoers: ${WATCHDOG_USER} can run 'sudo agictl model activate' without password"
-    else
-      rm -f "${_SUDOERS_FILE}"
-      warn "Sudoers syntax check failed — removed. Add manually if needed."
-    fi
-  else
-    ok "Sudoers: model activate entry already configured"
-  fi
+  # ── Sudoers: watchdog passwordless activate + media (remote dashboard SSH) ──
+  _ensure_watchdog_model_sudoers
 
   # Write topology + master key to setup.ini (dual-write)
   for SETUP_INI in "${SCRIPT_DIR}/setup.ini" "/etc/versa-agi/setup.ini"; do
@@ -1554,6 +1670,11 @@ SRVEOF
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_active_model=.*/sycl_active_model='"${SYCL_ACTIVE_MODEL}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^hf_token=.*/hf_token='"${HF_TOKEN}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_llama_cpp_tag=.*/sycl_llama_cpp_tag='"${SYCL_LLAMA_CPP_TAG}"'/}' "${SETUP_INI}"
+        if grep -q '^sd_cpp_tag=' "${SETUP_INI}"; then
+          sed -i '/^\[local_ai\]/,/^\[/{s/^sd_cpp_tag=.*/sd_cpp_tag='"${SD_CPP_TAG}"'/}' "${SETUP_INI}"
+        else
+          sed -i '/^sycl_llama_cpp_tag=.*/a sd_cpp_tag='"${SD_CPP_TAG}" "${SETUP_INI}"
+        fi
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_vram_gb=.*/sycl_vram_gb='"${SYCL_VRAM_GB}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_parallel=.*/sycl_parallel='"${SYCL_PARALLEL}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_ctx_size=.*/sycl_ctx_size='"${SYCL_CTX_SIZE}"'/}' "${SETUP_INI}"
@@ -1615,6 +1736,11 @@ for SETUP_INI in "${_INI_FILES[@]}"; do
     sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_active_model=.*/sycl_active_model='"${SYCL_ACTIVE_MODEL}"'/}' "${SETUP_INI}"
     sed -i '/^\[local_ai\]/,/^\[/{s/^hf_token=.*/hf_token='"${HF_TOKEN}"'/}' "${SETUP_INI}"
     sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_llama_cpp_tag=.*/sycl_llama_cpp_tag='"${SYCL_LLAMA_CPP_TAG}"'/}' "${SETUP_INI}"
+    if grep -q '^sd_cpp_tag=' "${SETUP_INI}"; then
+      sed -i '/^\[local_ai\]/,/^\[/{s/^sd_cpp_tag=.*/sd_cpp_tag='"${SD_CPP_TAG}"'/}' "${SETUP_INI}"
+    else
+      sed -i '/^sycl_llama_cpp_tag=.*/a sd_cpp_tag='"${SD_CPP_TAG}" "${SETUP_INI}"
+    fi
     sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_vram_gb=.*/sycl_vram_gb='"${SYCL_VRAM_GB}"'/}' "${SETUP_INI}"
     sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_parallel=.*/sycl_parallel='"${SYCL_PARALLEL}"'/}' "${SETUP_INI}"
     sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_ctx_size=.*/sycl_ctx_size='"${SYCL_CTX_SIZE}"'/}' "${SETUP_INI}"

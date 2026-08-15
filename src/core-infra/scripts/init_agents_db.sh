@@ -247,6 +247,35 @@ CREATE TABLE IF NOT EXISTS utility_models (
   updated_at      DATETIME DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_utility_models_enabled ON utility_models(enabled);
+
+INSERT OR IGNORE INTO utility_models
+  (id, label, catalog_model, system_prompt, output_modality, output_path,
+   run_as_agent, config_json, enabled)
+VALUES (
+  'qwen-image-2512',
+  'Qwen-Image-2512 (local)',
+  'qwen-image-2512',
+  'Paint a single well-composed image. Prefer a clear subject and a coherent style.',
+  'image',
+  '',
+  'coa',
+  '{"width":768,"height":768,"steps":40}',
+  1
+);
+INSERT OR IGNORE INTO utility_models
+  (id, label, catalog_model, system_prompt, output_modality, output_path,
+   run_as_agent, config_json, enabled)
+VALUES (
+  'flux1-dev',
+  'FLUX.1-dev (local)',
+  'flux1-dev',
+  'Paint a single well-composed image. Prefer a clear subject and a coherent style.',
+  'image',
+  '',
+  'coa',
+  '{"width":768,"height":768,"steps":20,"cfg_scale":1}',
+  1
+);
 UTIL
 
 # Seed per-catalog modality maps (idempotent)

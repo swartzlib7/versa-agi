@@ -94,6 +94,12 @@ EXPECTED_OUTPUT_BINDINGS = {
         "audio",
         "chat_mm_audio_out_pcm16",
     ),
+    # DR-LOC-02
+    "qwen-image-2512": (
+        "local_media",
+        "image",
+        "local_media_image_out_sdcpp",
+    ),
 }
 
 
@@ -138,7 +144,7 @@ class TestExactResolution(RegistryTestCase):
         self.assertIsNotNone(resolved)
         assert resolved is not None
         self.assertEqual(resolved.model["provider"], "google")
-        self.assertEqual(resolved.provider["label"], "Google Gemini")
+        self.assertEqual(resolved.provider["label"], "Google")
         self.assertEqual(resolved.binding.direction, "input")
 
     def test_each_exact_output_binding_resolves(self):
@@ -299,6 +305,7 @@ class TestRegistryIntegrity(RegistryTestCase):
                 "chat_mm_image_out_openai_compat",
                 "chat_mm_audio_out_pcm16",
                 "chat_mm_image_out_google_generate_content",
+                "local_media_image_out_sdcpp",
             },
         )
         for stale_id in (

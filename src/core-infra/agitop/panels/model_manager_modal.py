@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import time
 
 from textual import on
 from textual.app import ComposeResult
@@ -24,6 +25,17 @@ from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual.widgets import Static, Button, Input, Label, DataTable, Select, Checkbox, TabbedContent, TabPane
 from agitop.widgets.clear_checkbox import ClearCheckbox
 
+from agitop.panels.media_wizard import (
+    _LOCAL_CATALOG_PROVIDERS,
+    build_gpu_host_agictl_cmd,
+    media_form_prefill,
+    media_import_failure_hint,
+    media_wizard_summary,
+    read_local_ai_topology,
+    read_tunnel_host,
+    watchdog_ssh_key,
+)
+from model_media_remote import format_elapsed, run_cmd_streaming
 from agitop.panels.modality_format import format_modality_labels
 from agitop.widgets.provider_brand_icon import provider_brand_class, provider_import_button_label
 
@@ -62,14 +74,31 @@ _FALLBACK_REASONING_OPTS = [
 ]
 
 
-def _run_agictl(args, timeout=25):
-    """Run `sudo agictl <args>` and parse the trailing JSON line.
+def gguf_registry_blocked(inspect: dict | None, confirm_unknown: bool = False) -> str | None:
+    """Return an error if SYCL GGUF fields must not be saved/imported."""
+    from model_hf_ingest import gguf_registry_blocked as _blocked
 
-    Returns (ok: bool, data: dict, err: str). Never raises.
-    """
+    return _blocked(inspect, confirm_unknown=confirm_unknown)
+
+
+def _parse_agictl_json(stdout: str) -> dict:
+    if not stdout:
+        return {}
+    for line in reversed(stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+    return {}
+
+
+def _run_cmd(cmd, timeout=25):
+    """Run ``cmd`` and parse a trailing agictl JSON line. Never raises."""
     try:
         proc = subprocess.run(
-            ["sudo", "agictl"] + args,
+            cmd,
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -77,21 +106,18 @@ def _run_agictl(args, timeout=25):
     except Exception as e:  # noqa: BLE001
         return False, {}, str(e)
 
-    data = {}
-    if proc.stdout:
-        for line in reversed(proc.stdout.strip().splitlines()):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    data = json.loads(line)
-                    break
-                except Exception:  # noqa: BLE001
-                    continue
+    data = _parse_agictl_json(proc.stdout)
     ok = bool(data.get("success")) if data else (proc.returncode == 0)
     err = ""
     if not ok:
-        err = data.get("error") or (proc.stderr.strip() or "Unknown error")
+        err = data.get("error") or (proc.stderr.strip() or proc.stdout.strip() or "Unknown error")
     return ok, data, err
+
+
+def _run_agictl(args, timeout=25, sudo=True):
+    """Run `agictl <args>` (optionally via sudo) and parse the trailing JSON line."""
+    cmd = (["sudo", "agictl"] if sudo else ["agictl"]) + args
+    return _run_cmd(cmd, timeout=timeout)
 
 
 def _fmt_per_m(value) -> str:
@@ -429,7 +455,7 @@ class ModelManagerModal(ModalScreen):
         mt = self.query_one("#mm-models-table", DataTable)
         mt.cursor_type = "row"
         mt.add_columns(
-            "Label", "Key", "Type", "Work", "Rtr", "En", "COA", "Rsn",
+            "Label", "Key", "Provider", "Type", "Work", "Rtr", "En", "COA", "Rsn",
             "Input", "Input Price", "Output", "Output Price", "Drivers",
         )
         pt = self.query_one("#mm-providers-table", DataTable)
@@ -459,6 +485,9 @@ class ModelManagerModal(ModalScreen):
             mt.add_row(
                 m.get("label", ""),
                 m["key"],
+                (self._providers_by_slug.get(m.get("provider") or "") or {}).get(
+                    "label"
+                ) or m.get("provider") or "—",
                 _model_type(m),
                 m.get("work_modality", "balanced"),
                 _yn(m.get("router_eligible")),
@@ -710,10 +739,14 @@ class CatalogFormModal(ModalScreen):
         self._edit = existing is not None
         self._had_custom_params = False
         self._source_providers = source_providers
+        self._hf_inspect = None
+        self._import_busy = False
 
     def compose(self) -> ComposeResult:
         e = self._existing or {}
         prov_opts = [(p, p) for p in self._providers] or [("(none)", "")]
+        if "local_media" not in {v for _, v in prov_opts}:
+            prov_opts.append(("local_media", "local_media"))
         local_runtime = _local_backend_label()
         prov_values = {v for _, v in prov_opts}
         default_provider = e.get("provider")
@@ -731,9 +764,14 @@ class CatalogFormModal(ModalScreen):
                 yield Static("[bold]✎ Edit Model[/]", id="msg-dialog-header")
             else:
                 yield Static("[bold]Add Model[/]", id="catalog-form-title")
-                yield Static("[dim]Import from provider API:[/]", id="catalog-form-import-label")
+                yield Static("[dim]Import from a provider:[/]", id="catalog-form-import-label")
                 with Horizontal(id="catalog-form-header"):
-                    for prov in (self._source_providers or []):
+                    import_providers = list(self._source_providers or [])
+                    if not any(p.get("slug") == "huggingface" for p in import_providers):
+                        import_providers.append(
+                            {"slug": "huggingface", "label": "Hugging Face"}
+                        )
+                    for prov in import_providers:
                         slug = prov["slug"]
                         brand = provider_brand_class(slug)
                         yield Button(
@@ -749,8 +787,8 @@ class CatalogFormModal(ModalScreen):
                         yield Input(value=e.get("key", ""), placeholder="model id", id="f-key",
                                     disabled=self._edit)
                     with Vertical(classes="mm-form-col"):
-                        yield Static("[b]Display label[/]")
-                        yield Input(value=e.get("label", ""), placeholder="shown in pickers", id="f-label")
+                        yield Static("[b]Display label[/]  [dim]product name only; pickers add Provider + key[/]")
+                        yield Input(value=e.get("label", ""), placeholder="e.g. GPT-5.6 Terra", id="f-label")
 
                 with Horizontal(classes="mm-form-row"):
                     with Vertical(classes="mm-form-col"):
@@ -824,7 +862,15 @@ class CatalogFormModal(ModalScreen):
 
                 if not self._edit:
                     yield Static(
-                        "[dim]Local only — optional SYCL GGUF (also registers [sycl_models]):[/]")
+                        "[bold cyan]Hugging Face inspect[/]  [dim](paste URL or hf://org/repo/file.gguf)[/]")
+                    yield Input(
+                        placeholder="hf://unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf",
+                        id="f-hf-source",
+                    )
+                    yield Static("", id="f-hf-inspect-result")
+                    yield Static(
+                        "[dim]Inspect first. Chat → SYCL Import. Media → Media Import. "
+                        "Media never enters llama-server.[/]")
                     yield Input(placeholder="HuggingFace repo (org/model)", id="f-gguf-repo")
                     yield Input(placeholder="GGUF filename", id="f-gguf-file")
                     yield Input(placeholder="approx size GB", type="integer", id="f-size")
@@ -833,7 +879,11 @@ class CatalogFormModal(ModalScreen):
 
             with Horizontal(id="catalog-form-footer"):
                 yield Button("Save", variant="success", id="f-save")
-                yield Button("Model Feedback", variant="warning", id="f-feedback")
+                if not self._edit:
+                    yield Button("Inspect HF", variant="primary", id="f-hf-inspect")
+                    yield Button("⬇ SYCL Import", variant="warning", id="f-sycl-import")
+                    yield Button("▣ Media Import", variant="warning", id="f-media-import")
+                yield Button("★ Model Feedback", variant="warning", id="f-feedback")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="f-cancel")
 
     def on_mount(self) -> None:
@@ -897,8 +947,11 @@ class CatalogFormModal(ModalScreen):
             class_sel.value = model_class
 
         prov_sel = self.query_one("#f-provider", Select)
-        if provider in self._providers:
-            prov_sel.value = provider
+        try:
+            if provider:
+                prov_sel.value = provider
+        except Exception:
+            pass
 
         work_sel = self.query_one("#f-work-modality", Select)
         if work in {v for _, v in _WORK_MODALITY_CHOICES}:
@@ -909,6 +962,23 @@ class CatalogFormModal(ModalScreen):
         self.query_one("#f-router-eligible", Checkbox).value = bool(
             prefill.get("router_eligible", True)
         )
+
+        hf_source = (prefill.get("hf_source") or "").strip()
+        if hf_source:
+            try:
+                self.query_one("#f-hf-source", Input).value = hf_source
+            except Exception:
+                pass
+            self._inspect_hf()
+            next_step = (
+                "Media Import"
+                if (prefill.get("kind") or "") == "media"
+                else "Save"
+            )
+            self.query_one("#f-error", Static).update(
+                f"[green]Prefilled from {provider_label}[/] — review, then {next_step}."
+            )
+            return
 
         self.query_one("#f-error", Static).update(
             f"[green]Prefilled from {provider_label}[/] — review fields and click Save."
@@ -923,7 +993,7 @@ class CatalogFormModal(ModalScreen):
             slug = event.button.id[len("f-import-"):]
             label = next(
                 (p["label"] for p in (self._source_providers or []) if p["slug"] == slug),
-                slug,
+                "Hugging Face" if slug == "huggingface" else slug,
             )
 
             def _on_pick(prefill: dict | None) -> None:
@@ -937,8 +1007,289 @@ class CatalogFormModal(ModalScreen):
             if not model_key and self._existing:
                 model_key = (self._existing.get("key") or "").strip()
             self.app.push_screen(ModelFeedbackModal(catalog_key=model_key))
+        elif event.button.id == "f-hf-inspect":
+            self._inspect_hf()
+        elif event.button.id == "f-sycl-import":
+            self._sycl_import()
+        elif event.button.id == "f-media-import":
+            self._media_import()
         elif event.button.id == "f-save":
             self._submit()
+
+    def _inspect_hf(self) -> None:
+        source = ""
+        try:
+            source = self.query_one("#f-hf-source", Input).value.strip()
+        except Exception:
+            source = ""
+        if not source:
+            repo = self.query_one("#f-gguf-repo", Input).value.strip()
+            gguf = self.query_one("#f-gguf-file", Input).value.strip()
+            if repo and gguf:
+                source = f"hf://{repo}/{gguf}"
+        if not source:
+            self.query_one("#f-hf-inspect-result", Static).update(
+                "[red]Paste a Hugging Face URL or hf://org/repo/file.gguf first.[/]"
+            )
+            return
+        ok, data, err = _run_agictl(["model", "hf", "inspect", source], timeout=45, sudo=False)
+        if not ok:
+            self._hf_inspect = None
+            self.query_one("#f-hf-inspect-result", Static).update(f"[red]Inspect failed: {err}[/]")
+            return
+        self._hf_inspect = data
+        kind = data.get("classification") or "unknown"
+        selected = (data.get("selected_file") or {}).get("path") or ""
+        size_gb = data.get("size_gb")
+        src = data.get("source") or {}
+        color = {
+            "chat_gguf": "green",
+            "chat_vlm_mmproj": "yellow",
+            "media_pipeline": "red",
+            "unknown": "yellow",
+        }.get(kind, "yellow")
+        lines = [
+            f"[{color}]class={kind}[/{color}]  repo={src.get('repo_id') or ''}  file={selected}",
+        ]
+        if size_gb:
+            lines.append(f"size≈{size_gb}GB")
+        if data.get("next_step"):
+            lines.append(str(data["next_step"]))
+        self.query_one("#f-hf-inspect-result", Static).update("\n".join(lines))
+        if kind == "media_pipeline":
+            self.query_one("#f-gguf-repo", Input).value = ""
+            self.query_one("#f-gguf-file", Input).value = ""
+            self._show_media_plan(source)
+            return
+        if src.get("repo_id"):
+            self.query_one("#f-gguf-repo", Input).value = src["repo_id"]
+        if selected:
+            self.query_one("#f-gguf-file", Input).value = os.path.basename(selected)
+        if size_gb:
+            self.query_one("#f-size", Input).value = str(size_gb)
+        if kind == "chat_vlm_mmproj":
+            self.query_one("#f-input-modalities", Input).value = "text"
+            self.query_one("#f-error", Static).update(
+                "[yellow]VLM+mmproj: import is text-only until TD-LOCAL-MMProj-001.[/]"
+            )
+
+    def _show_media_plan(self, source: str) -> None:
+        dest = self.query_one("#f-key", Input).value.strip()
+        args = ["model", "media", "inspect", source]
+        if dest:
+            args += ["--name", dest]
+        ok, data, err = _run_agictl(args, timeout=45, sudo=False)
+        if ok:
+            self._hf_inspect = data
+        else:
+            data = self._hf_inspect or {}
+        self.query_one("#f-hf-inspect-result", Static).update(
+            f"[red]{media_wizard_summary(data)}[/]" if not ok
+            else f"[cyan]{media_wizard_summary(data)}[/]"
+        )
+        if not ok:
+            self.query_one("#f-error", Static).update(
+                f"[red]Media inspect failed: {err}. SYCL Import stays blocked.[/]"
+            )
+            return
+        prefill = media_form_prefill(data)
+        key_in = self.query_one("#f-key", Input)
+        if not key_in.value.strip():
+            key_in.value = prefill["key"]
+        self.query_one("#f-label", Input).value = prefill["label"]
+        try:
+            self.query_one("#f-class", Select).value = prefill["class"]
+        except Exception:
+            pass
+        try:
+            self.query_one("#f-provider", Select).value = prefill["provider"]
+        except Exception:
+            pass
+        try:
+            self.query_one("#f-work-modality", Select).value = prefill["work_modality"]
+        except Exception:
+            pass
+        self.query_one("#f-input-modalities", Input).value = prefill["input_modalities"]
+        self.query_one("#f-output-modalities", Input).value = prefill["output_modalities"]
+        self.query_one("#f-router-eligible", Checkbox).value = False
+        self.query_one("#f-coa", Checkbox).value = False
+        self.query_one("#f-error", Static).update(
+            "[cyan]Media pipeline — use Media Import. Not a SYCL chat model.[/]"
+        )
+
+    def _media_source(self) -> str:
+        source = ""
+        try:
+            source = self.query_one("#f-hf-source", Input).value.strip()
+        except Exception:
+            source = ""
+        if source:
+            return source
+        repo = self.query_one("#f-gguf-repo", Input).value.strip()
+        gguf = self.query_one("#f-gguf-file", Input).value.strip()
+        return f"hf://{repo}/{gguf}" if repo and gguf else ""
+
+    def _set_import_status(self, text: str) -> None:
+        try:
+            self.query_one("#f-error", Static).update(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _set_import_busy(self, busy: bool) -> None:
+        self._import_busy = busy
+        for wid in ("#f-media-import", "#f-sycl-import", "#f-hf-inspect"):
+            try:
+                self.query_one(wid, Button).disabled = busy
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _start_import_worker(
+        self,
+        cmd: list,
+        *,
+        kind: str,
+        topology: str,
+        key: str,
+    ) -> None:
+        if self._import_busy:
+            return
+        where = "GPU host" if topology == "client" else "this host"
+        label = "Media Import" if kind == "media" else "SYCL Import"
+        self._set_import_busy(True)
+        self._set_import_status(f"[yellow]{label} on the {where}… 0s[/]")
+        self.run_worker(
+            lambda: self._import_worker(
+                cmd, kind=kind, topology=topology, key=key, where=where, label=label,
+            ),
+            exclusive=True,
+            thread=True,
+            name=f"{kind}-import",
+        )
+
+    def _import_worker(self, cmd, *, kind, topology, key, where, label) -> None:
+        started = time.monotonic()
+
+        def on_progress(line: str) -> None:
+            elapsed = format_elapsed(time.monotonic() - started)
+            snippet = (line or "").strip()
+            if len(snippet) > 160:
+                snippet = snippet[-160:]
+            try:
+                self.app.call_from_thread(
+                    self._set_import_status,
+                    f"[yellow]{label} on the {where} · {elapsed}[/]\n{snippet}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        ok, data, err = run_cmd_streaming(cmd, timeout=3600, on_progress=on_progress)
+        try:
+            self.app.call_from_thread(
+                self._import_done, ok, data, err, kind, topology, key, where,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _import_done(self, ok, data, err, kind, topology, key, where) -> None:
+        self._set_import_busy(False)
+        if not ok:
+            hint = media_import_failure_hint(err) if kind == "media" else err
+            title = "Media" if kind == "media" else "SYCL"
+            self._set_import_status(f"[red]{title} import failed: {hint}[/]")
+            return
+        if kind == "media":
+            if topology == "client":
+                _run_agictl(["model", "refresh"], timeout=30, sudo=True)
+            store = data.get("store_dir") or f"/opt/versa-agi/media-models/{key}"
+            self._set_import_status(
+                f"[green]Bundle stored at {store} on the {where}. Not a chat model. "
+                "Paint from this laptop with agictl model media generate or "
+                "agictl utility run — the PNG comes back here. "
+                "Utility Profile is not created here.[/]"
+            )
+            return
+        self._set_import_status(
+            f"[green]Imported '{key}' as text-only chat. Activate separately — never auto-activated.[/]"
+        )
+        if data.get("file"):
+            self.query_one("#f-gguf-file", Input).value = os.path.basename(str(data["file"]))
+        if data.get("repo"):
+            self.query_one("#f-gguf-repo", Input).value = str(data["repo"])
+        if data.get("size_gb"):
+            self.query_one("#f-size", Input).value = str(data["size_gb"])
+
+    def _sycl_import(self) -> None:
+        if self._import_busy:
+            return
+        if not self._hf_inspect:
+            self._inspect_hf()
+        blocked = gguf_registry_blocked(self._hf_inspect)
+        if blocked:
+            self.query_one("#f-error", Static).update(f"[red]{blocked}[/]")
+            return
+        key = self.query_one("#f-key", Input).value.strip()
+        if not key:
+            self.query_one("#f-error", Static).update("[red]Model key is required for SYCL import.[/]")
+            return
+        source = self.query_one("#f-hf-source", Input).value.strip()
+        if not source:
+            repo = self.query_one("#f-gguf-repo", Input).value.strip()
+            gguf = self.query_one("#f-gguf-file", Input).value.strip()
+            source = f"hf://{repo}/{gguf}" if repo and gguf else ""
+        if not source:
+            self.query_one("#f-error", Static).update("[red]Inspect a Hugging Face source first.[/]")
+            return
+        label = self.query_one("#f-label", Input).value.strip() or key
+        args = ["model", "sycl", "import", source, "--name", key, "--runtime", "chat", "--label", label]
+        kind = (self._hf_inspect or {}).get("classification")
+        if kind == "unknown":
+            args.append("--confirm-unknown")
+        self._start_import_worker(
+            (["sudo", "agictl"] + args),
+            kind="sycl",
+            topology=read_local_ai_topology(),
+            key=key,
+        )
+
+    def _media_import(self) -> None:
+        if self._import_busy:
+            return
+        if not self._hf_inspect:
+            self._inspect_hf()
+        kind = (self._hf_inspect or {}).get("classification")
+        if kind != "media_pipeline":
+            self.query_one("#f-error", Static).update(
+                "[red]Media Import is for media pipelines. Inspect a Qwen-Image source first.[/]"
+            )
+            return
+        key = self.query_one("#f-key", Input).value.strip() or media_form_prefill(
+            self._hf_inspect
+        )["key"]
+        if not key:
+            self.query_one("#f-error", Static).update("[red]Model key is required for Media Import.[/]")
+            return
+        source = self._media_source()
+        if not source:
+            self.query_one("#f-error", Static).update("[red]Inspect a Hugging Face source first.[/]")
+            return
+        args = [
+            "model", "media", "import", source,
+            "--name", key, "--runtime", "media",
+        ]
+        if kind == "unknown":
+            args.append("--confirm-unknown")
+        topology = read_local_ai_topology()
+        try:
+            cmd = build_gpu_host_agictl_cmd(
+                args,
+                topology=topology,
+                tunnel_host=read_tunnel_host(),
+                ssh_key=watchdog_ssh_key(),
+            )
+        except ValueError as exc:
+            self.query_one("#f-error", Static).update(f"[red]{exc}[/]")
+            return
+        self._start_import_worker(cmd, kind="media", topology=topology, key=key)
 
     def _submit(self) -> None:
         key = self.query_one("#f-key", Input).value.strip()
@@ -956,9 +1307,9 @@ class CatalogFormModal(ModalScreen):
             return
 
         model_class = self.query_one("#f-class", Select).value
-        if model_class == "local" and provider not in ("ollama", "llamacpp"):
+        if model_class == "local" and provider not in _LOCAL_CATALOG_PROVIDERS:
             self.query_one("#f-error", Static).update(
-                "[red]Local models must use provider 'ollama' or 'llamacpp'.[/]")
+                "[red]Local models must use provider 'ollama', 'llamacpp', or 'local_media'.[/]")
             return
 
         def _int(wid):
@@ -1003,6 +1354,20 @@ class CatalogFormModal(ModalScreen):
                 result["size_gb"] = int(self.query_one("#f-size", Input).value.strip() or "0")
             except ValueError:
                 result["size_gb"] = 0
+            if result["gguf_repo"] and result["gguf_file"]:
+                inspect = self._hf_inspect
+                if not inspect:
+                    src = f"hf://{result['gguf_repo']}/{result['gguf_file']}"
+                    _ok, inspect, _err = _run_agictl(
+                        ["model", "hf", "inspect", src], timeout=45, sudo=False,
+                    )
+                    self._hf_inspect = inspect or None
+                blocked = gguf_registry_blocked(inspect)
+                if blocked:
+                    self.query_one("#f-error", Static).update(f"[red]{blocked}[/]")
+                    return
+                if (inspect or {}).get("classification") == "chat_vlm_mmproj":
+                    result["input_modalities"] = "text"
         self.dismiss(result)
 
 

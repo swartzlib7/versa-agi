@@ -114,6 +114,8 @@ sycl_models_max=1
 hf_token=
 # llama.cpp version tag for Docker image builds (pinned for reproducibility)
 sycl_llama_cpp_tag=b9082
+# stable-diffusion.cpp release tag for Intel SYCL sd-cli (local Utility media)
+sd_cpp_tag=master-820-de298c2
 # Total GPU VRAM in GB (auto-detected during setup, used for concurrency calculation)
 sycl_vram_gb=32
 #

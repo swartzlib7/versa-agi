@@ -149,12 +149,11 @@ def enrich_catalog_dict(row: dict, or_model: dict, *, preserve_label: bool = Tru
 
 
 def or_display_label(or_model: dict) -> str:
+    """Product name only. Pickers prepend the catalog Provider."""
     name = (or_model.get("name") or or_model.get("id") or "").strip()
-    if not name:
-        return or_model.get("id", "")
-    if "(via OpenRouter)" in name:
-        return name
-    return f"{name} (via OpenRouter)"
+    if name.endswith(" (via OpenRouter)"):
+        name = name[: -len(" (via OpenRouter)")].strip()
+    return name or or_model.get("id", "")
 
 
 def infer_work_modality(or_model: dict) -> str:

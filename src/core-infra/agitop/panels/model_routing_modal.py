@@ -49,6 +49,18 @@ def _catalog_list() -> list[dict]:
     return []
 
 
+def _picker_label(m: dict, extra: str = "") -> str:
+    from model_catalog import format_catalog_picker_label, provider_display_label
+
+    key = m.get("key") or ""
+    base = format_catalog_picker_label(
+        provider_display_label(m.get("provider") or ""),
+        m.get("label") or key,
+        key,
+    )
+    return f"{base}{extra}"
+
+
 def _load_router_model_choices(current_key: str = "") -> list[tuple[str, str]]:
     """Enabled, router-eligible catalog keys for preferred-map pickers."""
     choices: list[tuple[str, str]] = [("(none — pool fallback)", "")]
@@ -56,9 +68,8 @@ def _load_router_model_choices(current_key: str = "") -> list[tuple[str, str]]:
     for m in sorted(_catalog_list(), key=lambda r: r.get("key", "")):
         if m.get("enabled") and m.get("router_eligible"):
             key = m["key"]
-            label = m.get("label") or key
             note = " (not COA-approved)" if not m.get("coa") else ""
-            choices.append((f"{key} — {label}{note}", key))
+            choices.append((_picker_label(m, note), key))
             seen.add(key)
     current_key = (current_key or "").strip()
     if current_key and current_key not in seen:
@@ -82,8 +93,7 @@ def _load_output_model_choices(output_modality: str, current_key: str = "") -> l
         if output_modality not in driver_outputs:
             continue
         key = m["key"]
-        label = m.get("label") or key
-        choices.append((f"{key} — {label} ◆{output_modality}", key))
+        choices.append((_picker_label(m, f" ◆{output_modality}"), key))
         seen.add(key)
     current_key = (current_key or "").strip()
     if current_key and current_key not in seen:

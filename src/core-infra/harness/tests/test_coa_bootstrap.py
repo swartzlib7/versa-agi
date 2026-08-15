@@ -59,7 +59,7 @@ class RecommendedMap(unittest.TestCase):
 
     def test_options_label_first(self):
         opts = cb.recommended_options("xai")
-        self.assertEqual(opts, [("Grok 4.5", "grok-4.5")])
+        self.assertEqual(opts, [("xAI: Grok 4.5 (grok-4.5)", "grok-4.5")])
 
 
 class BootstrapDetection(unittest.TestCase):
