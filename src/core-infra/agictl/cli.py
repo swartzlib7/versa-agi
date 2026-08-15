@@ -44,6 +44,7 @@ from model_hf_ingest import (
     migrate_skip_reason,
     activate_needs_docker_restart,
     ensure_name_in_csv,
+    resolve_activate_parallel,
     size_gb_from_bytes,
     size_gb_from_path,
     sycl_import_block_reason,
@@ -77,6 +78,7 @@ try:
     from model_catalog import (
         WORK_MODALITIES,
         OUTPUT_DELIVERY_MODALITIES,
+        assigned_local_catalog_rows_to_upsert,
         catalog_row_to_value,
         load_catalog as _mc_load_catalog,
         parse_catalog_row,
@@ -86,6 +88,7 @@ try:
     )
 except ImportError:
     WORK_MODALITIES = OUTPUT_DELIVERY_MODALITIES = None
+    assigned_local_catalog_rows_to_upsert = None
     catalog_row_to_value = _mc_load_catalog = parse_catalog_row = None
     validate_model_routing_prefs = validate_preferred_model_key = validate_preferred_output_key = None
 
@@ -1639,7 +1642,7 @@ def _query_sycl_models():
     return models
 
 
-def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
+def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None, model_file=None):
     """Stop/rm/run the SYCL Docker container (--models-dir).
 
     Called when the loaded GGUF changes or when parallel/ctx/models-max change.
@@ -1706,6 +1709,8 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
         "-ngl", "99", "--host", "0.0.0.0", "--port", "8080",
         "--parallel", _parallel, "--ctx-size", _ctx_total,
     ]
+    if model_file:
+        cmd.extend(["--model", f"/models/{os.path.basename(model_file)}"])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -1720,6 +1725,37 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
     if SYCL_CONTAINER in check.stdout:
         return True, f"Container '{SYCL_CONTAINER}' running (port {sycl_port})"
     return False, "Container may not have started"
+
+
+def _wait_sycl_model_ready(api_id: str, port: int, timeout_s: int = 180) -> tuple[bool, str]:
+    """Poll llama-server until the GGUF stem is loaded or the child fails."""
+    import urllib.request
+
+    url = f"http://127.0.0.1:{port}/v1/models"
+    deadline = time.time() + max(15, int(timeout_s))
+    last = "waiting"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                payload = json.loads(resp.read().decode())
+            for row in payload.get("data") or []:
+                if (row.get("id") or "") != api_id:
+                    continue
+                status = row.get("status") or {}
+                value = (status.get("value") or "").strip().lower()
+                if value == "loaded":
+                    return True, f"llama-server loaded {api_id}"
+                if status.get("failed") or value == "failed":
+                    exit_code = status.get("exit_code")
+                    return False, (
+                        f"llama-server failed to load {api_id}"
+                        + (f" (exit {exit_code})" if exit_code is not None else "")
+                    )
+                last = value or last
+        except (OSError, ValueError, json.JSONDecodeError):
+            last = "unreachable"
+        time.sleep(3)
+    return False, f"llama-server did not load {api_id} within {timeout_s}s ({last})"
 
 
 def _local_model_name_set():
@@ -3287,14 +3323,34 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         if ini_csv_path:
             _update_ini_csv("local_ai", "local_models", registered_local, ini_csv_path)
         _update_paths_env_key("VERSA_LOCAL_MODELS", ",".join(registered_local))
+    catalog_added = _ensure_local_keys_in_live_catalog(registered_local)
+
+    model_size_gb = size_gb_from_path(
+        gguf_path, fallback=int(registry[name].get("size_gb") or 10),
+    )
+    ini_parallel, ini_ctx_size, ini_vram_gb = _resolve_sycl_concurrency()
+    use_ctx = ctx_override if ctx_override is not None else ini_ctx_size
+    recommended, max_slots, free_vram = _calculate_concurrency(
+        ini_vram_gb, model_size_gb, use_ctx,
+    )
+    use_parallel = resolve_activate_parallel(
+        ini_parallel, recommended, parallel_override,
+    )
+    parallel_clamped = parallel_override is None and use_parallel != ini_parallel
 
     # Already the loaded GGUF (sycl_active_model) and no slot/ctx change.
-    if not model_changed and ctx_override is None and parallel_override is None:
+    if (
+        not model_changed
+        and ctx_override is None
+        and parallel_override is None
+        and not parallel_clamped
+    ):
         json_response(
             True,
             model=name,
             action="already_active",
             registered=name in registered_local,
+            catalog_added=catalog_added,
             message=f"'{name}' is already the active model",
         )
         return
@@ -3335,27 +3391,26 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         steps.append("router mode — agents keep individual model assignments")
 
     # ── 2. Concurrency info ──
-    # Hub inspect often leaves size_gb=1; prefer the GGUF on disk.
-    model_size_gb = size_gb_from_path(
-        gguf_path, fallback=int(registry[name].get("size_gb") or 10),
-    )
-    ini_parallel, ini_ctx_size, ini_vram_gb = _resolve_sycl_concurrency()
-    use_ctx = ctx_override if ctx_override is not None else ini_ctx_size
-    recommended, max_slots, free_vram = _calculate_concurrency(ini_vram_gb, model_size_gb, use_ctx)
-    use_parallel = parallel_override if parallel_override is not None else ini_parallel
-
     click.echo(f"  Concurrency for {name}:", err=True)
     click.echo(f"    Model: ~{model_size_gb}GB, VRAM: {ini_vram_gb}GB, Free: ~{free_vram}GB", err=True)
     click.echo(f"    Slots: {use_parallel} (recommended: {recommended}, max: {max_slots})", err=True)
     click.echo(f"    Context: {use_ctx} per slot", err=True)
-    if recommended < use_parallel:
+    if parallel_clamped:
+        click.echo(
+            f"    Clamped slots {ini_parallel} → {use_parallel} so this GGUF fits.",
+            err=True,
+        )
+        steps.append(
+            f"clamped parallel {ini_parallel} → {use_parallel} (recommended {recommended} for ~{model_size_gb}GB)"
+        )
+    elif recommended < use_parallel:
         click.echo(
             f"    Warning: {use_parallel} slots may not fit this GGUF. "
             f"Retry with --parallel {recommended} if the container fails to load.",
             err=True,
         )
         steps.append(
-            f"slot warning: ini parallel={use_parallel}, recommended={recommended} for ~{model_size_gb}GB"
+            f"slot warning: parallel={use_parallel}, recommended={recommended} for ~{model_size_gb}GB"
         )
 
     # ── 3. Docker restart when the loaded GGUF or slot/ctx settings change ──
@@ -3363,11 +3418,22 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         model_changed=model_changed,
         ctx_override=ctx_override,
         parallel_override=parallel_override,
+        parallel_changed=parallel_clamped,
     ):
         click.echo("  Restarting Docker (loading the selected GGUF)...", err=True)
-        ok, msg = _docker_restart_sycl(parallel=use_parallel, ctx_size=use_ctx)
+        ok, msg = _docker_restart_sycl(
+            parallel=use_parallel,
+            ctx_size=use_ctx,
+            model_file=gguf_file,
+        )
         if ok:
             steps.append(msg)
+            api_id = os.path.basename(gguf_file).removesuffix(".gguf")
+            click.echo(f"  Waiting for llama-server to load {api_id}...", err=True)
+            ready, ready_msg = _wait_sycl_model_ready(api_id, _resolve_sycl_port())
+            steps.append(ready_msg)
+            if not ready:
+                errors.append(ready_msg)
         else:
             errors.append(msg)
     else:
@@ -3383,7 +3449,7 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         _update_ini_key(ini_path, "local_ai", "default_model", name)
         if ctx_override is not None:
             _update_ini_key(ini_path, "local_ai", "sycl_ctx_size", str(use_ctx))
-        if parallel_override is not None:
+        if parallel_override is not None or parallel_clamped:
             _update_ini_key(ini_path, "local_ai", "sycl_parallel", str(use_parallel))
         _sync_ini_to_source(ini_path)
         steps.append(f"setup.ini updated (strategy={strategy})")
@@ -3447,10 +3513,38 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
             "strategy": strategy,
             "steps": steps,
             "previous_model": current_active,
+            "catalog_added": catalog_added,
         }
         if affected:
             result_data["affected_agents"] = [{"agent": a, "previous_model": m} for a, m in affected]
         json_response(True, **result_data)
+
+
+def _ensure_local_keys_in_live_catalog(keys: list[str]) -> list[str]:
+    """Write assigned local keys into ``[catalog]`` when migrate has not yet.
+
+    ``model refresh`` and activate update ``local_models`` / pickers. Harness
+    ``load_catalog()`` only reads ``[catalog]`` + custom unless the library
+    fallback applies — persist the row so Model Manager and the next migrate
+    stay aligned.
+    """
+    if not keys or assigned_local_catalog_rows_to_upsert is None:
+        return []
+    targets = _models_ini_write_targets()
+    if not targets:
+        return []
+    added: list[str] = []
+    try:
+        rows = assigned_local_catalog_rows_to_upsert(
+            targets[0], assigned_local=keys
+        )
+        for key, raw in rows:
+            for path in targets:
+                _upsert_models_ini_entry(path, "catalog", key, raw)
+            added.append(key)
+    except (OSError, PermissionError):
+        return []
+    return added
 
 
 @model.command("refresh")
@@ -3593,9 +3687,12 @@ def model_refresh():
     if active_model:
         _update_paths_env_key("VERSA_ACTIVE_LOCAL_MODEL", active_model)
 
+    catalog_added = _ensure_local_keys_in_live_catalog(models)
+
     json_response(True,
                   models=models,
                   active_model=active_model,
+                  catalog_added=catalog_added,
                   source="ssh+agictl" if topology == "client" else "local",
                   server_config=server_config_synced if server_config_synced else None)
 

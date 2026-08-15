@@ -35,6 +35,7 @@ from model_hf_ingest import (  # noqa: E402
     activation_block_reason,
     activate_needs_docker_restart,
     ensure_name_in_csv,
+    resolve_activate_parallel,
     atomic_move_into,
     classify_hf_model,
     inspect_hf_source,
@@ -476,6 +477,19 @@ class TestActivateSizeAndRestart(unittest.TestCase):
                 model_changed=False, ctx_override=8192, parallel_override=None,
             )
         )
+        self.assertTrue(
+            activate_needs_docker_restart(
+                model_changed=False,
+                ctx_override=None,
+                parallel_override=None,
+                parallel_changed=True,
+            )
+        )
+
+    def test_activate_clamps_ini_slots_to_recommendation(self):
+        self.assertEqual(resolve_activate_parallel(4, 2, None), 2)
+        self.assertEqual(resolve_activate_parallel(4, 2, 3), 3)
+        self.assertEqual(resolve_activate_parallel(2, 4, None), 2)
 
 
 if __name__ == "__main__":

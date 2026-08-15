@@ -184,8 +184,146 @@ def provider_is_enabled(slug: str, providers: dict[str, dict] | None = None) -> 
     return bool(providers.get(slug, {}).get("enabled"))
 
 
-def load_catalog(path: str | None = None) -> dict[str, dict]:
-    """Load merged catalog (baseline + custom)."""
+def parse_csv_keys(raw: str) -> list[str]:
+    """Split a comma CSV into stripped keys, dropping empties."""
+    return [part.strip() for part in (raw or "").split(",") if part.strip()]
+
+
+def assigned_local_model_keys(
+    *,
+    setup_csv: str | None = None,
+    paths_env_path: str | None = None,
+) -> list[str]:
+    """Local chat keys the site has assigned (setup.ini + paths.env).
+
+    Does not read ``[catalog_library]``. Unused stock library rows stay out of
+    the live catalog until they appear in ``local_models`` / ``VERSA_LOCAL_MODELS``.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        for key in parse_csv_keys(raw):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+
+    if setup_csv is not None:
+        _add(setup_csv)
+    else:
+        _add(read_setup_value("local_ai", "local_models", ""))
+    env_path = (
+        "/etc/versa-agi/paths.env" if paths_env_path is None else paths_env_path
+    )
+    if env_path:
+        try:
+            with open(env_path, encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("VERSA_LOCAL_MODELS="):
+                        _add(line.split("=", 1)[1].strip().strip('"'))
+                        break
+        except OSError:
+            pass
+    return keys
+
+
+def _local_ctx_from_windows(raw: str, default_max: int = 4096) -> tuple[int, int]:
+    if "," not in (raw or ""):
+        return 0, default_max
+    try:
+        rec_s, max_s = raw.split(",")[0].strip(), raw.split(",")[1].strip()
+        return int(rec_s or "0"), int(max_s or str(default_max))
+    except ValueError:
+        return 0, default_max
+
+
+def fill_assigned_local_catalog(
+    out: dict[str, dict],
+    path: str,
+    assigned: list[str] | set[str],
+    *,
+    gpu_backend: str | None = None,
+) -> None:
+    """Add assigned local keys that ``[catalog]`` / custom have not ingested yet.
+
+    Prefers ``[catalog_library]``. If the library has no row (custom SYCL import),
+    synthesize a local chat row from ``[local_models]`` / ``[sycl_models]`` labels
+    and ``[context_windows]``.
+    """
+    if not assigned:
+        return
+    library = _read_raw_section(path, "catalog_library")
+    labels = _read_raw_section(path, "local_models")
+    windows = _read_raw_section(path, "context_windows")
+    sycl = _read_raw_section(path, "sycl_models")
+    provider = resolve_local_provider(gpu_backend)
+    for key in assigned:
+        if key in out:
+            continue
+        raw = library.get(key)
+        if raw:
+            parsed = parse_catalog_row(raw)
+            if parsed:
+                parsed["origin"] = "library"
+                out[key] = parsed
+                continue
+        if key not in labels and key not in sycl:
+            continue
+        rec, mx = _local_ctx_from_windows(windows.get(key, ""))
+        out[key] = {
+            "class": "local",
+            "provider": provider,
+            "enabled": True,
+            "coa": False,
+            "ctx_recommended": rec,
+            "ctx_max": mx,
+            "work_modality": "local",
+            "input_modalities": "text",
+            "output_modalities": "text",
+            "router_eligible": False,
+            "label": labels.get(key, key),
+            "origin": "local_assigned",
+        }
+
+
+def assigned_local_catalog_rows_to_upsert(
+    path: str | None = None,
+    *,
+    assigned_local: list[str] | None = None,
+    gpu_backend: str | None = None,
+) -> list[tuple[str, str]]:
+    """``[catalog]`` values for assigned local keys that are not in the live sections."""
+    path = path or resolve_models_ini_path()
+    have = set(_read_raw_section(path, "catalog")) | set(
+        _read_raw_section(path, "catalog_custom")
+    )
+    keys = (
+        list(assigned_local)
+        if assigned_local is not None
+        else assigned_local_model_keys()
+    )
+    filled: dict[str, dict] = {}
+    fill_assigned_local_catalog(
+        filled,
+        path,
+        [key for key in keys if key not in have],
+        gpu_backend=gpu_backend,
+    )
+    return [(key, catalog_row_to_value(row)) for key, row in filled.items()]
+
+
+def load_catalog(
+    path: str | None = None,
+    *,
+    assigned_local: list[str] | set[str] | None = None,
+) -> dict[str, dict]:
+    """Load merged catalog (baseline + custom).
+
+    Assigned local chat keys (``local_models`` / ``VERSA_LOCAL_MODELS``) that
+    ``model migrate`` has not copied into ``[catalog]`` yet are filled from
+    ``[catalog_library]`` or synthesized from local pipeline sections. Unused
+    library rows stay out.
+    """
     path = path or resolve_models_ini_path()
     base = _read_raw_section(path, "catalog")
     custom = _read_raw_section(path, "catalog_custom")
@@ -201,6 +339,12 @@ def load_catalog(path: str | None = None) -> dict[str, dict]:
         _ingest(key, raw, "baseline")
     for key, raw in custom.items():
         _ingest(key, raw, "override" if key in base else "custom")
+    keys = (
+        list(assigned_local)
+        if assigned_local is not None
+        else assigned_local_model_keys()
+    )
+    fill_assigned_local_catalog(out, path, keys)
     return out
 
 

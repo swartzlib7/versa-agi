@@ -17,6 +17,7 @@ sys.path.insert(0, CORE_INFRA)
 sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
 
 from model_catalog import (  # noqa: E402
+    assigned_local_catalog_rows_to_upsert,
     load_catalog,
     model_output_includes,
     parse_catalog_row,
@@ -146,6 +147,12 @@ class TestModelDriverCatalogStock(unittest.TestCase):
         cfg = _config(self.models_path)
         section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
         self.assertFalse(cfg.has_option(section, "krea2-turbo"))
+
+    def test_setup_ini_local_models_includes_qwen38(self) -> None:
+        working = os.path.join(SRC_ROOT, "setup.ini")
+        path = working if os.path.isfile(working) else self.setup_path
+        cfg = _config(path)
+        self.assertIn("qwen3.8:27b", _csv(cfg.get("local_ai", "local_models")))
 
     def test_stock_library_has_local_qwen38(self) -> None:
         cfg = _config(self.models_path)
@@ -344,6 +351,98 @@ class TestModelDriverCatalogMigration(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("no exact executable ModelDriver", error)
+
+
+QWEN38_ROW = (
+    "local|llamacpp|true|false|32768|262144|local|text|text|false|"
+    "Qwen 3.8 27B — hybrid thinking"
+)
+
+
+class TestAssignedLocalCatalogFallback(unittest.TestCase):
+    """Refresh can update local_models before migrate copies the key into [catalog]."""
+
+    def _write_ini(self, handle, *, catalog: str, library: str, labels: str = "") -> None:
+        handle.write(
+            "[catalog]\n"
+            f"{catalog}"
+            "[catalog_custom]\n\n"
+            "[catalog_library]\n"
+            f"{library}"
+            "[local_models]\n"
+            f"{labels}"
+            "[context_windows]\n"
+            "qwen3.8:27b = 32768,262144\n"
+            "[sycl_models]\n"
+            "qwen3.8:27b = unsloth/Qwen3.8-27B-GGUF,Qwen3.8-27B-UD-Q6_K_XL.gguf,23\n"
+        )
+        handle.flush()
+
+    def test_assigned_library_key_fills_when_catalog_row_missing(self) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            self._write_ini(
+                handle,
+                catalog="gemma4:e4b = local|llamacpp|true|false|32768|131072|local|text|text|false|Gemma\n",
+                library=f"qwen3.8:27b = {QWEN38_ROW}\n",
+            )
+            catalog = load_catalog(handle.name, assigned_local=["qwen3.8:27b"])
+        self.assertIn("qwen3.8:27b", catalog)
+        self.assertEqual(catalog["qwen3.8:27b"]["provider"], "llamacpp")
+        self.assertEqual(catalog["qwen3.8:27b"]["origin"], "library")
+        self.assertEqual(catalog["qwen3.8:27b"]["ctx_max"], 262144)
+
+    def test_unassigned_library_key_stays_out(self) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            self._write_ini(
+                handle,
+                catalog="gemma4:e4b = local|llamacpp|true|false|32768|131072|local|text|text|false|Gemma\n",
+                library=f"qwen3.8:27b = {QWEN38_ROW}\n",
+            )
+            catalog = load_catalog(handle.name, assigned_local=[])
+        self.assertNotIn("qwen3.8:27b", catalog)
+        self.assertIn("gemma4:e4b", catalog)
+
+    def test_custom_import_synthesizes_row_without_library(self) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            self._write_ini(
+                handle,
+                catalog="",
+                library="",
+                labels="qwen3.8:27b = Qwen 3.8 27B\n",
+            )
+            catalog = load_catalog(
+                handle.name,
+                assigned_local=["qwen3.8:27b"],
+            )
+        self.assertEqual(catalog["qwen3.8:27b"]["origin"], "local_assigned")
+        self.assertEqual(catalog["qwen3.8:27b"]["class"], "local")
+        self.assertEqual(catalog["qwen3.8:27b"]["ctx_recommended"], 32768)
+
+    def test_upsert_list_skips_keys_already_in_catalog(self) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            self._write_ini(
+                handle,
+                catalog=f"qwen3.8:27b = {QWEN38_ROW}\n",
+                library=f"qwen3.8:27b = {QWEN38_ROW}\n",
+            )
+            rows = assigned_local_catalog_rows_to_upsert(
+                handle.name, assigned_local=["qwen3.8:27b"]
+            )
+        self.assertEqual(rows, [])
+
+    def test_upsert_list_returns_missing_assigned_key(self) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            self._write_ini(
+                handle,
+                catalog="",
+                library=f"qwen3.8:27b = {QWEN38_ROW}\n",
+            )
+            rows = assigned_local_catalog_rows_to_upsert(
+                handle.name, assigned_local=["qwen3.8:27b"]
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "qwen3.8:27b")
+        self.assertIn("llamacpp", rows[0][1])
 
 
 if __name__ == "__main__":

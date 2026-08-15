@@ -6,12 +6,16 @@ never select transport, credentials, endpoints, or client classes.
 
 from __future__ import annotations
 
-import configparser
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-from model_catalog import load_catalog, load_providers, resolve_models_ini_path
+from model_catalog import (
+    _read_raw_section,
+    load_catalog,
+    load_providers,
+    resolve_models_ini_path,
+)
 
 OPENROUTER_HEADERS = {
     "HTTP-Referer": "https://versavoice.ai",
@@ -126,20 +130,19 @@ def _resolve_sycl_api_model(
     catalog_key: str,
     models_ini_path: str | None = None,
 ) -> str:
-    """Map a catalog key to the llama-server API model ID."""
+    """Map a catalog key to the llama-server API model ID (GGUF stem).
+
+    Uses the same INI reader as ``load_catalog`` (``strict=False``). A strict
+    parser fails on the live ``models.ini`` duplicate ``[providers]`` header
+    and would silently send the catalog key, which llama-server does not list.
+    """
 
     path = models_ini_path or resolve_models_ini_path()
-    try:
-        ini = configparser.ConfigParser(delimiters=("=",))
-        ini.read(path)
-        if ini.has_section("sycl_models"):
-            raw = ini.get("sycl_models", catalog_key, fallback="")
-            if raw:
-                parts = raw.strip().split(",")
-                if len(parts) >= 2:
-                    return parts[1].strip().removesuffix(".gguf")
-    except (OSError, configparser.Error):
-        pass
+    raw = _read_raw_section(path, "sycl_models").get(catalog_key, "")
+    if raw:
+        parts = raw.strip().split(",")
+        if len(parts) >= 2:
+            return parts[1].strip().removesuffix(".gguf")
     return catalog_key
 
 

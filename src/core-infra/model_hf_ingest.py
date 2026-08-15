@@ -515,14 +515,38 @@ def ensure_name_in_csv(values: list[str], name: str) -> list[str]:
     return out
 
 
+def resolve_activate_parallel(
+    ini_parallel: int,
+    recommended: int,
+    override: int | None = None,
+) -> int:
+    """Pick llama-server ``--parallel`` for activate.
+
+    An explicit ``--parallel`` wins. Otherwise clamp the ini default down to
+    the VRAM recommendation so a dense GGUF (Qwen3.8 ~26 GB on 32 GB) does
+    not inherit the 4-slot layout that a smaller MoE GGUF (Qwen3.6) tolerated.
+    """
+    if override is not None:
+        return int(override)
+    rec = max(1, int(recommended or 1))
+    ini = max(1, int(ini_parallel or 1))
+    return min(ini, rec)
+
+
 def activate_needs_docker_restart(
     *,
     model_changed: bool,
     ctx_override: int | None,
     parallel_override: int | None,
+    parallel_changed: bool = False,
 ) -> bool:
     """Restart llama-server when the loaded GGUF or slot/ctx settings change."""
-    return bool(model_changed or ctx_override is not None or parallel_override is not None)
+    return bool(
+        model_changed
+        or ctx_override is not None
+        or parallel_override is not None
+        or parallel_changed
+    )
 
 
 def validate_gguf_file(path: str) -> None:

@@ -172,6 +172,31 @@ class TestExactProviderRoutes(unittest.TestCase):
         self.assertEqual(ollama.api_model, "ollama-model")
         self.assertEqual(ollama.client_type, "ChatOllama")
 
+    def test_sycl_api_id_survives_duplicate_ini_sections(self):
+        """Live models.ini has a second [providers] header; strict parse used to drop the map."""
+        with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+            handle.write(
+                "[providers]\n"
+                "llamacpp = true|Local|ChatOpenAI\n"
+                "[providers]\n"
+                "llamacpp = true|Local|ChatOpenAI\n"
+                "[sycl_models]\n"
+                "qwen3.8:27b = unsloth/Qwen3.8-27B-GGUF,Qwen3.8-27B-UD-Q6_K_XL.gguf,23\n"
+            )
+            ini_path = handle.name
+        try:
+            route = resolve_provider_route(
+                "qwen3.8:27b",
+                catalog={"qwen3.8:27b": _catalog_row("llamacpp")},
+                providers=PROVIDERS,
+                gpu_backend="intel",
+                inference_url="http://localhost:8080",
+                models_ini_path=ini_path,
+            )
+        finally:
+            os.unlink(ini_path)
+        self.assertEqual(route.api_model, "Qwen3.8-27B-UD-Q6_K_XL")
+
 
 class TestShippedCatalogRoutes(unittest.TestCase):
     @classmethod
