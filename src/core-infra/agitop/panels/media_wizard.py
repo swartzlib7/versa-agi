@@ -11,6 +11,31 @@ from model_media_remote import (  # noqa: F401
 
 _LOCAL_CATALOG_PROVIDERS = ("ollama", "llamacpp", "local_media")
 
+_CHAT_IMPORT_CLASSES = frozenset({"chat_gguf", "chat_vlm_mmproj"})
+_MEDIA_IMPORT_CLASS = "media_pipeline"
+
+
+def import_action_enabled(classification: str | None, *, busy: bool = False) -> dict[str, bool]:
+    """Which Add Model import buttons are live after inspect (or recipe prefill).
+
+    Inspect stays available so the operator can classify a pasted source.
+    SYCL Import is chat/VLM only. Media Import is media_pipeline only.
+    Unknown stays inspect-only (CLI would need --confirm-unknown).
+    """
+    if busy:
+        return {"inspect": False, "sycl": False, "media": False}
+    kind = (classification or "").strip()
+    return {
+        "inspect": True,
+        "sycl": kind in _CHAT_IMPORT_CLASSES,
+        "media": kind == _MEDIA_IMPORT_CLASS,
+    }
+
+
+def use_selected_enabled(*, fetching: bool, has_selection: bool) -> bool:
+    """Hugging Face / provider picker: Use selected only when a row is current."""
+    return (not fetching) and bool(has_selection)
+
 
 def media_import_ui_block(topology: str) -> str | None:
     """CLI-on-this-host block. The wizard does not use this for client — it SSHs."""

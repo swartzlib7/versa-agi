@@ -81,7 +81,7 @@ default_model=qwen3.6:35b
 # Tracked local model registry. These appear in the Dashboard model picker.
 # For 'standard': models are pulled via Ollama (ollama pull <name>)
 # For 'intel': models are downloaded as GGUFs from HuggingFace (hf download <repo>)
-local_models=gemma4:e4b,gemma4:26b,gemma4:31b,qwen3.6:35b
+local_models=gemma4:e4b,gemma4:26b,gemma4:31b,qwen3.6:35b,qwen3.8:27b
 
 # Auto-download default model during setup (downloads can be 2-20GB)
 auto_pull_model=true
@@ -171,9 +171,9 @@ inference_master_key=versa-sk
 
 # Model loading strategy — client-side policy for agent model assignment:
 #   single   — All local agents share one model (sycl_active_model). 'model activate' syncs all agents.
-#   router   — Each agent can use a different local model. 'model activate' updates default_model only.
-# The Docker container always runs in directory-scanning mode (--models-dir) regardless of this setting.
-# This controls client behavior only — the inference server handles any model on demand.
+#   router   — Each agent can keep its own model assignment. 'model activate' still loads the GGUF
+#              (sycl_active_model) but does not retarget agents.
+# The Docker container uses --models-dir. With sycl_models_max=1 only the activated GGUF is loaded.
 model_loading_strategy=single
 
 [third_party]

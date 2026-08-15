@@ -147,6 +147,18 @@ class TestModelDriverCatalogStock(unittest.TestCase):
         section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
         self.assertFalse(cfg.has_option(section, "krea2-turbo"))
 
+    def test_stock_library_has_local_qwen38(self) -> None:
+        cfg = _config(self.models_path)
+        section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
+        self.assertTrue(cfg.has_option(section, "qwen3.8:27b"))
+        row = parse_catalog_row(cfg.get(section, "qwen3.8:27b"))
+        self.assertEqual(row["class"], "local")
+        self.assertEqual(row["provider"], "llamacpp")
+        self.assertEqual(_csv(row["input_modalities"]), {"text"})
+        self.assertEqual(_csv(row["output_modalities"]), {"text"})
+        self.assertEqual(row["ctx_max"], 262144)
+        self.assertFalse(row["router_eligible"])
+
     def test_stock_library_has_local_flux(self) -> None:
         cfg = _config(self.models_path)
         section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"

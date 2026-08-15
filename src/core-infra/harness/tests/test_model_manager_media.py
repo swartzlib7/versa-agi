@@ -17,11 +17,13 @@ from media_wizard import (  # noqa: E402
     _LOCAL_CATALOG_PROVIDERS,
     build_gpu_host_agictl_cmd,
     catalog_prefill_from_hf_recipe,
+    import_action_enabled,
     media_form_prefill,
     media_import_failure_hint,
     media_import_ui_block,
     media_wizard_summary,
     read_local_ai_topology,
+    use_selected_enabled,
 )
 from model_hf_ingest import CLASS_MEDIA, gguf_registry_blocked  # noqa: E402
 from model_media_ingest import (  # noqa: E402
@@ -136,11 +138,40 @@ class TestMediaWizardHelpers(unittest.TestCase):
         self.assertTrue(prefill["hf_source"].startswith("hf://"))
         self.assertEqual(prefill["kind"], "media")
         self.assertFalse(any(r["id"] == "krea2-turbo" for r in rows))
+        chat_keys = {"qwen3.8:27b", "qwen3.6:35b", "gemma4:e4b", "gemma4:26b", "gemma4:31b"}
+        self.assertTrue(chat_keys.isdisjoint({r["id"] for r in rows}))
         from model_media_ingest import CATALOG_KEY_FLUX
 
         flux = next(r for r in rows if r["id"] == CATALOG_KEY_FLUX)
         self.assertIn("flux1-dev-Q8_0.gguf", flux["source"])
         self.assertEqual(catalog_prefill_from_hf_recipe(flux)["key"], CATALOG_KEY_FLUX)
+
+    def test_import_buttons_follow_inspect_class(self):
+        idle = import_action_enabled(None)
+        self.assertTrue(idle["inspect"])
+        self.assertFalse(idle["sycl"])
+        self.assertFalse(idle["media"])
+        chat = import_action_enabled("chat_gguf")
+        self.assertTrue(chat["sycl"])
+        self.assertFalse(chat["media"])
+        vlm = import_action_enabled("chat_vlm_mmproj")
+        self.assertTrue(vlm["sycl"])
+        self.assertFalse(vlm["media"])
+        media = import_action_enabled("media_pipeline")
+        self.assertFalse(media["sycl"])
+        self.assertTrue(media["media"])
+        unknown = import_action_enabled("unknown")
+        self.assertFalse(unknown["sycl"])
+        self.assertFalse(unknown["media"])
+        busy = import_action_enabled("chat_gguf", busy=True)
+        self.assertFalse(busy["inspect"])
+        self.assertFalse(busy["sycl"])
+        self.assertFalse(busy["media"])
+
+    def test_use_selected_needs_a_row(self):
+        self.assertFalse(use_selected_enabled(fetching=True, has_selection=True))
+        self.assertFalse(use_selected_enabled(fetching=False, has_selection=False))
+        self.assertTrue(use_selected_enabled(fetching=False, has_selection=True))
 
     def test_read_topology(self):
         with tempfile.TemporaryDirectory() as tmp:

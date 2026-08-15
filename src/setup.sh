@@ -665,7 +665,7 @@ print_inference_server_ready_banner() {
 _deploy_server_agictl_shared_py() {
   local src="${1:?}" dest="${2:?}"
   local f
-  for f in db_connect.py model_hf_ingest.py model_media_ingest.py model_catalog.py; do
+  for f in db_connect.py model_hf_ingest.py model_media_ingest.py model_catalog.py provider_runtime.py; do
     if [ -f "${src}/${f}" ]; then
       cp "${src}/${f}" "${dest}/${f}"
     fi

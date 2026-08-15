@@ -42,7 +42,9 @@ from model_hf_ingest import (
     load_sycl_meta,
     meta_value,
     migrate_skip_reason,
+    activate_needs_docker_restart,
     size_gb_from_bytes,
+    size_gb_from_path,
     sycl_import_block_reason,
     topology_import_block_reason,
     validate_gguf_file,
@@ -1637,10 +1639,10 @@ def _query_sycl_models():
 
 
 def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None):
-    """Stop/rm/run the SYCL Docker container in Router Mode (--models-dir).
+    """Stop/rm/run the SYCL Docker container (--models-dir).
 
-    Only called when infrastructure parameters change (parallel, ctx, models-max).
-    Model switching does NOT require a Docker restart — the server loads on demand.
+    Called when the loaded GGUF changes or when parallel/ctx/models-max change.
+    With sycl_models_max=1 the new GGUF is what llama-server will serve.
     Returns (ok, message).
     """
     # Stop existing
@@ -2432,6 +2434,8 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
             created_dest = True
             steps.append(f"downloaded:{os.path.basename(dest_path)}")
 
+        resolved_size = size_gb_from_path(dest_path, fallback=resolved_size)
+        plan["size_gb"] = resolved_size
         entry_value = f"{repo},{os.path.basename(dest_path)},{resolved_size}"
         meta = {
             "class": inspected.classification,
@@ -3206,8 +3210,9 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
 def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, confirm_unknown):
     """Switch the active/default model on the Intel SYCL backend.
 
-    Updates setup.ini and paths.env. In single mode, syncs all local sub-agents.
-    Docker is only restarted when infrastructure parameters (--ctx, --parallel) change.
+    Updates setup.ini and paths.env. Always sets sycl_active_model (the loaded GGUF).
+    In single mode, syncs all local sub-agents. Router mode leaves agent assignments.
+    Docker restarts when the loaded GGUF or --ctx/--parallel change.
 
     Only available when gpu_backend=intel. Requires root (sudo).
 
@@ -3271,9 +3276,10 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
 
     strategy = _resolve_loading_strategy()
     current_active = _resolve_sycl_active_model()
+    model_changed = name != current_active
 
-    # Already active? (only relevant in single mode where sycl_active_model matters)
-    if strategy == "single" and name == current_active and ctx_override is None and parallel_override is None:
+    # Already the loaded GGUF (sycl_active_model) and no slot/ctx change.
+    if not model_changed and ctx_override is None and parallel_override is None:
         json_response(True, model=name, action="already_active", message=f"'{name}' is already the active model")
         return
 
@@ -3313,7 +3319,10 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         steps.append("router mode — agents keep individual model assignments")
 
     # ── 2. Concurrency info ──
-    model_size_gb = registry[name].get("size_gb", 10)
+    # Hub inspect often leaves size_gb=1; prefer the GGUF on disk.
+    model_size_gb = size_gb_from_path(
+        gguf_path, fallback=int(registry[name].get("size_gb") or 10),
+    )
     ini_parallel, ini_ctx_size, ini_vram_gb = _resolve_sycl_concurrency()
     use_ctx = ctx_override if ctx_override is not None else ini_ctx_size
     recommended, max_slots, free_vram = _calculate_concurrency(ini_vram_gb, model_size_gb, use_ctx)
@@ -3323,30 +3332,39 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
     click.echo(f"    Model: ~{model_size_gb}GB, VRAM: {ini_vram_gb}GB, Free: ~{free_vram}GB", err=True)
     click.echo(f"    Slots: {use_parallel} (recommended: {recommended}, max: {max_slots})", err=True)
     click.echo(f"    Context: {use_ctx} per slot", err=True)
+    if recommended < use_parallel:
+        click.echo(
+            f"    Warning: {use_parallel} slots may not fit this GGUF. "
+            f"Retry with --parallel {recommended} if the container fails to load.",
+            err=True,
+        )
+        steps.append(
+            f"slot warning: ini parallel={use_parallel}, recommended={recommended} for ~{model_size_gb}GB"
+        )
 
-    # ── 3. Docker restart ONLY if infrastructure params changed ──
-    infra_changed = (ctx_override is not None or parallel_override is not None)
-    if infra_changed:
-        click.echo(f"  Restarting Docker (infrastructure params changed)...", err=True)
+    # ── 3. Docker restart when the loaded GGUF or slot/ctx settings change ──
+    if activate_needs_docker_restart(
+        model_changed=model_changed,
+        ctx_override=ctx_override,
+        parallel_override=parallel_override,
+    ):
+        click.echo("  Restarting Docker (loading the selected GGUF)...", err=True)
         ok, msg = _docker_restart_sycl(parallel=use_parallel, ctx_size=use_ctx)
         if ok:
             steps.append(msg)
         else:
             errors.append(msg)
     else:
-        steps.append("Docker restart not needed (config-only change)")
+        steps.append("Docker restart not needed (already loaded)")
 
     # ── 4. Update setup.ini (comment-preserving, sed-style) ──
     ini_path = SETUP_INI_CANONICAL
     if not os.path.isfile(ini_path):
         ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
     if os.path.isfile(ini_path):
-        if strategy == "single":
-            _update_ini_key(ini_path, "local_ai", "sycl_active_model", name)
-            _update_ini_key(ini_path, "local_ai", "default_model", name)
-        else:
-            # Router: update default_model only — agents keep individual assignments
-            _update_ini_key(ini_path, "local_ai", "default_model", name)
+        # Always record the loaded GGUF. Router vs single only changes agent sweep.
+        _update_ini_key(ini_path, "local_ai", "sycl_active_model", name)
+        _update_ini_key(ini_path, "local_ai", "default_model", name)
         if ctx_override is not None:
             _update_ini_key(ini_path, "local_ai", "sycl_ctx_size", str(use_ctx))
         if parallel_override is not None:
@@ -3376,7 +3394,7 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
             "sycl_parallel": use_parallel,
             "sycl_models_max": _resolve_sycl_models_max(),
             "sycl_vram_gb": ini_vram_gb,
-            "active_model": name if strategy == "single" else current_active,
+            "active_model": name,
             "default_model": name,
             "model_loading_strategy": strategy,
             "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -4505,7 +4523,10 @@ def catalog_list(model_class, as_table):
     """List catalog entries, optionally filtered by class."""
     from model_catalog import load_catalog_pricing
     from harness.model_params import resolve_model_params
-    from model_drivers.registry import catalog_driver_enrichment
+    try:
+        from model_drivers.registry import catalog_driver_enrichment
+    except ImportError:
+        catalog_driver_enrichment = None
     cat = _load_catalog()
     providers = _load_providers()
     pricing = load_catalog_pricing()
@@ -4514,14 +4535,17 @@ def catalog_list(model_class, as_table):
         if model_class and m["class"] != model_class:
             continue
         row = {"key": key, **m}
-        row.update(
-            catalog_driver_enrichment(
-                key,
-                m,
-                catalog=cat,
-                providers=providers,
+        if catalog_driver_enrichment is not None:
+            row.update(
+                catalog_driver_enrichment(
+                    key,
+                    m,
+                    catalog=cat,
+                    providers=providers,
+                )
             )
-        )
+        else:
+            row.setdefault("driver_summary", "text-native")
         resolved = resolve_model_params(key)
         row["reasoning_effort"] = resolved.get("reasoning_effort") or "none"
         pr = pricing.get(key)

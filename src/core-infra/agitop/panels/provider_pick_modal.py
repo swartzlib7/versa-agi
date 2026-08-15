@@ -16,6 +16,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from agitop.panels.media_wizard import use_selected_enabled
 from agitop.panels.modality_format import format_modality_labels
 from agitop.widgets import PaginatedDataTable
 from agitop.widgets.braille_spinner import DOTS2_INTERVAL_S, dots2_markup
@@ -219,11 +220,11 @@ class ProviderPickModal(ModalScreen):
         if fetching:
             self.query_one("#provider-pick-scroll").add_class("provider-pick-hidden")
             self.query_one("#provider-pick-loading").remove_class("provider-pick-hidden")
-            self.query_one("#provider-pick-use", Button).disabled = True
+            self._sync_use_button()
         else:
             self.query_one("#provider-pick-loading").add_class("provider-pick-hidden")
             self.query_one("#provider-pick-scroll").remove_class("provider-pick-hidden")
-            self.query_one("#provider-pick-use", Button).disabled = False
+            self._sync_use_button()
 
     def _begin_fetch(self) -> None:
         if self._fetching:
@@ -322,6 +323,24 @@ class ProviderPickModal(ModalScreen):
         )
         if table.row_count:
             table.move_cursor(row=0)
+        self._sync_use_button()
+
+    def _sync_use_button(self) -> None:
+        try:
+            self.query_one("#provider-pick-use", Button).disabled = not use_selected_enabled(
+                fetching=self._fetching,
+                has_selection=self._selected_model() is not None,
+            )
+        except Exception:
+            pass
+
+    def on_data_table_row_highlighted(self, event) -> None:
+        if event.data_table.id == "provider-pick-table":
+            self._sync_use_button()
+
+    def on_data_table_row_selected(self, event) -> None:
+        if event.data_table.id == "provider-pick-table":
+            self._sync_use_button()
 
     def _selected_model(self) -> dict | None:
         table = self.query_one("#provider-pick-table", PaginatedDataTable)

@@ -33,6 +33,7 @@ from model_hf_ingest import (  # noqa: E402
     HfFile,
     InspectResult,
     activation_block_reason,
+    activate_needs_docker_restart,
     atomic_move_into,
     classify_hf_model,
     inspect_hf_source,
@@ -40,6 +41,8 @@ from model_hf_ingest import (  # noqa: E402
     meta_value,
     migrate_skip_reason,
     parse_hf_source,
+    size_gb_from_bytes,
+    size_gb_from_path,
     sycl_import_block_reason,
     topology_import_block_reason,
     validate_gguf_file,
@@ -49,6 +52,7 @@ from model_hf_ingest import (  # noqa: E402
 QWEN_IMAGE_URI = "hf://unsloth/Qwen-Image-2512-GGUF/qwen-image-2512-Q8_0.gguf"
 MINIMAX_URI = "hf://unsloth/MiniMax-H3-GGUF/minimax_h3_fl2va_pruned-Q8_0.gguf"
 GEMMA_URI = "hf://unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf"
+QWEN38_URI = "hf://unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K_XL.gguf"
 
 
 def _hub(repo, pipeline, tags, files):
@@ -147,8 +151,23 @@ class TestClassifyAndInspect(unittest.TestCase):
             ),
         )
         self.assertEqual(result.classification, CLASS_CHAT)
+
+    def test_qwen38_is_vlm_text_only_import(self):
+        result = inspect_hf_source(
+            QWEN38_URI,
+            fetch_json=_hub(
+                "unsloth/Qwen3.8-27B-GGUF",
+                "image-text-to-text",
+                ["gguf", "conversational"],
+                [
+                    ("Qwen3.8-27B-UD-Q6_K_XL.gguf", 23 * 1024**3),
+                    ("mmproj-F16.gguf", 800 * 1024**2),
+                ],
+            ),
+        )
+        self.assertEqual(result.classification, CLASS_VLM)
         self.assertIsNone(sycl_import_block_reason(result.classification, "chat"))
-        self.assertEqual(result.size_gb, 5)
+        self.assertTrue(any("mmproj" in w.lower() or "text-only" in w.lower() for w in result.warnings))
 
     def test_vlm_mmproj(self):
         result = inspect_hf_source(
@@ -417,6 +436,35 @@ class TestHfDownloadToken(unittest.TestCase):
                 )
         self.assertIn("gated", ctx.exception.message)
         self.assertIn("license", ctx.exception.message)
+
+
+class TestActivateSizeAndRestart(unittest.TestCase):
+    def test_hub_null_size_falls_back(self):
+        self.assertEqual(size_gb_from_bytes(None, fallback=1), 1)
+
+    def test_on_disk_size_beats_hub_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "weights.gguf")
+            with open(path, "wb") as fh:
+                fh.truncate(3 * 1024 ** 3)
+            self.assertEqual(size_gb_from_path(path, fallback=1), 3)
+
+    def test_restart_when_loaded_gguf_changes(self):
+        self.assertTrue(
+            activate_needs_docker_restart(
+                model_changed=True, ctx_override=None, parallel_override=None,
+            )
+        )
+        self.assertFalse(
+            activate_needs_docker_restart(
+                model_changed=False, ctx_override=None, parallel_override=None,
+            )
+        )
+        self.assertTrue(
+            activate_needs_docker_restart(
+                model_changed=False, ctx_override=8192, parallel_override=None,
+            )
+        )
 
 
 if __name__ == "__main__":

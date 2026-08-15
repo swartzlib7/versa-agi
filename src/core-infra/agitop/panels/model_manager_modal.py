@@ -28,6 +28,7 @@ from agitop.widgets.clear_checkbox import ClearCheckbox
 from agitop.panels.media_wizard import (
     _LOCAL_CATALOG_PROVIDERS,
     build_gpu_host_agictl_cmd,
+    import_action_enabled,
     media_form_prefill,
     media_import_failure_hint,
     media_wizard_summary,
@@ -869,8 +870,9 @@ class CatalogFormModal(ModalScreen):
                     )
                     yield Static("", id="f-hf-inspect-result")
                     yield Static(
-                        "[dim]Inspect first. Chat → SYCL Import. Media → Media Import. "
-                        "Media never enters llama-server.[/]")
+                        "[dim]Inspect first. The matching import button turns on from "
+                        "that class (chat → SYCL, media → Media). Media never enters "
+                        "llama-server.[/]")
                     yield Input(placeholder="HuggingFace repo (org/model)", id="f-gguf-repo")
                     yield Input(placeholder="GGUF filename", id="f-gguf-file")
                     yield Input(placeholder="approx size GB", type="integer", id="f-size")
@@ -881,12 +883,13 @@ class CatalogFormModal(ModalScreen):
                 yield Button("Save", variant="success", id="f-save")
                 if not self._edit:
                     yield Button("Inspect HF", variant="primary", id="f-hf-inspect")
-                    yield Button("⬇ SYCL Import", variant="warning", id="f-sycl-import")
-                    yield Button("▣ Media Import", variant="warning", id="f-media-import")
+                    yield Button("⬇ SYCL Import", variant="warning", id="f-sycl-import", disabled=True)
+                    yield Button("▣ Media Import", variant="warning", id="f-media-import", disabled=True)
                 yield Button("★ Model Feedback", variant="warning", id="f-feedback")
                 yield Button("Cancel", classes="dismiss-btn", variant="default", id="f-cancel")
 
     def on_mount(self) -> None:
+        self._sync_import_buttons()
         if self._edit and self._existing:
             key = self._existing.get("key", "")
             ok, data, _err = _run_agictl(["model", "params", "get", f"model:{key}"])
@@ -1016,6 +1019,20 @@ class CatalogFormModal(ModalScreen):
         elif event.button.id == "f-save":
             self._submit()
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "f-hf-source":
+            return
+        if self._hf_inspect is None:
+            return
+        self._hf_inspect = None
+        try:
+            self.query_one("#f-hf-inspect-result", Static).update(
+                "[dim]Source changed — Inspect HF again.[/]"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        self._sync_import_buttons()
+
     def _inspect_hf(self) -> None:
         source = ""
         try:
@@ -1031,11 +1048,13 @@ class CatalogFormModal(ModalScreen):
             self.query_one("#f-hf-inspect-result", Static).update(
                 "[red]Paste a Hugging Face URL or hf://org/repo/file.gguf first.[/]"
             )
+            self._sync_import_buttons()
             return
         ok, data, err = _run_agictl(["model", "hf", "inspect", source], timeout=45, sudo=False)
         if not ok:
             self._hf_inspect = None
             self.query_one("#f-hf-inspect-result", Static).update(f"[red]Inspect failed: {err}[/]")
+            self._sync_import_buttons()
             return
         self._hf_inspect = data
         kind = data.get("classification") or "unknown"
@@ -1072,6 +1091,7 @@ class CatalogFormModal(ModalScreen):
             self.query_one("#f-error", Static).update(
                 "[yellow]VLM+mmproj: import is text-only until TD-LOCAL-MMProj-001.[/]"
             )
+        self._sync_import_buttons()
 
     def _show_media_plan(self, source: str) -> None:
         dest = self.query_one("#f-key", Input).value.strip()
@@ -1116,6 +1136,7 @@ class CatalogFormModal(ModalScreen):
         self.query_one("#f-error", Static).update(
             "[cyan]Media pipeline — use Media Import. Not a SYCL chat model.[/]"
         )
+        self._sync_import_buttons()
 
     def _media_source(self) -> str:
         source = ""
@@ -1137,9 +1158,23 @@ class CatalogFormModal(ModalScreen):
 
     def _set_import_busy(self, busy: bool) -> None:
         self._import_busy = busy
-        for wid in ("#f-media-import", "#f-sycl-import", "#f-hf-inspect"):
+        self._sync_import_buttons()
+
+    def _sync_import_buttons(self) -> None:
+        """Enable SYCL vs Media from the last inspect class, not from a guess."""
+        if self._edit:
+            return
+        flags = import_action_enabled(
+            (self._hf_inspect or {}).get("classification"),
+            busy=self._import_busy,
+        )
+        for wid, enabled in (
+            ("#f-hf-inspect", flags["inspect"]),
+            ("#f-sycl-import", flags["sycl"]),
+            ("#f-media-import", flags["media"]),
+        ):
             try:
-                self.query_one(wid, Button).disabled = busy
+                self.query_one(wid, Button).disabled = not enabled
             except Exception:  # noqa: BLE001
                 pass
 

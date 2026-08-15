@@ -496,6 +496,26 @@ def size_gb_from_bytes(size: int | None, fallback: int | None = None) -> int:
     return 0
 
 
+def size_gb_from_path(path: str, fallback: int | None = None) -> int:
+    """Prefer on-disk GGUF bytes over a Hub/registry guess (Hub size is often null)."""
+    try:
+        if path and os.path.isfile(path):
+            return size_gb_from_bytes(os.path.getsize(path), fallback=fallback)
+    except OSError:
+        pass
+    return fallback if fallback is not None else 0
+
+
+def activate_needs_docker_restart(
+    *,
+    model_changed: bool,
+    ctx_override: int | None,
+    parallel_override: int | None,
+) -> bool:
+    """Restart llama-server when the loaded GGUF or slot/ctx settings change."""
+    return bool(model_changed or ctx_override is not None or parallel_override is not None)
+
+
 def validate_gguf_file(path: str) -> None:
     if not os.path.isfile(path):
         raise HfIngestError(f"Downloaded file missing: {path}", "missing_file")

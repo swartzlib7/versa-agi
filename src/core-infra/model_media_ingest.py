@@ -68,9 +68,10 @@ CATALOG_LABELS = {
 }
 
 def list_hf_media_recipes() -> list[dict[str, Any]]:
-    """Recognized Hugging Face recipes the Add Model picker can list.
+    """Recognized Hugging Face **media** recipes the Add Model picker can list.
 
-    Not a search of the Hub. Only rows we have a bundle recipe for.
+    Not a search of the Hub. Chat stock keys (gemma4:*, qwen3.6:35b, qwen3.8:27b)
+    stay in the Model Manager catalog / ``agictl model list``, not this picker.
     """
     return [
         {
