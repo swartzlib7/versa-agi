@@ -506,6 +506,15 @@ def size_gb_from_path(path: str, fallback: int | None = None) -> int:
     return fallback if fallback is not None else 0
 
 
+def ensure_name_in_csv(values: list[str], name: str) -> list[str]:
+    """Return values with name appended if missing (activate must stay registered)."""
+    out = [v for v in values if v]
+    key = (name or "").strip()
+    if key and key not in out:
+        out.append(key)
+    return out
+
+
 def activate_needs_docker_restart(
     *,
     model_changed: bool,

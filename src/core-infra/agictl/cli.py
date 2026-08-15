@@ -43,6 +43,7 @@ from model_hf_ingest import (
     meta_value,
     migrate_skip_reason,
     activate_needs_docker_restart,
+    ensure_name_in_csv,
     size_gb_from_bytes,
     size_gb_from_path,
     sycl_import_block_reason,
@@ -3278,9 +3279,24 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
     current_active = _resolve_sycl_active_model()
     model_changed = name != current_active
 
+    # Keep the loaded key in setup.ini local_models. --update can drop a
+    # key that import added if the clone CSV lagged.
+    all_local, ini_csv_path = _read_ini_csv("local_ai", "local_models")
+    registered_local = ensure_name_in_csv(all_local, name)
+    if registered_local != all_local:
+        if ini_csv_path:
+            _update_ini_csv("local_ai", "local_models", registered_local, ini_csv_path)
+        _update_paths_env_key("VERSA_LOCAL_MODELS", ",".join(registered_local))
+
     # Already the loaded GGUF (sycl_active_model) and no slot/ctx change.
     if not model_changed and ctx_override is None and parallel_override is None:
-        json_response(True, model=name, action="already_active", message=f"'{name}' is already the active model")
+        json_response(
+            True,
+            model=name,
+            action="already_active",
+            registered=name in registered_local,
+            message=f"'{name}' is already the active model",
+        )
         return
 
     errors = []
@@ -3375,7 +3391,12 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         errors.append("setup.ini not found")
 
     # ── 5. Update paths.env — all models always available (router architecture) ──
-    all_local, _ = _read_ini_csv("local_ai", "local_models")
+    all_local, ini_csv_path = _read_ini_csv("local_ai", "local_models")
+    if name not in all_local:
+        all_local = ensure_name_in_csv(all_local, name)
+        if ini_csv_path:
+            _update_ini_csv("local_ai", "local_models", all_local, ini_csv_path)
+        steps.append(f"registered '{name}' in local_models")
     all_local_str = ",".join(all_local) if all_local else name
     if _update_paths_env_key("VERSA_LOCAL_MODELS", all_local_str):
         steps.append(f"paths.env VERSA_LOCAL_MODELS → {all_local_str}")

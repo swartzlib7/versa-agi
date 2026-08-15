@@ -34,6 +34,7 @@ from model_hf_ingest import (  # noqa: E402
     InspectResult,
     activation_block_reason,
     activate_needs_docker_restart,
+    ensure_name_in_csv,
     atomic_move_into,
     classify_hf_model,
     inspect_hf_source,
@@ -448,6 +449,16 @@ class TestActivateSizeAndRestart(unittest.TestCase):
             with open(path, "wb") as fh:
                 fh.truncate(3 * 1024 ** 3)
             self.assertEqual(size_gb_from_path(path, fallback=1), 3)
+
+    def test_activate_keeps_key_in_local_models_csv(self):
+        self.assertEqual(
+            ensure_name_in_csv(["gemma4:e4b", "qwen3.6:35b"], "qwen3.8:27b"),
+            ["gemma4:e4b", "qwen3.6:35b", "qwen3.8:27b"],
+        )
+        self.assertEqual(
+            ensure_name_in_csv(["qwen3.8:27b"], "qwen3.8:27b"),
+            ["qwen3.8:27b"],
+        )
 
     def test_restart_when_loaded_gguf_changes(self):
         self.assertTrue(
