@@ -112,8 +112,9 @@ sycl_active_model=qwen3.6:35b
 sycl_models_max=1
 # HuggingFace token for model downloads (prompted during setup)
 hf_token=
-# llama.cpp version tag for Docker image builds (pinned for reproducibility)
-sycl_llama_cpp_tag=b9082
+# llama.cpp version tag for Docker image builds (pinned for reproducibility).
+# Image is versa-agi-sycl:<tag>. Site-accepted pin: b10430.
+sycl_llama_cpp_tag=b10430
 # stable-diffusion.cpp release tag for Intel SYCL sd-cli (local Utility media)
 sd_cpp_tag=master-820-de298c2
 # Total GPU VRAM in GB (auto-detected during setup, used for concurrency calculation)

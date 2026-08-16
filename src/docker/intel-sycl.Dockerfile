@@ -16,7 +16,8 @@
 #     -f intel-sycl.Dockerfile <llama.cpp-source-dir>
 #
 # Source: github.com/ggml-org/llama.cpp .devops/intel.Dockerfile
-# Pinned: b9082 (2026-05-08)
+# Pinned llama.cpp source tag lives in setup.ini sycl_llama_cpp_tag (b10430).
+# This Dockerfile is the SYCL/oneAPI recipe.
 # ─────────────────────────────────────────────────
 
 ARG ONEAPI_VERSION=2025.3.3-0-devel-ubuntu24.04

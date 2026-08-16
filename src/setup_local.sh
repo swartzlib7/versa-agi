@@ -222,11 +222,16 @@ SYCL_MODEL_DIR="/opt/versa-agi/sycl-models"
 SYCL_PORT="${SYCL_PORT:-8080}"
 SYCL_CONTAINER="versa-agi-sycl"
 SYCL_IMAGE="versa-agi-sycl"
-SYCL_LLAMA_CPP_TAG="${SYCL_LLAMA_CPP_TAG:-b9082}"
+SYCL_LLAMA_CPP_TAG="${SYCL_LLAMA_CPP_TAG:-b10430}"
+SYCL_LLAMA_CPP_PREVIOUS_TAG="b10430"
 SD_CPP_TAG="${SD_CPP_TAG:-master-820-de298c2}"
 SDCPP_IMAGE_NAME="versa-agi-sdcpp"
 MEDIA_STORE="/opt/versa-agi/media-models"
 ENSURE_SD_CLI_ONLY=false
+ENSURE_SYCL_IMAGE_ONLY=false
+REBUILD_SYCL_IMAGE=false
+SWITCH_SYCL_IMAGE_TAG=""
+SYCL_LLAMA_CPP_TAG_SET=false
 HF_TOKEN="${HF_TOKEN:-}"
 SYCL_PARALLEL="${SYCL_PARALLEL:-1}"
 SYCL_CTX_SIZE="${SYCL_CTX_SIZE:-4096}"
@@ -362,6 +367,93 @@ _ensure_sd_cli_runtime() {
   chmod 644 /etc/versa-agi/sdcpp.env
 }
 
+# Persist the llama.cpp pin so activate / docker run use the same image tag.
+_sycl_write_llama_pin() {
+  local tag="${1:?}"
+  local f
+  for f in "${SCRIPT_DIR}/setup.ini" /etc/versa-agi/setup.ini; do
+    [ -f "${f}" ] || continue
+    sed -i '/^\[local_ai\]/,/^\[/{s/^sycl_llama_cpp_tag=.*/sycl_llama_cpp_tag='"${tag}"'/}' "${f}"
+  done
+}
+
+# Keep the currently running unversioned image as versa-agi-sycl:<old-tag>
+# so a pin bump can roll back without a rebuild.
+_sycl_preserve_rollback_image() {
+  local src=""
+  if docker image inspect "${SYCL_IMAGE}:latest" &>/dev/null; then
+    src="${SYCL_IMAGE}:latest"
+  elif docker image inspect "${SYCL_IMAGE}" &>/dev/null; then
+    src="${SYCL_IMAGE}"
+  else
+    return 0
+  fi
+  local label
+  label="$(docker inspect -f '{{index .Config.Labels "versa.llama_cpp_tag"}}' "${src}" 2>/dev/null || true)"
+  [ -z "${label}" ] && label="${SYCL_LLAMA_CPP_PREVIOUS_TAG}"
+  if ! docker image inspect "${SYCL_IMAGE}:${label}" &>/dev/null; then
+    docker tag "${src}" "${SYCL_IMAGE}:${label}"
+    ok "Preserved SYCL image as ${SYCL_IMAGE}:${label} (rollback)"
+  fi
+}
+
+# Build or reuse versa-agi-sycl:<sycl_llama_cpp_tag> and point :latest at it.
+# --update used to skip this whenever an unversioned image existed.
+_ensure_sycl_llama_image() {
+  local tag="${SYCL_LLAMA_CPP_TAG}"
+  local versioned="${SYCL_IMAGE}:${tag}"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    warn "Docker not found — cannot build ${versioned}."
+    return 0
+  fi
+
+  _sycl_preserve_rollback_image
+
+  if [ "${REBUILD_SYCL_IMAGE}" != true ] && docker image inspect "${versioned}" &>/dev/null; then
+    ok "SYCL image '${versioned}' already present"
+  else
+    local build_dir="/tmp/llama-cpp-sycl-build-$$"
+    rm -rf "${build_dir}"
+    info "Cloning llama.cpp (${tag})..."
+    git clone --depth 1 --branch "${tag}" \
+      https://github.com/ggml-org/llama.cpp "${build_dir}" \
+      || error "Failed to clone llama.cpp at tag ${tag}"
+    if [ ! -f "${SCRIPT_DIR}/docker/intel-sycl.Dockerfile" ]; then
+      error "Missing ${SCRIPT_DIR}/docker/intel-sycl.Dockerfile"
+    fi
+    cp "${SCRIPT_DIR}/docker/intel-sycl.Dockerfile" "${build_dir}/.devops/intel.Dockerfile"
+    info "Building ${versioned} (Intel SYCL llama-server; 10+ minutes)..."
+    docker build -t "${versioned}" \
+      --label "versa.llama_cpp_tag=${tag}" \
+      --build-arg="GGML_SYCL_F16=ON" \
+      --target server \
+      -f "${build_dir}/.devops/intel.Dockerfile" \
+      "${build_dir}" || error "Docker image build failed"
+    rm -rf "${build_dir}"
+    ok "Built ${versioned}"
+  fi
+
+  docker tag "${versioned}" "${SYCL_IMAGE}:latest"
+  docker tag "${versioned}" "${SYCL_IMAGE}"
+  _sycl_write_llama_pin "${tag}"
+  ok "SYCL runtime pin: ${tag} (${versioned})"
+}
+
+# Point :latest + setup.ini at an already-built pin. No clone, no rebuild.
+_switch_sycl_llama_image() {
+  local tag="${1:?}"
+  local versioned="${SYCL_IMAGE}:${tag}"
+  if ! docker image inspect "${versioned}" &>/dev/null; then
+    error "No image ${versioned}. Build it first or keep the current pin."
+  fi
+  docker tag "${versioned}" "${SYCL_IMAGE}:latest"
+  docker tag "${versioned}" "${SYCL_IMAGE}"
+  SYCL_LLAMA_CPP_TAG="${tag}"
+  _sycl_write_llama_pin "${tag}"
+  ok "SYCL runtime pin switched to ${tag}. Recreate the container: sudo agictl model activate <key>"
+}
+
 # Watchdog passwordless sudo for remote dashboard ops (SSH, no TTY).
 # Activate was first; Media Import uses the same sudo agictl pattern.
 # Must run on --update even when this server is already configured.
@@ -406,9 +498,12 @@ while [[ $# -gt 0 ]]; do
     --coa-user)           COA_USER="$2"; shift 2 ;;
     --paths-env)          PATHS_ENV="$2"; shift 2 ;;
     --hf-token)           HF_TOKEN="$2"; shift 2 ;;
-    --sycl-llama-cpp-tag) SYCL_LLAMA_CPP_TAG="$2"; shift 2 ;;
+    --sycl-llama-cpp-tag) SYCL_LLAMA_CPP_TAG="$2"; SYCL_LLAMA_CPP_TAG_SET=true; shift 2 ;;
     --sd-cpp-tag)         SD_CPP_TAG="$2"; shift 2 ;;
     --ensure-sd-cli)      ENSURE_SD_CLI_ONLY=true; shift ;;
+    --ensure-sycl-image)  ENSURE_SYCL_IMAGE_ONLY=true; shift ;;
+    --rebuild-sycl-image) REBUILD_SYCL_IMAGE=true; ENSURE_SYCL_IMAGE_ONLY=true; shift ;;
+    --switch-sycl-image-tag) SWITCH_SYCL_IMAGE_TAG="$2"; shift 2 ;;
     --topology)           TOPOLOGY="$2"; shift 2 ;;
     --remote-inference-url) REMOTE_INFERENCE_URL="$2"; shift 2 ;;
     --inference-master-key) INFERENCE_MASTER_KEY="$2"; shift 2 ;;
@@ -430,7 +525,10 @@ if [ -n "${_LOCAL_INI}" ]; then
   [ -z "${HF_TOKEN}" ]         && HF_TOKEN="$(_ini_val local_ai hf_token)"
   [ -z "${INTEL_DEVICE_ID}" ]  && INTEL_DEVICE_ID="$(_ini_val local_ai intel_device_id)"
   [ "${INTEL_CARD_COUNT}" = "1" ] && { _v="$(_ini_val local_ai intel_card_count)"; [ -n "$_v" ] && INTEL_CARD_COUNT="$_v"; }
-  [ -z "${SYCL_LLAMA_CPP_TAG}" ] || true  # already has default
+  if [ "${SYCL_LLAMA_CPP_TAG_SET}" != true ]; then
+    _v="$(_ini_val local_ai sycl_llama_cpp_tag)"
+    [ -n "$_v" ] && SYCL_LLAMA_CPP_TAG="$_v"
+  fi
   { _v="$(_ini_val local_ai sd_cpp_tag)"; [ -n "$_v" ] && SD_CPP_TAG="$_v"; }
   # Topology fallback from INI
   if [ "${TOPOLOGY}" = "local" ]; then
@@ -444,6 +542,31 @@ if [ -n "${_LOCAL_INI}" ]; then
   [ -z "${SYCL_VRAM_GB}" ] && SYCL_VRAM_GB="$(_ini_val local_ai sycl_vram_gb)"
   [ "${SYCL_MODELS_MAX}" = "1" ] && { _v="$(_ini_val local_ai sycl_models_max)"; [ -n "$_v" ] && SYCL_MODELS_MAX="$_v"; }
   { _v="$(_ini_val local_ai model_loading_strategy)"; [ -n "$_v" ] && MODEL_LOADING_STRATEGY="$_v"; }
+fi
+
+# --switch-sycl-image-tag: reuse a preserved pin (rollback). No rebuild.
+if [ -n "${SWITCH_SYCL_IMAGE_TAG}" ]; then
+  _switch_sycl_llama_image "${SWITCH_SYCL_IMAGE_TAG}"
+  exit 0
+fi
+
+# --ensure-sycl-image: build/reuse versa-agi-sycl:<pin> even when already configured.
+if [ "${ENSURE_SYCL_IMAGE_ONLY}" = true ]; then
+  SERVER_STATE_FILE="/etc/versa-agi/server_config.json"
+  if [ -f "${SERVER_STATE_FILE}" ] && command -v jq >/dev/null 2>&1; then
+    _be="$(jq -r '.gpu_backend // empty' "${SERVER_STATE_FILE}" 2>/dev/null || true)"
+    [ -n "${_be}" ] && GPU_BACKEND="${_be}"
+  fi
+  if [ "${GPU_BACKEND}" = "standard" ] && declare -F _ini_val >/dev/null 2>&1; then
+    _v="$(_ini_val local_ai gpu_backend)"
+    [ -n "${_v}" ] && GPU_BACKEND="${_v}"
+  fi
+  if [ "${GPU_BACKEND}" != "intel" ]; then
+    info "SYCL llama-server image is Intel only (gpu_backend=${GPU_BACKEND})."
+    exit 0
+  fi
+  _ensure_sycl_llama_image
+  exit 0
 fi
 
 # --ensure-sd-cli: install/refresh sd-cli only (no banner, no reconfigure).
@@ -489,13 +612,37 @@ if [ "${TOPOLOGY}" = "server" ]; then
     echo "  ╭─────────────────────────────────────────────╮"
     echo "  │  Inference Server — Already Configured    │"
     echo "  ├─────────────────────────────────────────────┤"
-    # Read and display current config from state file
+    # Read and display current config from state file.
+    # Activate used to rewrite this file without identity keys — fill from setup.ini.
     _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${SERVER_STATE_FILE}" 2>/dev/null)
     _srv_model=$(jq -r '.active_model // "unknown"' "${SERVER_STATE_FILE}" 2>/dev/null)
-    _srv_port=$(jq -r '.proxy_port // 4000' "${SERVER_STATE_FILE}" 2>/dev/null)
+    _srv_port=$(jq -r '.proxy_port // empty' "${SERVER_STATE_FILE}" 2>/dev/null)
     _srv_ip=$(jq -r '.lan_ip // "unknown"' "${SERVER_STATE_FILE}" 2>/dev/null)
     _srv_key=$(jq -r '.inference_master_key // ""' "${SERVER_STATE_FILE}" 2>/dev/null)
-    _srv_key_short="${_srv_key:0:8}...${_srv_key: -4}"
+    if declare -F _ini_val >/dev/null 2>&1; then
+      if [ "${_srv_backend}" = "unknown" ] || [ -z "${_srv_backend}" ]; then
+        _v="$(_ini_val local_ai gpu_backend)"; [ -n "${_v}" ] && _srv_backend="${_v}"
+      fi
+      if [ "${_srv_model}" = "unknown" ] || [ -z "${_srv_model}" ]; then
+        _v="$(_ini_val local_ai sycl_active_model)"; [ -n "${_v}" ] && _srv_model="${_v}"
+      fi
+      if [ -z "${_srv_port}" ]; then
+        _v="$(_ini_val local_ai sycl_port)"; _srv_port="${_v:-8080}"
+      fi
+      if [ -z "${_srv_key}" ]; then
+        _srv_key="$(_ini_val local_ai inference_master_key)"
+      fi
+    fi
+    if [ "${_srv_ip}" = "unknown" ] || [ -z "${_srv_ip}" ]; then
+      _srv_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+      _srv_ip="${_srv_ip:-unknown}"
+    fi
+    _srv_port="${_srv_port:-8080}"
+    if [ -n "${_srv_key}" ]; then
+      _srv_key_short="${_srv_key:0:8}...${_srv_key: -4}"
+    else
+      _srv_key_short="(not in state file)"
+    fi
     echo "  │  GPU Backend:   ${_srv_backend}$(printf '%*s' $((27 - ${#_srv_backend})) '')│"
     echo "  │  Active Model:  ${_srv_model}$(printf '%*s' $((27 - ${#_srv_model})) '')│"
     echo "  │  Inference Port:  ${_srv_port}$(printf '%*s' $((27 - ${#_srv_port})) '')│"
@@ -503,12 +650,6 @@ if [ "${TOPOLOGY}" = "server" ]; then
     echo "  │  Master Key:    ${_srv_key_short}$(printf '%*s' $((27 - ${#_srv_key_short})) '')│"
     echo "  ╰─────────────────────────────────────────────╯"
     echo ""
-    if [ "${_srv_backend}" = "unknown" ] || [ -z "${_srv_backend}" ]; then
-      if declare -F _ini_val >/dev/null 2>&1; then
-        _v="$(_ini_val local_ai gpu_backend)"
-        [ -n "${_v}" ] && _srv_backend="${_v}"
-      fi
-    fi
     # setup.sh --update must not stop here — sd-cli still needs installing.
     if [ -n "${VERSA_SETUP_PARENT:-}" ]; then
       _ensure_sd_cli_runtime "${_srv_backend}"
@@ -1300,28 +1441,7 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
 
   # ── Step 4: Build Docker SYCL Image ──
   info "Step 4: Docker SYCL Image"
-  if docker image inspect "${SYCL_IMAGE}" &>/dev/null; then
-    ok "Docker image '${SYCL_IMAGE}' already exists (use --rebuild-image to force)"
-  else
-    _LLAMA_BUILD_DIR="/tmp/llama-cpp-sycl-build-$$"
-    info "Cloning llama.cpp (${SYCL_LLAMA_CPP_TAG})..."
-    git clone --depth 1 --branch "${SYCL_LLAMA_CPP_TAG}" \
-      https://github.com/ggml-org/llama.cpp "${_LLAMA_BUILD_DIR}" 2>/dev/null || \
-      error "Failed to clone llama.cpp at tag ${SYCL_LLAMA_CPP_TAG}"
-
-    # Use our pinned Dockerfile
-    cp "${SCRIPT_DIR}/docker/intel-sycl.Dockerfile" "${_LLAMA_BUILD_DIR}/.devops/intel.Dockerfile"
-
-    info "Building Docker image (this may take 5-10 minutes)..."
-    docker build -t "${SYCL_IMAGE}" \
-      --build-arg="GGML_SYCL_F16=ON" \
-      --target server \
-      -f "${_LLAMA_BUILD_DIR}/.devops/intel.Dockerfile" \
-      "${_LLAMA_BUILD_DIR}" || error "Docker image build failed"
-
-    rm -rf "${_LLAMA_BUILD_DIR}"
-    ok "Docker image built: ${SYCL_IMAGE}"
-  fi
+  _ensure_sycl_llama_image
 
   # ── Step 4b: Pinned sd-cli (local Utility media; not llama-server) ──
   info "Step 4b: sd-cli (stable-diffusion.cpp SYCL)"
@@ -1505,6 +1625,9 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
   # all GGUFs in the directory and loads them on demand with LRU eviction.
   # Client-side model_loading_strategy (single/router) controls agent behavior,
   # not how the Docker container runs.
+  _SYCL_IMAGE_REF="${SYCL_IMAGE}:${SYCL_LLAMA_CPP_TAG}"
+  docker image inspect "${_SYCL_IMAGE_REF}" &>/dev/null || _SYCL_IMAGE_REF="${SYCL_IMAGE}"
+
   docker run -d --name "${SYCL_CONTAINER}" \
     --restart unless-stopped \
     ${DOCKER_DEVICES} \
@@ -1512,7 +1635,7 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     ${DOCKER_WSL_ENV} \
     -v "${SYCL_MODEL_DIR}:/models" \
     -p "${SYCL_PORT}:8080" \
-    "${SYCL_IMAGE}" \
+    "${_SYCL_IMAGE_REF}" \
     --models-dir /models \
     --models-max "${SYCL_MODELS_MAX:-1}" \
     -ngl 99 --host 0.0.0.0 --port 8080 \
@@ -1642,6 +1765,8 @@ if [ "${TOPOLOGY}" = "server" ]; then
   "default_model": "${DEFAULT_MODEL}",
   "model_loading_strategy": "${MODEL_LOADING_STRATEGY}",
   "lan_ip": "${_LAN_IP}",
+  "proxy_port": ${_INF_PORT:-8080},
+  "inference_master_key": "${INFERENCE_MASTER_KEY}",
   "sycl_ctx_size": ${SYCL_CTX_SIZE:-4096},
   "sycl_parallel": ${SYCL_PARALLEL:-1},
   "sycl_models_max": ${SYCL_MODELS_MAX:-1},

@@ -591,12 +591,35 @@ print_inference_server_ready_banner() {
   local _SRV_STATE="/etc/versa-agi/server_config.json"
   [ -f "${_SRV_STATE}" ] || return 0
 
-  local _srv_backend _srv_model _srv_port _srv_ip _srv_key
+  local _srv_backend _srv_model _srv_port _srv_ip _srv_key _ini
+  _ini="/etc/versa-agi/setup.ini"
+  [ -f "${_ini}" ] || _ini="${INI_FILE:-}"
+  _ini_get() {
+    [ -n "${_ini}" ] && [ -f "${_ini}" ] || return 0
+    awk -F '=' '/^\[local_ai\]/{f=1; next} /^\[/{f=0} f && $1=="'"$1"'"{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "${_ini}" 2>/dev/null
+  }
   _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${_SRV_STATE}" 2>/dev/null)
   _srv_model=$(jq -r '.active_model // "unknown"' "${_SRV_STATE}" 2>/dev/null)
-  _srv_port=$(jq -r '.proxy_port // 8080' "${_SRV_STATE}" 2>/dev/null)
+  _srv_port=$(jq -r '.proxy_port // empty' "${_SRV_STATE}" 2>/dev/null)
   _srv_ip=$(jq -r '.lan_ip // "unknown"' "${_SRV_STATE}" 2>/dev/null)
   _srv_key=$(jq -r '.inference_master_key // ""' "${_SRV_STATE}" 2>/dev/null)
+  if [ "${_srv_backend}" = "unknown" ] || [ -z "${_srv_backend}" ]; then
+    _v="$(_ini_get gpu_backend)"; [ -n "${_v}" ] && _srv_backend="${_v}"
+  fi
+  if [ "${_srv_model}" = "unknown" ] || [ -z "${_srv_model}" ]; then
+    _v="$(_ini_get sycl_active_model)"; [ -n "${_v}" ] && _srv_model="${_v}"
+  fi
+  if [ -z "${_srv_port}" ]; then
+    _v="$(_ini_get sycl_port)"; _srv_port="${_v:-8080}"
+  fi
+  if [ -z "${_srv_key}" ]; then
+    _srv_key="$(_ini_get inference_master_key)"
+  fi
+  if [ "${_srv_ip}" = "unknown" ] || [ -z "${_srv_ip}" ]; then
+    _srv_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    _srv_ip="${_srv_ip:-unknown}"
+  fi
+  _srv_port="${_srv_port:-8080}"
 
   echo ""
   echo "  ╭──────────────────────────────────────────────────────╮"
@@ -755,15 +778,15 @@ if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
     chmod 640 "/etc/versa-agi/setup.ini"
   fi
 
-  # Re-run setup_local.sh (rebuilds Docker image if Dockerfile changed).
-  # VERSA_SETUP_PARENT skips the "Already Configured / Reconfigure?" prompt
-  # so --update still installs pinned sd-cli on an existing server.
+  # Re-run setup_local.sh. Already-configured servers skip the interactive
+  # path; --ensure-sycl-image / --ensure-sd-cli still refresh pinned images.
   section "Server Update — Local AI Engine"
   SETUP_LOCAL_SCRIPT="${SCRIPT_DIR}/setup_local.sh"
   if [ -f "${SETUP_LOCAL_SCRIPT}" ]; then
     chmod +x "${SETUP_LOCAL_SCRIPT}"
     export VERSA_SETUP_PARENT=1
     bash "${SETUP_LOCAL_SCRIPT}" --topology server
+    bash "${SETUP_LOCAL_SCRIPT}" --ensure-sycl-image --topology server
     bash "${SETUP_LOCAL_SCRIPT}" --ensure-sd-cli --topology server
   fi
 
@@ -4006,7 +4029,7 @@ MINSEED
   _ini_set "sycl_active_model" "$(ini_get local_ai sycl_active_model '')"
   _ini_set "sycl_models_max" "$(ini_get local_ai sycl_models_max 1)"
   _ini_set "hf_token" "$(ini_get local_ai hf_token '')"
-  _ini_set "sycl_llama_cpp_tag" "$(ini_get local_ai sycl_llama_cpp_tag b9082)"
+  _ini_set "sycl_llama_cpp_tag" "$(ini_get local_ai sycl_llama_cpp_tag b10430)"
   _ini_set "sd_cpp_tag" "$(ini_get local_ai sd_cpp_tag master-820-de298c2)"
   _ini_set_in "local_ai" "topology" "${INI_TOPOLOGY:-local}"
   _ini_set "model_loading_strategy" "$(ini_get local_ai model_loading_strategy router)"

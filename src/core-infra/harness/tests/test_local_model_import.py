@@ -492,5 +492,55 @@ class TestActivateSizeAndRestart(unittest.TestCase):
         self.assertEqual(resolve_activate_parallel(2, 4, None), 2)
 
 
+class TestSyclImagePin(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
+        import cli as _cli  # noqa: WPS433
+
+        cls.cli = _cli
+
+    def test_prefers_versioned_image_when_present(self):
+        with patch.object(self.cli, "_resolve_sycl_llama_cpp_tag", return_value="b10430"), patch.object(
+            self.cli, "_docker_image_exists", return_value=True
+        ):
+            self.assertEqual(self.cli._resolve_sycl_image(), "versa-agi-sycl:b10430")
+
+    def test_falls_back_to_unversioned_when_pin_missing(self):
+        with patch.object(self.cli, "_resolve_sycl_llama_cpp_tag", return_value="b10430"), patch.object(
+            self.cli, "_docker_image_exists", return_value=False
+        ):
+            self.assertEqual(self.cli._resolve_sycl_image(), "versa-agi-sycl")
+
+    def test_activate_merge_keeps_identity_keys(self):
+        merged = self.cli._merge_server_config_dict(
+            {"sycl_ctx_size": 16384, "active_model": "qwen3.8:27b"},
+            {
+                "sycl_ctx_size": 65536,
+                "sycl_parallel": 2,
+                "active_model": "qwen3.6:35b",
+            },
+            {
+                "gpu_backend": "intel",
+                "lan_ip": "192.168.4.114",
+                "topology": "server",
+                "proxy_port": 8080,
+            },
+        )
+        self.assertEqual(merged["gpu_backend"], "intel")
+        self.assertEqual(merged["lan_ip"], "192.168.4.114")
+        self.assertEqual(merged["active_model"], "qwen3.6:35b")
+        self.assertEqual(merged["sycl_ctx_size"], 65536)
+        self.assertEqual(merged["proxy_port"], 8080)
+
+    def test_activate_merge_does_not_overwrite_good_lan_ip(self):
+        merged = self.cli._merge_server_config_dict(
+            {"lan_ip": "192.168.4.114", "gpu_backend": "intel"},
+            {"active_model": "qwen3.6:35b"},
+            {"lan_ip": "10.0.0.1", "gpu_backend": "intel"},
+        )
+        self.assertEqual(merged["lan_ip"], "192.168.4.114")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1083,6 +1083,8 @@ PROVIDER_KEYS_ENV_LEGACY = "/etc/versa-agi/inference_endpoint.env"
 SETUP_INI_CANONICAL = "/etc/versa-agi/setup.ini"
 SYCL_MODEL_DIR = "/opt/versa-agi/sycl-models"
 SYCL_CONTAINER = "versa-agi-sycl"
+SYCL_IMAGE_NAME = "versa-agi-sycl"
+SYCL_LLAMA_CPP_DEFAULT_TAG = "b10430"
 
 def _provider_keys_env_path() -> str:
     """Resolve provider key store (migrated from inference_endpoint.env)."""
@@ -1577,6 +1579,135 @@ def _resolve_sycl_models_max():
     return 1
 
 
+def _resolve_sycl_llama_cpp_tag():
+    """Read sycl_llama_cpp_tag from setup.ini (Docker image pin)."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            tag = (cfg.get("local_ai", "sycl_llama_cpp_tag", fallback="") or "").strip()
+            return tag or SYCL_LLAMA_CPP_DEFAULT_TAG
+    return SYCL_LLAMA_CPP_DEFAULT_TAG
+
+
+def _docker_image_exists(image: str) -> bool:
+    check = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True, text=True,
+    )
+    return check.returncode == 0
+
+
+def _resolve_sycl_image():
+    """Prefer versa-agi-sycl:<pin> so a preserved older pin can roll back."""
+    tag = _resolve_sycl_llama_cpp_tag()
+    versioned = f"{SYCL_IMAGE_NAME}:{tag}"
+    if _docker_image_exists(versioned):
+        return versioned
+    return SYCL_IMAGE_NAME
+
+
+def _blank_server_config_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() in ("", "unknown", "0.0.0.0"):
+        return True
+    return False
+
+
+def _detect_lan_ip() -> str:
+    try:
+        out = subprocess.run(
+            ["hostname", "-I"], capture_output=True, text=True, timeout=5
+        )
+        parts = (out.stdout or "").split()
+        if parts:
+            return parts[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _server_config_identity_defaults() -> dict:
+    """Fill topology / backend / LAN / port from setup.ini when activate rewrites state."""
+    import configparser
+    cfg = configparser.ConfigParser()
+    for path in [
+        SETUP_INI_CANONICAL,
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "setup.ini",
+        ),
+    ]:
+        if os.path.isfile(path):
+            cfg.read(path)
+            break
+    backend = ""
+    topology = "server"
+    sycl_port = "8080"
+    master = ""
+    if cfg.has_section("local_ai"):
+        backend = (cfg.get("local_ai", "gpu_backend", fallback="") or "").strip()
+        topology = (cfg.get("local_ai", "topology", fallback="server") or "server").strip()
+        sycl_port = (cfg.get("local_ai", "sycl_port", fallback="8080") or "8080").strip()
+        master = (cfg.get("local_ai", "inference_master_key", fallback="") or "").strip()
+    try:
+        port = int(sycl_port) if backend == "intel" else 4000
+    except ValueError:
+        port = 8080 if backend == "intel" else 4000
+    return {
+        "topology": topology or "server",
+        "gpu_backend": backend,
+        "lan_ip": _detect_lan_ip(),
+        "proxy_port": port,
+        "inference_master_key": master,
+    }
+
+
+def _merge_server_config_dict(existing: dict, updates: dict, identity: dict | None = None) -> dict:
+    """Keep identity keys activate used to wipe (gpu_backend, lan_ip, master key)."""
+    out = dict(existing or {})
+    for key, value in (identity or {}).items():
+        if value in (None, ""):
+            continue
+        if key not in out or _blank_server_config_value(out.get(key)):
+            out[key] = value
+    out.update(updates)
+    return out
+
+
+def _write_server_config(updates: dict) -> None:
+    import json as _json
+    path = "/etc/versa-agi/server_config.json"
+    existing: dict = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                loaded = _json.load(fh)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+    merged = _merge_server_config_dict(
+        existing, updates, _server_config_identity_defaults()
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(merged, fh, indent=2)
+        fh.write("\n")
+    os.chmod(path, 0o640)
+    try:
+        import pwd
+        import configparser as _cp
+        _ini = _cp.ConfigParser()
+        _ini.read(SETUP_INI_CANONICAL)
+        _wd_name = _ini.get("users", "watchdog", fallback="watchdog")
+        wdog = pwd.getpwnam(_wd_name)
+        os.chown(path, wdog.pw_uid, wdog.pw_gid)
+    except (KeyError, OSError):
+        pass
+
+
 def _resolve_sycl_concurrency():
     """Read sycl_parallel, sycl_ctx_size, sycl_vram_gb from setup.ini.
     Returns (parallel, ctx_size, vram_gb) as ints."""
@@ -1686,7 +1817,7 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None, model_fi
             devices.extend(["--device", dev])
 
     sycl_port = _resolve_sycl_port()
-    sycl_image = "versa-agi-sycl"
+    sycl_image = _resolve_sycl_image()
 
     # Read concurrency settings from setup.ini (or use provided overrides)
     ini_parallel, ini_ctx_size, _ = _resolve_sycl_concurrency()
@@ -1709,8 +1840,9 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None, model_fi
         "-ngl", "99", "--host", "0.0.0.0", "--port", "8080",
         "--parallel", _parallel, "--ctx-size", _ctx_total,
     ]
-    if model_file:
-        cmd.extend(["--model", f"/models/{os.path.basename(model_file)}"])
+    # Router discovers GGUFs from --models-dir. Do not also pass --model:
+    # llama-server ids are the filename stem (no .gguf). A second --model
+    # path with the extension fights on-demand load and the web UI.
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -1727,7 +1859,7 @@ def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None, model_fi
     return False, "Container may not have started"
 
 
-def _wait_sycl_model_ready(api_id: str, port: int, timeout_s: int = 180) -> tuple[bool, str]:
+def _wait_sycl_model_ready(api_id: str, port: int, timeout_s: int = 600) -> tuple[bool, str]:
     """Poll llama-server until the GGUF stem is loaded or the child fails."""
     import urllib.request
 
@@ -3429,11 +3561,12 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         if ok:
             steps.append(msg)
             api_id = os.path.basename(gguf_file).removesuffix(".gguf")
-            click.echo(f"  Waiting for llama-server to load {api_id}...", err=True)
-            ready, ready_msg = _wait_sycl_model_ready(api_id, _resolve_sycl_port())
-            steps.append(ready_msg)
-            if not ready:
-                errors.append(ready_msg)
+            click.echo(
+                f"  Router is up. {api_id} loads on the first request "
+                f"(web UI pick or chat), not at activate.",
+                err=True,
+            )
+            steps.append(f"router ready; {api_id} loads on demand")
         else:
             errors.append(msg)
     else:
@@ -3473,10 +3606,10 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         if _update_paths_env_key("VERSA_ACTIVE_LOCAL_MODEL", name):
             steps.append(f"paths.env VERSA_ACTIVE_LOCAL_MODEL → {name}")
 
-    # ── 7. Write server_config.json for client topology sync ──
+    # ── 7. Merge server_config.json (do not wipe gpu_backend / lan_ip / key) ──
     try:
-        import json as _json, datetime
-        server_config = {
+        import datetime
+        _write_server_config({
             "sycl_ctx_size": use_ctx,
             "sycl_parallel": use_parallel,
             "sycl_models_max": _resolve_sycl_models_max(),
@@ -3485,20 +3618,7 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
             "default_model": name,
             "model_loading_strategy": strategy,
             "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        server_config_path = "/etc/versa-agi/server_config.json"
-        with open(server_config_path, "w") as f:
-            _json.dump(server_config, f, indent=2)
-        os.chmod(server_config_path, 0o640)
-        try:
-            import pwd, configparser as _cp
-            _ini = _cp.ConfigParser()
-            _ini.read(SETUP_INI_CANONICAL)
-            _wd_name = _ini.get("users", "watchdog", fallback="watchdog")
-            wdog = pwd.getpwnam(_wd_name)
-            os.chown(server_config_path, wdog.pw_uid, wdog.pw_gid)
-        except (KeyError, OSError):
-            pass
+        })
         steps.append("server_config.json updated")
     except Exception as e:
         errors.append(f"server_config.json write failed: {e}")
