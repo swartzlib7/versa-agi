@@ -34,10 +34,21 @@ from model_hf_ingest import (  # noqa: E402
     InspectResult,
     activation_block_reason,
     activate_needs_docker_restart,
+    activate_needs_mmproj_reload,
+    builtin_probe_png,
+    ensure_sycl_vlm_subdir,
+    sycl_vlm_layout_ready,
+    catalog_input_modalities_after_probe,
+    chat_image_content_parts,
     drop_name_from_csv,
+    load_probe_image,
     ensure_name_in_csv,
+    paired_mmproj_name,
+    plan_sycl_additionals,
     plan_sycl_remove,
     resolve_activate_parallel,
+    select_mmproj_file,
+    install_paired_file,
     sycl_remove_block_reason,
     atomic_move_into,
     classify_hf_model,
@@ -187,6 +198,8 @@ class TestClassifyAndInspect(unittest.TestCase):
         self.assertEqual(result.classification, CLASS_VLM)
         self.assertIsNone(sycl_import_block_reason(result.classification, "chat"))
         self.assertTrue(any("mmproj" in w.lower() for w in result.warnings))
+        self.assertIn("sycl import", result.next_step or "")
+        self.assertNotIn("vision import", result.next_step or "")
 
     def test_unknown_requires_confirm(self):
         result = inspect_hf_source(
@@ -485,6 +498,14 @@ class TestActivateSizeAndRestart(unittest.TestCase):
                 model_changed=False,
                 ctx_override=None,
                 parallel_override=None,
+                mmproj_reload=True,
+            )
+        )
+        self.assertTrue(
+            activate_needs_docker_restart(
+                model_changed=False,
+                ctx_override=None,
+                parallel_override=None,
                 parallel_changed=True,
             )
         )
@@ -685,6 +706,122 @@ class TestSyclRemoveCli(unittest.TestCase):
             self.mod._gpu_host_sudo_error("sudo: a password is required"),
         )
         self.assertEqual(self.mod._gpu_host_sudo_error("disk full"), "disk full")
+
+
+class TestSyclAdditionals(unittest.TestCase):
+    def test_select_prefers_f16(self):
+        files = [
+            HfFile("mmproj-BF16.gguf", 10),
+            HfFile("mmproj-F16.gguf", 20),
+            HfFile("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", 99),
+        ]
+        picked = select_mmproj_file(files)
+        self.assertEqual(picked.path, "mmproj-F16.gguf")
+
+    def test_paired_name(self):
+        self.assertEqual(
+            paired_mmproj_name("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
+            "mmproj-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        )
+
+    def test_plan_mmproj_additional(self):
+        files = [HfFile("mmproj-F16.gguf", 899 * 1024**2)]
+        with tempfile.TemporaryDirectory() as td:
+            plan = plan_sycl_additionals(
+                main_file="Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+                dest_dir=td,
+                inspect_files=files,
+            )
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]["role"], "mmproj")
+        self.assertEqual(plan[0]["source"], "mmproj-F16.gguf")
+        self.assertEqual(plan[0]["file"], "mmproj-F16.gguf")
+        self.assertTrue(plan[0]["path"].endswith(
+            "Qwen3.6-35B-A3B-UD-Q4_K_M/mmproj-F16.gguf"
+        ))
+        self.assertFalse(plan[0]["exists"])
+
+    def test_no_mmproj_means_no_additionals(self):
+        self.assertEqual(
+            plan_sycl_additionals(
+                main_file="only-chat.gguf",
+                dest_dir="/tmp",
+                inspect_files=[HfFile("only-chat.gguf", 10)],
+            ),
+            [],
+        )
+
+    def test_install_renames_to_paired(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "mmproj-F16.gguf")
+            with open(src, "wb") as fh:
+                fh.write(b"GGUF" + b"\0" * 8)
+            dest_dir = os.path.join(td, "models")
+            os.mkdir(dest_dir)
+            final = install_paired_file(
+                src, dest_dir, "mmproj-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            )
+            self.assertEqual(
+                os.path.basename(final),
+                "mmproj-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            )
+            self.assertTrue(os.path.isfile(final))
+
+
+class TestSyclVisionProbe(unittest.TestCase):
+    def test_reload_once_until_router_flag(self):
+        main = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+        with tempfile.TemporaryDirectory() as td:
+            open(os.path.join(td, f"mmproj-{main}"), "wb").close()
+            self.assertTrue(activate_needs_mmproj_reload(None, td, main))
+            # Flat leftover still needs a relocate even if router flag was set.
+            self.assertTrue(
+                activate_needs_mmproj_reload({"mmproj_router": True}, td, main)
+            )
+        self.assertFalse(activate_needs_mmproj_reload(None, "/nope", main))
+
+    def test_subdir_layout_ready_skips_reload(self):
+        main = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+        with tempfile.TemporaryDirectory() as td:
+            sub = os.path.join(td, "Qwen3.6-35B-A3B-UD-Q4_K_M")
+            os.mkdir(sub)
+            open(os.path.join(sub, main), "wb").close()
+            open(os.path.join(sub, "mmproj-F16.gguf"), "wb").close()
+            self.assertTrue(sycl_vlm_layout_ready(td, main))
+            self.assertFalse(
+                activate_needs_mmproj_reload({"mmproj_router": True}, td, main)
+            )
+
+    def test_ensure_moves_flat_pair_into_stem_dir(self):
+        main = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+        with tempfile.TemporaryDirectory() as td:
+            open(os.path.join(td, main), "wb").close()
+            open(os.path.join(td, f"mmproj-{main}"), "wb").close()
+            layout = ensure_sycl_vlm_subdir(td, main)
+            self.assertTrue(layout["ready"])
+            self.assertTrue(os.path.isfile(os.path.join(
+                td, "Qwen3.6-35B-A3B-UD-Q4_K_M", main,
+            )))
+            self.assertTrue(os.path.isfile(os.path.join(
+                td, "Qwen3.6-35B-A3B-UD-Q4_K_M", "mmproj-F16.gguf",
+            )))
+            self.assertFalse(os.path.isfile(os.path.join(td, main)))
+
+    def test_catalog_gains_image(self):
+        self.assertEqual(catalog_input_modalities_after_probe("text"), "text,image")
+        self.assertEqual(
+            catalog_input_modalities_after_probe("text,image"), "text,image"
+        )
+
+    def test_builtin_png_and_parts(self):
+        png = builtin_probe_png()
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        data, mime = load_probe_image("probe")
+        self.assertEqual(mime, "image/png")
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        parts = chat_image_content_parts("color?", data, mime)
+        self.assertEqual(parts[0]["type"], "text")
+        self.assertTrue(parts[1]["image_url"]["url"].startswith("data:image/png;base64,"))
 
 
 if __name__ == "__main__":

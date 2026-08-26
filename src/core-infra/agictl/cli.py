@@ -43,8 +43,18 @@ from model_hf_ingest import (
     meta_value,
     migrate_skip_reason,
     activate_needs_docker_restart,
+    activate_needs_mmproj_reload,
+    catalog_input_modalities_after_probe,
+    ensure_sycl_vlm_subdir,
+    sycl_main_gguf_path,
+    sycl_mmproj_on_disk,
+    sycl_vlm_subdir,
+    chat_image_content_parts,
     drop_name_from_csv,
     ensure_name_in_csv,
+    install_paired_file,
+    load_probe_image,
+    plan_sycl_additionals,
     plan_sycl_remove,
     resolve_activate_parallel,
     sycl_remove_block_reason,
@@ -1751,29 +1761,40 @@ def _query_sycl_models():
         return models
     # Reload registry to catch any recent additions
     registry = _load_sycl_registry()
+    found: list[tuple[str, str]] = []
     for f in os.listdir(SYCL_MODEL_DIR):
-        if f.endswith(".gguf"):
-            fpath = os.path.join(SYCL_MODEL_DIR, f)
-            size_bytes = os.path.getsize(fpath)
-            if size_bytes >= 1_000_000_000:
-                size_str = f"{size_bytes / 1_000_000_000:.1f} GB"
-            elif size_bytes >= 1_000_000:
-                size_str = f"{size_bytes / 1_000_000:.1f} MB"
+        fpath = os.path.join(SYCL_MODEL_DIR, f)
+        if os.path.isfile(fpath) and f.endswith(".gguf") and not f.lower().startswith("mmproj"):
+            found.append((f, fpath))
+        elif os.path.isdir(fpath):
+            nested = os.path.join(fpath, f"{f}.gguf")
+            if os.path.isfile(nested):
+                found.append((f"{f}.gguf", nested))
             else:
-                size_str = f"{size_bytes} B"
-            # Reverse-map GGUF filename to model name
-            model_name = f
-            for mname, minfo in registry.items():
-                if minfo["file"] == f:
-                    model_name = mname
-                    break
-            models.append({
-                "name": model_name,
-                "file": f,
-                "size": size_str,
-                "size_bytes": size_bytes,
-                "active": model_name == active_model,
-            })
+                for inner in os.listdir(fpath):
+                    if inner.endswith(".gguf") and not inner.lower().startswith("mmproj"):
+                        found.append((inner, os.path.join(fpath, inner)))
+                        break
+    for filename, fpath in found:
+        size_bytes = os.path.getsize(fpath)
+        if size_bytes >= 1_000_000_000:
+            size_str = f"{size_bytes / 1_000_000_000:.1f} GB"
+        elif size_bytes >= 1_000_000:
+            size_str = f"{size_bytes / 1_000_000:.1f} MB"
+        else:
+            size_str = f"{size_bytes} B"
+        model_name = filename
+        for mname, minfo in registry.items():
+            if minfo["file"] == filename:
+                model_name = mname
+                break
+        models.append({
+            "name": model_name,
+            "file": filename,
+            "size": size_str,
+            "size_bytes": size_bytes,
+            "active": model_name == active_model,
+        })
     return models
 
 
@@ -2661,10 +2682,12 @@ def model_sycl():
               help="Required when Hub classification is unknown")
 @click.option("--dry-run", is_flag=True, help="Inspect and report plan; write nothing")
 def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dry_run):
-    """Download a chat GGUF into SYCL storage and register it. Never activates.
+    """Download a chat GGUF (and VLM projector) into SYCL storage. Never activates.
 
-    Refuses media pipelines (image/video/audio bundles). Clients must import on
-    the GPU server, then run `agictl model refresh`.
+    A ``chat_vlm_mmproj`` source also stores ``mmproj`` as an additional. Re-import
+    of an existing key completes a missing projector. Catalog stays text-only
+    until vision probe. Refuses media pipelines. Clients import on the GPU
+    server, then run ``agictl model refresh``.
     """
     topo = _resolve_topology()
     gpu_backend = _resolve_gpu_backend()
@@ -2707,6 +2730,14 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
         selected.size if selected else None, fallback=1,
     )
     display_label = label or name
+    models_ini_path = _resolve_models_ini_path()
+    existing_meta = (load_sycl_meta(models_ini_path) or {}).get(name) or {} if models_ini_path else {}
+    additionals = plan_sycl_additionals(
+        main_file=os.path.basename(filename),
+        dest_dir=SYCL_MODEL_DIR,
+        inspect_files=inspected.files,
+        meta=existing_meta,
+    )
     plan = {
         "name": name,
         "runtime": runtime,
@@ -2717,10 +2748,13 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
         "sycl_dir": SYCL_MODEL_DIR,
         "activate": False,
         "input_modalities": "text",
+        "additionals": additionals,
     }
     if inspected.classification == CLASS_VLM:
         plan["mmproj_warning"] = (
-            "Imported as text-only chat. Image input requires TD-LOCAL-MMProj-001."
+            "Projector will be stored. Catalog stays text-only until vision probe."
+            if additionals
+            else "VLM repo has no mmproj-*.gguf. Imported as text-only chat."
         )
 
     if dry_run:
@@ -2728,20 +2762,25 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
         return
 
     registry = _load_sycl_registry()
-    dest_path = os.path.join(SYCL_MODEL_DIR, os.path.basename(filename))
+    dest_path = sycl_main_gguf_path(SYCL_MODEL_DIR, os.path.basename(filename))
     already = os.path.isfile(dest_path) and name in registry
+    need_download = (not already) or any(not extra.get("exists") for extra in additionals)
     steps = []
     created_dest = False
+    created_additionals = []
+    additional_downloaded = False
     tmpdir = None
     try:
-        if already:
-            steps.append(f"already downloaded: {os.path.basename(filename)}")
-        else:
+        hf_cmd = None
+        if need_download:
             hf_cmd = _resolve_hf_cli()
             if not hf_cmd:
                 json_response(False, error="HuggingFace CLI not found. Install: sudo pipx install huggingface_hub[cli]", mutated=False)
                 sys.exit(1)
             tmpdir = tempfile.mkdtemp(prefix="versa-sycl-import-")
+        if already:
+            steps.append(f"already downloaded: {os.path.basename(filename)}")
+        else:
             print(f"Downloading: {filename} ...")
             downloaded = default_hf_download(repo, filename, tmpdir, hf_cmd)
             validate_gguf_file(downloaded)
@@ -2749,10 +2788,32 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
             created_dest = True
             steps.append(f"downloaded:{os.path.basename(dest_path)}")
 
+        if additionals:
+            layout = ensure_sycl_vlm_subdir(SYCL_MODEL_DIR, os.path.basename(filename))
+            dest_path = layout.get("main") or dest_path
+            steps.extend(layout.get("steps") or [])
+
+        for extra in additionals:
+            if extra.get("exists") and os.path.isfile(extra.get("path") or ""):
+                steps.append(f"already downloaded: {extra['file']}")
+                continue
+            print(f"Downloading: {extra['source']} ...")
+            extra_dl = default_hf_download(repo, extra["source"], tmpdir, hf_cmd)
+            validate_gguf_file(extra_dl)
+            extra_dir = sycl_vlm_subdir(SYCL_MODEL_DIR, os.path.basename(filename))
+            extra_path = install_paired_file(extra_dl, extra_dir, extra["file"])
+            extra["exists"] = True
+            extra["path"] = extra_path
+            created_additionals.append(extra_path)
+            additional_downloaded = True
+            steps.append(f"downloaded:{extra['file']}")
+
         resolved_size = size_gb_from_path(dest_path, fallback=resolved_size)
         plan["size_gb"] = resolved_size
+        plan["additionals"] = additionals
         entry_value = f"{repo},{os.path.basename(dest_path)},{resolved_size}"
         meta = {
+            **existing_meta,
             "class": inspected.classification,
             "runtime": runtime,
             "source": inspected.source.as_hf_uri(),
@@ -2762,12 +2823,16 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
             "sha256": (selected.sha256 if selected else None),
             "confirm_unknown": bool(confirm_unknown),
         }
-        models_ini_path = _resolve_models_ini_path()
+        mmproj = next((extra for extra in additionals if extra.get("role") == "mmproj"), None)
+        if mmproj:
+            meta["mmproj"] = mmproj["file"]
+            meta["mmproj_source"] = mmproj["source"]
         if not models_ini_path:
             raise HfIngestError("models.ini not found", "no_models_ini")
         _upsert_models_ini_entry(models_ini_path, "sycl_models", name, entry_value)
         _upsert_models_ini_entry(models_ini_path, "sycl_model_meta", name, meta_value(meta))
         _upsert_models_ini_entry(models_ini_path, "local_models", name, display_label)
+        _forget_catalog_removed(name)
         steps.append("models.ini updated")
 
         current_models, ini_path = _read_ini_csv("local_ai", "local_models")
@@ -2786,17 +2851,29 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
                 steps.append("rolled back GGUF")
             except OSError:
                 pass
+        for extra_path in created_additionals:
+            if extra_path and os.path.isfile(extra_path):
+                try:
+                    os.remove(extra_path)
+                    steps.append(f"rolled back {os.path.basename(extra_path)}")
+                except OSError:
+                    pass
         json_response(False, error=str(exc), steps=steps, mutated=False)
         sys.exit(1)
     finally:
         if tmpdir and os.path.isdir(tmpdir):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    hint = f"Registered as text-only chat. Activate separately: sudo agictl model activate {name}"
+    if any(extra.get("role") == "mmproj" for extra in additionals):
+        hint = (
+            f"{hint} Projector stored. Catalog stays text-only until vision probe."
+        )
     json_response(
         True,
-        action="already_imported" if already else "imported",
+        action="already_imported" if already and not additional_downloaded else "imported",
         steps=steps,
-        hint=f"Registered as text-only chat. Activate separately: sudo agictl model activate {name}",
+        hint=hint,
         **plan,
     )
 
@@ -2877,7 +2954,7 @@ def model_sycl_remove(name, dry_run, confirm_agent_assignments):
 
     registry = _load_sycl_registry()
     plan = plan_sycl_remove(key, registry, SYCL_MODEL_DIR)
-    present = _sycl_inventory_present(key) or plan["gguf_exists"]
+    present = _sycl_inventory_present(key) or plan["gguf_exists"] or plan.get("mmproj_exists")
     steps = []
     if dry_run:
         json_response(
@@ -2902,6 +2979,22 @@ def model_sycl_remove(name, dry_run, confirm_agent_assignments):
         steps.append(f"kept GGUF (also used by {', '.join(plan['shared_keys'])})")
     elif plan["in_registry"] and not plan["gguf_exists"]:
         steps.append("GGUF already absent")
+
+    if plan.get("delete_mmproj"):
+        try:
+            os.remove(plan["mmproj_path"])
+            steps.append(f"deleted {plan['mmproj_file']}")
+        except OSError as exc:
+            json_response(False, error=f"Failed to delete mmproj: {exc}", plan=plan, mutated=True)
+            sys.exit(1)
+    if plan.get("delete_subdir"):
+        sub = plan.get("subdir") or ""
+        try:
+            if sub and os.path.isdir(sub) and not os.listdir(sub):
+                os.rmdir(sub)
+                steps.append(f"removed {os.path.basename(sub)}/")
+        except OSError:
+            pass
 
     steps.extend(_clear_sycl_inventory(key))
     try:
@@ -3517,13 +3610,21 @@ def model_remove(name, delete):
 @click.argument("prompt", required=False, default=None)
 @click.option("--temperature", "-t", type=float, default=0.7, help="Sampling temperature (0.0–2.0)")
 @click.option("--max-tokens", "-m", type=int, default=8192, help="Maximum response tokens (Gemma 4: up to 256K context)")
-def model_run(name, prompt, temperature, max_tokens):
-    """Test a local model interactively via the Inference Endpoint or Ollama.
+@click.option(
+    "--image",
+    "image_spec",
+    default=None,
+    help="JPEG/PNG path, or 'probe' for a built-in 32x32 PNG (vision probe).",
+)
+def model_run(name, prompt, temperature, max_tokens, image_spec):
+    """Test a local model via the Inference Endpoint or Ollama.
 
-    Send a one-shot prompt and stream the response.
+    Send a one-shot prompt. ``--image probe`` (or a JPEG/PNG path) is the
+    SYCL vision probe: on success the catalog may gain ``image``.
 
     Examples:
       agictl model run gemma4:e4b "Hello, who are you?"
+      agictl model run qwen3.6:35b "What color is this? One word." --image probe
       agictl model run gemma4:e4b  # enters interactive mode
     """
     import urllib.request
@@ -3550,30 +3651,57 @@ def model_run(name, prompt, temperature, max_tokens):
                 prompt = click.prompt("You", prompt_suffix="> ")
                 if prompt.lower() in ("exit", "quit", "/q"):
                     break
-                _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, ollama_host)
+                _run_model_prompt(
+                    name, prompt, temperature, max_tokens, inference_url, ollama_host,
+                    image_spec=image_spec,
+                )
                 click.echo("")
         except (KeyboardInterrupt, EOFError):
             click.echo("\n[agictl model run] Session ended.")
         return
 
-    _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, ollama_host)
+    _run_model_prompt(
+        name, prompt, temperature, max_tokens, inference_url, ollama_host,
+        image_spec=image_spec,
+    )
 
 
-def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, ollama_host):
+def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, ollama_host, image_spec=None):
     """Send a single prompt to a local model and print the response."""
     import urllib.request
     import urllib.error
 
     gpu_backend = _resolve_gpu_backend()
+    content = prompt
+    if image_spec:
+        try:
+            image_bytes, mime = load_probe_image(image_spec)
+        except HfIngestError as exc:
+            click.echo(f"Error: {exc.message}", err=True)
+            sys.exit(1)
+        content = chat_image_content_parts(prompt, image_bytes, mime)
+        click.echo(
+            "[agictl model run] Image attached. First SYCL load can take many minutes.",
+            err=True,
+        )
+
+    api_name = name
+    if gpu_backend == "intel":
+        try:
+            from provider_runtime import _resolve_sycl_api_model
+            api_name = _resolve_sycl_api_model(name)
+        except Exception:
+            row = (_load_sycl_registry() or {}).get(name) or {}
+            api_name = (row.get("file") or name).removesuffix(".gguf")
 
     # Build endpoint list based on backend
     endpoints = []
     if gpu_backend == "intel":
         # Intel: try Docker SYCL directly first, then Inference Server
         sycl_port = _resolve_sycl_port()
-        endpoints.append(("SYCL", f"http://localhost:{sycl_port}/v1/chat/completions", name))
+        endpoints.append(("SYCL", f"http://localhost:{sycl_port}/v1/chat/completions", api_name))
         if inference_url:
-            endpoints.append(("Inference Server", f"{inference_url}/v1/chat/completions", name))
+            endpoints.append(("Inference Server", f"{inference_url}/v1/chat/completions", api_name))
     else:
         # Standard: try Ollama directly first, then Inference Server
         endpoints.append(("Ollama", f"{ollama_host}/api/chat", name))
@@ -3586,7 +3714,7 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
                 # OpenAI-compatible (Inference Server or SYCL)
                 body = {
                     "model": model_name,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "user", "content": content}],
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "stream": False,
@@ -3595,7 +3723,7 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
                 # Ollama native API
                 body = {
                     "model": model_name,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "user", "content": content}],
                     "stream": False,
                     "options": {"temperature": temperature, "num_predict": max_tokens},
                 }
@@ -3607,7 +3735,7 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
                 method="POST",
             )
 
-            click.echo(f"[{backend_name}] Sending request...", err=True)
+            click.echo(f"[{backend_name}] Sending request (model={model_name})...", err=True)
             with urllib.request.urlopen(req, timeout=900) as response:
                 result = json.loads(response.read().decode("utf-8"))
 
@@ -3622,8 +3750,35 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
                 text = json.dumps(result, indent=2)
 
             click.echo(text)
+            if image_spec and gpu_backend == "intel":
+                applied, detail = _apply_sycl_vision_catalog(name)
+                if applied:
+                    click.echo(
+                        f"[agictl model run] Catalog '{name}' input_modalities → {detail}",
+                        err=True,
+                    )
+                else:
+                    click.echo(
+                        f"[agictl model run] Probe ok; catalog not updated ({detail}). "
+                        f"sudo agictl catalog update {name} --input-modalities text,image",
+                        err=True,
+                    )
             return
 
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            click.echo(f"[{backend_name}] HTTP {e.code}: {body[:500]}", err=True)
+            if image_spec and "mmproj" in body.lower():
+                click.echo(
+                    "[agictl model run] Pairing failed — llama-server did not attach the projector. "
+                    "Restart with: sudo agictl model activate {name}".format(name=name),
+                    err=True,
+                )
+            continue
         except (TimeoutError, urllib.error.URLError) as e:
             # Connection refused, timeout, or unreachable — try next backend silently
             click.echo(f"[{backend_name}] Unavailable ({e}), trying next...", err=True)
@@ -3634,6 +3789,36 @@ def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, olla
 
     click.echo("Error: Could not reach Inference Endpoint or Ollama. Is the local AI backend running?", err=True)
     sys.exit(1)
+
+
+def _apply_sycl_vision_catalog(name):
+    """After a successful image probe, advertise text,image on this catalog key."""
+    if _mc_load_catalog is None or catalog_row_to_value is None:
+        return False, "catalog helpers unavailable"
+    cat = _mc_load_catalog()
+    if name not in cat:
+        return False, "catalog row missing"
+    row = dict(cat[name])
+    row["input_modalities"] = catalog_input_modalities_after_probe(
+        row.get("input_modalities")
+    )
+    value = catalog_row_to_value(row)
+    targets = _models_ini_write_targets()
+    if not targets:
+        return False, "models.ini not found"
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "catalog_custom", name, value)
+        models_ini = _resolve_models_ini_path()
+        if models_ini:
+            meta = dict((load_sycl_meta(models_ini) or {}).get(name) or {})
+            meta["mmproj_probe"] = "ok"
+            _upsert_models_ini_entry(models_ini, "sycl_model_meta", name, meta_value(meta))
+    except PermissionError:
+        return False, "permission denied (use sudo)"
+    except OSError as exc:
+        return False, str(exc)
+    return True, row["input_modalities"]
 
 
 @model.command("activate")
@@ -3651,7 +3836,8 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
 
     Updates setup.ini and paths.env. Always sets sycl_active_model (the loaded GGUF).
     In single mode, syncs all local sub-agents. Router mode leaves agent assignments.
-    Docker restarts when the loaded GGUF or --ctx/--parallel change.
+    Docker restarts when the loaded GGUF, --ctx/--parallel, or a newly
+    landed mmproj projector changes.
 
     Only available when gpu_backend=intel. Requires root (sudo).
 
@@ -3686,9 +3872,9 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         json_response(False, error=activate_guard, classification=(meta or {}).get("class"))
         sys.exit(1)
 
-    # Check model is downloaded
+    # Check model is downloaded (flat or stem subdirectory)
     gguf_file = registry[name]["file"]
-    gguf_path = os.path.join(SYCL_MODEL_DIR, gguf_file)
+    gguf_path = sycl_main_gguf_path(SYCL_MODEL_DIR, gguf_file)
     if not os.path.isfile(gguf_path):
         # Fallback: scan directory for the file (handles symlinks, case drift)
         found_path = None
@@ -3716,6 +3902,15 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
     strategy = _resolve_loading_strategy()
     current_active = _resolve_sycl_active_model()
     model_changed = name != current_active
+    layout_steps = []
+    if sycl_mmproj_on_disk(SYCL_MODEL_DIR, gguf_file):
+        layout = ensure_sycl_vlm_subdir(SYCL_MODEL_DIR, gguf_file)
+        layout_steps = layout.get("steps") or []
+        if layout.get("main") and os.path.isfile(layout["main"]):
+            gguf_path = layout["main"]
+    mmproj_reload = activate_needs_mmproj_reload(
+        meta, SYCL_MODEL_DIR, gguf_file,
+    ) or bool(layout_steps)
 
     # Keep the loaded key in setup.ini local_models. --update can drop a
     # key that import added if the clone CSV lagged.
@@ -3740,12 +3935,13 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
     )
     parallel_clamped = parallel_override is None and use_parallel != ini_parallel
 
-    # Already the loaded GGUF (sycl_active_model) and no slot/ctx change.
+    # Already the loaded GGUF (sycl_active_model) and no slot/ctx/mmproj change.
     if (
         not model_changed
         and ctx_override is None
         and parallel_override is None
         and not parallel_clamped
+        and not mmproj_reload
     ):
         json_response(
             True,
@@ -3759,6 +3955,7 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
 
     errors = []
     steps = []
+    steps.extend(layout_steps)
     affected = []
 
     # ── 1. Agent sync (strategy-dependent) ──
@@ -3821,8 +4018,12 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
         ctx_override=ctx_override,
         parallel_override=parallel_override,
         parallel_changed=parallel_clamped,
+        mmproj_reload=mmproj_reload,
     ):
-        click.echo("  Restarting Docker (loading the selected GGUF)...", err=True)
+        if mmproj_reload:
+            click.echo("  Restarting Docker so llama-server can pair the projector...", err=True)
+        else:
+            click.echo("  Restarting Docker (loading the selected GGUF)...", err=True)
         ok, msg = _docker_restart_sycl(
             parallel=use_parallel,
             ctx_size=use_ctx,
@@ -3837,6 +4038,15 @@ def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, c
                 err=True,
             )
             steps.append(f"router ready; {api_id} loads on demand")
+            if mmproj_reload:
+                models_ini_path = _resolve_models_ini_path()
+                if models_ini_path:
+                    updated = dict(meta or {})
+                    updated["mmproj_router"] = True
+                    _upsert_models_ini_entry(
+                        models_ini_path, "sycl_model_meta", name, meta_value(updated),
+                    )
+                    steps.append("sycl_model_meta mmproj_router")
         else:
             errors.append(msg)
     else:

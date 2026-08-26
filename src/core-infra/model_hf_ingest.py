@@ -8,16 +8,19 @@ storage or agent pickers.
 
 from __future__ import annotations
 
+import base64
 import configparser
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -300,12 +303,14 @@ def inspect_hf_source(
             )
     elif classification == CLASS_VLM:
         warnings.append(
-            "Vision projector (mmproj) detected. Chat import may store the main GGUF as "
-            "text-only; image input requires TD-LOCAL-MMProj-001."
+            "Vision projector (mmproj) detected. Chat import stores the main GGUF "
+            "and the projector. Catalog stays text-only until vision probe."
         )
         next_step = (
-            "You may import the main GGUF as a text-only chat model. Do not set "
-            "input_modalities=image until TD-LOCAL-MMProj-001 wires and probes mmproj."
+            "On topology=local or server (Intel SYCL): "
+            "sudo agictl model sycl import <source> --name <key> --runtime chat. "
+            "Re-import of an existing key downloads a missing projector. "
+            "Do not set input_modalities=image until vision probe passes."
         )
     elif classification == CLASS_UNKNOWN:
         next_step = (
@@ -515,6 +520,170 @@ def ensure_name_in_csv(values: list[str], name: str) -> list[str]:
     return out
 
 
+def select_mmproj_file(files: Iterable[HfFile] | None) -> HfFile | None:
+    """Prefer Unsloth ``mmproj-F16.gguf``, then BF16, then any mmproj-*.gguf."""
+    found = [f for f in (files or []) if f and MMPROJ_RE.search(f.path or "")]
+    if not found:
+        return None
+
+    def _rank(item: HfFile) -> tuple[int, str]:
+        name = os.path.basename(item.path or "").lower()
+        if name == "mmproj-f16.gguf":
+            return (0, name)
+        if "f16" in name:
+            return (1, name)
+        if "bf16" in name:
+            return (2, name)
+        return (3, name)
+
+    return sorted(found, key=_rank)[0]
+
+
+def paired_mmproj_name(main_file: str) -> str:
+    """Legacy flat name. Pin ``b10430`` does not pair this in ``--models-dir``."""
+    base = os.path.basename(main_file or "").strip()
+    if not base:
+        return ""
+    return f"mmproj-{base}"
+
+
+MMPROJ_STORE_NAME = "mmproj-F16.gguf"
+
+
+def gguf_stem(main_file: str) -> str:
+    return os.path.basename(main_file or "").removesuffix(".gguf")
+
+
+def sycl_vlm_subdir(dest_dir: str, main_file: str) -> str:
+    """``dest_dir/<stem>/`` — llama-server pairs mmproj only inside this folder."""
+    stem = gguf_stem(main_file)
+    if not dest_dir or not stem:
+        return ""
+    return os.path.join(dest_dir, stem)
+
+
+def list_mmproj_paths(folder: str) -> list[str]:
+    if not folder or not os.path.isdir(folder):
+        return []
+    return sorted(
+        os.path.join(folder, name)
+        for name in os.listdir(folder)
+        if MMPROJ_RE.search(name)
+    )
+
+
+def sycl_main_gguf_path(dest_dir: str, main_file: str) -> str:
+    """Prefer ``<stem>/<file>``, else the flat ``<file>``."""
+    base = os.path.basename(main_file or "")
+    if not dest_dir or not base:
+        return ""
+    nested = os.path.join(sycl_vlm_subdir(dest_dir, main_file), base)
+    if os.path.isfile(nested):
+        return nested
+    return os.path.join(dest_dir, base)
+
+
+def sycl_vlm_layout_ready(dest_dir: str, main_file: str) -> bool:
+    sub = sycl_vlm_subdir(dest_dir, main_file)
+    main = os.path.join(sub, os.path.basename(main_file or "")) if sub else ""
+    return bool(main and os.path.isfile(main) and list_mmproj_paths(sub))
+
+
+def ensure_sycl_vlm_subdir(dest_dir: str, main_file: str) -> dict[str, Any]:
+    """Move main GGUF + projector into ``dest_dir/<stem>/`` (same-filesystem rename)."""
+    base = os.path.basename(main_file or "")
+    sub = sycl_vlm_subdir(dest_dir, main_file)
+    steps: list[str] = []
+    dest_main = os.path.join(sub, base) if sub and base else ""
+    if sub:
+        os.makedirs(sub, exist_ok=True)
+    src_main = os.path.join(dest_dir, base) if dest_dir and base else ""
+    if (
+        dest_main
+        and src_main
+        and os.path.isfile(src_main)
+        and os.path.abspath(src_main) != os.path.abspath(dest_main)
+    ):
+        os.rename(src_main, dest_main)
+        steps.append(f"moved {base} → {gguf_stem(main_file)}/")
+    candidates: list[str] = []
+    if dest_dir:
+        for name in (paired_mmproj_name(main_file), MMPROJ_STORE_NAME):
+            leftover = os.path.join(dest_dir, name)
+            if os.path.isfile(leftover) and leftover not in candidates:
+                candidates.append(leftover)
+    if sub:
+        candidates.extend(list_mmproj_paths(sub))
+    dest_mmproj = os.path.join(sub, MMPROJ_STORE_NAME) if sub else ""
+    placed = ""
+    for src in candidates:
+        if not os.path.isfile(src):
+            continue
+        if dest_mmproj and os.path.abspath(src) == os.path.abspath(dest_mmproj):
+            placed = dest_mmproj
+            continue
+        if dest_mmproj and os.path.abspath(os.path.dirname(src)) == os.path.abspath(sub):
+            placed = src
+            continue
+        if dest_mmproj:
+            if os.path.isfile(dest_mmproj) and os.path.abspath(src) != os.path.abspath(dest_mmproj):
+                os.remove(dest_mmproj)
+            os.rename(src, dest_mmproj)
+            steps.append(f"moved {os.path.basename(src)} → {gguf_stem(main_file)}/{MMPROJ_STORE_NAME}")
+            placed = dest_mmproj
+            break
+    if not placed and dest_mmproj and os.path.isfile(dest_mmproj):
+        placed = dest_mmproj
+    return {
+        "subdir": sub,
+        "main": dest_main if dest_main and os.path.isfile(dest_main) else src_main,
+        "mmproj": placed,
+        "ready": sycl_vlm_layout_ready(dest_dir, main_file),
+        "steps": steps,
+    }
+
+
+def plan_sycl_additionals(
+    *,
+    main_file: str,
+    dest_dir: str,
+    inspect_files: Iterable[HfFile] | None = None,
+    meta: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Companion files for a chat GGUF. Today: mmproj only. Does not write."""
+    hub = select_mmproj_file(inspect_files)
+    source_file = (hub.path if hub else "") or ((meta or {}).get("mmproj_source") or "")
+    if not source_file:
+        return []
+    dest_file = MMPROJ_STORE_NAME
+    sub = sycl_vlm_subdir(dest_dir, main_file)
+    dest_path = os.path.join(sub, dest_file) if sub else dest_file
+    exists = bool(
+        dest_path and os.path.isfile(dest_path)
+    ) or sycl_mmproj_on_disk(dest_dir, main_file)
+    return [
+        {
+            "role": "mmproj",
+            "source": os.path.basename(source_file),
+            "file": dest_file,
+            "path": dest_path,
+            "exists": exists,
+            "hub_size_bytes": hub.size if hub else None,
+        }
+    ]
+
+
+def install_paired_file(src_path: str, dest_dir: str, dest_name: str) -> str:
+    """Atomic move into dest_dir, then rename to dest_name if Hub used another name."""
+    moved = atomic_move_into(src_path, dest_dir)
+    final = os.path.join(dest_dir, dest_name)
+    if os.path.abspath(moved) != os.path.abspath(final):
+        if os.path.isfile(final):
+            os.remove(final)
+        os.replace(moved, final)
+    return final
+
+
 def drop_name_from_csv(values: list[str], name: str) -> list[str]:
     """Return values without name (LA-DEL setup.ini / paths.env CSV)."""
     key = (name or "").strip()
@@ -540,9 +709,18 @@ def plan_sycl_remove(name: str, registry: dict, dest_dir: str) -> dict:
     key = (name or "").strip()
     row = (registry or {}).get(key) or {}
     filename = (row.get("file") or "").strip()
-    path = os.path.join(dest_dir, filename) if filename else ""
+    path = sycl_main_gguf_path(dest_dir, filename) if filename else ""
     shared = sycl_gguf_also_used_by(registry, key)
     exists = bool(path and os.path.isfile(path))
+    sub = sycl_vlm_subdir(dest_dir, filename) if filename else ""
+    found = list_mmproj_paths(sub) if sub else []
+    if dest_dir and filename:
+        found.extend(list_mmproj_paths(dest_dir))
+        leftover = os.path.join(dest_dir, paired_mmproj_name(filename))
+        if os.path.isfile(leftover) and leftover not in found:
+            found.append(leftover)
+    mmproj_path = found[0] if found else ""
+    mmproj_file = os.path.basename(mmproj_path) if mmproj_path else MMPROJ_STORE_NAME
     return {
         "name": key,
         "file": filename,
@@ -550,6 +728,12 @@ def plan_sycl_remove(name: str, registry: dict, dest_dir: str) -> dict:
         "gguf_exists": exists,
         "shared_keys": shared,
         "delete_gguf": bool(exists and not shared),
+        "mmproj_file": mmproj_file,
+        "mmproj_path": mmproj_path,
+        "mmproj_exists": bool(mmproj_path),
+        "delete_mmproj": bool(mmproj_path and not shared),
+        "subdir": sub,
+        "delete_subdir": bool(sub and os.path.isdir(sub) and not shared),
         "in_registry": key in (registry or {}),
     }
 
@@ -611,14 +795,91 @@ def activate_needs_docker_restart(
     ctx_override: int | None,
     parallel_override: int | None,
     parallel_changed: bool = False,
+    mmproj_reload: bool = False,
 ) -> bool:
-    """Restart llama-server when the loaded GGUF or slot/ctx settings change."""
+    """Restart llama-server when the loaded GGUF, slot/ctx, or new projector changes."""
     return bool(
         model_changed
         or ctx_override is not None
         or parallel_override is not None
         or parallel_changed
+        or mmproj_reload
     )
+
+
+def sycl_mmproj_on_disk(dest_dir: str, main_file: str) -> bool:
+    if not dest_dir or not main_file:
+        return False
+    if list_mmproj_paths(sycl_vlm_subdir(dest_dir, main_file)):
+        return True
+    leftover = paired_mmproj_name(main_file)
+    if leftover and os.path.isfile(os.path.join(dest_dir, leftover)):
+        return True
+    return os.path.isfile(os.path.join(dest_dir, MMPROJ_STORE_NAME))
+
+
+def activate_needs_mmproj_reload(meta: dict | None, dest_dir: str, main_file: str) -> bool:
+    """Restart after a projector lands, or when the VLM subdir is not ready yet."""
+    if not sycl_mmproj_on_disk(dest_dir, main_file):
+        return False
+    if not sycl_vlm_layout_ready(dest_dir, main_file):
+        return True
+    return not bool((meta or {}).get("mmproj_router"))
+
+
+def catalog_input_modalities_after_probe(current: str | None) -> str:
+    tokens = [t.strip() for t in (current or "text").split(",") if t.strip()]
+    if "text" not in tokens:
+        tokens.insert(0, "text")
+    if "image" not in tokens:
+        tokens.append("image")
+    return ",".join(tokens)
+
+
+def builtin_probe_png() -> bytes:
+    """32×32 opaque red PNG (no extra files)."""
+    width = height = 32
+    raw = b"".join(b"\x00" + (b"\xff\x00\x00" * width) for _ in range(height))
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _chunk(b"IDAT", zlib.compress(raw, 9))
+        + _chunk(b"IEND", b"")
+    )
+
+
+def load_probe_image(spec: str) -> tuple[bytes, str]:
+    """``probe`` → built-in PNG; otherwise read a local JPEG/PNG path."""
+    text = (spec or "").strip()
+    if not text or text.lower() == "probe":
+        return builtin_probe_png(), "image/png"
+    if not os.path.isfile(text):
+        raise HfIngestError(f"Image not found: {text}", "missing_image")
+    with open(text, "rb") as fh:
+        data = fh.read(16)
+        rest = fh.read()
+    blob = data + rest
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return blob, "image/png"
+    if blob[:2] == b"\xff\xd8":
+        return blob, "image/jpeg"
+    raise HfIngestError(
+        f"{os.path.basename(text)} is not a JPEG or PNG.",
+        "not_image",
+    )
+
+
+def chat_image_content_parts(prompt: str, image_bytes: bytes, mime: str) -> list[dict[str, Any]]:
+    data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    return [
+        {"type": "text", "text": prompt or "What is in this image? Reply in one short sentence."},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ]
 
 
 def validate_gguf_file(path: str) -> None:

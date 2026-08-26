@@ -55,6 +55,8 @@ EXPECTED_INPUT_BINDINGS = {
     "openai/gpt-5.6-luna": "openrouter",
     # DR-CM-11
     "x-ai/grok-4.5": "openrouter",
+    # DR-LOC-01 / MP-3
+    "qwen3.6:35b": "llamacpp",
 }
 
 EXPECTED_OUTPUT_BINDINGS = {
@@ -96,6 +98,11 @@ EXPECTED_OUTPUT_BINDINGS = {
     ),
     # DR-LOC-02
     "qwen-image-2512": (
+        "local_media",
+        "image",
+        "local_media_image_out_sdcpp",
+    ),
+    "flux1-dev": (
         "local_media",
         "image",
         "local_media_image_out_sdcpp",
@@ -379,6 +386,15 @@ class TestCoverageAndAdvice(RegistryTestCase):
         self.assertEqual(claude["driver_badges"]["input"]["image"], "◇")
         self.assertIn("input:image◇", claude["driver_summary"])
 
+        qwen36 = reg.catalog_driver_enrichment(
+            "qwen3.6:35b",
+            self.catalog["qwen3.6:35b"],
+            catalog=self.catalog,
+            providers=self.providers,
+        )
+        self.assertEqual(qwen36["driver_badges"]["input"]["image"], "◆")
+        self.assertIn("input:image◆", qwen36["driver_summary"])
+
     def test_spawn_routing_requires_exact_non_text_input_driver(self):
         self.assertTrue(
             _model_supports_inputs(
@@ -393,6 +409,24 @@ class TestCoverageAndAdvice(RegistryTestCase):
             _model_supports_inputs(
                 "claude-sonnet-4-6",
                 self.catalog["claude-sonnet-4-6"],
+                ["text", "image"],
+                self.catalog,
+                self.providers,
+            )
+        )
+        self.assertTrue(
+            _model_supports_inputs(
+                "qwen3.6:35b",
+                self.catalog["qwen3.6:35b"],
+                ["text", "image"],
+                self.catalog,
+                self.providers,
+            )
+        )
+        self.assertFalse(
+            _model_supports_inputs(
+                "qwen3.8:27b",
+                self.catalog["qwen3.8:27b"],
                 ["text", "image"],
                 self.catalog,
                 self.providers,

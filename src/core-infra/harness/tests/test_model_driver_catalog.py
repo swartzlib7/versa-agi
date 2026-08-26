@@ -154,6 +154,17 @@ class TestModelDriverCatalogStock(unittest.TestCase):
         cfg = _config(path)
         self.assertIn("qwen3.8:27b", _csv(cfg.get("local_ai", "local_models")))
 
+    def test_stock_library_has_local_qwen36_image_in(self) -> None:
+        cfg = _config(self.models_path)
+        section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
+        self.assertTrue(cfg.has_option(section, "qwen3.6:35b"))
+        row = parse_catalog_row(cfg.get(section, "qwen3.6:35b"))
+        self.assertEqual(row["class"], "local")
+        self.assertEqual(row["provider"], "llamacpp")
+        self.assertEqual(_csv(row["input_modalities"]), {"text", "image"})
+        self.assertEqual(_csv(row["output_modalities"]), {"text"})
+        self.assertFalse(row["router_eligible"])
+
     def test_stock_library_has_local_qwen38(self) -> None:
         cfg = _config(self.models_path)
         section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"

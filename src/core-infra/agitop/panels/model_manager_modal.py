@@ -1122,7 +1122,7 @@ class CatalogFormModal(ModalScreen):
         if kind == "chat_vlm_mmproj":
             self.query_one("#f-input-modalities", Input).value = "text"
             self.query_one("#f-error", Static).update(
-                "[yellow]VLM+mmproj: import is text-only until TD-LOCAL-MMProj-001.[/]"
+                "[yellow]VLM: import stores the projector. Catalog stays text-only until vision probe.[/]"
             )
         self._sync_import_buttons()
 
