@@ -43,8 +43,11 @@ from model_hf_ingest import (
     meta_value,
     migrate_skip_reason,
     activate_needs_docker_restart,
+    drop_name_from_csv,
     ensure_name_in_csv,
+    plan_sycl_remove,
     resolve_activate_parallel,
+    sycl_remove_block_reason,
     size_gb_from_bytes,
     size_gb_from_path,
     sycl_import_block_reason,
@@ -980,7 +983,8 @@ def _reconcile_setup_ini(template, deployed):
 # Shared local sections: shipped rows + registry-added user rows coexist here,
 # so reconciliation is a per-key union (deployed-only keys are preserved).
 _MODELS_UNION_SECTIONS = (
-    "local_models", "context_windows", "sycl_models", "sycl_model_meta", "media_bundles",
+    "local_models", "context_windows", "sycl_models", "sycl_model_meta",
+    "media_bundles", "catalog_removed",
 )
 
 
@@ -1899,6 +1903,148 @@ def _local_model_name_set():
     return local_names
 
 
+def _agents_assigned_to_model(name):
+    """Agent names on this host whose catalog model is ``name``."""
+    key = (name or "").strip()
+    agents_db = "/var/lib/versa-agi/agents.db"
+    if not key or not os.path.isfile(agents_db):
+        return []
+    try:
+        conn = db_connect.connect_compat(agents_db)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM agents WHERE model = ?", (key,))
+        names = [row[0] for row in cursor.fetchall() if row and row[0]]
+        conn.close()
+        return names
+    except Exception:
+        return []
+
+
+def _media_catalog_keys():
+    """Stock + registered media bundle keys (must not use SYCL remove)."""
+    keys = [str(k).strip() for k in STOCK_MEDIA_CATALOG_KEYS if k]
+    try:
+        path = _resolve_models_ini_path()
+        if path:
+            keys.extend(load_media_bundles(path).keys())
+    except Exception:
+        pass
+    return keys
+
+
+def _parse_trailing_json(text):
+    """Last JSON object in stdout/stderr (agictl prints one payload line)."""
+    for line in reversed((text or "").splitlines()):
+        raw = line.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _sycl_inventory_present(name):
+    """True when this host still has catalog, CSV, or SYCL registry traces."""
+    key = (name or "").strip()
+    if not key:
+        return False
+    if key in _load_sycl_registry():
+        return True
+    current, _ = _read_ini_csv("local_ai", "local_models")
+    if key in current:
+        return True
+    try:
+        if key in _load_catalog():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _clear_sycl_inventory(name):
+    """Drop SYCL registry, catalog, and local_models CSV traces. Returns steps."""
+    key = (name or "").strip()
+    steps = []
+    if not key:
+        return steps
+    for path in _models_ini_write_targets():
+        for section in (
+            "sycl_models",
+            "sycl_model_meta",
+            "local_models",
+            "context_windows",
+            "catalog",
+            "catalog_custom",
+        ):
+            if _remove_ini_entry(path, section, key):
+                steps.append(f"{os.path.basename(path)} [{section}]")
+        if _remove_ini_entry(path, "model_params_custom", f"model:{key}"):
+            steps.append(f"{os.path.basename(path)} [model_params_custom]")
+        if _remove_ini_entry(path, "model_params", f"model:{key}"):
+            steps.append(f"{os.path.basename(path)} [model_params]")
+    _remember_catalog_removed(key)
+    current_models, ini_path = _read_ini_csv("local_ai", "local_models")
+    remaining = drop_name_from_csv(current_models, key)
+    if remaining != current_models:
+        if ini_path and _update_ini_csv("local_ai", "local_models", remaining, ini_path):
+            steps.append("setup.ini local_models")
+        current_models = remaining
+    if _update_paths_env_key("VERSA_LOCAL_MODELS", ",".join(current_models)):
+        steps.append("paths.env")
+    return steps
+
+
+def _gpu_host_sudo_error(detail):
+    """Rewrite remote ``sudo -n`` failures into an --update hint."""
+    text = (detail or "").strip()
+    low = text.lower()
+    if "password is required" in low or "a terminal is required" in low:
+        return (
+            "GPU host watchdog cannot passwordless-sudo 'agictl model sycl'. "
+            "On the GPU host run: sudo ./setup.sh --update"
+        )
+    return text or "GPU host remove returned no JSON"
+
+
+def _sycl_remove_on_gpu_host(name, dry_run, timeout=600):
+    """Client → GPU ``model sycl remove`` over watchdog SSH."""
+    from model_media_remote import (
+        build_gpu_host_agictl_cmd,
+        read_tunnel_host,
+        watchdog_ssh_key,
+    )
+
+    args = ["model", "sycl", "remove", name]
+    if dry_run:
+        args.append("--dry-run")
+    host = read_tunnel_host()
+    if not host:
+        raise HfIngestError(
+            "No tunnel_host in client_config.json — run setup_local.sh",
+            "no_tunnel_host",
+        )
+    cmd = build_gpu_host_agictl_cmd(
+        args,
+        topology="client",
+        tunnel_host=host,
+        ssh_key=watchdog_ssh_key(),
+    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    payload = _parse_trailing_json(result.stdout) or _parse_trailing_json(result.stderr)
+    if not payload:
+        raise HfIngestError(
+            _gpu_host_sudo_error(result.stderr or result.stdout),
+            "remote_failed",
+        )
+    if not payload.get("success"):
+        raise HfIngestError(
+            payload.get("error") or "GPU host remove failed",
+            payload.get("code") or "remote_failed",
+        )
+    return payload
+
+
 def _preview_local_agent_model_sweep():
     """List (agent_name, old_model) that single-mode activate would retarget."""
     affected = []
@@ -2652,6 +2798,130 @@ def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dr
         steps=steps,
         hint=f"Registered as text-only chat. Activate separately: sudo agictl model activate {name}",
         **plan,
+    )
+
+
+@model_sycl.command("remove")
+@click.argument("name")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+@click.option(
+    "--confirm-agent-assignments",
+    is_flag=True,
+    help="Allow remove while agents still list this key (does not retarget them)",
+)
+def model_sycl_remove(name, dry_run, confirm_agent_assignments):
+    """Delete a SYCL chat model: GGUF, registry, catalog, and local_models.
+
+    Media bundles use ``model media remove``. The loaded GGUF must be switched
+    first. On topology=client this SSHs to the GPU host, then cleans this machine.
+    """
+    key = (name or "").strip()
+    topo = _resolve_topology()
+    if os.geteuid() != 0 and not dry_run:
+        json_response(
+            False,
+            error="model sycl remove requires root. Use: sudo agictl model sycl remove ...",
+            mutated=False,
+        )
+        sys.exit(1)
+
+    blocked = sycl_remove_block_reason(
+        key,
+        active_model="" if topo == "client" else _resolve_sycl_active_model(),
+        media_keys=_media_catalog_keys(),
+        assigned_agents=_agents_assigned_to_model(key),
+        confirm_agent_assignments=confirm_agent_assignments,
+    )
+    if blocked:
+        json_response(False, error=blocked, mutated=False)
+        sys.exit(1)
+
+    if topo == "client":
+        try:
+            remote = _sycl_remove_on_gpu_host(key, dry_run)
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code, mutated=False)
+            sys.exit(1)
+        local_steps = []
+        if not dry_run:
+            local_steps = _clear_sycl_inventory(key)
+            try:
+                _sync_catalog()
+            except Exception:
+                pass
+        action = "dry_run" if dry_run else (
+            "already_removed" if remote.get("action") == "already_removed" and not local_steps
+            else "removed"
+        )
+        json_response(
+            True,
+            action=action,
+            name=key,
+            topology=topo,
+            gpu=remote,
+            local_steps=local_steps,
+            mutated=not dry_run,
+            hint="Agents still assigned keep this key until you retarget them.",
+        )
+        return
+
+    gpu_backend = _resolve_gpu_backend()
+    if gpu_backend != "intel":
+        json_response(
+            False,
+            error="model sycl remove is for Intel SYCL. Use: sudo agictl model remove <name>",
+            gpu_backend=gpu_backend,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    registry = _load_sycl_registry()
+    plan = plan_sycl_remove(key, registry, SYCL_MODEL_DIR)
+    present = _sycl_inventory_present(key) or plan["gguf_exists"]
+    steps = []
+    if dry_run:
+        json_response(
+            True,
+            action="dry_run",
+            name=key,
+            topology=topo,
+            plan=plan,
+            inventory_present=present,
+            mutated=False,
+        )
+        return
+
+    if plan["delete_gguf"]:
+        try:
+            os.remove(plan["path"])
+            steps.append(f"deleted {plan['file']}")
+        except OSError as exc:
+            json_response(False, error=f"Failed to delete GGUF: {exc}", plan=plan, mutated=False)
+            sys.exit(1)
+    elif plan["shared_keys"]:
+        steps.append(f"kept GGUF (also used by {', '.join(plan['shared_keys'])})")
+    elif plan["in_registry"] and not plan["gguf_exists"]:
+        steps.append("GGUF already absent")
+
+    steps.extend(_clear_sycl_inventory(key))
+    try:
+        _sync_catalog()
+    except Exception:
+        pass
+
+    action = "already_removed" if not present and not steps else "removed"
+    json_response(
+        True,
+        action=action,
+        name=key,
+        topology=topo,
+        plan=plan,
+        steps=steps,
+        mutated=action == "removed",
+        hint=(
+            "Activate another model first if this was loaded. "
+            "On a client, run sudo agictl model refresh after GPU-only leftover cleanup."
+        ),
     )
 
 
@@ -4019,14 +4289,22 @@ _PROVIDER_DEFAULT_MODEL_PARAMS = json.dumps({
 }, separators=(",", ":"))
 
 
-def _append_setup_csv(section, key, value):
-    """Append ``value`` to a comma-separated setup.ini key (every live copy)."""
-    for ini in (SETUP_INI_CANONICAL, os.path.join(
+def _setup_ini_live_paths() -> list[str]:
+    """Deployed setup.ini plus the source copy next to setup.sh, if present."""
+    paths = [SETUP_INI_CANONICAL]
+    src = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "setup.ini",
-    )):
-        if not os.path.isfile(ini):
-            continue
+    )
+    if src not in paths:
+        paths.append(src)
+    return [p for p in paths if os.path.isfile(p)]
+
+
+def _append_setup_csv(section, key, value):
+    """Append ``value`` to a comma-separated setup.ini key (every live copy)."""
+    _forget_catalog_removed(value)
+    for ini in _setup_ini_live_paths():
         existing = _read_ini_csv(section, key)[0]
         if value not in existing:
             existing.append(value)
@@ -4034,6 +4312,65 @@ def _append_setup_csv(section, key, value):
                 _update_ini_key(ini, section, key, ",".join(existing))
             except Exception:
                 pass
+
+
+def _drop_setup_csv(section, option, value):
+    """Remove ``value`` from a comma-separated setup.ini key (every live copy)."""
+    import configparser
+    for ini in _setup_ini_live_paths():
+        cfg = configparser.ConfigParser()
+        try:
+            cfg.read(ini)
+        except configparser.Error:
+            continue
+        if not cfg.has_option(section, option):
+            continue
+        items = [m.strip() for m in cfg.get(section, option).split(",") if m.strip()]
+        if value not in items:
+            continue
+        try:
+            _update_ini_key(ini, section, option, ",".join(m for m in items if m != value))
+        except Exception:
+            pass
+
+
+def _drop_catalog_key_from_setup_ini(key):
+    """Drop a catalog key from every setup.ini activation CSV."""
+    _drop_setup_csv("gemini", "cloud_models", key)
+    _drop_setup_csv("gemini", "coa_approved_models", key)
+    _drop_setup_csv("local_ai", "local_models", key)
+    slugs = list(_read_ini_csv("third_party", "providers")[0] or [])
+    for slug in dict.fromkeys([*slugs, "xai", "openai", "anthropic", "openrouter"]):
+        _drop_setup_csv("third_party", f"{slug}_models", key)
+
+
+def _catalog_removed_keys() -> set[str]:
+    """Operator-removed catalog keys (survive --update via [catalog_removed])."""
+    import configparser
+    out: set[str] = set()
+    for path in _MODELS_INI_PATHS:
+        if not os.path.isfile(path):
+            continue
+        cfg = configparser.ConfigParser(delimiters=("=",), strict=False)
+        cfg.optionxform = str
+        try:
+            cfg.read(path)
+        except configparser.Error:
+            continue
+        if not cfg.has_section("catalog_removed"):
+            continue
+        out.update(k.strip() for k in cfg.options("catalog_removed") if k.strip())
+    return out
+
+
+def _remember_catalog_removed(key):
+    for path in _models_ini_write_targets():
+        _upsert_models_ini_entry(path, "catalog_removed", key, "1")
+
+
+def _forget_catalog_removed(key):
+    for path in _models_ini_write_targets():
+        _remove_ini_entry(path, "catalog_removed", key)
 
 
 @model.group("source")
@@ -4351,6 +4688,7 @@ def _build_migration_rows(target):
     local_models = _read_ini_csv("local_ai", "local_models")[0]
     tp_providers = _read_ini_csv("third_party", "providers")[0]
     google_enabled = _gemini_credentials_present() and _gemini_provider_enabled()
+    removed = _catalog_removed_keys()
 
     or_index: dict = {}
     try:
@@ -4363,6 +4701,8 @@ def _build_migration_rows(target):
     # ── Cloud: inject only when Gemini credentials + enabled= ──
     if google_enabled:
         for k in cloud_models:
+            if k in removed:
+                continue
             m = cat_meta.get(k, {})
             lbl = m.get("label", k)
             rec = m.get("ctx_recommended", 0)
@@ -4402,6 +4742,8 @@ def _build_migration_rows(target):
         if p_enabled != "true":
             continue
         for k in _read_ini_csv("third_party", f"{slug}_models")[0]:
+            if k in removed:
+                continue
             m = cat_meta.get(k, {})
             lbl = m.get("label", k)
             rec = m.get("ctx_recommended", 0)
@@ -4446,6 +4788,8 @@ def _build_migration_rows(target):
             if mini.has_section("local_models") else [])
         sycl_meta = load_sycl_meta(_resolve_models_ini_path())
         for k in local_keys:
+            if k in removed:
+                continue
             if migrate_skip_reason(sycl_meta.get(k)):
                 continue
             rec, mx = _local_ctx(k, 4096)
@@ -4466,6 +4810,8 @@ def _build_migration_rows(target):
         if mini.has_section("media_bundles"):
             media_keys = [k for k, _ in mini.items("media_bundles") if k and not k.startswith("#")]
         for k in dict.fromkeys([*media_keys, *STOCK_MEDIA_CATALOG_KEYS]):
+            if k in removed:
+                continue
             m = cat_meta.get(k, {})
             if k not in STOCK_MEDIA_CATALOG_KEYS and m.get("provider") not in ("local_media", "", None):
                 continue
@@ -4872,6 +5218,7 @@ def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
     if not targets:
         json_response(False, error="models.ini not found")
         sys.exit(1)
+    _forget_catalog_removed(key)
 
     model_row = {
         "class": model_class, "provider": provider, "enabled": enabled, "coa": coa_approved,
@@ -4983,42 +5330,37 @@ def catalog_update(key, label, provider, model_class, ctx_recommended, ctx_max,
 @click.argument("key")
 @click.option("--no-sync", is_flag=True)
 def catalog_remove(key, no_sync):
-    """Remove a model from the catalog.
+    """Remove a model from the catalog and setup.ini activation lists.
 
-    Custom (CLI/dashboard-added) models are deleted outright. Models that come
-    from the setup.ini **baseline** cannot be deleted here (migrate would just
-    re-add them) — they are *disabled* via a custom override instead. To drop a
-    baseline model entirely, remove it from setup.ini.
+    Drops the key from setup.ini CSVs, deletes user-layer catalog/params rows,
+    records ``[catalog_removed]`` so a later ``--update`` migrate does not
+    re-inject a stock list entry, then rebuilds the [catalog] baseline.
     """
     cat = _load_catalog()
     if key not in cat:
         json_response(False, error=f"Model '{key}' not in catalog.")
         sys.exit(1)
-    m = cat[key]
-    baseline_backed = m.get("origin") in ("baseline", "override")
 
     try:
+        _drop_catalog_key_from_setup_ini(key)
+        _remember_catalog_removed(key)
         for path in _models_ini_write_targets():
-            if baseline_backed:
-                m = dict(m)
-                m["enabled"] = False
-                value = catalog_row_to_value(m)
-                _upsert_models_ini_entry(path, "catalog_custom", key, value)
-            else:
-                _remove_ini_entry(path, "catalog_custom", key)
-                _remove_ini_entry(path, "local_models", key)
+            _remove_ini_entry(path, "catalog_custom", key)
+            _remove_ini_entry(path, "local_models", key)
             _remove_ini_entry(path, "model_params_custom", f"model:{key}")
+        _migrate_catalog_baseline(force=False)
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
 
-    if baseline_backed:
-        msg = (f"'{key}' is a setup.ini baseline model — disabled via override "
-               f"(remove it from setup.ini to drop entirely).")
-    else:
-        msg = f"Removed custom model '{key}' from catalog."
-    _auto_sync_and_respond({"model": key, "disabled_only": baseline_backed,
-                            "message": msg}, do_sync=not no_sync)
+    _auto_sync_and_respond(
+        {
+            "model": key,
+            "disabled_only": False,
+            "message": f"Removed '{key}' from catalog and setup.ini.",
+        },
+        do_sync=not no_sync,
+    )
 
 
 @catalog.command("reset")

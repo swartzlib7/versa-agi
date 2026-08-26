@@ -445,5 +445,39 @@ class TestAssignedLocalCatalogFallback(unittest.TestCase):
         self.assertIn("llamacpp", rows[0][1])
 
 
+class TestCatalogRemoved(unittest.TestCase):
+    def test_stock_seeds_catalog_removed_section(self) -> None:
+        cfg = _config(os.path.join(SRC_ROOT, "models.ini.stock"))
+        self.assertTrue(cfg.has_section("catalog_removed"))
+
+    def test_catalog_removed_keys_reads_section(self) -> None:
+        from agictl import cli as agictl_cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = os.path.join(tmp, "models.ini")
+            with open(ini, "w", encoding="utf-8") as handle:
+                handle.write("[catalog_removed]\ngpt-5.4-2026-03-05 = 1\n")
+            with patch.object(agictl_cli, "_MODELS_INI_PATHS", [ini]):
+                self.assertEqual(
+                    agictl_cli._catalog_removed_keys(),
+                    {"gpt-5.4-2026-03-05"},
+                )
+
+    def test_drop_setup_csv_removes_key(self) -> None:
+        from agictl import cli as agictl_cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = os.path.join(tmp, "setup.ini")
+            with open(ini, "w", encoding="utf-8") as handle:
+                handle.write("[third_party]\nopenrouter_models=a,b,c\n")
+            with patch.object(agictl_cli, "_setup_ini_live_paths", return_value=[ini]):
+                agictl_cli._drop_setup_csv("third_party", "openrouter_models", "b")
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read(ini)
+            left = [m.strip() for m in cfg.get("third_party", "openrouter_models").split(",") if m.strip()]
+        self.assertEqual(left, ["a", "c"])
+
+
 if __name__ == "__main__":
     unittest.main()

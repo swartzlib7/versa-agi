@@ -49,7 +49,6 @@ _CLASS_CHOICES = [
     ("☁ Cloud · other provider", "third_party"),
     ("🖥 Local · Ollama / llama.cpp", "local"),
 ]
-_CLASS_ORDER = {"cloud": 0, "third_party": 1, "local": 2}
 _COMMON_LC_CLASSES = [
     ("ChatOpenAI", "ChatOpenAI"),
     ("ChatAnthropic", "ChatAnthropic"),
@@ -312,27 +311,37 @@ class ModelRemoveConfirmModal(ModalScreen):
     }
     """
 
-    def __init__(self, key: str, label: str = "", origin: str = "", **kwargs):
+    def __init__(
+        self,
+        key: str,
+        label: str = "",
+        origin: str = "",
+        local_sycl: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.key = key
         self.label = label
         self.origin = origin
+        self.local_sycl = local_sycl
 
     def compose(self) -> ComposeResult:
         title = f"[bold red]⚠ Remove Model: {self.key}[/]"
         if self.label and self.label != self.key:
             title += f"\n[dim]{self.label}[/]"
-        if self.origin in ("baseline", "override"):
+        if self.local_sycl:
             body = (
-                "This model is provisioned by setup.ini.\n"
-                "Remove will disable it via a custom override.\n"
-                "To drop it entirely, remove it from setup.ini.\n\n"
-                "[bold]This cannot be undone from Reset alone.[/]"
+                "This deletes the GGUF on the GPU host, the SYCL registry,\n"
+                "the catalog row, and local_models.\n"
+                "Activate another model first if this one is loaded.\n"
+                "Agents still assigned keep this key until you retarget them.\n\n"
+                "[bold]This cannot be undone.[/]"
             )
         else:
             body = (
-                "This deletes the custom catalog entry from [catalog_custom]\n"
-                "and clears any per-model default params.\n\n"
+                "This deletes the catalog entry and removes the key from\n"
+                "setup.ini activation lists so migrate will not bring it back.\n"
+                "Per-model default params are cleared.\n\n"
                 "[bold]This cannot be undone.[/]"
             )
         with Vertical(id="model-remove-dialog"):
@@ -478,7 +487,14 @@ class ModelManagerModal(ModalScreen):
         local_label = _local_backend_label()
         mt = self.query_one("#mm-models-table", DataTable)
         mt.clear()
-        for m in sorted(models, key=lambda r: (_CLASS_ORDER.get(r["class"], 9), r["key"])):
+        def _row_sort(r):
+            prov = (self._providers_by_slug.get(r.get("provider") or "") or {}).get(
+                "label"
+            ) or r.get("provider") or ""
+            label = r.get("label") or r.get("key") or ""
+            return (prov.casefold(), label.casefold(), r.get("key") or "")
+
+        for m in sorted(models, key=_row_sort):
             pin = m.get("prompt_per_m")
             pout = m.get("completion_per_m")
             price_in = f"{pin:.3g}" if pin else "—"
@@ -532,9 +548,9 @@ class ModelManagerModal(ModalScreen):
     def _feedback(self, markup) -> None:
         self.query_one("#mm-feedback", Static).update(markup)
 
-    def _apply(self, args, success_msg) -> None:
+    def _apply(self, args, success_msg, timeout=25) -> None:
         """Run a mutating agictl command, surface feedback, and reload on success."""
-        ok, data, err = _run_agictl(args)
+        ok, data, err = _run_agictl(args, timeout=timeout)
         if ok:
             self._dirty = True
             extra = data.get("message", "")
@@ -602,9 +618,17 @@ class ModelManagerModal(ModalScreen):
                         self._feedback("[yellow]Select a model row first.[/]")
                         return
                     m = self._models_by_key.get(key) or {}
+                    local_sycl = (
+                        m.get("class") == "local" and m.get("provider") == "llamacpp"
+                    )
                     self.app.push_screen(
-                        ModelRemoveConfirmModal(key, m.get("label", ""), m.get("origin", "")),
-                        callback=lambda confirmed: self._on_model_remove_confirmed(confirmed, key),
+                        ModelRemoveConfirmModal(
+                            key,
+                            m.get("label", ""),
+                            m.get("origin", ""),
+                            local_sycl=local_sycl,
+                        ),
+                        callback=lambda confirmed, k=key: self._on_model_remove_confirmed(confirmed, k),
                     )
                 else:
                     slug = self._selected_key("#mm-providers-table")
@@ -646,7 +670,16 @@ class ModelManagerModal(ModalScreen):
         )
 
     def _on_model_remove_confirmed(self, confirmed: bool, key: str) -> None:
-        if confirmed:
+        if not confirmed:
+            return
+        m = self._models_by_key.get(key) or {}
+        if m.get("class") == "local" and m.get("provider") == "llamacpp":
+            self._apply(
+                ["model", "sycl", "remove", key, "--confirm-agent-assignments"],
+                f"Removed local '{key}'",
+                timeout=600,
+            )
+        else:
             self._apply(["model", "catalog", "remove", key], f"Removed '{key}'")
 
     def _on_provider_remove_confirmed(self, confirmed: bool, slug: str) -> None:

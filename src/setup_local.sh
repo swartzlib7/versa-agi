@@ -455,7 +455,7 @@ _switch_sycl_llama_image() {
 }
 
 # Watchdog passwordless sudo for remote dashboard ops (SSH, no TTY).
-# Activate was first; Media Import uses the same sudo agictl pattern.
+# Activate was first; Media Import and SYCL remove use the same pattern.
 # Must run on --update even when this server is already configured.
 _ensure_watchdog_model_sudoers() {
   local sudoers_file="/etc/sudoers.d/versa-agi-model-activate"
@@ -466,17 +466,19 @@ _ensure_watchdog_model_sudoers() {
       [ -n "${p}" ] || continue
       echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: ${p} model activate *"
       echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: ${p} model media *"
+      echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: ${p} model sycl *"
     done
   } | awk 'NF && !seen[$0]++' > "${tmp}"
   if [ ! -s "${tmp}" ]; then
     echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl model activate *" > "${tmp}"
     echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl model media *" >> "${tmp}"
+    echo "${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl model sycl *" >> "${tmp}"
   fi
   chmod 0440 "${tmp}"
   if visudo -cf "${tmp}" >/dev/null 2>&1; then
     mv "${tmp}" "${sudoers_file}"
     chmod 0440 "${sudoers_file}"
-    ok "Sudoers: ${WATCHDOG_USER} can run 'sudo agictl model activate|media' without password"
+    ok "Sudoers: ${WATCHDOG_USER} can run 'sudo agictl model activate|media|sycl' without password"
   else
     rm -f "${tmp}"
     warn "Sudoers syntax check failed — left ${sudoers_file} unchanged."

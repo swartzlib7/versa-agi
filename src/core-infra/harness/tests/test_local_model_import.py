@@ -34,8 +34,11 @@ from model_hf_ingest import (  # noqa: E402
     InspectResult,
     activation_block_reason,
     activate_needs_docker_restart,
+    drop_name_from_csv,
     ensure_name_in_csv,
+    plan_sycl_remove,
     resolve_activate_parallel,
+    sycl_remove_block_reason,
     atomic_move_into,
     classify_hf_model,
     inspect_hf_source,
@@ -540,6 +543,148 @@ class TestSyclImagePin(unittest.TestCase):
             {"lan_ip": "10.0.0.1", "gpu_backend": "intel"},
         )
         self.assertEqual(merged["lan_ip"], "192.168.4.114")
+
+
+class TestSyclRemoveHelpers(unittest.TestCase):
+    def test_drop_name_from_csv(self):
+        self.assertEqual(drop_name_from_csv(["a", "b", "a"], "a"), ["b"])
+        self.assertEqual(drop_name_from_csv(["qwen3.8:27b"], "qwen3.6:35b"), ["qwen3.8:27b"])
+        self.assertEqual(drop_name_from_csv(["", "x"], "x"), [])
+
+    def test_shared_gguf_not_deleted(self):
+        registry = {
+            "a": {"file": "same.gguf"},
+            "b": {"file": "same.gguf"},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "same.gguf"), "wb") as fh:
+                fh.write(b"x")
+            plan = plan_sycl_remove("a", registry, td)
+        self.assertEqual(plan["shared_keys"], ["b"])
+        self.assertFalse(plan["delete_gguf"])
+        self.assertTrue(plan["gguf_exists"])
+
+    def test_unique_gguf_marked_for_delete(self):
+        registry = {"leftover:e4b": {"file": "only.gguf"}}
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "only.gguf"), "wb") as fh:
+                fh.write(b"x")
+            plan = plan_sycl_remove("leftover:e4b", registry, td)
+        self.assertEqual(plan["shared_keys"], [])
+        self.assertTrue(plan["delete_gguf"])
+
+    def test_block_media_active_and_agents(self):
+        self.assertIn(
+            "media bundle",
+            sycl_remove_block_reason("qwen-image-2512", media_keys=["qwen-image-2512"]),
+        )
+        self.assertIn(
+            "active",
+            sycl_remove_block_reason("qwen3.8:27b", active_model="qwen3.8:27b").lower(),
+        )
+        self.assertIn(
+            "clerk",
+            sycl_remove_block_reason("x", assigned_agents=["clerk"]),
+        )
+        self.assertIsNone(
+            sycl_remove_block_reason(
+                "x",
+                assigned_agents=["clerk"],
+                confirm_agent_assignments=True,
+            )
+        )
+
+
+class TestSyclRemoveCli(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
+        from click.testing import CliRunner
+        import cli as _cli_mod  # noqa: WPS433
+
+        cls.mod = _cli_mod
+        cls.cli = _cli_mod.cli
+        cls.runner = CliRunner
+
+    def test_refuses_active_on_gpu_host(self):
+        from click.testing import CliRunner
+
+        with patch("cli._resolve_topology", return_value="local"), patch(
+            "cli._resolve_gpu_backend", return_value="intel"
+        ), patch("cli.os.geteuid", return_value=0), patch(
+            "cli._resolve_sycl_active_model", return_value="gemma4:e4b"
+        ), patch("cli._agents_assigned_to_model", return_value=[]), patch(
+            "cli._media_catalog_keys", return_value=[]
+        ):
+            out = CliRunner().invoke(self.cli, ["model", "sycl", "remove", "gemma4:e4b"])
+        self.assertNotEqual(out.exit_code, 0, out.output)
+        payload = json.loads(out.output.strip().splitlines()[-1])
+        self.assertFalse(payload["success"])
+        self.assertIn("active", payload["error"].lower())
+
+    def test_refuses_media_key(self):
+        from click.testing import CliRunner
+
+        with patch("cli._resolve_topology", return_value="local"), patch(
+            "cli.os.geteuid", return_value=0
+        ), patch("cli._media_catalog_keys", return_value=["qwen-image-2512"]), patch(
+            "cli._agents_assigned_to_model", return_value=[]
+        ), patch("cli._resolve_sycl_active_model", return_value=""):
+            out = CliRunner().invoke(
+                self.cli, ["model", "sycl", "remove", "qwen-image-2512"]
+            )
+        self.assertNotEqual(out.exit_code, 0, out.output)
+        payload = json.loads(out.output.strip().splitlines()[-1])
+        self.assertIn("media", payload["error"].lower())
+
+    def test_client_refuses_agents_before_ssh(self):
+        from click.testing import CliRunner
+
+        with patch("cli._resolve_topology", return_value="client"), patch(
+            "cli.os.geteuid", return_value=0
+        ), patch("cli._media_catalog_keys", return_value=[]), patch(
+            "cli._agents_assigned_to_model", return_value=["clerk"]
+        ), patch("cli._sycl_remove_on_gpu_host") as remote:
+            out = CliRunner().invoke(self.cli, ["model", "sycl", "remove", "leftover:e4b"])
+        self.assertNotEqual(out.exit_code, 0, out.output)
+        remote.assert_not_called()
+
+    def test_client_sshes_then_clears_local(self):
+        from click.testing import CliRunner
+
+        with patch("cli._resolve_topology", return_value="client"), patch(
+            "cli.os.geteuid", return_value=0
+        ), patch("cli._media_catalog_keys", return_value=[]), patch(
+            "cli._agents_assigned_to_model", return_value=["clerk"]
+        ), patch(
+            "cli._sycl_remove_on_gpu_host",
+            return_value={"success": True, "action": "removed", "steps": ["deleted x.gguf"]},
+        ) as remote, patch(
+            "cli._clear_sycl_inventory", return_value=["setup.ini"]
+        ) as clear, patch("cli._sync_catalog", return_value=(True, {})):
+            out = CliRunner().invoke(
+                self.cli,
+                [
+                    "model",
+                    "sycl",
+                    "remove",
+                    "leftover:e4b",
+                    "--confirm-agent-assignments",
+                ],
+            )
+        self.assertEqual(out.exit_code, 0, out.output)
+        payload = json.loads(out.output.strip().splitlines()[-1])
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["action"], "removed")
+        remote.assert_called_once()
+        clear.assert_called_once_with("leftover:e4b")
+
+    def test_gpu_sudo_password_error_hints_update(self):
+        self.assertIn(
+            "setup.sh --update",
+            self.mod._gpu_host_sudo_error("sudo: a password is required"),
+        )
+        self.assertEqual(self.mod._gpu_host_sudo_error("disk full"), "disk full")
 
 
 if __name__ == "__main__":

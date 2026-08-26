@@ -13,6 +13,7 @@
 #   USER LAYER (owned by the CLI / dashboard — never touched by migrate):
 #   [providers_custom]    — Added/overridden providers
 #   [catalog_custom]      — Added/overridden models
+#   [catalog_removed]     — Operator-removed keys; migrate skips these
 #
 #   The loaders merge USER over BASELINE per key (whole-row override). So
 #   setup.ini edits propagate via the baseline, while CLI/dashboard edits in the
@@ -182,10 +183,17 @@ flux1-dev                     = local|local_media|true|false|0|0|local|text|imag
 # ─────────────────────────────────────────────────
 # Unified Model Catalog — USER LAYER (owned by `agictl model catalog` / the dashboard)
 # Overlays [catalog] per key (whole-row override). Never touched by migrate.
-# Disabling a baseline model writes a here-override with enabled=false.
 # ─────────────────────────────────────────────────
 
 [catalog_custom]
+
+# ─────────────────────────────────────────────────
+# Catalog removals — USER LAYER (Model Manager / catalog remove)
+# Keys listed here are skipped by migrate even if they remain in setup.ini CSVs
+# after a stock-list reconcile. Re-adding the model clears the row.
+# ─────────────────────────────────────────────────
+
+[catalog_removed]
 
 # ─────────────────────────────────────────────────
 # Catalog Pricing — USER LAYER (OpenRouter API enrichment, TD-COST-001)

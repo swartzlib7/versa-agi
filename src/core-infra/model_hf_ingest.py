@@ -515,6 +515,78 @@ def ensure_name_in_csv(values: list[str], name: str) -> list[str]:
     return out
 
 
+def drop_name_from_csv(values: list[str], name: str) -> list[str]:
+    """Return values without name (LA-DEL setup.ini / paths.env CSV)."""
+    key = (name or "").strip()
+    return [v for v in values if v and v != key]
+
+
+def sycl_gguf_also_used_by(registry: dict, name: str) -> list[str]:
+    """Other [sycl_models] keys that share this key's GGUF filename."""
+    key = (name or "").strip()
+    row = (registry or {}).get(key) or {}
+    filename = (row.get("file") or "").strip()
+    if not filename:
+        return []
+    return sorted(
+        other
+        for other, meta in (registry or {}).items()
+        if other != key and (meta or {}).get("file") == filename
+    )
+
+
+def plan_sycl_remove(name: str, registry: dict, dest_dir: str) -> dict:
+    """Describe GGUF + registry teardown. Does not write."""
+    key = (name or "").strip()
+    row = (registry or {}).get(key) or {}
+    filename = (row.get("file") or "").strip()
+    path = os.path.join(dest_dir, filename) if filename else ""
+    shared = sycl_gguf_also_used_by(registry, key)
+    exists = bool(path and os.path.isfile(path))
+    return {
+        "name": key,
+        "file": filename,
+        "path": path,
+        "gguf_exists": exists,
+        "shared_keys": shared,
+        "delete_gguf": bool(exists and not shared),
+        "in_registry": key in (registry or {}),
+    }
+
+
+def sycl_remove_block_reason(
+    name: str,
+    *,
+    active_model: str = "",
+    media_keys: list[str] | tuple[str, ...] | None = None,
+    assigned_agents: list[str] | None = None,
+    confirm_agent_assignments: bool = False,
+) -> str | None:
+    """Refuse media keys, the loaded GGUF, or assigned agents without confirm."""
+    key = (name or "").strip()
+    if not key:
+        return "Model key is required."
+    media = {str(k).strip() for k in (media_keys or []) if k}
+    if key in media:
+        return (
+            f"'{key}' is a media bundle. Use: sudo agictl model media remove {key}"
+        )
+    if key and key == (active_model or "").strip():
+        return (
+            f"Cannot remove active model '{key}'. "
+            f"Switch first: sudo agictl model activate <other>"
+        )
+    agents = [a for a in (assigned_agents or []) if a]
+    if agents and not confirm_agent_assignments:
+        listed = ", ".join(agents[:8])
+        extra = f" (+{len(agents) - 8})" if len(agents) > 8 else ""
+        return (
+            f"Agents still assigned to '{key}': {listed}{extra}. "
+            f"Retarget them or pass --confirm-agent-assignments."
+        )
+    return None
+
+
 def resolve_activate_parallel(
     ini_parallel: int,
     recommended: int,
