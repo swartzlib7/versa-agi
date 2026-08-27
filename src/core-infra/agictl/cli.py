@@ -92,6 +92,7 @@ try:
         WORK_MODALITIES,
         OUTPUT_DELIVERY_MODALITIES,
         assigned_local_catalog_rows_to_upsert,
+        catalog_label_after_probe,
         catalog_row_to_value,
         load_catalog as _mc_load_catalog,
         parse_catalog_row,
@@ -101,7 +102,7 @@ try:
     )
 except ImportError:
     WORK_MODALITIES = OUTPUT_DELIVERY_MODALITIES = None
-    assigned_local_catalog_rows_to_upsert = None
+    assigned_local_catalog_rows_to_upsert = catalog_label_after_probe = None
     catalog_row_to_value = _mc_load_catalog = parse_catalog_row = None
     validate_model_routing_prefs = validate_preferred_model_key = validate_preferred_output_key = None
 
@@ -3802,6 +3803,8 @@ def _apply_sycl_vision_catalog(name):
     row["input_modalities"] = catalog_input_modalities_after_probe(
         row.get("input_modalities")
     )
+    if catalog_label_after_probe is not None:
+        row["label"] = catalog_label_after_probe(row.get("label"))
     value = catalog_row_to_value(row)
     targets = _models_ini_write_targets()
     if not targets:

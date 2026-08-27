@@ -741,6 +741,22 @@ class TestSyclAdditionals(unittest.TestCase):
         ))
         self.assertFalse(plan[0]["exists"])
 
+    def test_plan_mmproj_additional_qwen38(self):
+        files = [HfFile("mmproj-F16.gguf", 928 * 1024**2)]
+        with tempfile.TemporaryDirectory() as td:
+            plan = plan_sycl_additionals(
+                main_file="Qwen3.8-27B-UD-Q6_K_XL.gguf",
+                dest_dir=td,
+                inspect_files=files,
+            )
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]["role"], "mmproj")
+        self.assertEqual(plan[0]["source"], "mmproj-F16.gguf")
+        self.assertTrue(plan[0]["path"].endswith(
+            "Qwen3.8-27B-UD-Q6_K_XL/mmproj-F16.gguf"
+        ))
+        self.assertFalse(plan[0]["exists"])
+
     def test_no_mmproj_means_no_additionals(self):
         self.assertEqual(
             plan_sycl_additionals(
@@ -812,6 +828,18 @@ class TestSyclVisionProbe(unittest.TestCase):
         self.assertEqual(
             catalog_input_modalities_after_probe("text,image"), "text,image"
         )
+
+    def test_catalog_label_drops_pre_probe_note(self):
+        from model_catalog import catalog_label_after_probe, parse_catalog_row
+
+        stale = "Qwen 3.8 27B — hybrid thinking, 256K context (text-only until mmproj)"
+        clean = "Qwen 3.8 27B — hybrid thinking, 256K context"
+        self.assertEqual(catalog_label_after_probe(stale), clean)
+        self.assertEqual(catalog_label_after_probe(clean), clean)
+        row = parse_catalog_row(
+            "local|llamacpp|true|false|32768|262144|local|text,image|text|false|" + stale
+        )
+        self.assertEqual(row["label"], clean)
 
     def test_builtin_png_and_parts(self):
         png = builtin_probe_png()

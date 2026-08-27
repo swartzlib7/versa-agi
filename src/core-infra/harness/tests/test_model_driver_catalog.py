@@ -172,7 +172,7 @@ class TestModelDriverCatalogStock(unittest.TestCase):
         row = parse_catalog_row(cfg.get(section, "qwen3.8:27b"))
         self.assertEqual(row["class"], "local")
         self.assertEqual(row["provider"], "llamacpp")
-        self.assertEqual(_csv(row["input_modalities"]), {"text"})
+        self.assertEqual(_csv(row["input_modalities"]), {"text", "image"})
         self.assertEqual(_csv(row["output_modalities"]), {"text"})
         self.assertEqual(row["ctx_max"], 262144)
         self.assertFalse(row["router_eligible"])

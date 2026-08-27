@@ -41,6 +41,14 @@ def _read_raw_section(path: str, section: str) -> dict[str, str]:
     return out
 
 
+_STALE_TEXT_ONLY_MMPROJ_LABEL = " (text-only until mmproj)"
+
+
+def catalog_label_after_probe(label: str | None) -> str:
+    """Drop the pre-probe parenthetical once vision is live on the row."""
+    return (label or "").replace(_STALE_TEXT_ONLY_MMPROJ_LABEL, "").strip()
+
+
 def parse_catalog_row(raw: str) -> dict | None:
     """Parse a catalog pipe row (7- or 11-field) into a normalized dict."""
     parts = [p.strip() for p in raw.split("|")]
@@ -57,13 +65,13 @@ def parse_catalog_row(raw: str) -> dict | None:
         input_modalities = parts[7] or "text"
         output_modalities = parts[8] or "text"
         router_eligible = parts[9].lower() == "true"
-        label = "|".join(parts[10:]).strip()
+        label = catalog_label_after_probe("|".join(parts[10:]))
     else:
         work_modality = "balanced"
         input_modalities = "text"
         output_modalities = "text"
         router_eligible = False
-        label = "|".join(parts[6:]).strip()
+        label = catalog_label_after_probe("|".join(parts[6:]))
 
     return {
         "class": parts[0],

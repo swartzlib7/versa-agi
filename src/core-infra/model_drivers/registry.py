@@ -141,8 +141,9 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
     _binding("openai/gpt-5.6-luna"),
     # DR-CM-11 — OpenRouter Grok 4.5 image input.
     _binding("x-ai/grok-4.5"),
-    # DR-LOC-01 / MP-3 — local SYCL chat vision (llama-server content parts).
+    # DR-LOC-01 — local SYCL chat vision (llama-server content parts).
     _binding("qwen3.6:35b"),
+    _binding("qwen3.8:27b"),
     # DR-CM-01 — OpenRouter image output.
     _binding(
         "google/gemini-3.1-flash-image",

@@ -55,8 +55,9 @@ EXPECTED_INPUT_BINDINGS = {
     "openai/gpt-5.6-luna": "openrouter",
     # DR-CM-11
     "x-ai/grok-4.5": "openrouter",
-    # DR-LOC-01 / MP-3
+    # DR-LOC-01
     "qwen3.6:35b": "llamacpp",
+    "qwen3.8:27b": "llamacpp",
 }
 
 EXPECTED_OUTPUT_BINDINGS = {
@@ -395,6 +396,15 @@ class TestCoverageAndAdvice(RegistryTestCase):
         self.assertEqual(qwen36["driver_badges"]["input"]["image"], "◆")
         self.assertIn("input:image◆", qwen36["driver_summary"])
 
+        qwen38 = reg.catalog_driver_enrichment(
+            "qwen3.8:27b",
+            self.catalog["qwen3.8:27b"],
+            catalog=self.catalog,
+            providers=self.providers,
+        )
+        self.assertEqual(qwen38["driver_badges"]["input"]["image"], "◆")
+        self.assertIn("input:image◆", qwen38["driver_summary"])
+
     def test_spawn_routing_requires_exact_non_text_input_driver(self):
         self.assertTrue(
             _model_supports_inputs(
@@ -423,7 +433,7 @@ class TestCoverageAndAdvice(RegistryTestCase):
                 self.providers,
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             _model_supports_inputs(
                 "qwen3.8:27b",
                 self.catalog["qwen3.8:27b"],
