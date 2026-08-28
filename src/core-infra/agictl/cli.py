@@ -7755,11 +7755,12 @@ def agent_set_model(name, model, clear_model):
             try:
                 from harness.model_context import get_model_context
                 recommended, _ = get_model_context(new_model)
-                if recommended:
-                    conn.execute(
-                        "UPDATE agents SET num_ctx = ?, updated_at = datetime('now') WHERE name = ?",
-                        (recommended, name),
-                    )
+                # Always persist, including 0 (cloud Auto). `if recommended`
+                # is false for 0 and left a leftover 4K local default on COA.
+                conn.execute(
+                    "UPDATE agents SET num_ctx = ?, updated_at = datetime('now') WHERE name = ?",
+                    (int(recommended), name),
+                )
             except Exception:
                 pass
         conn.commit()

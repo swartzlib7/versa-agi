@@ -1752,15 +1752,18 @@ def main():
         """Trim messages to fit context window before LLM call.
         Returns llm_input_messages (not messages) to preserve full checkpoint history."""
         all_msgs = state["messages"]
-        trimmed = trim_messages(
-            all_msgs,
+        # start_on="human" empties first-contact / tool-only threads (no
+        # HumanMessage). Only require a human start when one exists.
+        trim_kwargs = dict(
             max_tokens=CONTEXT_WINDOW_CHARS,
             strategy="last",
             token_counter=_count_message_chars,
             include_system=True,     # always preserve system prompt
-            start_on="human",        # ensure valid message ordering
             allow_partial=False,
         )
+        if any(isinstance(m, HumanMessage) for m in all_msgs):
+            trim_kwargs["start_on"] = "human"
+        trimmed = trim_messages(all_msgs, **trim_kwargs)
         if len(trimmed) < len(all_msgs):
             tlog(f"CONTEXT TRIM: {len(all_msgs)} → {len(trimmed)} messages "
                  f"({_count_message_chars(trimmed):,} chars, limit: {CONTEXT_WINDOW_CHARS:,})")

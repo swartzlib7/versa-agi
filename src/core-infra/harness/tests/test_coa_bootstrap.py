@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -110,12 +111,27 @@ class BootstrapDetection(unittest.TestCase):
         # Simulate openrouter keyed via monkeypatch
         self._init_db("z-ai/glm-5.2")
         orig = cb.usable_providers
+        orig_cat = cb._model_in_live_catalog
         cb.usable_providers = lambda **kw: ["openrouter"]  # type: ignore
+        cb._model_in_live_catalog = lambda m: True  # type: ignore
         try:
             self.assertFalse(cb.needs_coa_bootstrap(**self._kwargs()))
             self.assertFalse(cb.should_auto_prompt_bootstrap(**self._kwargs()))
         finally:
             cb.usable_providers = orig
+            cb._model_in_live_catalog = orig_cat
+
+    def test_coa_model_missing_from_catalog_needs(self):
+        self._init_db("x-ai/grok-4.5")
+        orig = cb.usable_providers
+        orig_cat = cb._model_in_live_catalog
+        cb.usable_providers = lambda **kw: ["openrouter"]  # type: ignore
+        cb._model_in_live_catalog = lambda m: False  # type: ignore
+        try:
+            self.assertTrue(cb.needs_coa_bootstrap(**self._kwargs()))
+        finally:
+            cb.usable_providers = orig
+            cb._model_in_live_catalog = orig_cat
 
     def test_coa_on_unkeyed_provider_needs(self):
         self._init_db("gemini-3-flash-preview")
@@ -146,12 +162,15 @@ class BootstrapDetection(unittest.TestCase):
         self._init_db("z-ai/glm-5.2")
         cb.mark_bootstrap_done(self.state)
         orig = cb.usable_providers
+        orig_cat = cb._model_in_live_catalog
         cb.usable_providers = lambda **kw: ["openrouter"]  # type: ignore
+        cb._model_in_live_catalog = lambda m: True  # type: ignore
         try:
             self.assertFalse(cb.needs_coa_bootstrap(**self._kwargs()))
             self.assertFalse(cb.should_show_remind_banner(**self._kwargs()))
         finally:
             cb.usable_providers = orig
+            cb._model_in_live_catalog = orig_cat
 
     def test_gemini_usable_respects_enabled_false(self):
         self.coa_env.write_text("GEMINI_API_KEY=test-key\n", encoding="utf-8")
@@ -207,6 +226,67 @@ class RoleModelSection(unittest.TestCase):
             self.assertEqual(cb.read_role_model(path), "")
         finally:
             os.unlink(path)
+
+
+class HealCoaAssignment(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "agents.db"
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "CREATE TABLE agents ("
+            "name TEXT PRIMARY KEY, model TEXT, num_ctx INTEGER, "
+            "updated_at TEXT)"
+        )
+        con.execute(
+            "INSERT INTO agents (name, model, num_ctx) VALUES ('coa', 'x-ai/grok-4.5', 4096)"
+        )
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_fresh_clears_missing_catalog_key(self):
+        orig = cb._model_in_live_catalog
+        cb._model_in_live_catalog = lambda m: False  # type: ignore
+        try:
+            result = cb.heal_coa_assignment(agents_db=self.db, fresh_install=True)
+        finally:
+            cb._model_in_live_catalog = orig
+        self.assertTrue(result["changed"])
+        self.assertIn("cleared_missing_catalog_model", result["actions"])
+        con = sqlite3.connect(self.db)
+        row = con.execute("SELECT model, num_ctx FROM agents WHERE name='coa'").fetchone()
+        con.close()
+        self.assertEqual((row[0], row[1]), ("", 0))
+
+    def test_update_leaves_missing_catalog_key(self):
+        orig = cb._model_in_live_catalog
+        cb._model_in_live_catalog = lambda m: False  # type: ignore
+        try:
+            result = cb.heal_coa_assignment(agents_db=self.db, fresh_install=False)
+        finally:
+            cb._model_in_live_catalog = orig
+        self.assertFalse(result["changed"])
+        self.assertIn("missing_catalog_model", result["actions"])
+
+    def test_resets_leaked_4k_on_cloud(self):
+        orig = cb._model_in_live_catalog
+        cb._model_in_live_catalog = lambda m: True  # type: ignore
+        try:
+            with patch(
+                "harness.model_context.get_model_context", return_value=(0, 131072)
+            ):
+                result = cb.heal_coa_assignment(agents_db=self.db, fresh_install=False)
+        finally:
+            cb._model_in_live_catalog = orig
+        self.assertTrue(result["changed"])
+        self.assertIn("reset_cloud_num_ctx_auto", result["actions"])
+        con = sqlite3.connect(self.db)
+        num_ctx = con.execute("SELECT num_ctx FROM agents WHERE name='coa'").fetchone()[0]
+        con.close()
+        self.assertEqual(num_ctx, 0)
 
 
 if __name__ == "__main__":

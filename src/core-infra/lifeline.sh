@@ -1943,8 +1943,14 @@ Wake reason: ${WAKE_REASON}."
   # If num_ctx is 0 (auto), resolve the recommended default from the model context map.
   # Cloud models return 0 (context managed server-side — no num_ctx needed).
   if [ "${AGENT_NUM_CTX}" = "0" ]; then
+    # Vendor/model slugs (OpenRouter etc.) are cloud — keep Auto (0) if lookup fails.
+    # Bare local keys fall back to the Ollama 4K default.
+    _CTX_FALLBACK=4096
+    case "${AGENT_MODEL}" in
+      */*) _CTX_FALLBACK=0 ;;
+    esac
     AGENT_NUM_CTX=$(PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -c \
-      "from harness.model_context import get_model_context; print(get_model_context('${AGENT_MODEL}')[0])" 2>/dev/null || echo "4096")
+      "from harness.model_context import get_model_context; print(get_model_context('${AGENT_MODEL}')[0])" 2>/dev/null || echo "${_CTX_FALLBACK}")
   fi
 
   # ── Server Ceiling Cap (Intel/Remote) ──

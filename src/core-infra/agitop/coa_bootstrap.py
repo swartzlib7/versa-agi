@@ -76,13 +76,28 @@ def recommended_keys(provider: str) -> list[str]:
 
 
 def recommended_options(provider: str) -> list[tuple[str, str]]:
-    """(label, catalog_key) for Select widgets."""
+    """(label, catalog_key) for Select widgets.
+
+    When the live catalog is readable and at least one Recommended key is
+    present there, hide stock keys that have not been migrated in yet so
+    the picker cannot assign a Model the harness cannot route.
+    """
     from model_catalog import format_catalog_picker_label
 
     prov = PROVIDER_LABELS.get(provider, provider)
+    items = list(RECOMMENDED.get(provider, []))
+    try:
+        from model_catalog import load_catalog
+        cat = load_catalog() or {}
+    except Exception:
+        cat = {}
+    if cat:
+        in_cat = [(key, label) for key, label in items if key in cat]
+        if in_cat:
+            items = in_cat
     return [
         (format_catalog_picker_label(prov, label, key), key)
-        for key, label in RECOMMENDED.get(provider, [])
+        for key, label in items
     ]
 
 
@@ -235,6 +250,95 @@ def usable_providers(
     return ordered
 
 
+def _model_in_live_catalog(model: str) -> bool:
+    """True when ``model`` is in the merged live catalog.
+
+    On catalog-load failure, return True so a transient read error does not
+    force bootstrap in a loop. An empty successful load still returns False
+    for a missing key.
+    """
+    if not model:
+        return False
+    try:
+        from model_catalog import load_catalog
+        cat = load_catalog()
+    except Exception:
+        return True
+    if cat is None:
+        return True
+    return model in cat
+
+
+def heal_coa_assignment(
+    *,
+    agents_db: Path | None = None,
+    fresh_install: bool = False,
+) -> dict:
+    """After catalog migrate: keep COA on a live key and cloud Auto ctx.
+
+    - Fresh install + model missing from catalog → clear model (bootstrap assigns).
+    - Cloud catalog row (recommended 0) stuck on the 4K local default → num_ctx=0.
+    Does not rewrite a deliberate non-4096 window on ``--update``.
+    """
+    db = agents_db or AGENTS_DB
+    result: dict = {"changed": False, "actions": [], "model": ""}
+    if not db.is_file():
+        result["actions"].append("no_agents_db")
+        return result
+    try:
+        con = sqlite3.connect(str(db), timeout=5)
+        try:
+            row = con.execute(
+                "SELECT model, num_ctx FROM agents WHERE name='coa' LIMIT 1"
+            ).fetchone()
+            if not row:
+                result["actions"].append("no_coa_row")
+                return result
+            model = (row[0] or "").strip()
+            try:
+                num_ctx = int(row[1] or 0)
+            except (TypeError, ValueError):
+                num_ctx = 0
+            result["model"] = model
+            if not model:
+                result["actions"].append("coa_model_empty")
+                return result
+            in_cat = _model_in_live_catalog(model)
+            if not in_cat:
+                if fresh_install:
+                    con.execute(
+                        "UPDATE agents SET model='', num_ctx=0, "
+                        "updated_at=datetime('now') WHERE name='coa'"
+                    )
+                    con.commit()
+                    result["changed"] = True
+                    result["actions"].append("cleared_missing_catalog_model")
+                    result["model"] = ""
+                else:
+                    result["actions"].append("missing_catalog_model")
+                return result
+            try:
+                from harness.model_context import get_model_context
+                recommended, _ = get_model_context(model)
+            except Exception:
+                return result
+            if recommended == 0 and num_ctx == 4096:
+                con.execute(
+                    "UPDATE agents SET num_ctx=0, updated_at=datetime('now') "
+                    "WHERE name='coa'"
+                )
+                con.commit()
+                result["changed"] = True
+                result["actions"].append("reset_cloud_num_ctx_auto")
+            else:
+                result["actions"].append("ok")
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        result["actions"].append(f"db_error:{exc}")
+    return result
+
+
 def _coa_model(agents_db: Path | None = None) -> str:
     db = agents_db or AGENTS_DB
     try:
@@ -288,12 +392,14 @@ def needs_coa_bootstrap(
     coa_model = _coa_model(agents_db)
     default_model = _read_paths_env("VERSA_DEFAULT_MODEL", "", paths_env=paths_env)
 
-    # Healthy: explicit COA model on a keyed provider
+    # Healthy: explicit COA model on a keyed provider *and* in the live catalog.
+    # Setup can sqlite-assign a Recommended key before migrate injects it;
+    # that must not count as done (harness resolve_provider_route will fail).
     if coa_model:
         prov = provider_for_model(coa_model)
-        if prov and prov in usable:
+        if prov and prov in usable and _model_in_live_catalog(coa_model):
             return False
-        # Explicit model but provider not keyed → still need bootstrap
+        # Explicit model but provider not keyed, or key not in catalog
         return True
 
     # No usable provider → always need bootstrap

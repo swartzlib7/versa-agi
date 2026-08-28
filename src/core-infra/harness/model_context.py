@@ -114,29 +114,42 @@ def _load_context_map() -> dict[str, tuple[int, int]]:
 MODEL_CONTEXT_MAP: dict[str, tuple[int, int]] = _load_context_map()
 
 
+def _lookup_context(name: str) -> tuple[int, int] | None:
+    """Exact match, then longest prefix match. None if unknown."""
+    if not name:
+        return None
+    if name in MODEL_CONTEXT_MAP:
+        return MODEL_CONTEXT_MAP[name]
+    best_match = ""
+    for key in MODEL_CONTEXT_MAP:
+        if name.startswith(key) and len(key) > len(best_match):
+            best_match = key
+    if best_match:
+        return MODEL_CONTEXT_MAP[best_match]
+    return None
+
+
 def get_model_context(model_name: str) -> tuple[int, int]:
     """Return (recommended, max) context window for a model.
 
     Uses longest prefix match against MODEL_CONTEXT_MAP.
-    Returns (DEFAULT_NUM_CTX, DEFAULT_NUM_CTX) for unknown models.
-    Returns (0, 0) for cloud models (context managed server-side).
+    Vendor-prefixed cloud keys (``x-ai/grok-4.6``) also match on the
+    basename after the last ``/`` so the ``grok`` / ``gpt`` / ``claude``
+    fallbacks apply. Returns (DEFAULT_NUM_CTX, DEFAULT_NUM_CTX) for
+    unknown models. Cloud rows use recommended 0 (Auto / server-side).
     """
     if not model_name:
         return (DEFAULT_NUM_CTX, DEFAULT_NUM_CTX)
 
-    # Exact match first
-    if model_name in MODEL_CONTEXT_MAP:
-        return MODEL_CONTEXT_MAP[model_name]
-
-    # Prefix match (longest wins)
-    best_match = ""
-    for key in MODEL_CONTEXT_MAP:
-        if model_name.startswith(key) and len(key) > len(best_match):
-            best_match = key
-
-    if best_match:
-        return MODEL_CONTEXT_MAP[best_match]
-
+    hit = _lookup_context(model_name)
+    if hit is not None:
+        return hit
+    if "/" in model_name:
+        tail = model_name.rsplit("/", 1)[-1]
+        if tail != model_name:
+            hit = _lookup_context(tail)
+            if hit is not None:
+                return hit
     return (DEFAULT_NUM_CTX, DEFAULT_NUM_CTX)
 
 

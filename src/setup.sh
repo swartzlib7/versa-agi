@@ -2844,7 +2844,7 @@ if [ -d "${PROVIDERS_DIR}" ]; then
       INI_GEMINI_MODEL="${_picked_default}"
       if [ -f "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" ]; then
         sqlite3 "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" \
-          "UPDATE agents SET model='${_picked_default}' WHERE name='coa' AND (model IS NULL OR TRIM(model)='');" 2>/dev/null || true
+          "UPDATE agents SET model='${_picked_default}', num_ctx=0 WHERE name='coa' AND (model IS NULL OR TRIM(model)='');" 2>/dev/null || true
       fi
       ok "Default/COA model set to ${_picked_default} (Gemini not configured; using enabled provider)"
     fi
@@ -3509,6 +3509,26 @@ except Exception:
     ok "Model catalog synced (derived sections + paths.env)"
   else
     warn "Model catalog sync skipped (non-fatal)"
+  fi
+  # COA may have been sqlite-assigned in Step 9d before migrate injected the
+  # key. Confirm it is in the live catalog; reset a leaked 4K cloud window.
+  if [ -f "${DEPLOYED_CORE_INFRA}/agitop/coa_bootstrap.py" ]; then
+    _COA_FRESH=0
+    [ "${UPDATE_MODE}" = false ] && _COA_FRESH=1
+    _COA_HEAL="$(PYTHONPATH="${DEPLOYED_CORE_INFRA}${PYTHONPATH:+:${PYTHONPATH}}" python3 -c "
+from agitop.coa_bootstrap import heal_coa_assignment
+r = heal_coa_assignment(fresh_install=bool(${_COA_FRESH}))
+print(','.join(r.get('actions') or ['ok']))
+" 2>/dev/null || true)"
+    if echo "${_COA_HEAL}" | grep -q 'cleared_missing_catalog_model'; then
+      warn "COA model was not in the live catalog — cleared so first-login bootstrap can assign a catalog key"
+    elif echo "${_COA_HEAL}" | grep -q 'reset_cloud_num_ctx_auto'; then
+      ok "COA context window reset to Auto (cloud model was left on 4K)"
+    elif echo "${_COA_HEAL}" | grep -q 'missing_catalog_model'; then
+      warn "COA model is not in the live catalog — assign via agitop COA Setup or import the Model"
+    elif [ -n "${_COA_HEAL}" ]; then
+      ok "COA model assignment checked (${_COA_HEAL})"
+    fi
   fi
   echo ""
 fi
