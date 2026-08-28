@@ -75,12 +75,16 @@ gpu_backend=intel
 proxy_port=4000
 
 # Default local model for new locally-assigned agents.
+# Fresh setup asks which stock chat keys to download; empty answer = gemma4:e4b.
 # Recommended: gemma4:e4b (≤8GB VRAM), gemma4:26b (≤12GB), gemma4:31b (≥16GB)
-default_model=qwen3.6:35b
+# --update carries an existing site's value forward (does not stamp this default).
+default_model=gemma4:e4b
 
-# Tracked local model registry. These appear in the Dashboard model picker.
-# For 'standard': models are pulled via Ollama (ollama pull <name>)
-# For 'intel': models are downloaded as GGUFs from HuggingFace (hf download <repo>)
+# Known stock chat keys (catalog + setup picker). Fresh install writes only the
+# keys the operator picked. --update does not rewrite this on an existing site.
+# Other keys stay in [catalog_library] for later: agictl model add / sycl import.
+# For 'standard': chosen keys are pulled via Ollama (ollama pull <name>)
+# For 'intel': chosen keys are downloaded as GGUFs from HuggingFace
 local_models=gemma4:e4b,gemma4:26b,gemma4:31b,qwen3.6:35b,qwen3.8:27b
 
 # Auto-download default model during setup (downloads can be 2-20GB)
@@ -103,7 +107,7 @@ sycl_port=8080
 # Active model for single-mode policy (set by 'agictl model activate').
 # Used only when model_loading_strategy=single. All local agents are synced to this model.
 # In router mode, agents use per-agent model assignments and this key is ignored.
-sycl_active_model=qwen3.6:35b
+sycl_active_model=gemma4:e4b
 # Maximum models resident in VRAM simultaneously (llama-server --models-max).
 # The server uses LRU eviction when loaded count exceeds this value.
 # Calculation: (VRAM - KV_cache - 2GB_headroom) / avg_model_size_gb
@@ -286,7 +290,7 @@ fast=deepseek/deepseek-v4-flash
 balanced=deepseek/deepseek-v4-flash
 reasoning=deepseek/deepseek-v4-pro
 code=z-ai/glm-5.2
-local=qwen3.6:35b
+local=gemma4:e4b
 
 [output_routing]
 # Preferred catalog key per output delivery modality (PU-owned; reconcile carries forward).

@@ -945,9 +945,13 @@ def _ini_section_body_lines(path, section):
 def _is_stock_setup_key(section, key):
     """True for setup.ini keys owned by the shipped template (never carried forward).
 
-    These are the stock model-selection lists and the system default model — the
-    release decides them; the operator customizes models via the dashboard/CLI
-    custom layer (and per-agent overrides in agents.db) instead.
+    These are the stock cloud/third-party model-selection lists — the release
+    decides them; the operator customizes models via the dashboard/CLI custom
+    layer (and per-agent overrides in agents.db) instead.
+
+    local_ai default_model / local_models / sycl_active_model and
+    model_routing.local are site-owned. Fresh setup writes the operator's pick;
+    --update must not stamp stock (an Intel 32 GB site stays on qwen3.6:35b).
     """
     if section == "gemini" and key in (
         "cloud_models", "coa_approved_models", "model",

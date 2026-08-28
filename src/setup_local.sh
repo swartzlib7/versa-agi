@@ -208,7 +208,7 @@ INTEL_DEVICE_ID="${INTEL_DEVICE_ID:-}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 PROXY_PORT="${PROXY_PORT:-4000}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-gemma4:e4b}"
-LOCAL_MODELS="${LOCAL_MODELS:-gemma4:e4b,gemma4:26b,gemma4:31b,qwen3.6:35b}"
+LOCAL_MODELS="${LOCAL_MODELS:-gemma4:e4b}"
 AUTO_PULL="${AUTO_PULL:-true}"
 WATCHDOG_USER="${WATCHDOG_USER:-watchdog}"
 COA_USER="${COA_USER:-coa}"
@@ -249,6 +249,11 @@ IPEX_SERVICE_FILE="/etc/systemd/system/${IPEX_SERVICE_NAME}.service"
 # Loaded dynamically from models.ini via manage_registry.sh
 # Populates: _REG_NAMES[], _REG_REPOS[], _REG_FILES[], _REG_SIZES[], _REG_COUNT
 _MANAGE_REGISTRY_SCRIPT="${SCRIPT_DIR}/manage_registry.sh"
+_MODEL_PICK_LIB="${SCRIPT_DIR}/setup_local_model_pick.sh"
+if [ -f "${_MODEL_PICK_LIB}" ]; then
+  # shellcheck source=setup_local_model_pick.sh
+  source "${_MODEL_PICK_LIB}"
+fi
 
 # Load registry arrays (silently — no interactive menu here)
 _load_sycl_registry_arrays() {
@@ -1501,39 +1506,15 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
     exit 1
   fi
 
-  echo ""
-  echo "  Select the model to run on your Intel ARC GPU:"
-  echo ""
-  for i in $(seq 0 $((_REG_COUNT - 1))); do
-    printf "    %d) %-16s — ~%sGB\n" "$((i + 1))" "${_REG_NAMES[$i]}" "${_REG_SIZES[$i]}"
-  done
-  echo ""
-  echo "  Only one model is loaded at a time. Switch with:"
-  echo "    sudo agictl model activate <name>"
-  echo ""
-
-  # Determine default selection number
-  _MODEL_DEFAULT=1
-  for i in $(seq 0 $((_REG_COUNT - 1))); do
-    if [ "${_REG_NAMES[$i]}" = "${DEFAULT_MODEL}" ]; then
-      _MODEL_DEFAULT=$((i + 1))
-      break
-    fi
-  done
-
-  read -p "  Selection [${_MODEL_DEFAULT}]: " _MODEL_CHOICE
-  _MODEL_CHOICE=${_MODEL_CHOICE:-${_MODEL_DEFAULT}}
-
-  # Validate and resolve selection
-  _CHOICE_IDX=$((_MODEL_CHOICE - 1))
-  if [ "${_CHOICE_IDX}" -lt 0 ] || [ "${_CHOICE_IDX}" -ge "${_REG_COUNT}" ]; then
-    warn "Invalid selection. Defaulting to first model."
-    _CHOICE_IDX=0
+  if declare -F _prompt_stock_chat_downloads >/dev/null 2>&1; then
+    _prompt_stock_chat_downloads
+    _write_stock_chat_pick_to_ini
+  else
+    warn "setup_local_model_pick.sh missing — defaulting to gemma4:e4b"
+    DEFAULT_MODEL="gemma4:e4b"
+    LOCAL_MODELS="gemma4:e4b"
+    SYCL_ACTIVE_MODEL="gemma4:e4b"
   fi
-  DEFAULT_MODEL="${_REG_NAMES[$_CHOICE_IDX]}"
-  ok "Selected model: ${DEFAULT_MODEL}"
-
-  SYCL_ACTIVE_MODEL="${DEFAULT_MODEL}"
   SYCL_ACTIVE_GGUF="$(_reg_file_for "${DEFAULT_MODEL}")"
 
   # ── Step 6b: Concurrency Configuration ──
@@ -1564,22 +1545,35 @@ if [ "${GPU_BACKEND}" = "intel" ]; then
   SYCL_CTX_TOTAL=$(( SYCL_CTX_SIZE * SYCL_PARALLEL ))
   ok "Concurrency: ${SYCL_PARALLEL} slots × ${SYCL_CTX_SIZE}/slot = ${SYCL_CTX_TOTAL} total ctx"
 
-  # ── Step 7: Download Model ──
-  info "Step 7: Download Model"
+  # ── Step 7: Download chosen GGUF(s) ──
+  info "Step 7: Download chosen model(s)"
   mkdir -p "${SYCL_MODEL_DIR}"
 
-  _HF_REPO="$(_reg_repo_for "${DEFAULT_MODEL}")"
-  _HF_FILE="$(_reg_file_for "${DEFAULT_MODEL}")"
-
-  if [ -f "${SYCL_MODEL_DIR}/${_HF_FILE}" ]; then
-    ok "Model already downloaded: ${_HF_FILE}"
+  if [ "${AUTO_PULL}" != "true" ]; then
+    info "Auto-pull disabled — skipping GGUF download. Import later with: sudo agictl model sycl import"
   else
-    info "Downloading: ${_HF_FILE} (this may take several minutes)..."
-    ${HF_CMD} download "${_HF_REPO}" \
-      --include "${_HF_FILE}" \
-      --local-dir "${SYCL_MODEL_DIR}" || \
-      error "Failed to download model from ${_HF_REPO}"
-    ok "Model downloaded to ${SYCL_MODEL_DIR}/"
+    _PICK_CSV="${LOCAL_MODELS:-${DEFAULT_MODEL}}"
+    IFS=',' read -ra _PICK_KEYS <<< "${_PICK_CSV}"
+    for _pick_key in "${_PICK_KEYS[@]}"; do
+      _pick_key="$(echo "${_pick_key}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      [ -n "${_pick_key}" ] || continue
+      _HF_REPO="$(_reg_repo_for "${_pick_key}")"
+      _HF_FILE="$(_reg_file_for "${_pick_key}")"
+      if [ -z "${_HF_REPO}" ] || [ -z "${_HF_FILE}" ]; then
+        warn "No SYCL registry row for ${_pick_key} — skip download (add via sycl import)"
+        continue
+      fi
+      if [ -f "${SYCL_MODEL_DIR}/${_HF_FILE}" ]; then
+        ok "Already downloaded: ${_HF_FILE}"
+      else
+        info "Downloading ${_pick_key}: ${_HF_FILE} (this may take several minutes)..."
+        ${HF_CMD} download "${_HF_REPO}" \
+          --include "${_HF_FILE}" \
+          --local-dir "${SYCL_MODEL_DIR}" || \
+          error "Failed to download ${_pick_key} from ${_HF_REPO}"
+        ok "Downloaded ${_pick_key} to ${SYCL_MODEL_DIR}/"
+      fi
+    done
   fi
 
   # ── Step 8: Start Docker SYCL Container ──
@@ -1701,27 +1695,43 @@ else
   info "Skipping local Ollama installation (using remote host)"
 fi
 
-# ─── Step: Pull Default Model (Standard backend only) ──
-# Intel backend handles model download in Step 7 above.
-if [ "${AUTO_PULL}" = "true" ] && [ "${GPU_BACKEND}" = "standard" ]; then
-  OLLAMA_CMD=""
-  if command -v ollama &>/dev/null; then
-    OLLAMA_CMD="ollama"
+# ─── Step: Pick + pull chosen models (Standard backend only) ──
+# Intel backend handles pick + GGUF download in Steps 6–7 above.
+if [ "${GPU_BACKEND}" = "standard" ]; then
+  if declare -F _prompt_stock_chat_downloads >/dev/null 2>&1; then
+    _prompt_stock_chat_downloads
+    _write_stock_chat_pick_to_ini
+  else
+    DEFAULT_MODEL="${DEFAULT_MODEL:-gemma4:e4b}"
+    LOCAL_MODELS="${LOCAL_MODELS:-${DEFAULT_MODEL}}"
   fi
 
-  if [ -n "${OLLAMA_CMD}" ]; then
-    info "Pulling model: ${DEFAULT_MODEL} (this may take several minutes)..."
-    export OLLAMA_HOST="${OLLAMA_HOST}"
-    if ${OLLAMA_CMD} pull "${DEFAULT_MODEL}"; then
-      ok "Model pulled: ${DEFAULT_MODEL}"
+  if [ "${AUTO_PULL}" = "true" ]; then
+    OLLAMA_CMD=""
+    if command -v ollama &>/dev/null; then
+      OLLAMA_CMD="ollama"
+    fi
+
+    if [ -n "${OLLAMA_CMD}" ]; then
+      export OLLAMA_HOST="${OLLAMA_HOST}"
+      _PICK_CSV="${LOCAL_MODELS:-${DEFAULT_MODEL}}"
+      IFS=',' read -ra _PICK_KEYS <<< "${_PICK_CSV}"
+      for _pick_key in "${_PICK_KEYS[@]}"; do
+        _pick_key="$(echo "${_pick_key}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ -n "${_pick_key}" ] || continue
+        info "Pulling model: ${_pick_key} (this may take several minutes)..."
+        if ${OLLAMA_CMD} pull "${_pick_key}"; then
+          ok "Model pulled: ${_pick_key}"
+        else
+          warn "Model pull failed for ${_pick_key} — you can pull manually: ollama pull ${_pick_key}"
+        fi
+      done
     else
-      warn "Model pull failed for ${DEFAULT_MODEL} — you can pull manually: ollama pull ${DEFAULT_MODEL}"
+      warn "Ollama CLI not found. Pull chosen keys on the host: ${LOCAL_MODELS:-${DEFAULT_MODEL}}"
     fi
   else
-    warn "Ollama CLI not found. Please ensure the model '${DEFAULT_MODEL}' is pulled on your host machine."
+    info "Auto-pull disabled — pull later with: sudo agictl model add <key>"
   fi
-elif [ "${GPU_BACKEND}" = "standard" ]; then
-  info "Auto-pull disabled — ensure models are pulled on the target host."
 fi
 
 # ─── Inference Server Deprecated ──────────────────────────────
@@ -1790,6 +1800,8 @@ SRVEOF
       sed -i '/^\[local_ai\]/,/^\[/{s/^gpu_backend=.*/gpu_backend='"${GPU_BACKEND}"'/}' "${SETUP_INI}"
       sed -i '/^\[local_ai\]/,/^\[/{s|^topology=.*|topology=server|}' "${SETUP_INI}"
       sed -i '/^\[local_ai\]/,/^\[/{s/^default_model=.*/default_model='"${DEFAULT_MODEL}"'/}' "${SETUP_INI}"
+      sed -i '/^\[local_ai\]/,/^\[/{s/^local_models=.*/local_models='"${LOCAL_MODELS}"'/}' "${SETUP_INI}"
+      sed -i '/^\[model_routing\]/,/^\[/{s/^local=.*/local='"${DEFAULT_MODEL}"'/}' "${SETUP_INI}"
       if [ "${GPU_BACKEND}" = "intel" ]; then
         sed -i '/^\[local_ai\]/,/^\[/{s/^intel_card_count=.*/intel_card_count='"${INTEL_CARD_COUNT}"'/}' "${SETUP_INI}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^intel_device_id=.*/intel_device_id='"${INTEL_DEVICE_ID}"'/}' "${SETUP_INI}"
@@ -1856,6 +1868,8 @@ for SETUP_INI in "${_INI_FILES[@]}"; do
   sed -i '/^\[local_ai\]/,/^\[/{s|^topology=.*|topology=local|}' "${SETUP_INI}"
   sed -i '/^\[gemini\]/,/^\[/{s/^mode=.*/mode=hybrid/}' "${SETUP_INI}"
   sed -i '/^\[local_ai\]/,/^\[/{s/^default_model=.*/default_model='"${DEFAULT_MODEL}"'/}' "${SETUP_INI}"
+  sed -i '/^\[local_ai\]/,/^\[/{s/^local_models=.*/local_models='"${LOCAL_MODELS}"'/}' "${SETUP_INI}"
+  sed -i '/^\[model_routing\]/,/^\[/{s/^local=.*/local='"${DEFAULT_MODEL}"'/}' "${SETUP_INI}"
   if [ "${GPU_BACKEND}" = "intel" ]; then
     sed -i '/^\[local_ai\]/,/^\[/{s/^intel_card_count=.*/intel_card_count='"${INTEL_CARD_COUNT}"'/}' "${SETUP_INI}"
     sed -i '/^\[local_ai\]/,/^\[/{s/^intel_device_id=.*/intel_device_id='"${INTEL_DEVICE_ID}"'/}' "${SETUP_INI}"

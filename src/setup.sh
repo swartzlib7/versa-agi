@@ -63,7 +63,7 @@ else
   }
 fi
 
-VERSION="3.3.7"
+VERSION="3.3.8"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -2665,6 +2665,9 @@ if [ "${SELECTED_EXEC_MODE}" = "local" ] || [ "${SELECTED_EXEC_MODE}" = "hybrid"
       --watchdog-user "${WATCHDOG_USER}" \
       --coa-user "${COA_USER}" \
       --paths-env "${PATHS_ENV}"
+    # Picker writes chosen keys into setup.ini — re-read so Step 13 persists them.
+    INI_LOCAL_AI_DEFAULT_MODEL="$(ini_get local_ai default_model gemma4:e4b)"
+    INI_LOCAL_MODELS="$(ini_get local_ai local_models "${INI_LOCAL_AI_DEFAULT_MODEL}")"
     ok "Local AI backend configured"
   else
     warn "setup_local.sh not found at ${SETUP_LOCAL_SCRIPT} — local AI setup skipped"
@@ -4017,7 +4020,7 @@ MINSEED
   _ini_set "ollama_host" "${INI_OLLAMA_HOST:-http://localhost:11434}"
   _ini_set "proxy_port" "${INI_PROXY_PORT:-4000}"
   _ini_set "default_model" "${INI_LOCAL_AI_DEFAULT_MODEL:-gemma4:e4b}"
-  _ini_set "local_models" "${INI_LOCAL_MODELS:-gemma4:e4b,gemma4:26b,gemma4:31b}"
+  _ini_set "local_models" "${INI_LOCAL_MODELS:-gemma4:e4b}"
   _ini_set "auto_pull_model" "${INI_AUTO_PULL_MODEL:-true}"
   _ini_set_in "local_ai" "gpu_backend" "${INI_GPU_BACKEND:-standard}"
   _ini_set "intel_card_count" "${INI_INTEL_CARD_COUNT:-1}"
@@ -4026,7 +4029,8 @@ MINSEED
   _ini_set "sycl_parallel" "$(ini_get local_ai sycl_parallel 2)"
   _ini_set "sycl_ctx_size" "$(ini_get local_ai sycl_ctx_size 4096)"
   _ini_set "sycl_port" "$(ini_get local_ai sycl_port 8080)"
-  _ini_set "sycl_active_model" "$(ini_get local_ai sycl_active_model '')"
+  _ini_set "sycl_active_model" "$(ini_get local_ai sycl_active_model "${INI_LOCAL_AI_DEFAULT_MODEL:-gemma4:e4b}")"
+  _ini_set_in "model_routing" "local" "${INI_LOCAL_AI_DEFAULT_MODEL:-gemma4:e4b}"
   _ini_set "sycl_models_max" "$(ini_get local_ai sycl_models_max 1)"
   _ini_set "hf_token" "$(ini_get local_ai hf_token '')"
   _ini_set "sycl_llama_cpp_tag" "$(ini_get local_ai sycl_llama_cpp_tag b10430)"
