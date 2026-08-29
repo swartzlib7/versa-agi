@@ -757,6 +757,24 @@ ${AGENT_REGISTRY_CONTENT}
     fi
   fi
 
+  # ─── Spawn hold — no LLM cycle ─────────────────────
+  # COA is protected, so it cannot be deactivated. Fresh install leaves it
+  # without a model until first-login assign. Skip overdue spawn_attempts
+  # (auto-freeze) and harness spawn until a catalog model is assigned.
+  # invalid_config / circuit_breaker / halted use the same hold for any agent.
+  HOLD_STATUS=$(sqlite3 "${AGENTS_DB}" "SELECT COALESCE(status,'') FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
+  HOLD_ASSIGNED=$(sqlite3 "${AGENTS_DB}" "SELECT TRIM(COALESCE(model,'')) FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
+  if [ "${AGENT_NAME}" = "coa" ] && [ -z "${HOLD_ASSIGNED}" ]; then
+    log "HOLD: coa — no model assigned (first-login). Skipping spawn and task-freeze."
+    flock -u 200
+    continue
+  fi
+  if [ "${HOLD_STATUS}" = "invalid_config" ] || [ "${HOLD_STATUS}" = "circuit_breaker" ] || [ "${HOLD_STATUS}" = "halted" ]; then
+    log "BLOCKED: ${AGENT_NAME} — status '${HOLD_STATUS}', skipping spawn (assign a model or run 'agictl agent activate ${AGENT_NAME}')"
+    flock -u 200
+    continue
+  fi
+
   # ─── Work Detection ────────────────────────────────
   SHOULD_WAKE="false"
   WAKE_REASON=""

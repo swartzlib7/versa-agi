@@ -269,6 +269,38 @@ def _model_in_live_catalog(model: str) -> bool:
     return model in cat
 
 
+COA_HOLD_STATUS = "invalid_config"
+COA_HOLD_MESSAGE = "Assign a COA model via first-login setup"
+
+
+def hold_coa_without_model(con: sqlite3.Connection) -> bool:
+    """Mark COA unspawnable when it has no assigned model.
+
+    COA is protected, so ``inactive=1`` is not allowed (Lifeline
+    ``ensure-protected`` would clear it). ``invalid_config`` is the hold
+    Lifeline already understands; first-login assign / set-model clears it.
+    """
+    cols = {row[1] for row in con.execute("PRAGMA table_info(agents)")}
+    if "status" not in cols:
+        return False
+    row = con.execute(
+        "SELECT model, status FROM agents WHERE name='coa' LIMIT 1"
+    ).fetchone()
+    if not row:
+        return False
+    if (row[0] or "").strip():
+        return False
+    status = (row[1] or "").strip()
+    if status in ("circuit_breaker", "halted", COA_HOLD_STATUS):
+        return False
+    con.execute(
+        "UPDATE agents SET status=?, status_message=?, updated_at=datetime('now') "
+        "WHERE name='coa'",
+        (COA_HOLD_STATUS, COA_HOLD_MESSAGE),
+    )
+    return True
+
+
 def heal_coa_assignment(
     *,
     agents_db: Path | None = None,
@@ -277,6 +309,7 @@ def heal_coa_assignment(
     """After catalog migrate: keep COA on a live key and cloud Auto ctx.
 
     - Fresh install + model missing from catalog → clear model (bootstrap assigns).
+    - Empty or cleared COA model → hold spawn until first-login assign.
     - Cloud catalog row (recommended 0) stuck on the 4K local default → num_ctx=0.
     Does not rewrite a deliberate non-4096 window on ``--update``.
     """
@@ -302,6 +335,10 @@ def heal_coa_assignment(
             result["model"] = model
             if not model:
                 result["actions"].append("coa_model_empty")
+                if hold_coa_without_model(con):
+                    con.commit()
+                    result["changed"] = True
+                    result["actions"].append("held_pending_model")
                 return result
             in_cat = _model_in_live_catalog(model)
             if not in_cat:
@@ -310,10 +347,12 @@ def heal_coa_assignment(
                         "UPDATE agents SET model='', num_ctx=0, "
                         "updated_at=datetime('now') WHERE name='coa'"
                     )
-                    con.commit()
                     result["changed"] = True
                     result["actions"].append("cleared_missing_catalog_model")
                     result["model"] = ""
+                    if hold_coa_without_model(con):
+                        result["actions"].append("held_pending_model")
+                    con.commit()
                 else:
                     result["actions"].append("missing_catalog_model")
                 return result

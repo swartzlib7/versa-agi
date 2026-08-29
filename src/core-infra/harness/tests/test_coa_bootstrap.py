@@ -232,7 +232,7 @@ class HealCoaAssignment(unittest.TestCase):
         con.execute(
             "CREATE TABLE agents ("
             "name TEXT PRIMARY KEY, model TEXT, num_ctx INTEGER, "
-            "updated_at TEXT)"
+            "status TEXT, status_message TEXT, updated_at TEXT)"
         )
         con.execute(
             "INSERT INTO agents (name, model, num_ctx) VALUES ('coa', 'x-ai/grok-4.5', 4096)"
@@ -252,10 +252,32 @@ class HealCoaAssignment(unittest.TestCase):
             cb._model_in_live_catalog = orig
         self.assertTrue(result["changed"])
         self.assertIn("cleared_missing_catalog_model", result["actions"])
+        self.assertIn("held_pending_model", result["actions"])
         con = sqlite3.connect(self.db)
-        row = con.execute("SELECT model, num_ctx FROM agents WHERE name='coa'").fetchone()
+        row = con.execute(
+            "SELECT model, num_ctx, status, status_message FROM agents WHERE name='coa'"
+        ).fetchone()
         con.close()
-        self.assertEqual((row[0], row[1]), ("", 0))
+        self.assertEqual((row[0], row[1], row[2]), ("", 0, "invalid_config"))
+        self.assertIn("first-login", row[3])
+
+    def test_empty_model_holds_pending(self):
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE agents SET model='', num_ctx=0, status=NULL")
+        con.commit()
+        con.close()
+        result = cb.heal_coa_assignment(agents_db=self.db, fresh_install=True)
+        self.assertTrue(result["changed"])
+        self.assertIn("coa_model_empty", result["actions"])
+        self.assertIn("held_pending_model", result["actions"])
+        con = sqlite3.connect(self.db)
+        status = con.execute("SELECT status FROM agents WHERE name='coa'").fetchone()[0]
+        con.close()
+        self.assertEqual(status, "invalid_config")
+        again = cb.heal_coa_assignment(agents_db=self.db, fresh_install=True)
+        self.assertFalse(again["changed"])
+        self.assertIn("coa_model_empty", again["actions"])
+        self.assertNotIn("held_pending_model", again["actions"])
 
     def test_update_leaves_missing_catalog_key(self):
         orig = cb._model_in_live_catalog

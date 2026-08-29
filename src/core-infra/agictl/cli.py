@@ -7792,6 +7792,13 @@ def agent_set_model(name, model, clear_model):
                WHERE name = ?""",
             (new_model, name),
         )
+        if not new_model and name == "coa":
+            conn.execute(
+                "UPDATE agents SET status='invalid_config', "
+                "status_message='Assign a COA model via first-login setup', "
+                "updated_at=datetime('now') WHERE name='coa' "
+                "AND COALESCE(status,'') NOT IN ('circuit_breaker', 'halted')"
+            )
         if new_model:
             try:
                 from harness.model_context import get_model_context

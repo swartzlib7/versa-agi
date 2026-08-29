@@ -712,12 +712,24 @@ print_inference_server_ready_banner() {
   echo ""
 }
 
-# Shared .py next to agictl/ so `import db_connect` / `import model_hf_ingest`
-# resolve on topology=server (subset deploy, not a full core-infra rsync).
+# Shared .py next to agictl/ / harness so top-level imports resolve under
+# PYTHONPATH=/usr/local/lib/versa-agi (and the server subset deploy).
+# Keep this list in lockstep with the LIB_DIR copy in Step 8.
+_VERSA_LIB_SHARED_PY=(
+  db_connect.py
+  model_hf_ingest.py
+  model_media_ingest.py
+  model_catalog.py
+  provider_runtime.py
+  provider_registry.py
+  shipped_models.py
+  catalog_compat.py
+)
+
 _deploy_server_agictl_shared_py() {
   local src="${1:?}" dest="${2:?}"
   local f
-  for f in db_connect.py model_hf_ingest.py model_media_ingest.py model_catalog.py provider_runtime.py; do
+  for f in "${_VERSA_LIB_SHARED_PY[@]}"; do
     if [ -f "${src}/${f}" ]; then
       cp "${src}/${f}" "${dest}/${f}"
     fi
@@ -1448,13 +1460,15 @@ if [ -f "${AGENTS_INIT}" ]; then
   # Seed protected agents (harness defaults: graph 400, tool out 5000, resume on/25)
   sqlite3 "${AGENTS_DB}" \
     "INSERT OR IGNORE INTO agents (
-       name, os_user, workspace, role, timeout_minutes, runaway_threshold,
+       name, os_user, workspace, role, status, status_message, timeout_minutes, runaway_threshold,
        max_session_turns, tool_output_token_budget, resume_enabled, resume_max_messages,
        inactive, protected, requested_by)
      VALUES
        ('coa', '${COA_USER}', '${DEPLOYED_COA_ENV}', 'Chief Orchestrator Agent',
+        'invalid_config', 'Assign a COA model via first-login setup',
         ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 400, 5000, 1, 25, 0, 1, 'setup'),
        ('watchdog', '${WATCHDOG_USER}', '${WATCHDOG_HOME}', 'System Watchdog',
+        NULL, NULL,
         ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 400, 5000, 1, 25, 0, 1, 'setup');"
   ok "agents.db initialized at ${AGENTS_DB} (watchdog:${COA_USER} 660)"
 else
@@ -1684,10 +1698,9 @@ find "${LIB_DIR}/harness" -type f -exec chmod 644 {} +
 
 # Shared modules the harness imports as top-level (one level above harness/).
 # These live in the core-infra root and must sit next to harness/ so
-# `import model_catalog` / `import db_connect` / `import provider_runtime`
-# resolve under
+# `import model_catalog` / `import provider_registry` resolve under
 # PYTHONPATH=${LIB_DIR} (the harness runtime layout).
-for _shared_py in model_catalog.py db_connect.py provider_runtime.py model_hf_ingest.py model_media_ingest.py; do
+for _shared_py in "${_VERSA_LIB_SHARED_PY[@]}"; do
   if [ -f "${DEPLOYED_CORE_INFRA}/${_shared_py}" ]; then
     cp "${DEPLOYED_CORE_INFRA}/${_shared_py}" "${LIB_DIR}/${_shared_py}"
     chown root:root "${LIB_DIR}/${_shared_py}"
@@ -3529,7 +3542,9 @@ from agitop.coa_bootstrap import heal_coa_assignment
 r = heal_coa_assignment(fresh_install=bool(${_COA_FRESH}))
 print(','.join(r.get('actions') or ['ok']))
 " 2>/dev/null || true)"
-    if echo "${_COA_HEAL}" | grep -q 'cleared_missing_catalog_model'; then
+    if echo "${_COA_HEAL}" | grep -q 'held_pending_model'; then
+      info "COA held until a catalog model is assigned (first-login API Keys / COA)"
+    elif echo "${_COA_HEAL}" | grep -q 'cleared_missing_catalog_model'; then
       warn "COA model was not in the live catalog — cleared so first-login bootstrap can assign a catalog key"
     elif echo "${_COA_HEAL}" | grep -q 'reset_cloud_num_ctx_auto'; then
       ok "COA context window reset to Auto (cloud model was left on 4K)"
