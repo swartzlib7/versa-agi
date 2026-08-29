@@ -2154,7 +2154,19 @@ if [ -f "${PRODUCT_README_SRC}" ]; then
   cp -f "${PRODUCT_README_SRC}" "${DOCS_DEST}/versa_agi_readme.md"
   chown "${WATCHDOG_USER}:agi_agents" "${DOCS_DEST}/versa_agi_readme.md"
   chmod 440 "${DOCS_DEST}/versa_agi_readme.md"
-  ok "docs/versa_agi_readme.md — product README deployed for COA consult (overwrite)"
+  # Operator section files (same folder so COA can follow rewritten links).
+  PRODUCT_DOCS_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)/docs"
+  for _doc in models.md credentials.md operations.md security.md directories.md \
+    troubleshooting.md backup-restore.md install-wsl-server.md roadmap.md; do
+    if [ -f "${PRODUCT_DOCS_SRC}/${_doc}" ]; then
+      cp -f "${PRODUCT_DOCS_SRC}/${_doc}" "${DOCS_DEST}/${_doc}"
+      chown "${WATCHDOG_USER}:agi_agents" "${DOCS_DEST}/${_doc}"
+      chmod 440 "${DOCS_DEST}/${_doc}"
+    fi
+  done
+  # Hub links are docs/foo.md on GitHub; COA copies live beside the hub.
+  sed -i -E 's|\]\(docs/([A-Za-z0-9._-]+\.md)\)|](\1)|g' "${DOCS_DEST}/versa_agi_readme.md"
+  ok "docs/versa_agi_readme.md — product README + operator pages deployed for COA consult (overwrite)"
 else
   warn "Product README not found at ${PRODUCT_README_SRC} — COA docs/versa_agi_readme.md not updated"
 fi
@@ -3723,7 +3735,12 @@ apply_system_permissions() {
     [ -f "${DEPLOYED_COA_ENV}/.agent/README.md" ] && chown "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/README.md" && chmod 644 "${DEPLOYED_COA_ENV}/.agent/README.md"
     # .agent/docs/ — COA-only product README (shipped overwrite; read-only)
     [ -d "${DEPLOYED_COA_ENV}/.agent/docs" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/docs" && chmod 755 "${DEPLOYED_COA_ENV}/.agent/docs"
-    [ -f "${DEPLOYED_COA_ENV}/.agent/docs/versa_agi_readme.md" ] && chown "${WATCHDOG_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/docs/versa_agi_readme.md" && chmod 440 "${DEPLOYED_COA_ENV}/.agent/docs/versa_agi_readme.md"
+    if [ -d "${DEPLOYED_COA_ENV}/.agent/docs" ]; then
+      for _d in versa_agi_readme.md models.md credentials.md operations.md security.md \
+        directories.md troubleshooting.md backup-restore.md install-wsl-server.md roadmap.md; do
+        [ -f "${DEPLOYED_COA_ENV}/.agent/docs/${_d}" ] && chown "${WATCHDOG_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/docs/${_d}" && chmod 440 "${DEPLOYED_COA_ENV}/.agent/docs/${_d}"
+      done
+    fi
     # .agent/poise.md — watchdog:coa 640 (copied from /etc/versa-agi/poise/coa.md by Lifeline)
     [ -f "${DEPLOYED_COA_ENV}/.agent/poise.md" ] && chown "${WATCHDOG_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/poise.md" && chmod 640 "${DEPLOYED_COA_ENV}/.agent/poise.md"
     
