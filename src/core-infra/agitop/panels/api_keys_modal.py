@@ -363,7 +363,8 @@ class ApiKeysModal(ModalScreen):
         results = []
         errors = []
         # VV / provider keys can take longer (live VV validation).
-        timeout = 45 if any(t == "versavoice" for t, _ in changes) else 20
+        # set-key may migrate + live-import the shipped COA set (8 OpenRouter rows).
+        timeout = 90 if any(t == "versavoice" for t, _ in changes) else 75
         for key_type, value in changes:
             try:
                 proc = subprocess.run(

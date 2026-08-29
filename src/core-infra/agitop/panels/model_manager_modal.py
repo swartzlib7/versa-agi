@@ -41,12 +41,9 @@ from agitop.panels.modality_format import format_modality_labels
 from agitop.widgets.provider_brand_icon import provider_brand_class, provider_import_button_label
 
 
-# The stored catalog `class` (cloud|third_party|local) still drives routing, but
-# the dashboard presents it in the simpler "shipped / custom / local" language
-# the user reasons about. cloud == Google API, third_party == any other API.
+# Live catalog class is vendor-neutral: cloud (any remote API) or local.
 _CLASS_CHOICES = [
-    ("☁ Cloud · Google", "cloud"),
-    ("☁ Cloud · other provider", "third_party"),
+    ("☁ Cloud", "cloud"),
     ("🖥 Local · Ollama / llama.cpp", "local"),
 ]
 _COMMON_LC_CLASSES = [
@@ -974,7 +971,9 @@ class CatalogFormModal(ModalScreen):
         except Exception:
             pass
 
-        model_class = prefill.get("class") or "third_party"
+        model_class = prefill.get("class") or "cloud"
+        if model_class == "third_party":
+            model_class = "cloud"
         provider = prefill.get("provider") or ""
         work = prefill.get("work_modality") or "balanced"
 

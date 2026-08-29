@@ -108,10 +108,9 @@ def _provider_available(provider: str, mclass: str) -> bool:
                 read_setup_value("local_ai", "gpu_backend", "standard"),
             )
         return provider == active
-    if mclass == "cloud":
-        return True
-    if mclass == "third_party":
-        return read_setup_value("third_party", f"{provider}_enabled", "false").lower() == "true"
+    if mclass in ("cloud", "third_party"):
+        providers = load_providers()
+        return provider_is_enabled(provider, providers)
     return True
 
 

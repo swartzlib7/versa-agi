@@ -19,33 +19,21 @@ api_token=
 # Runtime uses the LangChain harness — not the Gemini CLI.
 auth_method=api_key
 api_key=
-# Provider registry flag (WU-07). Stock false — Step 9b / set-key flip to true.
-# Unset on legacy installs is treated as credentials-gated (compat).
-enabled=false
-
 # Execution mode: "cloud", "local", or "hybrid"
 #   cloud  — cloud models (Gemini and/or other providers — keys optional per provider)
 #   local  — Local AI only via Ollama (no cloud keys needed)
 #   hybrid — Both cloud and local agents available
 mode=cloud
 
-# Tracked cloud model registry. Used by Lifeline for backend resolution.
-# STOCK LIST — owned by the shipped template: regenerated from it on every
-# setup.sh run (reconcile-config). Hand-edits here do not stick; add or disable
-# models via the dashboard/CLI (writes the models.ini custom layer).
-cloud_models=gemini-2.5-pro,gemini-2.5-flash,gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-3.1-flash-lite,gemini-3.1-flash-image
-
 # System default model (catalog key). Written to paths.env as VERSA_DEFAULT_MODEL.
 # Stock blank until first-login COA bootstrap assigns one (WU-02/03).
 # Empty agents.model falls back here. Per-agent overrides: agitop / set-model.
 model=
 
-# COA-approved models — only these models appear in the Dashboard model picker
-# for the COA agent. Weaker models lack reliable tool-calling and structured output
-# required for orchestration. Sub-agents are not restricted by this list.
-# STOCK LIST — regenerated from the shipped template on every setup.sh run;
-# toggle COA eligibility per-model via the dashboard/CLI instead.
-coa_approved_models=z-ai/glm-5.2,x-ai/grok-4.5,google/gemini-3-flash-preview,gemini-2.5-pro,gemini-2.5-flash,gemini-3-flash-preview,gemini-3.1-pro-preview,grok-4.5,gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,claude-fable-5,claude-opus-4-8,claude-sonnet-4-6,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash
+# Deprecated — not an allowlist. COA eligibility is the catalog row `coa` flag
+# (tick on Import / catalog edit). This key is not stock-owned; --update does
+# not restamp it. Left empty so older readers do not treat leftovers as law.
+coa_approved_models=
 
 # Default thinking level for agent spawns (Gemini 3+ only).
 # Replaces legacy thinking_budget. Cannot mix with thinking_budget.
@@ -182,43 +170,21 @@ inference_master_key=versa-sk
 model_loading_strategy=single
 
 [third_party]
-# Third-Party Cloud Providers backend — route non-Google cloud models through Inference Server.
-# Each provider follows the same 3-key pattern: {slug}_enabled, {slug}_api_key, {slug}_models.
-# Run setup_proxy.sh to install, or uninstall_proxy.sh to remove.
-#
-# To add a new provider:
-#   1. Add provider slug to 'providers' CSV below
-#   2. Add {slug}_enabled, {slug}_api_key, {slug}_models keys
-#   3. Add configure_{slug}() function in setup_proxy.sh
-#   4. Add a [catalog] row per model in models.ini (label + context windows)
-#   5. Re-run setup.sh --update (runs model migrate + sync)
+# Credential store only. Provider activation lives in models.ini [providers_site].
+# Shipped selection lives in models.ini [shipped_models]. These keys are user-owned.
 enabled=false
 
-# Provider registry — CSV list of provider slugs.
-# STOCK LISTS — 'providers' and every '{slug}_models' key are owned by the
-# shipped template and regenerated on every setup.sh run (reconcile-config).
-# '{slug}_enabled' and '{slug}_api_key' are user-owned and always preserved.
-providers=xai,openai,anthropic,openrouter
-
 # ── xAI (Grok) ──────────────────────────────────────
-xai_enabled=false
 xai_api_key=
-xai_models=grok-4.5
 
 # ── OpenAI (GPT) ────────────────────────────────────
-openai_enabled=false
 openai_api_key=
-openai_models=gpt-5.5-2026-04-23,gpt-5.4-2026-03-05,gpt-5.4-mini-2026-03-17,gpt-audio-1.5
 
 # ── Anthropic (Claude) ──────────────────────────────
-anthropic_enabled=false
 anthropic_api_key=
-anthropic_models=claude-fable-5,claude-opus-4-8,claude-sonnet-4-6
 
 # ── OpenRouter (multi-vendor aggregator) ─────────────
-openrouter_enabled=false
 openrouter_api_key=
-openrouter_models=x-ai/grok-4.5,google/gemini-3-flash-preview,google/gemini-3.1-flash-image,openai/gpt-audio,openai/gpt-5.6-luna,openai/gpt-5.4-image-2,openai/gpt-audio-mini,z-ai/glm-5.2,moonshotai/kimi-k2.7-code,deepseek/deepseek-v4-flash,deepseek/deepseek-v4-pro
 
 [gcp]
 # Only needed for vertex auth. If service_account_key is set, it's used;
@@ -383,19 +349,17 @@ max_concurrent_runs=1
 output_tail_lines=20
 
 [features]
-# Optional dashboard feature surfaces (TD-ORG-001 et al). Each is prompted at
-# install / --update, DEFAULTS DISABLED, and persists here (PU-owned; reconcile
-# carries the operator's choice forward). Three readers meet here: setup.sh
-# (prompts), feature_flags.py (agitop), and lifeline.sh (agent context — tells
-# agents which agictl command groups are unavailable when a feature is off).
-#   organization_ui — EXPERIMENTAL business/accounting workspace. agitop runs as
-#   root and Organization writes use the same tools agents use, so anyone with
-#   `sudo` on this machine can read/change this data and control Versa AGi. A
-#   prominent disclaimer + second confirmation is shown when enabling it.
+# Optional dashboard feature surfaces (TD-ORG-001 et al). Prompted at install /
+# --update; persist here (PU-owned; reconcile carries the operator's choice).
+# Three readers: setup.sh (prompts), feature_flags.py (agitop), lifeline.sh
+# (tells agents which agictl groups are unavailable when a feature is off).
+#   organization_ui — EXPERIMENTAL; stock OFF; disclaimer + confirm to enable.
+#   utility_models_ui / script_tasks_ui / output_routing_ui — stock ON (product
+#   defaults). Fresh install prompts [Y/n]; --update carries the site's value.
 organization_ui=false
-utility_models_ui=false
-script_tasks_ui=false
-output_routing_ui=false
+utility_models_ui=true
+script_tasks_ui=true
+output_routing_ui=true
 
 [registration]
 # Runtime submission state (endpoint + key: core-infra/registration.conf)

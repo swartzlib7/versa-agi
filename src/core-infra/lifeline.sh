@@ -1780,7 +1780,7 @@ Wake reason: ${WAKE_REASON}."
     elif [ "${IS_CLOUD_MODEL}" = false ]; then
       # Model not in any known list → invalid config
       log "INVALID_CONFIG: ${AGENT_NAME} has unknown model '${AGENT_MODEL}' — skipping"
-      sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='invalid_config', status_message='Unknown model: ${AGENT_MODEL}. Use a model from setup.ini cloud_models, local_models, or third_party.', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
+        sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='invalid_config', status_message='Unknown model: ${AGENT_MODEL}. Use a key from the live catalog (models.ini [catalog]).', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
       flock -u 200
       continue
     fi

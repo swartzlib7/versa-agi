@@ -562,28 +562,27 @@ install_acceptance_feature_prompts() {
 
   if declare -F text_box >/dev/null 2>&1; then
     text_box "OPTIONAL FEATURES" \
-      "Enable optional dashboard surfaces. Each defaults to OFF." \
+      "Organization is experimental and defaults to OFF." \
+      "Utility Models, Script Tasks, and Output Routing default to ON." \
       "You can change these any time by re-running setup."
   else
     echo ""
-    echo "Optional features (each defaults to OFF; re-run setup to change):"
+    echo "Optional features (Organization defaults OFF; Utility / Script / Routing default ON):"
     echo ""
   fi
 
-  # Fresh install: always prompt [y/N] (OFF). --update carries prior choice.
-  # Do not seed the prompt from stock/source setup.ini=true (that made Enter
-  # mean Yes while the copy said "defaults to OFF").
+  # Fresh: Organization OFF; the three product surfaces ON. --update carries.
   local org_current util_current script_current output_current
   if [ "${UPDATE_MODE:-false}" = true ]; then
     org_current="$(_install_acceptance_features_get organization_ui false)"
-    util_current="$(_install_acceptance_features_get utility_models_ui false)"
-    script_current="$(_install_acceptance_features_get script_tasks_ui false)"
-    output_current="$(_install_acceptance_features_get output_routing_ui false)"
+    util_current="$(_install_acceptance_features_get utility_models_ui true)"
+    script_current="$(_install_acceptance_features_get script_tasks_ui true)"
+    output_current="$(_install_acceptance_features_get output_routing_ui true)"
   else
     org_current="false"
-    util_current="false"
-    script_current="false"
-    output_current="false"
+    util_current="true"
+    script_current="true"
+    output_current="true"
   fi
 
   # Organization — disclaimer first, then the gated prompt.

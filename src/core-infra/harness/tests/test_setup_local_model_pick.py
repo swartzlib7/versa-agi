@@ -64,6 +64,9 @@ class TestStockSetupDefaults(unittest.TestCase):
         self.assertFalse(_is_stock_setup_key("local_ai", "local_models"))
         self.assertFalse(_is_stock_setup_key("local_ai", "sycl_active_model"))
         self.assertFalse(_is_stock_setup_key("model_routing", "local"))
+        self.assertFalse(_is_stock_setup_key("gemini", "coa_approved_models"))
+        self.assertFalse(_is_stock_setup_key("gemini", "cloud_models"))
+        self.assertFalse(_is_stock_setup_key("gemini", "model"))
 
 
 class TestReconcilePreservesSiteDefaults(unittest.TestCase):

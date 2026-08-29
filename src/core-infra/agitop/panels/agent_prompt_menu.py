@@ -109,8 +109,7 @@ class AgentPromptMenu(ModalScreen):
         model_options = _load_models_ini(panel.system_reader)
         if is_protected and self.agent_name == "coa":
             coa_allowed = set(panel.system_reader.get_coa_approved_models())
-            if coa_allowed:
-                model_options = [(label, key) for label, key in model_options if key in coa_allowed]
+            model_options = [(label, key) for label, key in model_options if key in coa_allowed]
         model_kwargs = {"id": "select-model", "allow_blank": True, "prompt": "System default"}
         if current_model and any(k == current_model for _, k in model_options):
             model_kwargs["value"] = current_model

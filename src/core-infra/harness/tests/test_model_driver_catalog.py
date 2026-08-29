@@ -117,21 +117,16 @@ class TestModelDriverCatalogStock(unittest.TestCase):
             stock_setup if os.path.isfile(stock_setup) else "/etc/versa-agi/setup.ini"
         )
 
-    def test_phase_output_rows_have_honest_exact_metadata(self) -> None:
+    def test_phase_output_rows_are_driver_only_not_stock_library(self) -> None:
+        from model_drivers.registry import MODEL_DRIVERS
+
         cfg = _config(self.models_path)
         section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
-        for key, expected in OUTPUT_MODELS.items():
+        bound = {binding.catalog_key for binding in MODEL_DRIVERS.values()}
+        for key in OUTPUT_MODELS:
             with self.subTest(key=key):
-                self.assertTrue(cfg.has_option(section, key), f"{key} missing from {section}")
-                row = parse_catalog_row(cfg.get(section, key))
-                self.assertIsNotNone(row)
-                self.assertEqual(row["provider"], expected["provider"])
-                self.assertEqual(_csv(row["input_modalities"]), expected["input"])
-                self.assertEqual(_csv(row["output_modalities"]), expected["output"])
-                self.assertEqual(row["ctx_max"], expected["ctx_max"])
-                self.assertTrue(row["enabled"])
-                self.assertFalse(row["coa"])
-                self.assertFalse(row["router_eligible"])
+                self.assertFalse(cfg.has_option(section, key), f"{key} should not ship in {section}")
+                self.assertIn(key, bound)
 
     def test_stock_library_has_local_qwen_image(self) -> None:
         cfg = _config(self.models_path)
@@ -187,25 +182,35 @@ class TestModelDriverCatalogStock(unittest.TestCase):
         self.assertEqual(_csv(row["output_modalities"]), {"image"})
         self.assertFalse(row["router_eligible"])
 
-    def test_stock_activation_lists_include_each_output_model(self) -> None:
-        cfg = _config(self.setup_path)
-        self.assertIn(
-            "gemini-3.1-flash-image",
-            _csv(cfg.get("gemini", "cloud_models")),
+    def test_stock_activation_lists_exclude_output_specialties(self) -> None:
+        from shipped_models import all_keys
+
+        models = _config(self.models_path)
+        section = (
+            "catalog_library" if models.has_section("catalog_library") else "catalog"
         )
-        self.assertIn(
-            "gpt-audio-1.5",
-            _csv(cfg.get("third_party", "openai_models")),
-        )
-        openrouter = _csv(cfg.get("third_party", "openrouter_models"))
-        self.assertIn("google/gemini-3.1-flash-image", openrouter)
-        self.assertIn("openai/gpt-audio", openrouter)
-        self.assertTrue(set(PROMOTED_MODELS) <= openrouter)
+        activated = set(all_keys(self.models_path))
+        specialty = set(OUTPUT_MODELS) | {
+            key for key in PROMOTED_MODELS if key != "openai/gpt-5.6-luna"
+        }
+        for key in specialty:
+            with self.subTest(key=key):
+                self.assertFalse(
+                    models.has_option(section, key), f"{key} should not ship in {section}"
+                )
+                self.assertNotIn(key, activated)
+        self.assertIn("openai/gpt-5.6-luna", activated)
+        self.assertTrue(models.has_option(section, "openai/gpt-5.6-luna"))
 
     def test_promoted_active_site_models_have_exact_stock_metadata(self) -> None:
         cfg = _config(self.models_path)
         section = "catalog_library" if cfg.has_section("catalog_library") else "catalog"
-        for key, expected in PROMOTED_MODELS.items():
+        shipped_promoted = {
+            key: expected
+            for key, expected in PROMOTED_MODELS.items()
+            if key == "openai/gpt-5.6-luna"
+        }
+        for key, expected in shipped_promoted.items():
             with self.subTest(key=key):
                 self.assertTrue(cfg.has_option(section, key), f"{key} missing from {section}")
                 row = parse_catalog_row(cfg.get(section, key))
@@ -213,6 +218,11 @@ class TestModelDriverCatalogStock(unittest.TestCase):
                 self.assertEqual(_csv(row["input_modalities"]), expected["input"])
                 self.assertEqual(_csv(row["output_modalities"]), expected["output"])
                 self.assertEqual(row["ctx_max"], expected["ctx_max"])
+        for key in PROMOTED_MODELS:
+            if key == "openai/gpt-5.6-luna":
+                continue
+            with self.subTest(driver_only=key):
+                self.assertFalse(cfg.has_option(section, key))
 
     def test_current_input_replacements_ship_without_retired_aliases(self) -> None:
         models = _config(self.models_path)
@@ -221,24 +231,26 @@ class TestModelDriverCatalogStock(unittest.TestCase):
             if models.has_section("catalog_library")
             else "catalog"
         )
-        for key, expected in CURRENT_INPUT_REPLACEMENTS.items():
+        for key in CURRENT_INPUT_REPLACEMENTS:
             with self.subTest(key=key):
-                self.assertTrue(models.has_option(section, key))
-                row = parse_catalog_row(models.get(section, key))
-                self.assertEqual(row["provider"], expected["provider"])
-                self.assertEqual(_csv(row["input_modalities"]), expected["input"])
-                self.assertEqual(row["ctx_max"], expected["ctx_max"])
+                self.assertFalse(models.has_option(section, key))
         for key in RETIRED_INPUT_MODELS:
             with self.subTest(retired=key):
                 self.assertFalse(models.has_option(section, key))
 
-        setup = _config(self.setup_path)
-        activated = (
-            _csv(setup.get("gemini", "cloud_models"))
-            | _csv(setup.get("third_party", "xai_models"))
-        )
-        self.assertTrue(set(CURRENT_INPUT_REPLACEMENTS) <= activated)
+        from shipped_models import all_keys
+
+        activated = set(all_keys(self.models_path))
         self.assertTrue(RETIRED_INPUT_MODELS.isdisjoint(activated))
+        self.assertTrue(set(CURRENT_INPUT_REPLACEMENTS).isdisjoint(activated))
+
+
+def _write_site_layers(path: str, *, enabled: str, selected: list[str]) -> None:
+    from catalog_compat import _ensure_section_lines
+
+    _ensure_section_lines(path, "providers_site", {"enabled": enabled})
+    if selected:
+        _ensure_section_lines(path, "catalog_selected", {key: "true" for key in selected})
 
 
 class TestModelDriverCatalogMigration(unittest.TestCase):
@@ -253,60 +265,96 @@ class TestModelDriverCatalogMigration(unittest.TestCase):
                 self.skipTest("agictl migration dependencies are not installed")
             raise
 
-        csv_values = {
-            ("gemini", "coa_approved_models"): [],
-            ("gemini", "cloud_models"): ["gemini-3.1-flash-image"],
-            ("local_ai", "local_models"): [],
-            ("third_party", "providers"): ["openai", "openrouter"],
-            ("third_party", "openai_models"): ["gpt-audio-1.5"],
-            ("third_party", "openrouter_models"): [
-                "google/gemini-3.1-flash-image",
-                "openai/gpt-audio",
-                *PROMOTED_MODELS,
-            ],
-            ("third_party", "xai_models"): [],
-            ("third_party", "anthropic_models"): [],
-        }
-        value_values = {
-            ("third_party", "xai_enabled"): "false",
-            ("third_party", "openai_enabled"): "true",
-            ("third_party", "anthropic_enabled"): "false",
-            ("third_party", "openrouter_enabled"): "true",
-            ("local_ai", "enabled"): "false",
-            ("gemini", "mode"): "cloud",
-        }
-
-        def read_csv(section: str, key: str):
-            return list(csv_values.get((section, key), [])), "fixture"
-
-        def read_value(section: str, key: str, default: str = ""):
-            return value_values.get((section, key), default)
-
-        with (
-            patch.object(agictl_cli, "_read_ini_csv", side_effect=read_csv),
-            patch.object(agictl_cli, "_read_ini_value", side_effect=read_value),
-            patch.object(agictl_cli, "_gemini_credentials_present", return_value=True),
-            patch.object(agictl_cli, "_gemini_provider_enabled", return_value=True),
-            patch.object(
-                agictl_cli,
-                "fetch_openrouter_index_with_fallback",
-                return_value={},
-            ),
-            patch.object(agictl_cli, "_resolve_gpu_backend", return_value="intel"),
-        ):
-            _providers, rows = agictl_cli._build_migration_rows(stock_models)
+        expected_models = {"openai/gpt-5.6-luna": PROMOTED_MODELS["openai/gpt-5.6-luna"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "models.ini")
+            with open(stock_models, encoding="utf-8") as handle:
+                body = handle.read()
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(body)
+            _write_site_layers(
+                path,
+                enabled="google,openai,openrouter",
+                selected=list(OUTPUT_MODELS) + list(PROMOTED_MODELS),
+            )
+            with (
+                patch.object(agictl_cli, "_read_ini_value", side_effect=lambda s, k, d="": {
+                    ("local_ai", "enabled"): "false",
+                    ("gemini", "mode"): "cloud",
+                }.get((s, k), d)),
+                patch.object(agictl_cli, "_read_ini_csv", return_value=([], "fixture")),
+                patch("provider_registry.credentials_present", return_value=True),
+                patch("model_catalog.collect_model_references", return_value=[]),
+                patch.object(
+                    agictl_cli,
+                    "fetch_openrouter_index_with_fallback",
+                    return_value={},
+                ),
+                patch.object(agictl_cli, "_resolve_gpu_backend", return_value="intel"),
+            ):
+                _providers, rows = agictl_cli._build_migration_rows(path)
 
         migrated = dict(rows)
-        expected_models = {**OUTPUT_MODELS, **PROMOTED_MODELS}
         self.assertEqual(
             set(migrated).intersection(expected_models),
             set(expected_models),
         )
+        self.assertTrue(set(OUTPUT_MODELS).isdisjoint(migrated))
         for key, expected in expected_models.items():
             with self.subTest(key=key):
                 row = parse_catalog_row(migrated[key])
                 self.assertEqual(row["provider"], expected["provider"])
                 self.assertEqual(_csv(row["output_modalities"]), expected["output"])
+                self.assertEqual(row["class"], "cloud")
+
+    def test_migrate_sets_coa_from_library_not_csv(self) -> None:
+        stock_models = os.path.join(SRC_ROOT, "models.ini.stock")
+        if not os.path.isfile(stock_models):
+            self.skipTest("source stock template is not installed")
+        try:
+            import agictl.cli as agictl_cli
+        except ModuleNotFoundError as exc:
+            if exc.name == "click":
+                self.skipTest("agictl migration dependencies are not installed")
+            raise
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "models.ini")
+            with open(stock_models, encoding="utf-8") as handle:
+                body = handle.read()
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(body)
+            _write_site_layers(
+                path,
+                enabled="google,openrouter",
+                selected=[],
+            )
+            with (
+                patch.object(agictl_cli, "_read_ini_value", side_effect=lambda s, k, d="": {
+                    ("local_ai", "enabled"): "false",
+                    ("gemini", "mode"): "cloud",
+                }.get((s, k), d)),
+                patch.object(agictl_cli, "_read_ini_csv", return_value=([], "fixture")),
+                patch("provider_registry.credentials_present", return_value=True),
+                patch("model_catalog.collect_model_references", return_value=[]),
+                patch.object(
+                    agictl_cli,
+                    "fetch_openrouter_index_with_fallback",
+                    return_value={},
+                ),
+                patch.object(agictl_cli, "_resolve_gpu_backend", return_value="intel"),
+            ):
+                _providers, rows = agictl_cli._build_migration_rows(path)
+
+        migrated = dict(rows)
+        flash = parse_catalog_row(migrated["gemini-3.7-flash"])
+        grok = parse_catalog_row(migrated["x-ai/grok-4.6"])
+        self.assertTrue(flash["coa"])
+        self.assertTrue(grok["coa"])
+        self.assertEqual(flash["class"], "cloud")
+        self.assertEqual(grok["class"], "cloud")
+        self.assertNotIn("gemini-3.1-flash-image", migrated)
+        self.assertNotIn("google/gemini-3.1-flash-image", migrated)
 
     def test_merged_catalog_exposes_output_capabilities(self) -> None:
         lines = ["[catalog]"]

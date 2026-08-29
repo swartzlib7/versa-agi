@@ -945,20 +945,10 @@ def _ini_section_body_lines(path, section):
 def _is_stock_setup_key(section, key):
     """True for setup.ini keys owned by the shipped template (never carried forward).
 
-    These are the stock cloud/third-party model-selection lists — the release
-    decides them; the operator customizes models via the dashboard/CLI custom
-    layer (and per-agent overrides in agents.db) instead.
-
-    local_ai default_model / local_models / sycl_active_model and
-    model_routing.local are site-owned. Fresh setup writes the operator's pick;
-    --update must not stamp stock (an Intel 32 GB site stays on qwen3.6:35b).
+    Setup.ini is no longer a model inventory. Shipped selection lives in
+    models.ini ``[shipped_models]``. Site-owned values (including the system
+    default ``[gemini] model``) carry forward on ``--update``.
     """
-    if section == "gemini" and key in (
-        "cloud_models", "coa_approved_models", "model",
-    ):
-        return True
-    if section == "third_party" and (key == "providers" or key.endswith("_models")):
-        return True
     return False
 
 
@@ -1002,6 +992,12 @@ _MODELS_UNION_SECTIONS = (
     "media_bundles", "catalog_removed",
 )
 
+_MODELS_SITE_SECTIONS = (
+    "catalog_custom", "providers_custom", "model_params_custom",
+    "providers_site", "provider_custom", "provider_overrides",
+    "catalog_selected", "catalog_overrides",
+)
+
 
 def _reconcile_models_ini(template, deployed):
     """Regenerate the deployed models.ini from the template, preserving user content.
@@ -1016,7 +1012,7 @@ def _reconcile_models_ini(template, deployed):
     """
     custom_bodies = {
         sec: _ini_section_body_lines(deployed, sec)
-        for sec in ("catalog_custom", "providers_custom", "model_params_custom")
+        for sec in _MODELS_SITE_SECTIONS
     }
     tmpl_pairs = _parse_ini_pairs(template)
     dep_pairs = _parse_ini_pairs(deployed)
@@ -1064,6 +1060,19 @@ def system_reconcile_config(setup_template, models_template):
 
     result = {}
     try:
+        from catalog_compat import migrate_legacy_site_state, snapshot_vanishing_presets
+        if os.path.exists(SETUP_INI_CANONICAL) and os.path.exists(_MODELS_INI_PATHS[0]):
+            result["legacy_catalog"] = migrate_legacy_site_state(
+                setup_path=SETUP_INI_CANONICAL,
+                models_path=_MODELS_INI_PATHS[0],
+            )
+        if os.path.exists(_MODELS_INI_PATHS[0]) and os.path.exists(models_template):
+            vanished = snapshot_vanishing_presets(
+                models_path=_MODELS_INI_PATHS[0],
+                template_path=models_template,
+            )
+            if vanished:
+                result["snapshotted_presets"] = vanished
         # setup.ini: regenerate only when a deployed copy exists (fresh installs
         # create it later, in setup.sh Step 13, from interactively collected values).
         if os.path.exists(SETUP_INI_CANONICAL):
@@ -1422,21 +1431,17 @@ def _sync_catalog():
 
     for key, m in catalog.items():
         cls = m["class"]
+        if cls == "third_party":
+            cls = "cloud"
         if cls == "cloud":
-            # Same gate as third_party: model enabled AND provider enabled.
-            # Google stays En=· until Gemini credentials exist (migrate / set-key).
             prov = providers.get(m["provider"], {})
             available = m["enabled"] and prov.get("enabled", False)
             if available:
                 cloud.append(key)
-                if m["coa"]:
-                    coa.append(key)
-        elif cls == "third_party":
-            prov = providers.get(m["provider"], {})
-            available = m["enabled"] and prov.get("enabled", False)
-            if available:
-                third_party.append(key)
-                tp_provider_active.add(m["provider"])
+                transport = prov.get("transport") or "direct"
+                if transport != "direct":
+                    third_party.append(key)
+                    tp_provider_active.add(m["provider"])
                 if m["coa"]:
                     coa.append(key)
         # local rows are advisory in this edition — not synced here
@@ -4393,7 +4398,7 @@ _OPENROUTER_DEFAULT_MODEL_PARAMS = json.dumps({
 @openrouter_cmd.command("add")
 @click.argument("model_id")
 @click.option("--coa-approved/--no-coa-approved", default=None,
-              help="Default: true when model is in setup.ini coa_approved_models")
+              help="Default: library-row coa flag, else false (tick COA on Import)")
 @click.option("--router-eligible/--no-router-eligible", default=True)
 @click.option("--no-sync", is_flag=True)
 def openrouter_add_cmd(model_id, coa_approved, router_eligible, no_sync):
@@ -4415,13 +4420,12 @@ def openrouter_add_cmd(model_id, coa_approved, router_eligible, no_sync):
     if not is_chat_capable(or_model):
         json_response(False, error=f"Model '{model_id}' is not chat-capable (no text output)")
         sys.exit(1)
-    coa_set = set(_read_ini_csv("gemini", "coa_approved_models")[0])
     if coa_approved is None:
-        coa_approved = model_id in coa_set
+        coa_approved = _library_coa_flag(model_id)
     ctx = or_model.get("context_length") or 131072
     summary = or_model_summary(or_model)
     row = {
-        "class": "third_party",
+        "class": "cloud",
         "provider": "openrouter",
         "enabled": True,
         "coa": coa_approved,
@@ -4437,13 +4441,13 @@ def openrouter_add_cmd(model_id, coa_approved, router_eligible, no_sync):
     if not targets:
         json_response(False, error="models.ini not found")
         sys.exit(1)
-    value = catalog_row_to_value(row)
     try:
-        for path in targets:
-            _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
-            _upsert_models_ini_entry(
-                path, "model_params_custom", f"model:{model_id}", _OPENROUTER_DEFAULT_MODEL_PARAMS,
-            )
+        if _library_row(model_id):
+            _select_known_catalog_key(model_id, coa_override=coa_approved)
+        else:
+            value = catalog_row_to_value(row)
+            for path in targets:
+                _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
@@ -4453,20 +4457,6 @@ def openrouter_add_cmd(model_id, coa_approved, router_eligible, no_sync):
             patch_models_ini_openrouter_pricing(path, keys=[model_id])
     except Exception:
         pass
-    # Append to setup.ini openrouter_models so migrate retains membership
-    for ini in (SETUP_INI_CANONICAL, os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "setup.ini",
-    )):
-        if not os.path.isfile(ini):
-            continue
-        existing = _read_ini_csv("third_party", "openrouter_models")[0]
-        if model_id not in existing:
-            existing.append(model_id)
-            try:
-                _update_ini_key(ini, "third_party", "openrouter_models", ",".join(existing))
-            except Exception:
-                pass
     payload = {
         "action": "openrouter_add",
         "key": model_id,
@@ -4668,7 +4658,7 @@ def source_list_cmd(provider, addable_only, as_table, refresh):
 @click.argument("provider")
 @click.argument("model_id")
 @click.option("--coa-approved/--no-coa-approved", default=None,
-              help="Default: true when model is in setup.ini coa_approved_models")
+              help="Default: library-row coa flag, else false (tick COA on Import)")
 @click.option("--router-eligible/--no-router-eligible", default=True)
 @click.option("--no-sync", is_flag=True)
 def source_add_cmd(provider, model_id, coa_approved, router_eligible, no_sync):
@@ -4697,11 +4687,10 @@ def source_add_cmd(provider, model_id, coa_approved, router_eligible, no_sync):
         json_response(False, error=f"Model '{model_id}' is not chat-capable (no text output)")
         sys.exit(1)
     summary = _pc.model_summary(provider, raw)
-    coa_set = set(_read_ini_csv("gemini", "coa_approved_models")[0])
     if coa_approved is None:
-        coa_approved = model_id in coa_set
+        coa_approved = _library_coa_flag(model_id)
     ctx = summary.get("context_length") or 131072
-    model_class = "cloud" if provider == "google" else "third_party"
+    model_class = "cloud"
     row = {
         "class": model_class,
         "provider": provider,
@@ -4719,13 +4708,13 @@ def source_add_cmd(provider, model_id, coa_approved, router_eligible, no_sync):
     if not targets:
         json_response(False, error="models.ini not found")
         sys.exit(1)
-    value = catalog_row_to_value(row)
     try:
-        for path in targets:
-            _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
-            _upsert_models_ini_entry(
-                path, "model_params_custom", f"model:{model_id}", _PROVIDER_DEFAULT_MODEL_PARAMS,
-            )
+        if _library_row(model_id):
+            _select_known_catalog_key(model_id, coa_override=coa_approved)
+        else:
+            value = catalog_row_to_value(row)
+            for path in targets:
+                _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
@@ -4736,11 +4725,6 @@ def source_add_cmd(provider, model_id, coa_approved, router_eligible, no_sync):
             patch_models_ini_openrouter_pricing(path, keys=[model_id])
     except Exception:
         pass
-    # Track membership in setup.ini {slug}_models (google → gemini.cloud_models).
-    if provider == "google":
-        _append_setup_csv("gemini", "cloud_models", model_id)
-    else:
-        _append_setup_csv("third_party", f"{provider}_models", model_id)
     payload = {
         "action": "source_add",
         "provider": provider,
@@ -4796,6 +4780,47 @@ def _catalog_baseline_meta(ini):
     return meta
 
 
+def _library_coa_flag(model_id):
+    """True when [catalog_library] marks this key COA; else False."""
+    try:
+        ini = _models_ini_parser()
+        for path in _MODELS_INI_PATHS:
+            if os.path.isfile(path):
+                ini.read(path)
+                break
+        return bool(_catalog_baseline_meta(ini).get(model_id, {}).get("coa"))
+    except Exception:
+        return False
+
+
+def _library_row(model_id):
+    try:
+        ini = _models_ini_parser()
+        for path in _MODELS_INI_PATHS:
+            if os.path.isfile(path):
+                ini.read(path)
+                break
+        return _catalog_baseline_meta(ini).get(model_id)
+    except Exception:
+        return None
+
+
+def _select_known_catalog_key(model_id, *, coa_override=None):
+    """Mark a system preset as site-selected. No full custom row, no generic params."""
+    import json
+    targets = _models_ini_write_targets()
+    if not targets:
+        raise RuntimeError("models.ini not found")
+    lib = _library_row(model_id) or {}
+    for path in targets:
+        _upsert_models_ini_entry(path, "catalog_selected", model_id, "true")
+        if coa_override is not None and bool(lib.get("coa")) != bool(coa_override):
+            _upsert_models_ini_entry(
+                path, "catalog_overrides", model_id,
+                json.dumps({"coa": bool(coa_override)}, separators=(",", ":")),
+            )
+
+
 def _gemini_credentials_present() -> bool:
     """True when Gemini API key or GCP vault credentials are configured."""
     coa_env = "/etc/versa-agi/coa.env"
@@ -4818,7 +4843,16 @@ def _gemini_credentials_present() -> bool:
 
 
 def _gemini_provider_enabled() -> bool:
-    """[gemini] enabled= gate. Unset → True (legacy installs keyed without flag)."""
+    """Google is on when listed in [providers_site], else legacy [gemini] enabled=."""
+    try:
+        from provider_registry import _read_raw_section, site_enabled_slugs
+        from model_catalog import resolve_models_ini_path
+        path = resolve_models_ini_path()
+        site = _read_raw_section(path, "providers_site")
+        if "enabled" in site:
+            return "google" in site_enabled_slugs(path)
+    except Exception:
+        pass
     try:
         import configparser
         cfg = configparser.ConfigParser()
@@ -4830,14 +4864,14 @@ def _gemini_provider_enabled() -> bool:
                 cfg.read(p)
                 break
         else:
-            return True
+            return False
         if not cfg.has_option("gemini", "enabled"):
-            return True
-        return cfg.get("gemini", "enabled", fallback="true").strip().lower() in (
+            return False
+        return cfg.get("gemini", "enabled", fallback="false").strip().lower() in (
             "true", "1", "yes", "on",
         )
     except Exception:
-        return True
+        return False
 
 
 def _activate_google_provider_on_key(updated_files=None, errors=None):
@@ -4845,19 +4879,21 @@ def _activate_google_provider_on_key(updated_files=None, errors=None):
     updated_files = updated_files if updated_files is not None else []
     errors = errors if errors is not None else []
     try:
-        value = "true|Google|ChatGoogleGenerativeAI"
+        from provider_registry import set_site_enabled
         for path in _models_ini_write_targets():
-            _upsert_models_ini_entry(path, "providers_custom", "google", value)
+            set_site_enabled(path, "google", True)
             if path not in updated_files:
                 updated_files.append(path)
     except Exception as e:  # noqa: BLE001
         errors.append(f"models.ini provider enable (google): {e}")
     # Inject setup.ini cloud_models into live [catalog] (same as TP activate).
     if not os.environ.get("AGICTL_AGENT_USER", ""):
+        _ensure_coa_shipped_on_activate("google", errors)
         try:
             _migrate_catalog_baseline(force=False)
         except Exception as e:  # noqa: BLE001
             errors.append(f"model migrate on activate (google): {e}")
+        _import_missing_coa_shipped("google", errors)
     try:
         _sync_catalog()
     except Exception:  # noqa: BLE001
@@ -4865,18 +4901,18 @@ def _activate_google_provider_on_key(updated_files=None, errors=None):
 
 
 def _build_migration_rows(target):
-    """Derive ([providers], [catalog]) rows from setup.ini + catalog library.
+    """Derive ([providers], [catalog]) from shipped selection + site overlays.
 
     Returns (provider_rows, catalog_rows) as ordered lists of (key, value).
-
-    Providers are always prefaced (En=· until keyed). Live [catalog] rows are
-    injected only for *activated* backends:
-      - Google cloud_models when Gemini credentials exist
-      - third_party {slug}_models when {slug}_enabled=true
-      - local_models when local_ai.enabled and mode is local/hybrid
-    Metadata (labels/ctx) comes from [catalog_library] (or legacy [catalog]).
     """
     import configparser
+    from model_catalog import (
+        apply_catalog_overrides,
+        compute_live_catalog_keys,
+        local_provider_for_backend,
+    )
+    from provider_registry import load_merged_providers, provider_row_to_value
+
     mini = _models_ini_parser()
     if target and os.path.exists(target):
         mini.read(target)
@@ -4899,13 +4935,9 @@ def _build_migration_rows(target):
                     pass
         return 0, default_max
 
-    # setup.ini model config (_read_ini_csv returns (list, path))
-    coa_approved = set(_read_ini_csv("gemini", "coa_approved_models")[0])
-    cloud_models = _read_ini_csv("gemini", "cloud_models")[0]
     local_models = _read_ini_csv("local_ai", "local_models")[0]
-    tp_providers = _read_ini_csv("third_party", "providers")[0]
-    google_enabled = _gemini_credentials_present() and _gemini_provider_enabled()
     removed = _catalog_removed_keys()
+    providers = load_merged_providers(target)
 
     or_index: dict = {}
     try:
@@ -4913,72 +4945,45 @@ def _build_migration_rows(target):
     except Exception:
         or_index = {}
 
-    catalog_rows = []
-
-    # ── Cloud: inject only when Gemini credentials + enabled= ──
-    if google_enabled:
-        for k in cloud_models:
-            if k in removed:
-                continue
-            m = cat_meta.get(k, {})
-            lbl = m.get("label", k)
-            rec = m.get("ctx_recommended", 0)
-            mx = m.get("ctx_max", 1000000) or 1000000
-            coa = "true" if k in coa_approved else "false"
-            row = {
-                "class": "cloud", "provider": "google", "enabled": True, "coa": coa == "true",
-                "ctx_recommended": rec, "ctx_max": mx,
-                "work_modality": m.get("work_modality", "balanced"),
-                "input_modalities": m.get("input_modalities", "text"),
-                "output_modalities": m.get("output_modalities", "text"),
-                "router_eligible": m.get("router_eligible", False),
-                "label": lbl,
-            }
-            catalog_rows.append((k, catalog_row_to_value(row)))
-
-    # ── Providers: always prefill stock cloud providers (enabled = keyed/opted-in).
-    # Skip-all installs still get Google/xAI/OpenAI/Anthropic/OpenRouter in the
-    # Providers tab so Add Model has a provider dropdown; En=· until configured.
-    provider_rows = [
-        ("google", f"{'true' if google_enabled else 'false'}|Google|ChatGoogleGenerativeAI"),
-    ]
-    cls_map = {"xai": "ChatOpenAI", "openai": "ChatOpenAI",
-               "anthropic": "ChatAnthropic", "openrouter": "ChatOpenAI"}
-    label_map = {"xai": "xAI", "openai": "OpenAI",
-                 "anthropic": "Anthropic", "openrouter": "OpenRouter"}
-    # setup.ini [third_party] providers= plus stock slugs (never leave the registry empty)
-    _stock_tp = ("xai", "openai", "anthropic", "openrouter")
-    _tp_slugs = list(dict.fromkeys([*(tp_providers or []), *_stock_tp]))
-    for slug in _tp_slugs:
-        raw_enabled = _read_ini_value("third_party", f"{slug}_enabled", "false")
-        p_enabled = "true" if raw_enabled.strip().lower() == "true" else "false"
-        p_cls = cls_map.get(slug, "ChatOpenAI")
-        p_label = label_map.get(slug, slug)
-        provider_rows.append((slug, f"{p_enabled}|{p_label}|{p_cls}"))
-        # Inject {slug}_models into live [catalog] only when that provider is on.
-        if p_enabled != "true":
+    provider_rows = []
+    for slug, prow in providers.items():
+        if prow.get("class") == "local":
             continue
-        for k in _read_ini_csv("third_party", f"{slug}_models")[0]:
-            if k in removed:
-                continue
-            m = cat_meta.get(k, {})
-            lbl = m.get("label", k)
-            rec = m.get("ctx_recommended", 0)
-            mx = m.get("ctx_max", 131072) or 131072
-            coa = "true" if k in coa_approved else "false"
-            row = {
-                "class": "third_party", "provider": slug, "enabled": True, "coa": coa == "true",
-                "ctx_recommended": rec, "ctx_max": mx,
-                "work_modality": m.get("work_modality", "balanced"),
-                "input_modalities": m.get("input_modalities", "text"),
-                "output_modalities": m.get("output_modalities", "text"),
-                "router_eligible": m.get("router_eligible", False),
-                "label": lbl,
-            }
-            if slug == "openrouter" and k in or_index:
-                row = enrich_catalog_dict(row, or_index[k], preserve_label=True)
-            catalog_rows.append((k, catalog_row_to_value(row)))
-    from model_catalog import local_provider_for_backend
+        provider_rows.append((slug, provider_row_to_value(prow)))
+
+    catalog_rows = []
+    live_keys = compute_live_catalog_keys(target)
+    resolved: dict[str, dict] = {}
+    for k in live_keys:
+        if k in removed:
+            continue
+        m = cat_meta.get(k, {})
+        if not m and mini.has_section("catalog_custom") and mini.has_option("catalog_custom", k):
+            m = parse_catalog_row(mini.get("catalog_custom", k)) or {}
+        if not m:
+            continue
+        row = {
+            "class": m.get("class") or "cloud",
+            "provider": m.get("provider") or "",
+            "enabled": True,
+            "coa": bool(m.get("coa")),
+            "ctx_recommended": m.get("ctx_recommended", 0),
+            "ctx_max": m.get("ctx_max") or 131072,
+            "work_modality": m.get("work_modality", "balanced"),
+            "input_modalities": m.get("input_modalities", "text"),
+            "output_modalities": m.get("output_modalities", "text"),
+            "router_eligible": m.get("router_eligible", False),
+            "label": m.get("label", k),
+        }
+        if row["class"] == "third_party":
+            row["class"] = "cloud"
+        if row.get("provider") == "openrouter" and k in or_index:
+            row = enrich_catalog_dict(row, or_index[k], preserve_label=True)
+        resolved[k] = row
+    apply_catalog_overrides(resolved, target)
+    for k, row in resolved.items():
+        catalog_rows.append((k, catalog_row_to_value(row)))
+
     gpu_backend = _resolve_gpu_backend()
     local_provider = local_provider_for_backend(gpu_backend)
     is_llamacpp = local_provider == "llamacpp"
@@ -5177,10 +5182,6 @@ def _migrate_catalog_baseline(force: bool = False) -> dict:
 
     provider_rows, catalog_rows = _build_migration_rows(target)
     write_targets = _models_ini_write_targets() or [target]
-    google_baseline_enabled = any(
-        k == "google" and str(v).split("|", 1)[0].strip().lower() == "true"
-        for k, v in provider_rows
-    )
 
     custom_io_refreshed = 0
     for path in write_targets:
@@ -5190,13 +5191,6 @@ def _migrate_catalog_baseline(force: bool = False) -> dict:
                                 header_comment=_BASELINE_CATALOG_HEADER)
         if not force:
             custom_io_refreshed += _refresh_catalog_custom_io_from_baseline(path, catalog_rows)
-            # Drop stale providers_custom google=true when Gemini was skipped
-            # (custom layer would otherwise keep Google enabled over baseline false).
-            if not google_baseline_enabled:
-                try:
-                    _remove_ini_entry(path, "providers_custom", "google")
-                except Exception:  # noqa: BLE001
-                    pass
         if force:
             _clear_ini_section(path, "providers_custom")
             _clear_ini_section(path, "catalog_custom")
@@ -5332,8 +5326,9 @@ def catalog_list(model_class, as_table):
     providers = _load_providers()
     pricing = load_catalog_pricing()
     rows = []
+    want_class = "cloud" if model_class == "third_party" else model_class
     for key, m in cat.items():
-        if model_class and m["class"] != model_class:
+        if want_class and m["class"] != want_class:
             continue
         row = {"key": key, **m}
         if catalog_driver_enrichment is not None:
@@ -5397,10 +5392,12 @@ def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
                 router_eligible, gguf_repo, gguf_file, size_gb, no_sync):
     """Add a model to the catalog.
 
-    For third-party models the provider must be enabled (and keyed) before the
+    For remote models the provider must be enabled (and keyed) before the
     model is routed at runtime. For local models, pass --gguf-* to also register
     SYCL download metadata; run 'agictl model add <key>' afterwards to download.
     """
+    if model_class == "third_party":
+        model_class = "cloud"
     cat = _load_catalog()
     if key in cat:
         json_response(False, error=f"Model '{key}' already in catalog. Use 'catalog update'.")
@@ -5502,7 +5499,7 @@ def catalog_update(key, label, provider, model_class, ctx_recommended, ctx_max,
             sys.exit(1)
         m["provider"] = provider
     if model_class is not None:
-        m["class"] = model_class
+        m["class"] = "cloud" if model_class == "third_party" else model_class
     if label is not None:
         m["label"] = label
     if ctx_recommended is not None:
@@ -6107,6 +6104,94 @@ def _setup_ini_write_targets():
     return paths
 
 
+def _ensure_coa_shipped_on_activate(slug, errors=None):
+    """Enable the provider in site state so migrate injects shipped keys."""
+    errors = errors if errors is not None else []
+    try:
+        from provider_registry import set_site_enabled
+        for path in _models_ini_write_targets():
+            set_site_enabled(path, slug, True)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"providers_site enable ({slug}): {exc}")
+
+
+def _import_missing_coa_shipped(slug, errors=None):
+    """Live-import shipped keys still missing after migrate (COA-approved)."""
+    errors = errors if errors is not None else []
+    try:
+        from shipped_models import keys_for_provider
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"shipped_models import: {exc}")
+        return
+    provider = slug
+    try:
+        cat = _load_catalog()
+    except Exception:
+        cat = {}
+    for model_id in keys_for_provider(provider):
+        if model_id in cat:
+            continue
+        try:
+            _live_import_coa_key(provider, model_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"coa shipped import {provider}/{model_id}: {exc}")
+
+
+def _live_import_coa_key(provider, model_id):
+    """Import one catalog key via the live provider API into [catalog_custom]."""
+    if provider == "openrouter":
+        from openrouter_catalog import (
+            fetch_openrouter_index_with_fallback,
+            is_chat_capable,
+            or_model_summary,
+        )
+        index = fetch_openrouter_index_with_fallback()
+        raw = index.get(model_id)
+        if not raw:
+            raise RuntimeError(f"not found on OpenRouter")
+        if not is_chat_capable(raw):
+            raise RuntimeError("not chat-capable")
+        summary = or_model_summary(raw)
+        ctx = raw.get("context_length") or 131072
+        model_class = "cloud"
+        params = _OPENROUTER_DEFAULT_MODEL_PARAMS
+    else:
+        if _pc is None:
+            raise RuntimeError("provider catalog unavailable")
+        raw_index = _pc.fetch_index(provider)
+        raw = raw_index.get(model_id)
+        if not raw:
+            raise RuntimeError(f"not found on {provider}")
+        if not _pc.is_chat_capable(provider, raw):
+            raise RuntimeError("not chat-capable")
+        summary = _pc.model_summary(provider, raw)
+        ctx = summary.get("context_length") or 131072
+        model_class = "cloud"
+        params = _PROVIDER_DEFAULT_MODEL_PARAMS
+    if _library_row(model_id):
+        _select_known_catalog_key(model_id, coa_override=True)
+        return
+    row = {
+        "class": model_class,
+        "provider": provider,
+        "enabled": True,
+        "coa": True,
+        "ctx_recommended": 0,
+        "ctx_max": int(ctx) if ctx else 131072,
+        "work_modality": summary["work_modality"],
+        "input_modalities": summary["input_modalities"],
+        "output_modalities": summary["output_modalities"],
+        "router_eligible": True,
+        "label": summary["label"],
+    }
+    targets = _models_ini_write_targets()
+    if not targets:
+        raise RuntimeError("models.ini not found")
+    value = catalog_row_to_value(row)
+    for path in targets:
+        _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
+
+
 def _activate_third_party_on_key(slug, updated_files=None, errors=None):
     """Setting a third-party API key implies enable — keep setup.ini + models.ini aligned.
 
@@ -6119,35 +6204,25 @@ def _activate_third_party_on_key(slug, updated_files=None, errors=None):
     errors = errors if errors is not None else []
     if slug not in _THIRD_PARTY_SETUP_SLUGS:
         return
-    flag = "true"
-    for path in _setup_ini_write_targets():
-        try:
-            _update_ini_key(path, "third_party", f"{slug}_enabled", flag)
-            _update_ini_key(path, "third_party", "enabled", flag)
+    try:
+        from provider_registry import set_site_enabled
+        for path in _models_ini_write_targets():
+            set_site_enabled(path, slug, True)
             if path not in updated_files:
                 updated_files.append(path)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{path}: {e}")
-    try:
-        provs = _load_providers()
-        info = provs.get(slug)
-        if info:
-            value = f"true|{info['label']}|{info['cls']}"
-            for path in _models_ini_write_targets():
-                _upsert_models_ini_entry(path, "providers_custom", slug, value)
-                if path not in updated_files:
-                    updated_files.append(path)
     except Exception as e:  # noqa: BLE001
-        errors.append(f"models.ini provider enable ({slug}): {e}")
+        errors.append(f"providers_site enable ({slug}): {e}")
     # Re-migrate stock {slug}_models from setup.ini into the catalog baseline,
     # then sync paths.env — otherwise enabling a key only flips the provider
     # flag and agitop never sees shipped OpenRouter rows (e.g. z-ai/glm-5.2).
     # Skip when an agent is the caller (same guard as `model migrate`).
     if not os.environ.get("AGICTL_AGENT_USER", ""):
+        _ensure_coa_shipped_on_activate(slug, errors)
         try:
             _migrate_catalog_baseline(force=False)
         except Exception as e:  # noqa: BLE001
             errors.append(f"model migrate on activate ({slug}): {e}")
+        _import_missing_coa_shipped(slug, errors)
     try:
         _sync_catalog()
     except Exception:  # noqa: BLE001
@@ -6160,34 +6235,14 @@ def _provider_set_enabled(slug, enabled, no_sync):
         json_response(False, error=f"Provider '{slug}' not found. Add it with 'provider add'.")
         sys.exit(1)
     info = provs[slug]
-    # Override always lands in the custom layer — for a baseline provider this
-    # writes a full-row override that wins at read time (and survives migrate).
-    value = f"{'true' if enabled else 'false'}|{info['label']}|{info['cls']}"
     try:
+        from provider_registry import set_site_enabled
         for path in _models_ini_write_targets():
-            _upsert_models_ini_entry(path, "providers_custom", slug, value)
+            set_site_enabled(path, slug, enabled)
     except PermissionError:
         json_response(False, error="permission denied writing models.ini (use sudo)")
         sys.exit(1)
-    # Keep setup.ini {slug}_enabled in lockstep so Import / openrouter_configured()
-    # and migrate agree with the Providers tab.
-    if slug in _THIRD_PARTY_SETUP_SLUGS:
-        flag = "true" if enabled else "false"
-        for path in _setup_ini_write_targets():
-            try:
-                _update_ini_key(path, "third_party", f"{slug}_enabled", flag)
-                if enabled:
-                    _update_ini_key(path, "third_party", "enabled", "true")
-            except Exception:  # noqa: BLE001
-                pass
-    # Enable or disable: rebuild live [catalog] so stock CSV models appear only
-    # while the provider is on (and drop when disabled).
-    if slug in _THIRD_PARTY_SETUP_SLUGS and not os.environ.get("AGICTL_AGENT_USER", ""):
-        try:
-            _migrate_catalog_baseline(force=False)
-        except Exception:  # noqa: BLE001
-            pass
-    if slug == "google" and not os.environ.get("AGICTL_AGENT_USER", ""):
+    if not os.environ.get("AGICTL_AGENT_USER", ""):
         try:
             _migrate_catalog_baseline(force=False)
         except Exception:  # noqa: BLE001
@@ -7715,22 +7770,8 @@ def agent_set_model(name, model, clear_model):
             sys.exit(1)
 
         if new_model and name == "coa":
-            import configparser
             cat = _load_catalog()
-            coa_allowed = set()
-            try:
-                cfg = configparser.ConfigParser()
-                for p in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
-                    if os.path.isfile(p):
-                        cfg.read(p)
-                        break
-                raw = cfg.get("gemini", "coa_approved_models", fallback="")
-                coa_allowed = {m.strip() for m in raw.split(",") if m.strip()}
-            except Exception:
-                pass
-            for key, m in cat.items():
-                if m.get("coa"):
-                    coa_allowed.add(key)
+            coa_allowed = {key for key, m in cat.items() if m.get("coa")}
             if coa_allowed and new_model not in coa_allowed:
                 conn.close()
                 json_response(False, error=f"Model '{new_model}' is not COA-approved. Allowed: {', '.join(sorted(coa_allowed))}")

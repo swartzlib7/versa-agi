@@ -73,8 +73,11 @@ def parse_catalog_row(raw: str) -> dict | None:
         router_eligible = False
         label = catalog_label_after_probe("|".join(parts[6:]))
 
+    model_class = parts[0]
+    if model_class == "third_party":
+        model_class = "cloud"
     return {
-        "class": parts[0],
+        "class": model_class,
         "provider": parts[1],
         "enabled": parts[2].lower() == "true",
         "coa": parts[3].lower() == "true",
@@ -142,24 +145,10 @@ def resolve_local_provider(gpu_backend: str | None = None) -> str:
 
 
 def load_providers(path: str | None = None) -> dict[str, dict]:
-    """Load merged provider registry (baseline [providers] + [providers_custom])."""
-    path = path or resolve_models_ini_path()
-    base = _read_raw_section(path, "providers")
-    custom = _read_raw_section(path, "providers_custom")
-    out: dict[str, dict] = {}
+    """Load merged provider registry (library + site activation + overlays)."""
+    from provider_registry import load_merged_providers
 
-    def _parse(slug: str, raw: str, origin: str) -> None:
-        parts = [p.strip() for p in raw.split("|")]
-        enabled = parts[0].lower() == "true" if parts else False
-        label = parts[1] if len(parts) > 1 else slug
-        cls = parts[2] if len(parts) > 2 else ""
-        out[slug] = {"enabled": enabled, "label": label, "cls": cls, "origin": origin}
-
-    for slug, raw in base.items():
-        _parse(slug, raw, "baseline")
-    for slug, raw in custom.items():
-        _parse(slug, raw, "override" if slug in base else "custom")
-    return out
+    return load_merged_providers(path)
 
 
 def provider_display_label(
@@ -347,12 +336,126 @@ def load_catalog(
         _ingest(key, raw, "baseline")
     for key, raw in custom.items():
         _ingest(key, raw, "override" if key in base else "custom")
+    apply_catalog_overrides(out, path)
     keys = (
         list(assigned_local)
         if assigned_local is not None
         else assigned_local_model_keys()
     )
     fill_assigned_local_catalog(out, path, keys)
+    return out
+
+
+def apply_catalog_overrides(out: dict[str, dict], path: str) -> None:
+    """Apply sparse [catalog_overrides] JSON patches onto resolved rows."""
+    import json
+
+    for key, raw in _read_raw_section(path, "catalog_overrides").items():
+        if key not in out:
+            continue
+        try:
+            patch = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(patch, dict):
+            out[key].update(patch)
+            out[key]["origin"] = "override"
+
+
+def selected_catalog_keys(path: str | None = None) -> list[str]:
+    path = path or resolve_models_ini_path()
+    return [
+        key for key, raw in _read_raw_section(path, "catalog_selected").items()
+        if raw.strip().lower() not in ("false", "0", "no")
+    ]
+
+
+def collect_model_references(
+    *,
+    agents_db: str | None = None,
+    paths_env: str | None = None,
+    setup_ini: str | None = None,
+) -> list[str]:
+    """Catalog keys assigned or preferred anywhere on the site."""
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str | None) -> None:
+        for key in parse_csv_keys(raw or ""):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+
+    setup_ini = setup_ini or SETUP_INI_CANONICAL
+    _add(read_setup_value("gemini", "model", ""))
+    for modality in WORK_MODALITIES:
+        _add(read_setup_value("model_routing", modality, ""))
+
+    env_path = "/etc/versa-agi/paths.env" if paths_env is None else paths_env
+    if env_path and os.path.isfile(env_path):
+        try:
+            with open(env_path, encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("VERSA_DEFAULT_MODEL="):
+                        _add(line.split("=", 1)[1].strip().strip('"'))
+        except OSError:
+            pass
+
+    db = agents_db or os.environ.get("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+    if db and os.path.isfile(db):
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(db, timeout=5)
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(agents)").fetchall()]
+            for col in ("model", "triage_model"):
+                if col in cols:
+                    for (value,) in conn.execute(f"SELECT {col} FROM agents WHERE {col} IS NOT NULL"):
+                        _add(value)
+            conn.close()
+        except Exception:
+            pass
+    return keys
+
+
+def compute_live_catalog_keys(
+    path: str | None = None,
+    *,
+    references: list[str] | None = None,
+) -> list[str]:
+    """Keys migrate should write into live [catalog] (minus [catalog_removed])."""
+    from provider_registry import load_merged_providers
+    from shipped_models import keys_for_provider
+
+    path = path or resolve_models_ini_path()
+    removed = set(_read_raw_section(path, "catalog_removed"))
+    providers = load_merged_providers(path)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(key: str) -> None:
+        if key and key not in seen and key not in removed:
+            seen.add(key)
+            out.append(key)
+
+    for slug, row in providers.items():
+        if not row.get("enabled"):
+            continue
+        if row.get("class") == "local":
+            continue
+        for key in keys_for_provider(slug, path):
+            _add(key)
+    for key in selected_catalog_keys(path):
+        _add(key)
+    for key in _read_raw_section(path, "catalog_custom"):
+        _add(key)
+    refs = collect_model_references() if references is None else references
+    library = _read_raw_section(path, "catalog_library")
+    custom = _read_raw_section(path, "catalog_custom")
+    overrides = _read_raw_section(path, "catalog_overrides")
+    for key in refs:
+        if key in library or key in custom or key in overrides:
+            _add(key)
     return out
 
 

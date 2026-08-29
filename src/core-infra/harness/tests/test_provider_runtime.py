@@ -453,7 +453,7 @@ class TestProviderFamilyCompatibility(unittest.TestCase):
         self.assertEqual(native["temperature"], 0.2)
         self.assertNotIn("extra_body", native)
 
-    def test_openrouter_omits_none_reasoning_body(self):
+    def test_openrouter_explicitly_disables_none_reasoning(self):
         native = to_native_kwargs(
             "openai_compat",
             "openai/gpt-5.6-terra",
@@ -465,8 +465,35 @@ class TestProviderFamilyCompatibility(unittest.TestCase):
             provider_slug="openrouter",
         )
         self.assertNotIn("reasoning_effort", native)
-        self.assertNotIn("extra_body", native)
+        self.assertEqual(native["extra_body"]["reasoning"], {"enabled": False})
         self.assertEqual(native["temperature"], 0.2)
+
+    def test_gemini_3_uses_thinking_level_without_sampling_or_budget(self):
+        native = to_native_kwargs(
+            "google",
+            "gemini-3.7-flash",
+            {
+                "temperature": 0.2,
+                "reasoning_effort": "medium",
+                "extra": {},
+            },
+            provider_slug="google",
+        )
+        self.assertEqual(native, {"thinking_level": "medium"})
+
+    def test_gemini_2_5_keeps_thinking_budget_shape(self):
+        native = to_native_kwargs(
+            "google",
+            "gemini-2.5-flash",
+            {
+                "temperature": 0.2,
+                "reasoning_effort": "low",
+                "extra": {},
+            },
+            provider_slug="google",
+        )
+        self.assertEqual(native["temperature"], 0.2)
+        self.assertEqual(native["model_kwargs"]["thinking_budget"], 4096)
 
 
 if __name__ == "__main__":

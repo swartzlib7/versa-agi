@@ -57,15 +57,13 @@
 #                            union-preserved on reconcile; never a 4th CSV field
 #   [media_bundles]       — local Utility media inventory (JSON); not llama-server
 #
-#   Cloud + third-party metadata (labels + context windows) lives SOLELY in
-#   [catalog] — there are no separate [models]/[third_party_models] sections.
-#   `agictl model migrate` re-selects which models ship from setup.ini and carries
-#   their label/context from the [catalog] template above (the stock-metadata source).
+#   Remote metadata lives in [catalog_library]. Live [catalog] is generated:
+#   shipped keys for enabled providers plus selected / custom / referenced keys.
 #
 # Format:
 #   [providers*]       slug = enabled|Display Name|langchain_class
 #   [catalog*]         key  = class|provider|enabled|coa_approved|ctx_recommended|ctx_max|work_modality|input_modalities|output_modalities|router_eligible|Display Label
-#                            class ∈ {cloud, third_party, local}
+#                            class ∈ {cloud, local}  (legacy third_party → cloud)
 #                            work_modality ∈ {fast, balanced, reasoning, code, local}
 #                            input/output_modalities: CSV of text,image,audio,video
 #   [local_models]     key = Display Label
@@ -97,8 +95,40 @@
 # when its model row is enabled AND its provider is enabled AND a key is present.
 # ─────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────
+# Shipped selection — SYSTEM (replaced on every --update)
+# offering_id = {"label":"…","keys":{"provider":"catalog_key",…}}
+# File order is the first-login picker order. Not a COA list.
+# ─────────────────────────────────────────────────
+
+[shipped_models]
+grok-4.6 = {"label":"Grok 4.6","keys":{"openrouter":"x-ai/grok-4.6","xai":"grok-4.6"}}
+gemini-3.7-flash = {"label":"Gemini 3.7 Flash","keys":{"openrouter":"google/gemini-3.7-flash","google":"gemini-3.7-flash"}}
+gpt-5.6-terra = {"label":"GPT-5.6 Terra","keys":{"openrouter":"openai/gpt-5.6-terra","openai":"gpt-5.6-terra"}}
+claude-opus-4-8 = {"label":"Opus 4.8","keys":{"openrouter":"anthropic/claude-opus-4.8","anthropic":"claude-opus-4-8"}}
+gpt-5.6-sol = {"label":"GPT-5.6 Sol","keys":{"openrouter":"openai/gpt-5.6-sol","openai":"gpt-5.6-sol"}}
+glm-5.2 = {"label":"GLM 5.2","keys":{"openrouter":"z-ai/glm-5.2"}}
+deepseek-v4-flash-0731 = {"label":"DeepSeek V4Flash0731","keys":{"openrouter":"deepseek/deepseek-v4-flash-0731"}}
+gpt-5.6-luna = {"label":"GPT-5.6 Luna","keys":{"openrouter":"openai/gpt-5.6-luna","openai":"gpt-5.6-luna"}}
+
+# ─────────────────────────────────────────────────
+# Provider presets — SYSTEM (replaced on every --update)
+# slug = class|label|langchain_class|transport|auth_adapter|endpoint
+# enabled/credentials are not stored here.
+# ─────────────────────────────────────────────────
+
+[provider_library]
+google = cloud|Google|ChatGoogleGenerativeAI|direct|google_gemini|
+xai = cloud|xAI|ChatOpenAI|openai_compat|openai_key|https://api.x.ai/v1
+openai = cloud|OpenAI|ChatOpenAI|openai_compat|openai_key|https://api.openai.com/v1
+anthropic = cloud|Anthropic|ChatAnthropic|anthropic|anthropic_key|
+openrouter = cloud|OpenRouter|ChatOpenAI|openai_compat|openai_key|https://openrouter.ai/api/v1
+ollama = local|Local (Ollama)|ChatOllama|ollama|local|
+llamacpp = local|Local (llama.cpp / SYCL)|ChatOpenAI|llamacpp|local|
+local_media = local|Local media (sd-cli)||local_media|local|
+
 [providers]
-# Google enabled only after Gemini credentials exist (migrate rewrites this flag).
+# Generated live baseline — migrate rewrites enabled from providers_site ∩ credentials.
 google    = false|Google|ChatGoogleGenerativeAI
 xai       = false|xAI|ChatOpenAI
 openai    = false|OpenAI|ChatOpenAI
@@ -107,6 +137,16 @@ openrouter = false|OpenRouter|ChatOpenAI
 ollama    = false|Local (Ollama)|ChatOllama
 llamacpp  = false|Local (llama.cpp / SYCL)|ChatOpenAI
 local_media = false|Local media (sd-cli)|
+
+[providers_site]
+# SITE — enabled= CSV of provider slugs the operator turned on.
+enabled=
+
+[provider_custom]
+# SITE — full records for providers not in [provider_library].
+
+[provider_overrides]
+# SITE — sparse JSON patches for system provider cards.
 
 # ─────────────────────────────────────────────────
 # Provider Registry — USER LAYER (owned by `agictl provider` / the dashboard)
@@ -123,34 +163,25 @@ local_media = false|Local media (sd-cli)|
 # ─────────────────────────────────────────────────
 
 [catalog_library]
+# Remote cards match [shipped_models] only. Extra / utility Models stay in
+# MODEL_DRIVERS (model_drivers/registry.py) and appear after site Import.
 # Cloud Native (Gemini)
-gemini-2.5-pro                = cloud|google|true|true|0|1000000|reasoning|text,image|text|true|Gemini 2.5 Pro — Flagship reasoning, 1M context
-gemini-2.5-flash              = cloud|google|true|true|0|1000000|balanced|text,image|text|true|Gemini 2.5 Flash — Fast, cost-efficient
-gemini-3-flash-preview        = cloud|google|true|true|0|1000000|balanced|text,image|text|true|Gemini 3 Flash Preview — Frontier-class reduced cost
-gemini-3.1-pro-preview        = cloud|google|true|true|0|1000000|reasoning|text,image|text|true|Gemini 3.1 Pro Preview — Next-gen flagship reasoning
-gemini-3.1-flash-lite         = cloud|google|true|false|0|1048576|fast|text,image,audio,video|text|true|Gemini 3.1 Flash Lite — Stable low-latency multimodal
-gemini-3.1-flash-image        = cloud|google|true|false|0|131072|balanced|text,image|text,image|false|Gemini 3.1 Flash Image — Native image generation
+gemini-3.7-flash              = cloud|google|true|true|0|1048576|balanced|text,image,audio,video|text|true|Gemini 3.7 Flash — Fast multimodal agent
 
-# Third-Party Cloud Providers
-grok-4.5                      = third_party|xai|true|true|0|500000|reasoning|text,image|text|true|Grok 4.5 — Flagship coding and agentic reasoning
-gpt-5.5-2026-04-23            = third_party|openai|true|true|0|1000000|reasoning|text,image|text|true|GPT-5.5 — Flagship reasoning
-gpt-5.4-2026-03-05            = third_party|openai|true|true|0|131072|reasoning|text,image|text|true|GPT-5.4 — Previous gen reasoning
-gpt-5.4-mini-2026-03-17       = third_party|openai|true|true|0|131072|fast|text,image|text|true|GPT-5.4 Mini — Cost-efficient
-gpt-audio-1.5                 = third_party|openai|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio 1.5 — Audio in/out
-claude-fable-5                = third_party|anthropic|true|true|0|1000000|reasoning|text,image|text|true|Claude Fable 5 — Highest capability widely released
-claude-opus-4-8               = third_party|anthropic|true|true|0|200000|reasoning|text,image|text|true|Claude Opus 4.8 — Flagship reasoning
-claude-sonnet-4-6             = third_party|anthropic|true|true|0|200000|balanced|text,image|text|true|Claude Sonnet 4.6 — Fast reasoning
-x-ai/grok-4.5                 = third_party|openrouter|true|true|0|131072|reasoning|text,image|text|true|Grok 4.5 — xAI flagship
-google/gemini-3-flash-preview = third_party|openrouter|true|true|0|1000000|balanced|text,image|text|true|Gemini 3 Flash Preview
-google/gemini-3.1-flash-image = third_party|openrouter|true|false|0|131072|balanced|text,image|text,image|false|Gemini 3.1 Flash Image — Image generation
-openai/gpt-audio              = third_party|openrouter|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio — Audio in/out
-openai/gpt-5.6-luna           = third_party|openrouter|true|true|0|1050000|balanced|text,image|text|true|GPT-5.6 Luna — Multimodal agent model
-openai/gpt-5.4-image-2        = third_party|openrouter|true|false|0|272000|balanced|text,image|text,image|false|GPT-5.4 Image 2 — Image generation
-openai/gpt-audio-mini         = third_party|openrouter|true|false|0|128000|fast|text,audio|text,audio|false|GPT Audio Mini — Cost-efficient audio in/out
-moonshotai/kimi-k2.7-code    = third_party|openrouter|true|true|0|262144|code|text,image|text|true|Kimi K2.7 Code — Moonshot AI
-deepseek/deepseek-v4-flash   = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Flash
-deepseek/deepseek-v4-pro     = third_party|openrouter|true|true|0|1048576|code|text|text|true|DeepSeek V4 Pro
-z-ai/glm-5.2                 = third_party|openrouter|true|true|0|1048576|code|text|text|true|Z.ai: GLM 5.2 — Code-focused, 1M context
+# Cloud providers (native + OpenRouter dual keys)
+grok-4.6                      = cloud|xai|true|true|0|500000|reasoning|text,image|text|true|Grok 4.6 — Flagship coding and agentic reasoning
+gpt-5.6-terra                 = cloud|openai|true|true|0|1050000|balanced|text,image|text|true|GPT-5.6 Terra — Balanced GPT-5.6
+gpt-5.6-sol                   = cloud|openai|true|true|0|1050000|reasoning|text,image|text|true|GPT-5.6 Sol — Flagship GPT-5.6
+gpt-5.6-luna                  = cloud|openai|true|true|0|1050000|fast|text,image|text|true|GPT-5.6 Luna — Cost-efficient GPT-5.6
+claude-opus-4-8               = cloud|anthropic|true|true|0|1000000|reasoning|text,image|text|true|Claude Opus 4.8 — Flagship reasoning
+x-ai/grok-4.6                 = cloud|openrouter|true|true|0|500000|reasoning|text,image|text|true|Grok 4.6 — xAI flagship
+google/gemini-3.7-flash       = cloud|openrouter|true|true|0|1048576|balanced|text,image,audio,video|text|true|Gemini 3.7 Flash
+openai/gpt-5.6-terra          = cloud|openrouter|true|true|0|1050000|balanced|text,image|text|true|GPT-5.6 Terra
+anthropic/claude-opus-4.8     = cloud|openrouter|true|true|0|1000000|reasoning|text,image|text|true|Claude Opus 4.8
+openai/gpt-5.6-sol            = cloud|openrouter|true|true|0|1050000|reasoning|text,image|text|true|GPT-5.6 Sol
+deepseek/deepseek-v4-flash-0731 = cloud|openrouter|true|true|0|1310720|code|text|text|true|DeepSeek V4 Flash 0731
+openai/gpt-5.6-luna           = cloud|openrouter|true|true|0|1050000|balanced|text,image|text|true|GPT-5.6 Luna — Multimodal agent model
+z-ai/glm-5.2                 = cloud|openrouter|true|true|0|1048576|code|text|text|true|Z.ai: GLM 5.2 — Code-focused, 1M context
 # Local AI — provider col regenerated by migrate from setup.ini gpu_backend
 # (standard→ollama, intel→llamacpp). Shipped template matches setup.ini (intel).
 qwen3.6:35b                   = local|llamacpp|true|false|32768|131072|local|text,image|text|false|Qwen 3.6 35B — MoE reasoning, 128K context
@@ -186,6 +217,13 @@ flux1-dev                     = local|local_media|true|false|0|0|local|text|imag
 # ─────────────────────────────────────────────────
 
 [catalog_custom]
+# SITE — full records for models absent from [catalog_library].
+
+[catalog_selected]
+# SITE — known system presets the operator imported/selected. key = true
+
+[catalog_overrides]
+# SITE — sparse JSON field patches for system model cards.
 
 # ─────────────────────────────────────────────────
 # Catalog removals — USER LAYER (Model Manager / catalog remove)
@@ -215,29 +253,21 @@ flux1-dev                     = local|local_media|true|false|0|0|local|text|imag
 
 [model_params]
 default = {"temperature":0.2,"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
-# Cloud — Google Gemini
-model:gemini-2.5-pro                = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
-model:gemini-2.5-flash              = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
-model:gemini-3-flash-preview        = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
-model:gemini-3.1-pro-preview        = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
-model:gemini-3.1-flash-lite         = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
-# Third-party — xAI
-model:grok-4.5                      = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
-# Third-party — OpenAI
-model:gpt-5.5-2026-04-23            = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
-model:gpt-5.4-2026-03-05            = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
-model:gpt-5.4-mini-2026-03-17       = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
-# Third-party — Anthropic (Opus 4.7+ / Fable 5 reject temperature — steer via effort / prompting)
-model:claude-fable-5                = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max","xhigh"]}
-model:claude-opus-4-8               = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max","xhigh"]}
-model:claude-sonnet-4-6             = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
-# Third-party — OpenRouter
-model:x-ai/grok-4.5                 = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","max"]}
-model:google/gemini-3-flash-preview = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high"]}
-model:moonshotai/kimi-k2.7-code    = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","xhigh"]}
-model:deepseek/deepseek-v4-flash   = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","xhigh"]}
-model:deepseek/deepseek-v4-pro     = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","minimal","low","medium","high","xhigh"]}
-model:z-ai/glm-5.2                 = {"reasoning_effort":"none","allowed_reasoning_efforts":["none"]}
+# Shipped remote presets only (matches [catalog_library] remote keys).
+model:gemini-3.7-flash              = {"reasoning_effort":"medium","allowed_reasoning_efforts":["low","medium","high"]}
+model:grok-4.6                      = {"reasoning_effort":"high","allowed_reasoning_efforts":["low","medium","high","xhigh"]}
+model:gpt-5.6-terra                 = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:gpt-5.6-sol                   = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:gpt-5.6-luna                  = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:claude-opus-4-8               = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:x-ai/grok-4.6                 = {"reasoning_effort":"high","allowed_reasoning_efforts":["low","medium","high","xhigh"]}
+model:google/gemini-3.7-flash       = {"reasoning_effort":"medium","allowed_reasoning_efforts":["low","medium","high"]}
+model:openai/gpt-5.6-terra          = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:anthropic/claude-opus-4.8     = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:openai/gpt-5.6-sol            = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:openai/gpt-5.6-luna           = {"reasoning_effort":"none","allowed_reasoning_efforts":["none","low","medium","high","xhigh","max"]}
+model:deepseek/deepseek-v4-flash-0731 = {"reasoning_effort":"high","allowed_reasoning_efforts":["none","low","high","max"]}
+model:z-ai/glm-5.2                 = {"reasoning_effort":"high","allowed_reasoning_efforts":["none","high","xhigh"]}
 # Local
 model:qwen3.6:35b                   = {"reasoning_effort":"none","think_mode":"boolean","allowed_reasoning_efforts":["none","low","medium","high"],"extra":{"top_p":0.95,"top_k":20,"repeat_penalty":1,"presence_penalty":1.5}}
 model:qwen3.8:27b                   = {"reasoning_effort":"none","think_mode":"boolean","allowed_reasoning_efforts":["none","low","medium","high"],"extra":{"top_p":0.80,"top_k":20,"repeat_penalty":1,"presence_penalty":1.5}}

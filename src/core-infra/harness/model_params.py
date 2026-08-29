@@ -502,24 +502,35 @@ def to_native_kwargs(
         elif temp is not None and not adaptive:
             kwargs["temperature"] = temp
     elif family == "google":
-        if temp is not None:
-            kwargs["temperature"] = temp
-        if thinking_on:
-            model_kwargs["thinking_budget"] = budget or _effort_budget(effort)
+        if model_name.startswith("gemini-3"):
+            # Gemini 3+ uses discrete thinking levels. Google rejects the
+            # Gemini 2.5 thinking_budget shape and recommends omitting legacy
+            # sampling overrides for these models.
+            if thinking_on:
+                kwargs["thinking_level"] = effort
+        else:
+            if temp is not None:
+                kwargs["temperature"] = temp
+            if thinking_on:
+                model_kwargs["thinking_budget"] = budget or _effort_budget(effort)
     elif family == "openai_compat":
         is_local_llamacpp = slug == "llamacpp"
         is_openrouter = slug == "openrouter"
         if temp is not None and not (thinking_on and not is_openrouter):
             if not (is_local_llamacpp and _ollama_think_mode(model_name)):
                 kwargs["temperature"] = temp
-        if is_openrouter and thinking_on:
+        if is_openrouter:
             reasoning: dict[str, Any] = {}
-            if effort != "none":
+            if effort == "none":
+                # Omission preserves the upstream model's default, which is
+                # reasoning-on for several shipped models. `none` must
+                # explicitly disable reasoning.
+                reasoning["enabled"] = False
+            else:
                 reasoning["effort"] = effort
             if budget:
                 reasoning["max_tokens"] = budget
-            if reasoning:
-                extra_body["reasoning"] = reasoning
+            extra_body["reasoning"] = reasoning
         elif thinking_on and effort != "none" and not is_local_llamacpp:
             kwargs["reasoning_effort"] = effort
         elif (

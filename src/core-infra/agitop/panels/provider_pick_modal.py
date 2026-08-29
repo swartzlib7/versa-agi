@@ -57,7 +57,7 @@ def catalog_prefill_from_source(slug: str, model: dict) -> dict:
         from agitop.panels.media_wizard import catalog_prefill_from_hf_recipe
 
         return catalog_prefill_from_hf_recipe(model)
-    model_class = "cloud" if slug == "google" else "third_party"
+    model_class = "cloud"
     return {
         "key": model.get("id") or "",
         "label": model.get("label") or model.get("name") or model.get("id") or "",

@@ -426,8 +426,12 @@ def _load_models_ini(system_reader: Optional[SystemReader] = None) -> list[tuple
         return provider_display_label(provider_by_key.get(key) or fallback, providers)
 
     # Cloud + third-party labels from the catalog (by class)
-    cloud_entries = [(lbl, key) for key, (cls, lbl, _slug) in catalog.items() if cls == "cloud"]
-    proxy_entries = [(lbl, key) for key, (cls, lbl, _slug) in catalog.items() if cls == "third_party"]
+    cloud_entries = [
+        (lbl, key)
+        for key, (cls, lbl, _slug) in catalog.items()
+        if cls in ("cloud", "third_party")
+    ]
+    proxy_entries = []
 
     # Local labels: catalog local rows, overlaid with the pipeline-owned
     # [local_models] section (registry-added models that aren't in the catalog).
@@ -1497,8 +1501,7 @@ class AgentEditModal(ModalScreen):
         # COA model restriction: only approved models for the orchestrator
         if is_protected and self.agent_name == "coa":
             coa_allowed = set(agents_panel.system_reader.get_coa_approved_models())
-            if coa_allowed:
-                model_options = [(label, key) for label, key in model_options if key in coa_allowed]
+            model_options = [(label, key) for label, key in model_options if key in coa_allowed]
 
         # Build Select kwargs — only set value when model matches an option
         model_kwargs = {"id": "select-model", "allow_blank": True, "prompt": "System default"}

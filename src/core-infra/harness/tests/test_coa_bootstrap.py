@@ -19,48 +19,44 @@ from agitop import coa_bootstrap as cb  # noqa: E402
 
 
 class RecommendedMap(unittest.TestCase):
-    def test_xai_is_grok_45_only(self):
-        self.assertEqual(cb.recommended_keys("xai"), ["grok-4.5"])
+    def test_xai_is_grok_46_only(self):
+        self.assertEqual(cb.recommended_keys("xai"), ["grok-4.6"])
 
-    def test_anthropic_three(self):
-        self.assertEqual(
-            cb.recommended_keys("anthropic"),
-            ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6"],
-        )
+    def test_anthropic_is_opus_48(self):
+        self.assertEqual(cb.recommended_keys("anthropic"), ["claude-opus-4-8"])
 
-    def test_openrouter_target_three(self):
+    def test_openrouter_shipped_eight(self):
         self.assertEqual(
             cb.recommended_keys("openrouter"),
             [
-                "x-ai/grok-4.5",
-                "google/gemini-3-flash-preview",
+                "x-ai/grok-4.6",
+                "google/gemini-3.7-flash",
+                "openai/gpt-5.6-terra",
+                "anthropic/claude-opus-4.8",
+                "openai/gpt-5.6-sol",
                 "z-ai/glm-5.2",
+                "deepseek/deepseek-v4-flash-0731",
+                "openai/gpt-5.6-luna",
             ],
         )
 
-    def test_google_three(self):
-        self.assertEqual(
-            cb.recommended_keys("google"),
-            [
-                "gemini-3-flash-preview",
-                "gemini-3.1-pro-preview",
-                "gemini-2.5-flash",
-            ],
-        )
+    def test_google_is_gemini_37_flash(self):
+        self.assertEqual(cb.recommended_keys("google"), ["gemini-3.7-flash"])
 
-    def test_openai_three(self):
+    def test_openai_gpt56_three(self):
         self.assertEqual(
             cb.recommended_keys("openai"),
-            [
-                "gpt-5.5-2026-04-23",
-                "gpt-5.4-2026-03-05",
-                "gpt-5.4-mini-2026-03-17",
-            ],
+            ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
         )
 
     def test_options_label_first(self):
-        opts = cb.recommended_options("xai")
-        self.assertEqual(opts, [("xAI: Grok 4.5 (grok-4.5)", "grok-4.5")])
+        with patch("model_catalog.load_catalog", return_value={"grok-4.6": {"coa": True}}):
+            opts = cb.recommended_options("xai")
+        self.assertEqual(opts, [("xAI: Grok 4.6 (grok-4.6)", "grok-4.6")])
+
+    def test_options_hide_keys_not_in_catalog(self):
+        with patch("model_catalog.load_catalog", return_value={"other": {}}):
+            self.assertEqual(cb.recommended_options("openrouter"), [])
 
 
 class BootstrapDetection(unittest.TestCase):

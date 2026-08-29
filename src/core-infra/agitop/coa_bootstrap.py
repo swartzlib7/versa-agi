@@ -25,32 +25,16 @@ GCP_VAULT = Path("/etc/versa-agi/vault/gcp-credentials.json")
 
 # ── Recommended COA models per provider (locked product lists) ──────────────
 # Values are catalog keys. Labels are for modal display.
-RECOMMENDED: dict[str, list[tuple[str, str]]] = {
-    # (catalog_key, UI label)
-    "xai": [
-        ("grok-4.5", "Grok 4.5"),
-    ],
-    "anthropic": [
-        ("claude-fable-5", "Fable 5"),
-        ("claude-opus-4-8", "Opus 4.8"),
-        ("claude-sonnet-4-6", "Sonnet 4.6"),
-    ],
-    "openrouter": [
-        ("x-ai/grok-4.5", "Grok 4.5 (OpenRouter)"),
-        ("google/gemini-3-flash-preview", "Gemini 3 Flash Preview (OpenRouter)"),
-        ("z-ai/glm-5.2", "GLM 5.2 (OpenRouter)"),
-    ],
-    "google": [
-        ("gemini-3-flash-preview", "Gemini 3 Flash Preview"),
-        ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
-        ("gemini-2.5-flash", "Gemini 2.5 Flash"),
-    ],
-    "openai": [
-        ("gpt-5.5-2026-04-23", "GPT-5.5"),
-        ("gpt-5.4-2026-03-05", "GPT-5.4"),
-        ("gpt-5.4-mini-2026-03-17", "GPT-5.4 Mini"),
-    ],
-}
+# Source of truth: models.ini [shipped_models] via shipped_models.py.
+from shipped_models import recommended_pairs  # noqa: E402
+from shipped_models import load_offerings as _load_shipped_offerings  # noqa: E402
+
+COA_SHIPPED = [(label, keys) for _, label, keys in _load_shipped_offerings()]
+
+RECOMMENDED: dict[str, list[tuple[str, str]]] = {}
+for _label, _keys in COA_SHIPPED:
+    for _prov, _key in _keys.items():
+        RECOMMENDED.setdefault(_prov, []).append((_key, _label))
 
 PROVIDER_LABELS = {
     "google": "Google",
@@ -72,29 +56,30 @@ PROVIDER_SETKEY = {
 
 def recommended_keys(provider: str) -> list[str]:
     """Catalog keys Recommended for COA for a provider slug."""
-    return [k for k, _ in RECOMMENDED.get(provider, [])]
+    return [k for k, _ in recommended_pairs(provider)]
 
 
 def recommended_options(provider: str) -> list[tuple[str, str]]:
     """(label, catalog_key) for Select widgets.
 
-    When the live catalog is readable and at least one Recommended key is
-    present there, hide stock keys that have not been migrated in yet so
-    the picker cannot assign a Model the harness cannot route.
+    Only keys that are already in the live catalog — never offer a
+    Recommended row the harness cannot route.
     """
     from model_catalog import format_catalog_picker_label
 
     prov = PROVIDER_LABELS.get(provider, provider)
-    items = list(RECOMMENDED.get(provider, []))
+    items = recommended_pairs(provider)
     try:
         from model_catalog import load_catalog
         cat = load_catalog() or {}
     except Exception:
         cat = {}
-    if cat:
-        in_cat = [(key, label) for key, label in items if key in cat]
-        if in_cat:
-            items = in_cat
+    if cat is not None:
+        items = [
+            (key, label)
+            for key, label in items
+            if key in cat and (cat.get(key) or {}).get("coa")
+        ]
     return [
         (format_catalog_picker_label(prov, label, key), key)
         for key, label in items
@@ -173,7 +158,17 @@ def _read_setup_ini(section: str, key: str, default: str = "", setup_ini: Path |
 
 
 def gemini_enabled(setup_ini: Path | None = None) -> bool | None:
-    """Return True/False when [gemini] enabled= is set; None when unset (legacy)."""
+    """Return True/False when Google is site-enabled; None when unset (legacy)."""
+    if setup_ini is None:
+        try:
+            from model_catalog import resolve_models_ini_path
+            from provider_registry import _read_raw_section, site_enabled_slugs
+            path = resolve_models_ini_path()
+            site = _read_raw_section(path, "providers_site")
+            if "enabled" in site:
+                return "google" in site_enabled_slugs(path)
+        except Exception:
+            pass
     raw = _read_setup_ini("gemini", "enabled", "", setup_ini=setup_ini).lower()
     if not raw:
         return None
@@ -228,17 +223,22 @@ def usable_providers(
 ) -> list[str]:
     """Catalog provider slugs that can run COA models (keyed; Gemini also enabled)."""
     out: list[str] = []
-    if gemini_usable(coa_env=coa_env, vault=vault, setup_ini=setup_ini):
+    try:
+        from provider_registry import load_merged_providers
+        for slug, row in load_merged_providers().items():
+            if row.get("class") != "local" and row.get("enabled"):
+                out.append(slug)
+    except Exception:
+        pass
+    if gemini_usable(coa_env=coa_env, vault=vault, setup_ini=setup_ini) and "google" not in out:
         out.append("google")
-
     try:
         from provider_catalog import configured_providers
         keyed = set(configured_providers())
     except Exception:
         keyed = set()
-
     for slug in ("xai", "openai", "anthropic", "openrouter"):
-        if slug in keyed:
+        if slug in keyed and slug not in out:
             out.append(slug)
 
     seen: set[str] = set()
