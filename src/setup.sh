@@ -4228,12 +4228,15 @@ else
   echo ""
 
   echo -e "  ${BOLD:-}Next Steps:${RESET:-}"
-step_arrow "${YELLOW:-}1. Open the dashboard (sudo agitop)${NC:-}"
-echo -e "     First login opens the COA setup modal. Pick a model there — COA stays"
-echo -e "     held until that assignment, then it is ready for the first pulse."
-step_arrow "${YELLOW:-}2. Accept the Connection Request${NC:-}"
+  echo -e "  ${YELLOW:-}Follow this sequence. The welcome message needs the VersaVoice${NC:-}"
+  echo -e "  ${YELLOW:-}connection first — do not skip ahead to agitop or the first pulse.${NC:-}"
+  echo ""
+step_arrow "${YELLOW:-}1. Accept the Connection Request${NC:-}"
 echo -e "     Open the VersaVoice AI mobile app. You will see a new connection"
 echo -e "     invitation from your agent. Accept it to establish comms."
+step_arrow "${YELLOW:-}2. Open the dashboard (sudo agitop)${NC:-}"
+echo -e "     First login opens the COA setup modal. Pick a model there — COA stays"
+echo -e "     held until that assignment, then it is ready for the first pulse."
 step_arrow "${YELLOW:-}3. The First Pulse (Agent Activation)${NC:-}"
 echo -e "     Wait for the CRON schedule to awaken the agent (or run manually:"
 echo -e "     ${BOLD:-}sudo ${DEPLOYED_CORE_INFRA}/lifeline.sh --force${RESET:-})."
@@ -4250,7 +4253,8 @@ echo ""
 
 # Offer to auto-launch agitop
 if [ -x /usr/local/bin/agitop ]; then
-  if confirm_accent "Launch agitop now?"; then
+  echo -e "  ${YELLOW:-}Accept the VersaVoice connection request (step 1) before opening agitop.${NC:-}"
+  if confirm_accent "Launch agitop now? (after accepting the connection)"; then
     echo ""
     step_info "Starting agitop..."
     echo -e "  ${DIM:-}(Press 'q' to quit, '?' for help)${RESET:-}"

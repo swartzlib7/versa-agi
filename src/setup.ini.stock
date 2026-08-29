@@ -156,7 +156,7 @@ topology=local
 # Remote inference server URL (only used when topology=client)
 # LAN:  http://192.168.1.100:11434
 # DDNS: https://myserver.duckdns.org:11434
-remote_inference_url=http://192.168.4.114:8080
+remote_inference_url=
 
 # Inference Server master key for API authentication.
 # Auto-generated during server setup; must match on client.

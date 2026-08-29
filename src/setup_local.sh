@@ -747,7 +747,10 @@ if [ "${TOPOLOGY}" != "server" ]; then
   echo "    2) Remote server — Connect to a LAN/DDNS inference server"
   echo ""
 
-  if [ -n "${REMOTE_INFERENCE_URL}" ]; then
+  # Default is this machine. A filled remote_inference_url in stock/site
+  # setup.ini is only a hint for option 2 — it must not flip the picker.
+  # Reconfigure of an existing client keeps 2 as the default.
+  if [ "${TOPOLOGY}" = "client" ]; then
     _LOC_DEFAULT=2
   else
     _LOC_DEFAULT=1
