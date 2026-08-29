@@ -61,6 +61,27 @@ _local_ai_product() {
   _local_ai_accent "Versa AGi"
 }
 
+# Line-based y/n (type then Enter). `read -n 1` accepts Y immediately and the
+# leftover Enter answers the next prompt (GPU backend, etc.).
+_confirm_yn() {
+  local prompt="$1"
+  local default="${2:-n}"
+  if declare -F confirm >/dev/null 2>&1; then
+    confirm "${prompt}" "${default}"
+    return $?
+  fi
+  local hint="[y/N]" reply=""
+  [ "${default}" = "y" ] && hint="[Y/n]"
+  read -r -p "  ${prompt} ${hint} " reply || true
+  echo
+  reply="$(printf '%s' "${reply}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [ "${default}" = "y" ]; then
+    [[ ! ${reply} =~ ^[Nn]([Oo])?$ ]]
+  else
+    [[ ${reply} =~ ^[Yy]([Ee][Ss])?$ ]]
+  fi
+}
+
 _local_ai_show_banner() {
   local hdr_line intro_line cloud_line
   local std_line nv_line amd_line intel_hdr intel_a intel_docker intel_ubuntu warn_line resp_line
@@ -598,9 +619,7 @@ _local_ai_show_banner
 
 # When called from setup.sh, skip the confirmation prompt
 if [ -z "${VERSA_SETUP_PARENT:-}" ]; then
-  read -p "  Proceed with local AI setup? [y/N]: " -n 1 -r
-  echo ""
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+  if ! _confirm_yn "Proceed with local AI setup?" "n"; then
     echo "  Local AI setup cancelled."
     exit 0
   fi
@@ -664,9 +683,7 @@ if [ "${TOPOLOGY}" = "server" ]; then
       ok "Server configuration unchanged (sd-cli + media sudoers ensured)."
       exit 0
     fi
-    read -p "  Reconfigure? [y/N]: " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if ! _confirm_yn "Reconfigure?" "n"; then
       _ensure_sd_cli_runtime "${_srv_backend}"
       _ensure_watchdog_model_sudoers
       ok "Server configuration unchanged (sd-cli + media sudoers ensured)."
@@ -760,9 +777,7 @@ if [ "${TOPOLOGY}" != "server" ]; then
       echo "  │  Status:        ${_cli_status}"
       echo "  ╰─────────────────────────────────────────────╯"
       echo ""
-      read -p "  Reconfigure? [y/N]: " -n 1 -r
-      echo ""
-      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      if ! _confirm_yn "Reconfigure?" "n"; then
         ok "Client configuration unchanged."
         exit 0
       fi
@@ -1121,6 +1136,8 @@ echo -e "    1) $(_local_ai_accent "Standard Ollama") — $(_local_ai_accent "NV
 echo -e "    2) $(_local_ai_accent "Intel ARC") — $(_local_ai_dim "Docker SYCL") (Battlemage, Alchemist)"
 echo ""
 
+# Fresh install defaults to Ollama. Intel SYCL is opt-in (choice 2).
+# A prior intel INI still pre-selects 2 on reconfigure.
 if [ "${GPU_BACKEND}" = "intel" ]; then
   GPU_CHOICE_DEFAULT=2
 else

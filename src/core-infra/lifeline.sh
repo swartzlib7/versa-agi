@@ -2068,20 +2068,57 @@ Wake reason: ${WAKE_REASON}."
   # checkpoint integrity on RESUME, making the sentinel mechanism unnecessary.
   # See agent_harness.py "Checkpoint State Inspection & Repair" block.
 
-  # ─── Rate Limit / Quota Detection ────────────────────
-  # Scan result file for API error indicators and set appropriate cooldowns.
-  # Daily quota exhaustion gets a longer backoff than temporary rate limits.
-  if [ -f "${RESULT_FILE}" ]; then
+  # ─── Rate Limit / Quota / 403 Detection ──────────────
+  # Classify the result log. 403 / credits notify the Primary User (once/day).
+  # Crash + 403/quota → 1h cooldown so CRON does not trip the circuit breaker.
+  # 429 / 503 stay cooldown-only (transient).
+  if [ -f "${RESULT_FILE}" ] && [ -f "${SCRIPT_DIR}/provider_alerts.py" ]; then
+    ALERT_JSON=$(python3 "${SCRIPT_DIR}/provider_alerts.py" classify "${RESULT_FILE}" 2>/dev/null || echo '{"kind":"none"}')
+    ALERT_KIND=$(printf '%s' "${ALERT_JSON}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('kind') or 'none')" 2>/dev/null || echo "none")
+    ALERT_FATAL=$(printf '%s' "${ALERT_JSON}" | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('fatal') else '0')" 2>/dev/null || echo "0")
+    if [ "${ALERT_KIND}" = "forbidden" ] || [ "${ALERT_KIND}" = "quota" ]; then
+      if [ "${EXIT_CODE}" != "0" ] || [ "${ALERT_FATAL}" = "1" ]; then
+        QUOTA_COOLDOWN=3600
+        log "PROVIDER_ALERT: ${AGENT_NAME} — ${ALERT_KIND}. Cooldown ${QUOTA_COOLDOWN}s."
+        echo "$(( $(date +%s) + QUOTA_COOLDOWN ))" > "${COOLDOWN_FILE}"
+      else
+        log "PROVIDER_ALERT: ${AGENT_NAME} — ${ALERT_KIND} (cycle continued; no cooldown)"
+      fi
+      ALERT_MARK="/tmp/versa-agi-provider-alert-${AGENT_NAME}-$(date +%Y-%m-%d)"
+      if [ ! -f "${ALERT_MARK}" ]; then
+        PU_UID=$(jq -r '.primary_user.uid // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
+        [ -z "${PU_UID}" ] && PU_UID=$(jq -r '.primary_user.uid // empty' "${COA_CONFIG}" 2>/dev/null || true)
+        ALERT_MSG=$(python3 "${SCRIPT_DIR}/provider_alerts.py" message "${RESULT_FILE}" "${AGENT_NAME}" 2>/dev/null || true)
+        if [ -n "${PU_UID}" ] && [ -n "${ALERT_MSG}" ]; then
+          AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
+            /usr/local/bin/agictl message send "${PU_UID}" "${ALERT_MSG}" --mode typed 2>/dev/null \
+            && log "NOTIFY: Provider ${ALERT_KIND} alert sent to Primary User" \
+            || log "WARN: Failed to send Provider ${ALERT_KIND} alert to Primary User"
+          touch "${ALERT_MARK}"
+        else
+          log "WARN: Cannot notify Primary User of Provider ${ALERT_KIND} (missing uid or message)"
+        fi
+      fi
+    elif [ "${ALERT_KIND}" = "rate_limit" ]; then
+      RATE_LIMIT_COOLDOWN=300
+      log "RATE_LIMIT: ${AGENT_NAME} — API rate limit (429) detected in output. Extending cooldown to ${RATE_LIMIT_COOLDOWN}s."
+      echo "$(( $(date +%s) + RATE_LIMIT_COOLDOWN - 120 ))" > "${COOLDOWN_FILE}"
+    elif [ "${ALERT_KIND}" = "overload" ]; then
+      MODEL_BACKOFF=300
+      log "OVERLOAD: ${AGENT_NAME} — API 503 (model overloaded/unavailable). Cooldown ${MODEL_BACKOFF}s."
+      echo "$(( $(date +%s) + MODEL_BACKOFF - 120 ))" > "${COOLDOWN_FILE}"
+    fi
+  elif [ -f "${RESULT_FILE}" ]; then
     if grep -qiE "TerminalQuotaError|exhausted.*daily.*quota|daily.*quota.*exhausted|free_tier_requests" "${RESULT_FILE}" 2>/dev/null; then
-      QUOTA_COOLDOWN=3600  # 1 hour
+      QUOTA_COOLDOWN=3600
       log "QUOTA: ${AGENT_NAME} — daily quota exhausted. Cooldown ${QUOTA_COOLDOWN}s (retries hourly until reset)."
       echo "$(( $(date +%s) + QUOTA_COOLDOWN ))" > "${COOLDOWN_FILE}"
     elif grep -qiE "429|RESOURCE_EXHAUSTED|rate.limit|Too Many Requests" "${RESULT_FILE}" 2>/dev/null; then
-      RATE_LIMIT_COOLDOWN=300  # 5 minutes
+      RATE_LIMIT_COOLDOWN=300
       log "RATE_LIMIT: ${AGENT_NAME} — API rate limit (429) detected in output. Extending cooldown to ${RATE_LIMIT_COOLDOWN}s."
       echo "$(( $(date +%s) + RATE_LIMIT_COOLDOWN - 120 ))" > "${COOLDOWN_FILE}"
     elif grep -qiE "503|UNAVAILABLE|high demand|model.*overloaded" "${RESULT_FILE}" 2>/dev/null; then
-      MODEL_BACKOFF=300  # 5 minutes
+      MODEL_BACKOFF=300
       log "OVERLOAD: ${AGENT_NAME} — API 503 (model overloaded/unavailable). Cooldown ${MODEL_BACKOFF}s."
       echo "$(( $(date +%s) + MODEL_BACKOFF - 120 ))" > "${COOLDOWN_FILE}"
     fi

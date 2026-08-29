@@ -57,7 +57,8 @@ enabled=false
 # configured before running setup. No auto-detection is performed.
 # Note: topology=client sets VERSA_GPU_BACKEND=remote in paths.env (connectivity only).
 # Provider slug (ollama vs llamacpp) is derived from this key, not from "remote".
-gpu_backend=intel
+# Fresh install defaults to Ollama. Choose Intel SYCL in setup_local.sh if needed.
+gpu_backend=standard
 
 # Inference Endpoint port (shared by both backends)
 proxy_port=4000
