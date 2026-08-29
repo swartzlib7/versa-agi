@@ -154,6 +154,5 @@ provider_ini_set third_party enabled true
 ok "setup.ini updated (third_party enabled)"
 
 echo ""
-echo "  ✅ Anthropic provider ready!"
-echo "  Assign agents to Anthropic models via Dashboard (agitop) → Edit Agent"
+ok "Anthropic provider ready"
 echo ""

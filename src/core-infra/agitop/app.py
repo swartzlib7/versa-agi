@@ -328,7 +328,7 @@ class AgitopApp(App):
             from agitop.panels.api_keys_modal import ApiKeysModal
 
             if should_auto_prompt_bootstrap():
-                self.push_screen(ApiKeysModal(bootstrap=True))
+                self.push_screen(ApiKeysModal(bootstrap=True), self._after_coa_bootstrap)
         except Exception as exc:
             import sys
             print(f"[agitop] COA bootstrap tripwire: {exc}", file=sys.stderr)
@@ -338,7 +338,14 @@ class AgitopApp(App):
         from agitop.coa_bootstrap import needs_coa_bootstrap
         from agitop.panels.api_keys_modal import ApiKeysModal
 
-        self.push_screen(ApiKeysModal(bootstrap=needs_coa_bootstrap()))
+        bootstrap = needs_coa_bootstrap()
+        callback = self._after_coa_bootstrap if bootstrap else None
+        self.push_screen(ApiKeysModal(bootstrap=bootstrap), callback)
+
+    def _after_coa_bootstrap(self, result=None) -> None:
+        """Refresh panels after first-login assign so COA hold/model update immediately."""
+        if result == "done":
+            self._refresh_all_data()
 
     def _should_prompt_registration(self, status: dict) -> bool:
         """Auto-prompt only for actionable version gates — not every failed registration retry."""

@@ -4220,15 +4220,21 @@ else
   step_arrow "Monitor:  ${DIM:-}tail -f /var/log/versa-agi-lifeline.log${RESET:-}"
   step_arrow "Dashboard:  ${DIM:-}sudo agitop${RESET:-}"
   echo ""
+  echo -e "  Assign agent models in the dashboard (${BOLD:-}agitop${RESET:-} → Agents → Edit)."
+  echo -e "  Add catalog models via Model Manager, or ${DIM:-}agictl model catalog add${RESET:-}."
+  echo ""
 
   divider
   echo ""
 
   echo -e "  ${BOLD:-}Next Steps:${RESET:-}"
-step_arrow "${YELLOW:-}1. Accept the Connection Request${NC:-}"
+step_arrow "${YELLOW:-}1. Open the dashboard (sudo agitop)${NC:-}"
+echo -e "     First login opens the COA setup modal. Pick a model there — COA stays"
+echo -e "     held until that assignment, then it is ready for the first pulse."
+step_arrow "${YELLOW:-}2. Accept the Connection Request${NC:-}"
 echo -e "     Open the VersaVoice AI mobile app. You will see a new connection"
 echo -e "     invitation from your agent. Accept it to establish comms."
-step_arrow "${YELLOW:-}2. The First Pulse (Agent Activation)${NC:-}"
+step_arrow "${YELLOW:-}3. The First Pulse (Agent Activation)${NC:-}"
 echo -e "     Wait for the CRON schedule to awaken the agent (or run manually:"
 echo -e "     ${BOLD:-}sudo ${DEPLOYED_CORE_INFRA}/lifeline.sh --force${RESET:-})."
 echo -e "     The agent will process its seeded Welcome Task and introduce itself."

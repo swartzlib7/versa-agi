@@ -121,6 +121,5 @@ provider_ini_set third_party enabled true
 ok "setup.ini updated (third_party enabled)"
 
 echo ""
-echo "  ✅ xAI provider ready!"
-echo "  Assign agents to xAI models via Dashboard (agitop) → Edit Agent"
+ok "xAI provider ready"
 echo ""

@@ -155,6 +155,5 @@ provider_ini_set third_party enabled true
 ok "setup.ini updated (third_party enabled)"
 
 echo ""
-echo "  ✅ OpenAI provider ready!"
-echo "  Assign agents to OpenAI models via Dashboard (agitop) → Edit Agent"
+ok "OpenAI provider ready"
 echo ""

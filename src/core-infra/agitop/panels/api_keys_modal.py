@@ -161,14 +161,13 @@ class ApiKeysModal(ModalScreen):
             with Horizontal(id="api-keys-footer"):
                 if self._bootstrap:
                     yield Button("Remind later", id="btn-coa-remind", variant="default")
-                yield Button("💾 Save Changes", variant="success", id="btn-api-save")
-                if self._bootstrap:
                     yield Button(
-                        "Set as COA model",
+                        "Set COA model",
                         variant="primary",
                         id="btn-coa-set-model",
                     )
                 else:
+                    yield Button("💾 Save Changes", variant="success", id="btn-api-save")
                     yield Button(
                         "Close",
                         classes="dismiss-btn",
@@ -220,7 +219,7 @@ class ApiKeysModal(ModalScreen):
 
         if self._bootstrap:
             self.query_one("#api-keys-status", Static).update(
-                "[dim]Connect at least one cloud provider, then pick a Recommended COA model below.[/]"
+                "[dim]Connect at least one cloud provider, pick a Recommended COA model, then Set COA model. New keys are saved with that button.[/]"
             )
         else:
             self.query_one("#api-keys-status", Static).update(
@@ -318,7 +317,7 @@ class ApiKeysModal(ModalScreen):
             )
             self.dismiss("remind")
         elif bid == "btn-coa-set-model":
-            self._set_coa_model()
+            await self._complete_coa_setup()
 
     async def on_select_changed(self, event: Select.Changed) -> None:
         if not self._bootstrap:
@@ -331,8 +330,7 @@ class ApiKeysModal(ModalScreen):
         elif sid == "coa-model-select" and event.value != Select.BLANK:
             self._selected_model = str(event.value)
 
-    async def _save_keys(self) -> None:
-        """Save changed keys via agictl system set-key."""
+    def _pending_key_changes(self) -> list[tuple[str, str]]:
         new_gemini = self.query_one("#input-gemini-key", Input).value.strip()
         new_vv = self.query_one("#input-vv-token", Input).value.strip()
         new_xai = self.query_one("#input-xai-key", Input).value.strip()
@@ -340,7 +338,7 @@ class ApiKeysModal(ModalScreen):
         new_anthropic = self.query_one("#input-anthropic-key", Input).value.strip()
         new_openrouter = self.query_one("#input-openrouter-key", Input).value.strip()
 
-        changes = []
+        changes: list[tuple[str, str]] = []
         if new_gemini and new_gemini != self._original.get("gemini", ""):
             changes.append(("gemini", new_gemini))
         if new_vv and new_vv != self._original.get("versavoice", ""):
@@ -353,15 +351,13 @@ class ApiKeysModal(ModalScreen):
             changes.append(("anthropic", new_anthropic))
         if new_openrouter and new_openrouter != self._original.get("openrouter", ""):
             changes.append(("openrouter", new_openrouter))
+        return changes
 
-        if not changes:
-            self.query_one("#api-keys-feedback", Static).update(
-                "[yellow]No changes detected. Enter new values in the fields above.[/]"
-            )
-            return
-
-        results = []
-        errors = []
+    def _persist_key_changes(
+        self, changes: list[tuple[str, str]]
+    ) -> tuple[list[str], list[str]]:
+        results: list[str] = []
+        errors: list[str] = []
         # VV / provider keys can take longer (live VV validation).
         # set-key may migrate + live-import the shipped COA set (8 OpenRouter rows).
         timeout = 90 if any(t == "versavoice" for t, _ in changes) else 75
@@ -384,7 +380,29 @@ class ApiKeysModal(ModalScreen):
                 errors.append(f"[red]❌ {key_type}[/] — Command timed out")
             except Exception as e:
                 errors.append(f"[red]❌ {key_type}[/] — {e}")
+        return results, errors
 
+    def _clear_key_inputs(self) -> None:
+        for fid in (
+            "input-gemini-key",
+            "input-vv-token",
+            "input-xai-key",
+            "input-openai-key",
+            "input-anthropic-key",
+            "input-openrouter-key",
+        ):
+            self.query_one(f"#{fid}", Input).value = ""
+
+    async def _save_keys(self) -> None:
+        """Save changed keys via agictl system set-key (non-bootstrap modal)."""
+        changes = self._pending_key_changes()
+        if not changes:
+            self.query_one("#api-keys-feedback", Static).update(
+                "[yellow]No changes detected. Enter new values in the fields above.[/]"
+            )
+            return
+
+        results, errors = self._persist_key_changes(changes)
         self.query_one("#api-keys-feedback", Static).update("\n".join(results + errors))
 
         if results and not errors:
@@ -393,18 +411,22 @@ class ApiKeysModal(ModalScreen):
                 severity="information",
             )
             self._refresh_key_status()
-            # Clear password fields after successful save
-            for fid in (
-                "input-gemini-key",
-                "input-vv-token",
-                "input-xai-key",
-                "input-openai-key",
-                "input-anthropic-key",
-                "input-openrouter-key",
-            ):
-                self.query_one(f"#{fid}", Input).value = ""
-            if self._bootstrap:
-                await self._rebuild_coa_section()
+            self._clear_key_inputs()
+
+    async def _complete_coa_setup(self) -> None:
+        """Save any typed keys, then assign the selected Recommended COA model."""
+        changes = self._pending_key_changes()
+        if changes:
+            results, errors = self._persist_key_changes(changes)
+            self.query_one("#api-keys-feedback", Static).update(
+                "\n".join(results + errors)
+            )
+            if errors:
+                return
+            self._refresh_key_status()
+            self._clear_key_inputs()
+            await self._rebuild_coa_section()
+        self._set_coa_model()
 
     def _set_coa_model(self) -> None:
         from agitop.coa_bootstrap import assign_coa_model
@@ -419,7 +441,7 @@ class ApiKeysModal(ModalScreen):
             pass
         if not model:
             feedback.update(
-                "[yellow]Save a provider key first, then select a Recommended COA model.[/]"
+                "[yellow]Enter a provider key above, then Set COA model.[/]"
             )
             return
         ok, msg = assign_coa_model(model)
@@ -427,4 +449,8 @@ class ApiKeysModal(ModalScreen):
             feedback.update(f"[red]{msg}[/]")
             return
         self.app.notify(msg, severity="information")
+        try:
+            self.app._refresh_all_data()
+        except Exception:
+            pass
         self.dismiss("done")

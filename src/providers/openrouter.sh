@@ -175,7 +175,5 @@ provider_ini_set third_party enabled true
 ok "setup.ini updated (third_party enabled)"
 
 echo ""
-echo "  ✅ OpenRouter provider ready!"
-echo "  Assign agents to OpenRouter models via Dashboard (agitop) → Edit Agent"
-echo "  Add more models via agitop → Model Manager or agictl model catalog add"
+ok "OpenRouter provider ready"
 echo ""
