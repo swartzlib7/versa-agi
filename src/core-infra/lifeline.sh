@@ -1361,7 +1361,7 @@ ${MEM_ITEMS}
       AW_TRUNC=300
       AW_CONCLUSIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type conclusion --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
       [[ "${AW_CONCLUSIONS}" != *"| ID |"* ]] && AW_CONCLUSIONS=""
-      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --all --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
       [[ "${AW_ACTIONS}" != *"| ID |"* ]] && AW_ACTIONS=""
 
       AWARENESS_TABLE=""
@@ -1387,7 +1387,7 @@ Most recent ${AW_RECENT} actions (team, active + completed):
 ${AW_ACTIONS}"
         fi
         AWARENESS_TABLE="${AWARENESS_TABLE}
-[!] Go deeper: 'agictl awareness table --status active --limit 100' (filters: --type conclusion|action, --agent <name>, --status active,completed). History: --status completed|superseded. Single entry: 'agictl awareness get <id>'."
+[!] Go deeper: 'agictl awareness table --status active --limit 100' (own board; fleet: --all). Filters: --type conclusion|action, --agent <name>, --status active,completed. History: --status completed|superseded. Single entry: 'agictl awareness get <id>'."
       fi
 
       # Build combined block for legacy path

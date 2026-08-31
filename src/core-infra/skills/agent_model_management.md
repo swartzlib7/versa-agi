@@ -154,7 +154,7 @@ agictl model params set model:qwen3.6:35b --think-mode boolean \
   --extra '{"top_p":0.95,"top_k":20}'
 ```
 
-**Vision:** set `input_modalities=text,image` on the catalog row. In-spawn vision uses `agictl_view_image` when the execution model supports image input.
+**Vision:** set `input_modalities=text,image` (add `video` when the Model ingest videos). In-spawn perception uses `agictl_view_image` / `agictl_view_video` when the execution model has an exact ◆ input driver.
 
 **Debugging provider routing:** cycle logs include `LLM ROUTE (triage|execution/…)` lines with `catalog_provider`, `client`, `api_model`, and `native=` params — use when verifying local `llamacpp`/`ollama` or cloud routes during spawn tests.
 

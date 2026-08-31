@@ -3243,9 +3243,19 @@ if [ "${UPDATE_MODE}" = true ]; then
             _MANAGE_REGISTRY_SCRIPT="${SCRIPT_DIR}/manage_registry.sh"
             if [ -f "${_MANAGE_REGISTRY_SCRIPT}" ]; then
               source "${_MANAGE_REGISTRY_SCRIPT}" --list >/dev/null 2>&1 || true
-              # Define reverse-lookup (GGUF filename → friendly key).
+              # Define reverse-lookup (GGUF filename or llama-server stem → friendly key).
               # manage_registry.sh loads _REG_* arrays but doesn't define this helper.
-              _reg_name_for_file() { local f="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_FILES[$i]}" = "$f" ]; then echo "${_REG_NAMES[$i]}"; return; fi; done; }
+              # /v1/models ids are stems (no .gguf); registry files include the suffix.
+              _reg_name_for_file() {
+                local f="$1" stem="${1%.gguf}" i rf
+                for i in $(seq 0 $((_REG_COUNT - 1))); do
+                  rf="${_REG_FILES[$i]}"
+                  if [ "$rf" = "$f" ] || [ "$rf" = "${stem}.gguf" ] || [ "${rf%.gguf}" = "$stem" ]; then
+                    echo "${_REG_NAMES[$i]}"
+                    return
+                  fi
+                done
+              }
               _translated_list=""
               IFS=',' read -ra _raw_arr <<< "${_raw_models}"
               for _gguf_name in "${_raw_arr[@]}"; do
@@ -3287,61 +3297,33 @@ REPAIRCFG
       ok "client_config.json exists"
     fi
 
-    # ── Step 2: Sync VERSA_ACTIVE_LOCAL_MODEL from remote server ──
-    # Only meaningful in single mode. Router mode has no single active model.
-    if [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
-    _CURRENT_ACTIVE=$(grep '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
-    # Trigger sync if: (a) empty, or (b) contains a raw GGUF filename (stale from previous bug)
-    _NEEDS_ACTIVE_SYNC=false
-    if [ -z "${_CURRENT_ACTIVE}" ]; then
-      _NEEDS_ACTIVE_SYNC=true
-      info "VERSA_ACTIVE_LOCAL_MODEL not set — querying remote server..."
-    elif [[ "${_CURRENT_ACTIVE}" == *.gguf ]]; then
-      _NEEDS_ACTIVE_SYNC=true
-      info "VERSA_ACTIVE_LOCAL_MODEL contains raw GGUF name '${_CURRENT_ACTIVE}' — re-translating..."
-    fi
-    if [ "${_NEEDS_ACTIVE_SYNC}" = "true" ]; then
-
-      # Read tunnel URL from paths.env (set during initial setup or sync above)
-      _REPAIR_INFERENCE=$(grep '^VERSA_INFERENCE_URL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
-      if [ -n "${_REPAIR_INFERENCE}" ]; then
-        _active_json=$(curl -sf --connect-timeout 5 --max-time 10 -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_INFERENCE}/v1/models" 2>/dev/null || echo "")
-        if [ -n "${_active_json}" ] && command -v jq &>/dev/null; then
-          _active_gguf=$(echo "${_active_json}" | jq -r '.data[0].id' 2>/dev/null)
-          if [ -n "${_active_gguf}" ] && [ "${_active_gguf}" != "null" ]; then
-            # Translate GGUF → friendly name
-            _active_friendly=""
-            if declare -f _reg_name_for_file &>/dev/null; then
-              _active_friendly=$(_reg_name_for_file "${_active_gguf}" 2>/dev/null || true)
-            elif [ -f "${SCRIPT_DIR}/manage_registry.sh" ]; then
-              source "${SCRIPT_DIR}/manage_registry.sh" --list >/dev/null 2>&1 || true
-              # Define reverse-lookup if not already available
-              _reg_name_for_file() { local f="$1"; local i; for i in $(seq 0 $((_REG_COUNT - 1))); do if [ "${_REG_FILES[$i]}" = "$f" ]; then echo "${_REG_NAMES[$i]}"; return; fi; done; }
-              _active_friendly=$(_reg_name_for_file "${_active_gguf}" 2>/dev/null || true)
-            fi
-            _active_friendly="${_active_friendly:-${_active_gguf}}"
-
-            # Write to paths.env
-            if grep -q '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null; then
-              sed -i "s|^VERSA_ACTIVE_LOCAL_MODEL=.*|VERSA_ACTIVE_LOCAL_MODEL=\"${_active_friendly}\"|" "${PATHS_ENV}"
-            else
-              echo "VERSA_ACTIVE_LOCAL_MODEL=\"${_active_friendly}\"" >> "${PATHS_ENV}"
-            fi
+    # ── Step 2: Sync inventory + starred model from the GPU host ──
+    # Same command the operator already uses (`agictl model refresh`): SSH
+    # `agictl model list` and take `active: true` (`sycl_active_model`).
+    # llama-server `/v1/models[0]` is directory order (GGUF stems), not the star.
+    if command -v agictl >/dev/null 2>&1 && [ -f "${CLIENT_STATE_FILE}" ]; then
+      info "Syncing local models from remote server (agictl model refresh)..."
+      _REFRESH_JSON=$(agictl model refresh 2>/dev/null || true)
+      _refresh_ok=$(echo "${_REFRESH_JSON}" | jq -r '.success // false' 2>/dev/null || echo false)
+      _active_friendly=$(echo "${_REFRESH_JSON}" | jq -r '.active_model // empty' 2>/dev/null || true)
+      if [ "${_refresh_ok}" = "true" ]; then
+        if [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
+          if [ -n "${_active_friendly}" ] && [ "${_active_friendly}" != "null" ]; then
             ok "Active model synced: ${_active_friendly}"
           else
-            warn "Remote server returned no models — VERSA_ACTIVE_LOCAL_MODEL not set"
+            warn "Remote server has no starred model — VERSA_ACTIVE_LOCAL_MODEL not set"
           fi
         else
-          warn "Could not query inference endpoint at ${_REPAIR_INFERENCE} — VERSA_ACTIVE_LOCAL_MODEL not set"
+          if grep -q '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null; then
+            sed -i 's|^VERSA_ACTIVE_LOCAL_MODEL=.*|VERSA_ACTIVE_LOCAL_MODEL=""|' "${PATHS_ENV}"
+          fi
+          ok "Router mode — inventory synced (all models available)"
         fi
       else
-        warn "No VERSA_INFERENCE_URL in paths.env — cannot query active model"
+        warn "agictl model refresh failed — VERSA_ACTIVE_LOCAL_MODEL unchanged"
       fi
     else
-      ok "Active model: ${_CURRENT_ACTIVE}"
-    fi
-    else
-      ok "Router mode — active model sync skipped (all models available)"
+      warn "Cannot refresh from GPU host (agictl or client_config.json missing)"
     fi
 
     echo ""
@@ -4270,8 +4252,8 @@ echo ""
 
 # Offer to auto-launch agitop
 if [ -x /usr/local/bin/agitop ]; then
-  echo -e "  ${YELLOW:-}Accept the VersaVoice connection request (step 1) before opening agitop.${NC:-}"
-  if confirm_accent "Launch agitop now? (after accepting the connection)"; then
+  echo -e "  ${DIM:-}Tip: if you have not already accepted the VersaVoice connection request, do that before opening agitop.${NC:-}"
+  if confirm_accent "Launch agitop now?"; then
     echo ""
     step_info "Starting agitop..."
     echo -e "  ${DIM:-}(Press 'q' to quit, '?' for help)${RESET:-}"

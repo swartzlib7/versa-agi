@@ -31,7 +31,11 @@ Remote class is **`cloud`**. Google is an ordinary provider. Extra / utility rem
 - Neither Import path writes generic `[model_params_custom]`.
 - **COA eligibility** is the live catalog `coa` flag only.
 
-Current shipped offerings (picker order): Grok 4.6, Gemini 3.7 Flash, GPT-5.6 Terra, Opus 4.8, GPT-5.6 Sol, GLM 5.2, DeepSeek V4Flash0731, GPT-5.6 Luna. Dual-provider offerings import both keys when both providers are enabled.
+Current shipped offerings (picker order): Grok 4.6, Gemini 3.7 Flash, GPT-5.6 Terra, Opus 4.8, GPT-5.6 Sol, GLM 5.3 Flash, DeepSeek V4Flash0731, GPT-5.6 Luna. Dual-provider offerings import both keys when both providers are enabled.
+
+**GLM 5.3 Flash** (`z-ai/glm-5.3-flash`, OpenRouter) is native multimodal: image and video ingest (◆). Reasoning cannot be turned off — stock default is `max` (`low` / `high` / `max`). Use `agictl_view_image` / `agictl_view_video` (mp4, mkv, mov, 200 MB max).
+
+**Gemini 3.7 Flash** is two catalog offerings. Image ingest is ◆ on both. Video ingest is ◆ on native Google (`gemini-3.7-flash`, inline ~20 MB) and on OpenRouter (`google/gemini-3.7-flash`, same `video_url` path as GLM, 200 MB VIEW gate). Declared audio input stays ◇. Use `agictl_view_image` / `agictl_view_video`.
 
 ## Assign and Import
 

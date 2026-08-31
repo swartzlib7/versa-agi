@@ -54,9 +54,9 @@ PROVIDER_SETKEY = {
 }
 
 
-def recommended_keys(provider: str) -> list[str]:
+def recommended_keys(provider: str, path: str | None = None) -> list[str]:
     """Catalog keys Recommended for COA for a provider slug."""
-    return [k for k, _ in recommended_pairs(provider)]
+    return [k for k, _ in recommended_pairs(provider, path)]
 
 
 def recommended_options(provider: str) -> list[tuple[str, str]]:

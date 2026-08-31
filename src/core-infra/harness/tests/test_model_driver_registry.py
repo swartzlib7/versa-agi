@@ -49,15 +49,26 @@ EXPECTED_INPUT_BINDINGS = {
     "gemini-3-flash-preview": "google",
     "gemini-3.1-pro-preview": "google",
     "gemini-3.1-flash-lite": "google",
+    # DR-CM-13
+    "gemini-3.7-flash": "google",
+    "google/gemini-3.7-flash": "openrouter",
     # DR-CM-08
     "grok-4.5": "xai",
     # DR-CM-07
     "openai/gpt-5.6-luna": "openrouter",
     # DR-CM-11
     "x-ai/grok-4.5": "openrouter",
+    # DR-CM-12
+    "z-ai/glm-5.3-flash": "openrouter",
     # DR-LOC-01
     "qwen3.6:35b": "llamacpp",
     "qwen3.8:27b": "llamacpp",
+}
+
+EXPECTED_VIDEO_INPUT_BINDINGS = {
+    "z-ai/glm-5.3-flash": ("openrouter", "chat_video_in_content_parts"),
+    "google/gemini-3.7-flash": ("openrouter", "chat_video_in_content_parts"),
+    "gemini-3.7-flash": ("google", "chat_video_in_google_media"),
 }
 
 EXPECTED_OUTPUT_BINDINGS = {
@@ -145,6 +156,16 @@ class TestExactResolution(RegistryTestCase):
                     resolved.adapter.adapter_id,
                     "chat_image_in_content_parts",
                 )
+                self.assertTrue(callable(resolved.adapter.entrypoint))
+
+    def test_each_existing_catalog_video_input_binding_resolves(self):
+        for catalog_key, (provider_slug, adapter_id) in EXPECTED_VIDEO_INPUT_BINDINGS.items():
+            with self.subTest(catalog_key=catalog_key):
+                resolved = self.resolve(catalog_key, "input", "video")
+                self.assertIsNotNone(resolved)
+                assert resolved is not None
+                self.assertEqual(resolved.model["provider"], provider_slug)
+                self.assertEqual(resolved.binding.adapter_id, adapter_id)
                 self.assertTrue(callable(resolved.adapter.entrypoint))
 
     def test_provider_is_derived_from_exact_catalog_model(self):
@@ -250,6 +271,8 @@ class TestExactResolution(RegistryTestCase):
         self.assertIsNone(self.resolve("gemini-2.5-pro", "output", "image"))
         self.assertIsNone(self.resolve("gemini-2.5-pro", "input", "audio"))
         self.assertIsNone(self.resolve("gemini-2.5-pro", "sideways", "image"))
+        self.assertIsNone(self.resolve("gemini-3.7-flash", "input", "audio"))
+        self.assertIsNone(self.resolve("gemini-3.1-flash-lite", "input", "video"))
 
     def test_text_never_resolves(self):
         self.assertIsNone(self.resolve("gemini-2.5-pro", "input", "text"))
@@ -282,6 +305,10 @@ class TestRegistryIntegrity(RegistryTestCase):
             for catalog_key in EXPECTED_INPUT_BINDINGS
         }
         expected.update(
+            (catalog_key, "input", "video")
+            for catalog_key in EXPECTED_VIDEO_INPUT_BINDINGS
+        )
+        expected.update(
             (catalog_key, "output", details[1])
             for catalog_key, details in EXPECTED_OUTPUT_BINDINGS.items()
         )
@@ -310,6 +337,8 @@ class TestRegistryIntegrity(RegistryTestCase):
             set(reg.ADAPTERS),
             {
                 "chat_image_in_content_parts",
+                "chat_video_in_content_parts",
+                "chat_video_in_google_media",
                 "chat_mm_image_out_openai_compat",
                 "chat_mm_audio_out_pcm16",
                 "chat_mm_image_out_google_generate_content",
@@ -352,6 +381,22 @@ class TestCoverageAndAdvice(RegistryTestCase):
         self.assertEqual(
             self.coverage("openai/gpt-audio"),
             {"input": set(), "output": {"audio"}},
+        )
+        self.assertEqual(
+            self.coverage("z-ai/glm-5.3-flash"),
+            {"input": {"image", "video"}, "output": set()},
+        )
+        self.assertEqual(
+            self.coverage("gemini-3.7-flash"),
+            {"input": {"image", "video"}, "output": set()},
+        )
+        self.assertEqual(
+            self.coverage("google/gemini-3.7-flash"),
+            {"input": {"image", "video"}, "output": set()},
+        )
+        self.assertEqual(
+            self.coverage("gemini-3.1-flash-lite"),
+            {"input": {"image"}, "output": set()},
         )
 
     def test_advice_omits_supported_input_and_reports_output_gaps(self):
@@ -506,6 +551,40 @@ class TestExecutableInputAdapter(RegistryTestCase):
         self.assertEqual(parts[0].text, "Convert")
         self.assertEqual(parts[1].inline_data.mime_type, "image/png")
         self.assertEqual(parts[1].inline_data.data, b"\x89PNG\r\n")
+
+    @unittest.skipUnless(
+        _HAS_GOOGLE_LANGCHAIN,
+        "langchain-google-genai is not installed",
+    )
+    def test_google_langchain_converts_media_video_to_inline_data(self):
+        from model_drivers.libraries.chat_video_in_google_media import (
+            to_content_parts as video_to_google_media,
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            video.write(b"\x00\x00\x00\x18ftypmp42")
+            video.flush()
+            canonical = video_to_google_media(
+                path=video.name,
+                caption="Convert video",
+            )
+
+        parts = _convert_to_parts(canonical, model="gemini-3.7-flash")
+        self.assertEqual(parts[0].text, "Convert video")
+        self.assertEqual(parts[1].inline_data.mime_type, "video/mp4")
+        self.assertEqual(parts[1].inline_data.data, b"\x00\x00\x00\x18ftypmp42")
+
+    def test_native_google_video_adapter_rejects_oversize(self):
+        from model_drivers.libraries.chat_video_in_google_media import (
+            MAX_VIDEO_BYTES,
+            to_content_parts as video_to_google_media,
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            video.write(b"\x00" * (MAX_VIDEO_BYTES + 1))
+            video.flush()
+            with self.assertRaises(ValueError):
+                video_to_google_media(path=video.name, caption="too big")
 
     def test_each_exact_binding_executes_the_shared_adapter_shape(self):
         with tempfile.NamedTemporaryFile(suffix=".png") as image:

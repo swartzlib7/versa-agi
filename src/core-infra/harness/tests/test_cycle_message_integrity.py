@@ -222,6 +222,78 @@ class TestMessageIdentityAliases(unittest.TestCase):
         self.assertEqual(json.loads(result.output)["count"], 0)
 
 
+class TestMessageGetChronology(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tempdir.name, "messages.db")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    direction TEXT,
+                    from_user_id TEXT,
+                    to_user_id TEXT,
+                    display_name TEXT,
+                    message_id TEXT,
+                    text TEXT,
+                    original_text TEXT,
+                    mode TEXT,
+                    status TEXT,
+                    created_at TEXT,
+                    channel TEXT
+                )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO messages (
+                    direction, from_user_id, to_user_id, display_name,
+                    message_id, text, mode, status, created_at, channel
+                ) VALUES (
+                    'received', 'human', 'vv-coa', 'Primary User', ?, ?,
+                    'typed', 'unprocessed', ?, 'vv'
+                )
+                """,
+                [
+                    ("msg-c", "third", "2026-08-31 12:00:30"),
+                    ("msg-a", "first", "2026-08-31 12:00:10"),
+                    ("msg-b", "second", "2026-08-31 12:00:20"),
+                    ("msg-d", "fourth", "2026-08-31 12:00:40"),
+                ],
+            )
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def _invoke(self, *extra: str):
+        with (
+            patch.object(agictl_cli, "messages_db", self.db_path),
+            patch.object(
+                agictl_cli,
+                "get_config",
+                return_value={"versavoice": {"sub_account_id": "vv-coa"}},
+            ),
+            patch.object(agictl_cli, "get_agent_name", return_value="coa"),
+        ):
+            return CliRunner().invoke(
+                agictl_cli.cli,
+                ["message", "get", "vv-coa", "--unread", *extra],
+            )
+
+    def test_unread_returns_oldest_to_newest(self) -> None:
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, result.output)
+        ids = [row["message_id"] for row in json.loads(result.output)]
+        self.assertEqual(ids, ["msg-a", "msg-b", "msg-c", "msg-d"])
+
+    def test_last_n_keeps_newest_window_in_chronological_order(self) -> None:
+        result = self._invoke("--last-n-count", "2")
+        self.assertEqual(result.exit_code, 0, result.output)
+        ids = [row["message_id"] for row in json.loads(result.output)]
+        self.assertEqual(ids, ["msg-c", "msg-d"])
+
+
 class TestCycleCloseout(unittest.TestCase):
     def test_missing_awareness_warns_without_breaking_closeout(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

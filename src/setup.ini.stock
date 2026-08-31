@@ -256,7 +256,7 @@ role=Chief Orchestrator Agent
 fast=deepseek/deepseek-v4-flash
 balanced=deepseek/deepseek-v4-flash
 reasoning=deepseek/deepseek-v4-pro
-code=z-ai/glm-5.2
+code=z-ai/glm-5.3-flash
 local=gemma4:e4b
 
 [output_routing]

@@ -23,7 +23,9 @@ agictl message get YOUR_SUB_ACCOUNT_ID --last-n-count 20  # Last 20 messages
 agictl message get YOUR_SUB_ACCOUNT_ID --contact <uid> --last-n-count 10  # Contact-specific history
 ```
 
-**Inbound order:** `message send` (reply/ack) **before** `mark-processed`. Never mark-processed first. Cycle-end journals are not a reply to the sender. Attachments: `.agent/attachments/{message_id}/` + `agictl_view_image`.
+Results are **oldest to newest** (same as injected NEW MESSAGES). `--last-n-count` / `--limit` still take the newest N, then return that window oldest first.
+
+**Inbound handling:** `message send` (reply/ack) **before** `mark-processed`. Never mark-processed first. Cycle-end journals are not a reply to the sender. Attachments: `.agent/attachments/{message_id}/` + `agictl_view_image` / `agictl_view_video`.
 
 ### Recipient IDs
 

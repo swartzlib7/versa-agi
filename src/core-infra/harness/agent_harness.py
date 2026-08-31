@@ -955,7 +955,7 @@ if _is_organization_enabled():
 
 
 # ═══════════════════════════════════════════════════════
-# VIEW — Agent-initiated image perception
+# VIEW — Agent-initiated image / video perception
 # ═══════════════════════════════════════════════════════
 
 MODALITY_VIEW_MIN_STEPS = 8
@@ -967,6 +967,39 @@ class ViewImageInput(BaseModel):
     path: str = Field(description=(
         "Absolute or workspace-relative path to a local image file on disk."
     ))
+
+
+class ViewVideoInput(BaseModel):
+    path: str = Field(description=(
+        "Absolute or workspace-relative path to a local video file on disk "
+        "(mp4, mkv, or mov, 200 MB max)."
+    ))
+
+
+def _view_late_cycle_refusal(remaining: int) -> str:
+    return json.dumps({
+        "success": False,
+        "code": "late_cycle_cutoff",
+        "error": (
+            f"Modality tools refused — fewer than {MODALITY_VIEW_MIN_STEPS} steps remain. "
+            "Wrap up: journal progress (agictl task progress), leave a handoff, and agictl cycle end."
+        ),
+        "steps_remaining": remaining,
+    })
+
+
+def _view_no_driver_refusal(execution_model: str, modality: str) -> str:
+    return json.dumps({
+        "success": False,
+        "code": "no_driver",
+        "error": (
+            f"Execution model '{execution_model}' has no exact executable "
+            f"{modality}-input ModelDriver. "
+            f"Use agictl agent set-model to assign a ◆ {modality}-capable catalog key, "
+            "journal next actions, and agictl cycle end to respawn on the new model."
+        ),
+        "execution_model": execution_model,
+    })
 
 
 @tool("agictl_view_image", args_schema=ViewImageInput)
@@ -988,28 +1021,10 @@ def agictl_view_image(path: str) -> str:
     remaining = int(ctx.get("steps_remaining") or 0)
 
     if remaining < MODALITY_VIEW_MIN_STEPS:
-        return json.dumps({
-            "success": False,
-            "code": "late_cycle_cutoff",
-            "error": (
-                f"Modality tools refused — fewer than {MODALITY_VIEW_MIN_STEPS} steps remain. "
-                "Wrap up: journal progress (agictl task progress), leave a handoff, and agictl cycle end."
-            ),
-            "steps_remaining": remaining,
-        })
+        return _view_late_cycle_refusal(remaining)
 
     if resolve_model_driver(execution_model, "input", "image") is None:
-        return json.dumps({
-            "success": False,
-            "code": "no_driver",
-            "error": (
-                f"Execution model '{execution_model}' has no exact executable "
-                "image-input ModelDriver. "
-                "Use agictl agent set-model to assign a ◆ image-capable catalog key, "
-                "journal next actions, and agictl cycle end to respawn on the new model."
-            ),
-            "execution_model": execution_model,
-        })
+        return _view_no_driver_refusal(execution_model, "image")
 
     try:
         result = inspect_image_for_view(path, agent_name)
@@ -1023,7 +1038,44 @@ def agictl_view_image(path: str) -> str:
     return json.dumps(result)
 
 
+@tool("agictl_view_video", args_schema=ViewVideoInput)
+def agictl_view_video(path: str) -> str:
+    """View a local video file — injects it into your context when the execution model supports video.
+
+    Use for mp4/mkv/mov attachments or recordings (200 MB max).
+    The execution model must have an exact video-input ModelDriver (◆).
+    Examples:
+      - agictl_view_video(path="/tmp/clip.mp4")
+      - agictl_view_video(path="workspace/project/demo.mov")
+    """
+    from model_drivers.registry import resolve_model_driver
+    from model_drivers.view_paths import ViewPathError, inspect_video_for_view
+
+    ctx = _HARNESS_VIEW_CTX
+    agent_name = ctx.get("agent_name") or os.environ.get("VERSA_AGENT_NAME", "")
+    execution_model = ctx.get("execution_model") or ""
+    remaining = int(ctx.get("steps_remaining") or 0)
+
+    if remaining < MODALITY_VIEW_MIN_STEPS:
+        return _view_late_cycle_refusal(remaining)
+
+    if resolve_model_driver(execution_model, "input", "video") is None:
+        return _view_no_driver_refusal(execution_model, "video")
+
+    try:
+        result = inspect_video_for_view(path, agent_name)
+    except ViewPathError as e:
+        return json.dumps({"success": False, "code": e.code, "error": e.message})
+    except OSError as e:
+        return json.dumps({"success": False, "code": "io_error", "error": str(e)})
+
+    result["execution_model"] = execution_model
+    result["inject"] = True
+    return json.dumps(result)
+
+
 ALL_TOOLS.append(agictl_view_image)
+ALL_TOOLS.append(agictl_view_video)
 
 
 def _build_view_image_message(
@@ -1047,13 +1099,14 @@ def _build_view_image_message(
     if not path:
         return None
     try:
-        caption = f"Agent requested view of image at {path}"
+        modality = str(payload.get("modality") or "image").strip().lower() or "image"
+        caption = f"Agent requested view of {modality} at {path}"
         execution_model = str(payload.get("execution_model") or "")
-        resolved = resolve_model_driver(execution_model, "input", "image")
+        resolved = resolve_model_driver(execution_model, "input", modality)
         if resolved is None:
             tlog(
                 f"VIEW INJECT: no_driver model={execution_model} "
-                "direction=input modality=image"
+                f"direction=input modality={modality}"
             )
             return None
         parts = resolved.adapter.entrypoint(
@@ -1998,7 +2051,7 @@ def main():
                             tlog(f"[STEP {step_count}/{max_steps}] TOOL  ← {preview}")
 
                             tool_name = getattr(msg, "name", "") or ""
-                            if tool_name == "agictl_view_image" and isinstance(content, str):
+                            if tool_name in ("agictl_view_image", "agictl_view_video") and isinstance(content, str):
                                 try:
                                     view_payload = json.loads(content)
                                 except json.JSONDecodeError:

@@ -4291,11 +4291,10 @@ def model_refresh():
                 pass  # best-effort
 
     # ── Phase 4: Sync active model ──
-    # Priority: server_config.json > /v1/models > first in list
+    # Star only: server_config.json, then `agictl model list` active flag.
+    # Do not invent "active" from inventory order (listdir / /v1/models[0]).
     if server_config_synced and server_config_synced.get("active_model"):
         active_model = server_config_synced["active_model"]
-    elif not active_model and models:
-        active_model = models[0]
     if active_model:
         _update_paths_env_key("VERSA_ACTIVE_LOCAL_MODEL", active_model)
 
@@ -8661,8 +8660,13 @@ def message_get(agent_uid, unread, last_n_minutes, last_n_count, limit, contact)
             conditions.append("(from_user_id=? OR to_user_id=?)")
             params.extend([contact, contact])
         where = " AND ".join(conditions)
-        query = f"SELECT * FROM messages WHERE {where} ORDER BY created_at DESC"
-        query += f" LIMIT {last_n_count}" if last_n_count else f" LIMIT {limit}"
+        window = last_n_count if last_n_count else limit
+        query = (
+            f"SELECT * FROM ("
+            f"SELECT * FROM messages WHERE {where} "
+            f"ORDER BY created_at DESC LIMIT {int(window)}"
+            f") ORDER BY created_at ASC"
+        )
         rows = conn.execute(query, params).fetchall()
         conn.close()
         print(json.dumps([dict(r) for r in rows], indent=2, default=str))
@@ -10641,7 +10645,7 @@ def awareness():
 def awareness_add(entry_type, subject_type, subject_id, content, action_conclusion_id, context, agent_name):
     """Add a conclusion or action to the awareness store."""
     if not agent_name:
-        agent_name = get_agent_name()
+        agent_name = _caller_agent_name()
     # Validate: actions should have a conclusion_id
     if entry_type == 'action' and action_conclusion_id is None:
         console.print("[yellow]⚠ Warning: Action added without --action-conclusion-id. Consider linking to a parent conclusion.[/yellow]", stderr=True)
@@ -10683,7 +10687,7 @@ def awareness_add(entry_type, subject_type, subject_id, content, action_conclusi
 def awareness_revise(entry_id, content, agent_name):
     """Revise an awareness entry. Old entry → superseded, new entry created."""
     if not agent_name:
-        agent_name = get_agent_name()
+        agent_name = _caller_agent_name()
     try:
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -10730,7 +10734,7 @@ def awareness_revise(entry_id, content, agent_name):
 def awareness_complete(entry_id, agent_name):
     """Mark an action as completed. Actions only — conclusions are superseded/revised."""
     if not agent_name:
-        agent_name = get_agent_name()
+        agent_name = _caller_agent_name()
     try:
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -10778,7 +10782,7 @@ def awareness_supersede(entry_id, agent_name):
     if the action was actually done).
     """
     if not agent_name:
-        agent_name = get_agent_name()
+        agent_name = _caller_agent_name()
     try:
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -10822,7 +10826,7 @@ def awareness_supersede(entry_id, agent_name):
 def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_name):
     """List awareness entries. No --status = all statuses."""
     if not agent_name:
-        agent_name = get_agent_name()
+        agent_name = _caller_agent_name()
     try:
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -10851,11 +10855,18 @@ def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_nam
 @click.option("--type", "entry_type", type=click.Choice(['conclusion', 'action']), default=None, help="Filter by type")
 @click.option("--subject", "subject_type", type=click.Choice(['connection','project','game','system','self']), default=None)
 @click.option("--status", "entry_status", default=None, help="Filter by status; comma-separated for multiple (e.g. active,completed). Default: all")
-@click.option("--agent", "agent_name", default=None, help="Filter by agent (default: all)")
+@click.option("--agent", "agent_name", default=None, help="Filter by agent (default: current caller)")
+@click.option("--all", "show_all_agents", is_flag=True, help="Show entries from all agents (fleet view)")
 @click.option("--limit", type=int, default=15, help="Limit the number of entries returned")
 @click.option("--truncate", "truncate_chars", type=int, default=0, help="Truncate Content column to N chars (0 = full)")
-def awareness_table(entry_type, subject_type, entry_status, agent_name, limit, truncate_chars):
-    """Output awareness entries in a token-efficient markdown table."""
+def awareness_table(entry_type, subject_type, entry_status, agent_name, show_all_agents, limit, truncate_chars):
+    """Output awareness entries in a token-efficient markdown table.
+
+    Default is the current caller's board. Pass --all for the fleet view
+    (COA orchestration / spawn team-actions digest).
+    """
+    if not show_all_agents and not agent_name:
+        agent_name = _caller_agent_name()
     try:
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -11492,6 +11503,32 @@ def _exec_env_root() -> str | None:
     return root if root and os.path.isdir(root) else None
 
 
+# Forwarded into execute bash/python so nested `agictl` keeps the invoking
+# agent's identity (sudo -u strips the environment).
+_EXEC_FORWARD_ENV = (
+    "AGICTL_CONFIG",
+    "AGICTL_AGENT_DIR",
+    "AGICTL_AGENT_USER",
+    "AGICTL_AGENTS_DB",
+    "AGICTL_MESSAGES_DB",
+    "AGICTL_TASKS_DB",
+    "AGICTL_CYCLES_DB",
+    "AGICTL_DB",
+    "VERSA_AGENT_NAME",
+    "VERSA_CYCLE_ID",
+)
+
+
+def _exec_forward_env_pairs() -> list[str]:
+    """KEY=value pairs for `env` so nested agictl keeps caller identity."""
+    pairs = []
+    for key in _EXEC_FORWARD_ENV:
+        val = os.environ.get(key)
+        if val:
+            pairs.append(f"{key}={val}")
+    return pairs
+
+
 def _get_exec_cmd(interpreter: str, script_path: str) -> list:
     """Build execution command, dropping back to the agent user if available.
 
@@ -11504,22 +11541,18 @@ def _get_exec_cmd(interpreter: str, script_path: str) -> list:
     use 'sudo -i' (login shell). Instead we use 'sudo -u' and explicitly
     invoke the interpreter, which works regardless of the user's shell.
 
-    AGICTL_AGENT_DIR is re-injected via `env` so nested scripts can use
-    `$AGICTL_AGENT_DIR/skills/...` even when sudo resets the environment.
+    Identity + DB env is re-injected via `env` so nested `agictl` inside
+    execute bash resolves as the invoking agent, not COA.
     """
     agent_user = os.environ.get("AGICTL_AGENT_USER")
     caller = os.environ.get("USER", "")
-    agent_dir = os.environ.get("AGICTL_AGENT_DIR", "").strip()
+    forwarded = _exec_forward_env_pairs()
     if agent_user and agent_user not in ("root", "watchdog", caller):
         # Drop back to agent user — sudo -u initializes supplementary groups.
-        # Use `env` (not sudo SETENV) so AGICTL_AGENT_DIR survives reliably.
-        cmd = ["sudo", "-u", agent_user, "env"]
-        if agent_dir:
-            cmd.append(f"AGICTL_AGENT_DIR={agent_dir}")
-        cmd.extend([interpreter, script_path])
-        return cmd
-    if agent_dir:
-        return ["env", f"AGICTL_AGENT_DIR={agent_dir}", interpreter, script_path]
+        # Use `env` (not sudo SETENV) so identity vars survive reliably.
+        return ["sudo", "-u", agent_user, "env", *forwarded, interpreter, script_path]
+    if forwarded:
+        return ["env", *forwarded, interpreter, script_path]
     return [interpreter, script_path]
 
 
@@ -11672,8 +11705,40 @@ def search_web(query, count, categories):
 
 @cli.group()
 def view():
-    """View local images for multimodal perception."""
+    """View local images or videos for multimodal perception."""
     pass
+
+
+def _view_asset(path, execution_model, *, modality: str, inspect):
+    from model_drivers.registry import resolve_model_driver
+    from model_drivers.view_paths import ViewPathError
+
+    agent_name = get_agent_name()
+    try:
+        result = inspect(path, agent_name)
+    except ViewPathError as e:
+        json_response(False, error=e.message, code=e.code)
+        sys.exit(1)
+    except OSError as e:
+        json_response(False, error=str(e), code="io_error")
+        sys.exit(1)
+
+    if execution_model:
+        if resolve_model_driver(execution_model, "input", modality) is None:
+            json_response(
+                False,
+                error=(
+                    f"Execution model '{execution_model}' has no exact executable "
+                    f"{modality}-input ModelDriver"
+                ),
+                code="no_driver",
+                execution_model=execution_model,
+                path=result.get("path"),
+            )
+            sys.exit(1)
+        result["execution_model"] = execution_model
+
+    json_response(True, **result)
 
 
 @view.command("image")
@@ -11685,35 +11750,23 @@ def view():
 )
 def view_image(path, execution_model):
     """Validate a local image path and return metadata for multimodal inject."""
-    from model_drivers.registry import resolve_model_driver
-    from model_drivers.view_paths import ViewPathError, inspect_image_for_view
+    from model_drivers.view_paths import inspect_image_for_view
 
-    agent_name = get_agent_name()
-    try:
-        result = inspect_image_for_view(path, agent_name)
-    except ViewPathError as e:
-        json_response(False, error=e.message, code=e.code)
-        sys.exit(1)
-    except OSError as e:
-        json_response(False, error=str(e), code="io_error")
-        sys.exit(1)
+    _view_asset(path, execution_model, modality="image", inspect=inspect_image_for_view)
 
-    if execution_model:
-        if resolve_model_driver(execution_model, "input", "image") is None:
-            json_response(
-                False,
-                error=(
-                    f"Execution model '{execution_model}' has no exact executable "
-                    "image-input ModelDriver"
-                ),
-                code="no_driver",
-                execution_model=execution_model,
-                path=result.get("path"),
-            )
-            sys.exit(1)
-        result["execution_model"] = execution_model
 
-    json_response(True, **result)
+@view.command("video")
+@click.argument("path")
+@click.option(
+    "--execution-model",
+    default=None,
+    help="Optional catalog key to test modality gate (harness passes this automatically)",
+)
+def view_video(path, execution_model):
+    """Validate a local video path and return metadata for multimodal inject."""
+    from model_drivers.view_paths import inspect_video_for_view
+
+    _view_asset(path, execution_model, modality="video", inspect=inspect_video_for_view)
 
 
 # ═══════════════════════════════════════════════════════

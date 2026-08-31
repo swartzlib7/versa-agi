@@ -40,7 +40,7 @@ agictl is organized into 20 data-model-driven command groups:
 
 When COA or a sub-agent runs inside the LangGraph harness, commands are **not** typed at a shell. Each CLI group above maps to a harness tool (`agictl_task`, `agictl_cycle`, …). Pass only the subcommand **after** `agictl` as the tool's `command` argument — e.g. shell `agictl task list` → tool **`agictl_task`**, argument **`task list`**. Never prefix `agictl` in the argument.
 
-Special cases: **`agictl_search`** (`query`, `count`) and **`agictl_view_image`** (`path`) use typed fields, not a command string. **`agictl_cycle`** must be the sole tool call when ending a cycle.
+Special cases: **`agictl_search`** (`query`, `count`) and **`agictl_view_image` / `agictl_view_video`** (`path`) use typed fields, not a command string. **`agictl_cycle`** must be the sole tool call when ending a cycle.
 
 Full mapping and examples: **`cli_reference_agent.md`** (*Harness tool invocation*). Shell notation in this file is the operator/human reference.
 
@@ -237,9 +237,9 @@ See skill **`script_tasks.md`** for authoring rules, scheduling behavior, and co
 ## 4. message — Communication
 
 ```bash
-agictl message get <sub_account_uid> --unread                # Unprocessed inbound messages (JSON)
+agictl message get <sub_account_uid> --unread                # Unprocessed inbound (oldest to newest)
 agictl message get <sub_account_uid> --contact <contact_uid> # Filter by specific sender/recipient
-agictl message get <sub_account_uid> --last-n-count 10      # Last N messages
+agictl message get <sub_account_uid> --last-n-count 10      # Newest N, returned oldest to newest
 agictl message get <sub_account_uid> --last-n-minutes 30    # Messages from last 30 min
 agictl message send <contact_uid> "<text>" --mode MODE  # Send via REST Adapter (JSON)
 agictl message internal <agent_name> "<text>"         # Direct SQLite message (no VV API)
@@ -390,8 +390,11 @@ agictl awareness revise <entry_id> --content "<updated text>"    # Supersedes ol
 agictl awareness supersede <entry_id>                            # Retire entry no longer true (no replacement)
 agictl awareness complete <entry_id>                             # Mark action as done (actions only)
 agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
+agictl awareness table [--status ...] [--type ...] [--agent NAME | --all] [--limit N]
 agictl awareness get <entry_id>                                  # Single entry details
 ```
+
+`awareness table` defaults to **your** board. `--all` is the fleet view (COA orchestration). Never batch-supersede from a fleet dump.
 
 **Subject types**: `connection`, `project`, `game`, `system`, `self`
 
@@ -571,16 +574,18 @@ agictl identity provision <agent_user> --token TOKEN --first-name NAME --last-na
 
 > **Voice options**: `female` (default), `male`, `reflective` (clones Primary User's voice).
 
-## 16. view — Image perception
+## 16. view — Image / video perception
 
 ```bash
 agictl view image <path>                              # Validate local image; JSON metadata
 agictl view image <path> --execution-model <key>      # Test modality gate for a catalog key
+agictl view video <path>                              # Validate local video (mp4/mkv/mov, 200 MB VIEW gate; native Google inline ~20 MB)
+agictl view video <path> --execution-model <key>      # Test video-input ModelDriver gate
 ```
 
-**Harness tool:** agents call `agictl_view_image(path="...")` during a cycle. On success the harness injects a multimodal message (same spawn) and trims image payloads from checkpoint history after the next reasoning turn.
+**Harness tool:** agents call `agictl_view_image(path="...")` or `agictl_view_video(path="...")` during a cycle. On success the harness injects a multimodal message (same spawn) and trims image/video payloads from checkpoint history after the next reasoning turn.
 
-**Gate:** the spawn's execution model must declare `image` in catalog `input_modalities`. Text-only models receive a clear tool refusal. Refused when fewer than 8 steps remain in the cycle.
+**Gate:** the spawn's execution model must have an exact executable input ModelDriver for that modality (◆). Text-only models receive a clear tool refusal. Refused when fewer than 8 steps remain in the cycle.
 
 **Paths:** any local file the agent OS user can read. Relative paths resolve from the agent workspace.
 

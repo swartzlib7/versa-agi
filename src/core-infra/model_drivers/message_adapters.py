@@ -50,9 +50,11 @@ def content_has_image_parts(content: object) -> bool:
         if not isinstance(part, dict):
             continue
         ptype = part.get("type", "")
-        if ptype in ("image_url", "media", "image"):
+        if ptype in ("image_url", "media", "image", "video_url"):
             return True
         if ptype == "image_url" and part.get("image_url"):
+            return True
+        if ptype == "video_url" and part.get("video_url"):
             return True
     return False
 

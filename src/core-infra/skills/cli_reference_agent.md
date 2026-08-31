@@ -30,7 +30,7 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 | `browser` | `agictl_browser` | `browser goto "https://…"` |
 | `organization` | `agictl_organization` | `organization org list` (only when Organization feature is ON) |
 | `search` | `agictl_search` | typed args: `query`, `count` (not a command string) |
-| `view` | `agictl_view_image` | typed arg: `path` (not a command string) |
+| `view` | `agictl_view_image` / `agictl_view_video` | typed arg: `path` (not a command string) |
 
 **Convention:** Examples in this reference use **shell notation** (`agictl group subcommand …`) so they match `--help` and operator docs. Translate when calling a tool:
 
@@ -122,9 +122,9 @@ agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 ## 4. message
 
 ```bash
-agictl message get <sub_account_uid> --unread                # Unprocessed inbound messages
+agictl message get <sub_account_uid> --unread                # Unprocessed inbound (oldest to newest)
 agictl message get <sub_account_uid> --contact <contact_uid> # Filter by sender/recipient
-agictl message get <sub_account_uid> --last-n-count 10       # Last N messages
+agictl message get <sub_account_uid> --last-n-count 10       # Newest N, returned oldest to newest
 agictl message get <sub_account_uid> --last-n-minutes 30     # Messages from last 30 min
 agictl message send <contact_uid> "<text>" --mode MODE       # Send via VersaVoice
 agictl message internal <agent_name> "<text>"                # Direct message to another agent (SQLite, no VV API)
@@ -244,8 +244,11 @@ agictl awareness revise <entry_id> --content "<updated text>"
 agictl awareness supersede <entry_id>
 agictl awareness complete <entry_id>
 agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
+agictl awareness table [--status ...] [--type ...] [--agent NAME | --all] [--limit N]
 agictl awareness get <entry_id>
 ```
+
+`awareness table` defaults to **your** board. `--all` is the fleet view. Never batch-supersede from a fleet dump.
 
 **Subject types**: `connection`, `project`, `game`, `system`, `self`
 
@@ -267,9 +270,9 @@ agictl search web "<query>" --categories science      # Filter by search categor
 
 Use for: technical research, version compatibility checks, documentation lookups, competitive intelligence.
 
-## 12. view — Image perception
+## 12. view — Image / video perception
 
-**Harness tool:** `agictl_view_image(path="...")` — preferred in-cycle (validates, injects image into context).
+**Harness tool:** `agictl_view_image(path="...")` or `agictl_view_video(path="...")` — preferred in-cycle (validates, injects media into context). Video accepts mp4, mkv, or mov up to 200 MB (VIEW gate). Native Google (`gemini-3.7-flash`) inline video is ~20 MB.
 
 **CLI (standalone validation):**
 
@@ -277,9 +280,10 @@ Use for: technical research, version compatibility checks, documentation lookups
 agictl view image <path>                              # Validate path; return JSON metadata
 agictl view image workspace/screenshots/page.png      # Relative to agent workspace
 agictl view image /any/local/path.png                 # Absolute path anywhere on disk
+agictl view video workspace/clips/demo.mp4            # Validate a local video
 ```
 
-**Requirement:** execution model catalog `input_modalities` must include `image`. Refused when fewer than 8 steps remain.
+**Requirement:** execution model must have an exact ◆ input ModelDriver for that modality. Refused when fewer than 8 steps remain.
 
 **Cross-spawn fallback:** if the execution model lacks vision: `agictl agent set-model` (COA/admin), journal progress, snooze or create a self-assigned task due now, then `agictl cycle end`. Next Lifeline tick respawns on the vision model.
 

@@ -59,10 +59,11 @@ agictl awareness add conclusion \
   --context "PU feedback: 'just say done'"
 ```
 
-> **Revise, don't duplicate.** Before writing a new conclusion, you MUST check your current awareness:
+> **Revise, don't duplicate.** Before writing a new conclusion, you MUST check **your** board (table defaults to you; do not batch-supersede a fleet dump):
 > ```bash
 > agictl awareness table --status active
 > ```
+> Fleet view (COA orchestration only): `agictl awareness table --status active --all`
 > If a similar entry exists, do NOT duplicate it. If it needs updating, revise it:
 > ```bash
 > agictl awareness revise <entry_id> --content "Updated understanding..."
@@ -143,7 +144,7 @@ Key prefixes: `constraint_*`, `discovery_*`, `user_instruction_*`, `schedule_*`
 Confirm your awareness and memory were persisted:
 
 ```bash
-# Check awareness entries from this cycle
+# Check your awareness entries from this cycle (own board)
 agictl awareness table --status active
 
 # Check factual memory

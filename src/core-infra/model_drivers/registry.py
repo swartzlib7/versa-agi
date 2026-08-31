@@ -27,6 +27,8 @@ from model_drivers.libraries import (
     chat_mm_audio_out_pcm16,
     chat_mm_image_out_google_generate_content,
     chat_mm_image_out_openai_compat,
+    chat_video_in_content_parts,
+    chat_video_in_google_media,
     local_media_image_out_sdcpp,
 )
 
@@ -82,6 +84,18 @@ ADAPTERS: dict[str, DriverAdapter] = {
         modality=chat_image_in_content_parts.MODALITY,
         entrypoint=chat_image_in_content_parts.to_content_parts,
     ),
+    chat_video_in_content_parts.ADAPTER_ID: DriverAdapter(
+        adapter_id=chat_video_in_content_parts.ADAPTER_ID,
+        direction=chat_video_in_content_parts.DIRECTION,
+        modality=chat_video_in_content_parts.MODALITY,
+        entrypoint=chat_video_in_content_parts.to_content_parts,
+    ),
+    chat_video_in_google_media.ADAPTER_ID: DriverAdapter(
+        adapter_id=chat_video_in_google_media.ADAPTER_ID,
+        direction=chat_video_in_google_media.DIRECTION,
+        modality=chat_video_in_google_media.MODALITY,
+        entrypoint=chat_video_in_google_media.to_content_parts,
+    ),
     chat_mm_image_out_openai_compat.ADAPTER_ID: DriverAdapter(
         adapter_id=chat_mm_image_out_openai_compat.ADAPTER_ID,
         direction=chat_mm_image_out_openai_compat.DIRECTION,
@@ -135,12 +149,33 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
     _binding("gemini-3-flash-preview"),
     _binding("gemini-3.1-pro-preview"),
     _binding("gemini-3.1-flash-lite"),
+    # DR-CM-13 — shipped Gemini 3.7 Flash image + native video.
+    _binding("gemini-3.7-flash"),
+    _binding(
+        "gemini-3.7-flash",
+        modality="video",
+        adapter_id=chat_video_in_google_media.ADAPTER_ID,
+    ),
     # DR-CM-08 — direct xAI image input (Grok 4.5 only).
     _binding("grok-4.5"),
     # DR-CM-07 — promoted OpenRouter image input used by active agents.
     _binding("openai/gpt-5.6-luna"),
     # DR-CM-11 — OpenRouter Grok 4.5 image input.
     _binding("x-ai/grok-4.5"),
+    # DR-CM-12 — OpenRouter GLM 5.3 Flash image + video input.
+    _binding("z-ai/glm-5.3-flash"),
+    _binding(
+        "z-ai/glm-5.3-flash",
+        modality="video",
+        adapter_id=chat_video_in_content_parts.ADAPTER_ID,
+    ),
+    # DR-CM-13 — OpenRouter Gemini 3.7 Flash image + video_url.
+    _binding("google/gemini-3.7-flash"),
+    _binding(
+        "google/gemini-3.7-flash",
+        modality="video",
+        adapter_id=chat_video_in_content_parts.ADAPTER_ID,
+    ),
     # DR-LOC-01 — local SYCL chat vision (llama-server content parts).
     _binding("qwen3.6:35b"),
     _binding("qwen3.8:27b"),

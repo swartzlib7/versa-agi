@@ -13,7 +13,7 @@ agictl message send <RECIPIENT_UID> "Message text" --mode <MODE>
 ## How to Read Messages
 
 ```bash
-agictl message get YOUR_SUB_ACCOUNT_ID --unread       # Unprocessed inbound
+agictl message get YOUR_SUB_ACCOUNT_ID --unread       # Unprocessed inbound (oldest to newest)
 agictl message mark-processed <id>                    # Mark as handled
 ```
 
@@ -25,7 +25,7 @@ agictl message mark-processed <id>                    # Mark as handled
 2. **When a reply is needed** — `agictl message send` to the sender **before** `mark-processed`.
 3. **mark-processed last** — after a meaningful reply, or after a deliberate silence decision. Never treat "send a courtesy thanks" as mandatory.
 4. **Cycle end is not a reply** — journal / `cycle end` text does not reach the sender.
-5. **Attachments** — under `.agent/attachments/{message_id}/`; use `agictl_view_image` per full `communication.md` before describing image content.
+5. **Attachments** — under `.agent/attachments/{message_id}/`; use `agictl_view_image` / `agictl_view_video` per full `communication.md` before describing media content.
 
 ### Inter-agent terminal acknowledgments (no reply)
 

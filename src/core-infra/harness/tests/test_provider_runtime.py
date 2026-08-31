@@ -468,6 +468,20 @@ class TestProviderFamilyCompatibility(unittest.TestCase):
         self.assertEqual(native["extra_body"]["reasoning"], {"enabled": False})
         self.assertEqual(native["temperature"], 0.2)
 
+    def test_openrouter_glm_53_flash_keeps_reasoning_on(self):
+        native = to_native_kwargs(
+            "openai_compat",
+            "z-ai/glm-5.3-flash",
+            {
+                "temperature": 0.2,
+                "reasoning_effort": "max",
+                "extra": {},
+            },
+            provider_slug="openrouter",
+        )
+        self.assertEqual(native["extra_body"]["reasoning"], {"effort": "max"})
+        self.assertNotEqual(native["extra_body"]["reasoning"].get("enabled"), False)
+
     def test_gemini_3_uses_thinking_level_without_sampling_or_budget(self):
         native = to_native_kwargs(
             "google",

@@ -17,35 +17,42 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from agitop import coa_bootstrap as cb  # noqa: E402
 
+STOCK = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "..",
+    "models.ini.stock",
+)
+STOCK = os.path.abspath(STOCK)
+
 
 class RecommendedMap(unittest.TestCase):
     def test_xai_is_grok_46_only(self):
-        self.assertEqual(cb.recommended_keys("xai"), ["grok-4.6"])
+        self.assertEqual(cb.recommended_keys("xai", STOCK), ["grok-4.6"])
 
     def test_anthropic_is_opus_48(self):
-        self.assertEqual(cb.recommended_keys("anthropic"), ["claude-opus-4-8"])
+        self.assertEqual(cb.recommended_keys("anthropic", STOCK), ["claude-opus-4-8"])
 
-    def test_openrouter_shipped_eight(self):
+    def test_openrouter_shipped_order(self):
         self.assertEqual(
-            cb.recommended_keys("openrouter"),
+            cb.recommended_keys("openrouter", STOCK),
             [
                 "x-ai/grok-4.6",
                 "google/gemini-3.7-flash",
                 "openai/gpt-5.6-terra",
                 "anthropic/claude-opus-4.8",
                 "openai/gpt-5.6-sol",
-                "z-ai/glm-5.2",
+                "z-ai/glm-5.3-flash",
                 "deepseek/deepseek-v4-flash-0731",
                 "openai/gpt-5.6-luna",
             ],
         )
 
     def test_google_is_gemini_37_flash(self):
-        self.assertEqual(cb.recommended_keys("google"), ["gemini-3.7-flash"])
+        self.assertEqual(cb.recommended_keys("google", STOCK), ["gemini-3.7-flash"])
 
     def test_openai_gpt56_three(self):
         self.assertEqual(
-            cb.recommended_keys("openai"),
+            cb.recommended_keys("openai", STOCK),
             ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
         )
 
