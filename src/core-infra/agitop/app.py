@@ -4,8 +4,19 @@ Main Textual application with live data panels.
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Iterable
+
+from agitop.version import read_product_version
+
+VERSION = read_product_version()
+
+# Before Textual import so `agitop --version` / `python -m agitop.app --version`
+# works in environments without the dashboard extras.
+if any(a in ("--version", "-V") for a in sys.argv[1:]):
+    print(f"agitop {VERSION}")
+    raise SystemExit(0)
 
 from textual import on
 from textual.app import App, ComposeResult, SystemCommand
@@ -29,9 +40,6 @@ from agitop.panels.organization import (
 )
 from agitop.panels.organization_modal import OrganizationModal
 from agitop.feature_flags import ORGANIZATION_UI_VISIBLE
-from agitop.version import read_product_version
-
-VERSION = read_product_version()
 
 # Themes offered in Ctrl+T picker (builtins outside this set are unregistered).
 # solarized-light omitted — poor contrast with agitop's cyan/hardcoded styles;
@@ -440,6 +448,11 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=f"agitop v{VERSION} — Versa AGi Mission Control Dashboard"
+    )
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"agitop {VERSION}",
     )
     parser.add_argument(
         "--agents-db", default="/var/lib/versa-agi/agents.db",

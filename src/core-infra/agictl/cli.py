@@ -217,7 +217,26 @@ def json_response(*args, **kwargs):
     return success
 
 # ─── Root CLI ─────────────────────────────────────────
+def _product_version(default: str = "unknown") -> str:
+    """Shipped semver from core-infra/VERSION (same file agitop / setup.sh use)."""
+    try:
+        from agitop.version import read_product_version
+        return read_product_version(default)
+    except ImportError:
+        vf = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+        try:
+            value = open(vf, encoding="utf-8").read().strip()
+            return value or default
+        except OSError:
+            return default
+
+
 @click.group()
+@click.version_option(
+    version=_product_version(),
+    prog_name="agictl",
+    message="%(prog)s %(version)s",
+)
 def cli():
     """Versa AGi Control Interface — agictl"""
     pass

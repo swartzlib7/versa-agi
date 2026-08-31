@@ -963,6 +963,9 @@ if [ "${UPDATE_MODE}" = false ]; then
         cp "${SOURCE_CORE_INFRA}/harness/model_params.py" "${DEPLOYED_CORE_INFRA}/harness/"
       fi
       _deploy_server_agictl_shared_py "${SOURCE_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}"
+      if [ -f "${SOURCE_CORE_INFRA}/VERSION" ]; then
+        cp "${SOURCE_CORE_INFRA}/VERSION" "${DEPLOYED_CORE_INFRA}/VERSION"
+      fi
 
       chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}"
       ok "core-infra deployed to ${DEPLOYED_CORE_INFRA} (server subset)"
@@ -993,6 +996,11 @@ if [ "${UPDATE_MODE}" = false ]; then
         sed -i "s|^VERSA_CORE_INFRA=.*|VERSA_CORE_INFRA=\"${DEPLOYED_CORE_INFRA}\"|" "${PATHS_ENV}"
       else
         echo "VERSA_CORE_INFRA=\"${DEPLOYED_CORE_INFRA}\"" >> "${PATHS_ENV}"
+      fi
+      if grep -q "^VERSA_PRODUCT_VERSION=" "${PATHS_ENV}" 2>/dev/null; then
+        sed -i "s|^VERSA_PRODUCT_VERSION=.*|VERSA_PRODUCT_VERSION=\"${VERSION}\"|" "${PATHS_ENV}"
+      else
+        echo "VERSA_PRODUCT_VERSION=\"${VERSION}\"" >> "${PATHS_ENV}"
       fi
       ok "paths.env: VERSA_CORE_INFRA=${DEPLOYED_CORE_INFRA}"
 
@@ -1594,6 +1602,7 @@ cat > "${PATHS_ENV}" <<PATHSEOF
 VERSA_WATCHDOG_USER="${WATCHDOG_USER}"
 VERSA_COA_USER="${COA_USER}"
 VERSA_CORE_INFRA="${DEPLOYED_CORE_INFRA}"
+VERSA_PRODUCT_VERSION="${VERSION}"
 VERSA_COA_ENV="${DEPLOYED_COA_ENV}"
 VERSA_AGENTS_DB="${AGENTS_DB}"
 VERSA_DEFAULT_MODEL="${INI_GEMINI_MODEL}"

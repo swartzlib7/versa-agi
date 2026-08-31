@@ -25,6 +25,28 @@ if [ -f "${PATHS_ENV}" ]; then
 fi
 CORE_INFRA="${VERSA_CORE_INFRA:-/home/watchdog/core-infra}"
 
+for _arg in "$@"; do
+  case "${_arg}" in
+    --version|-V)
+      _ver="${VERSA_PRODUCT_VERSION:-}"
+      if [ -z "${_ver}" ]; then
+        for _vf in \
+            "${CORE_INFRA}/VERSION" \
+            "/home/watchdog/core-infra/VERSION" \
+            "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/VERSION"; do
+          if [ -f "${_vf}" ]; then
+            _ver="$(tr -d '[:space:]' < "${_vf}")"
+            break
+          fi
+        done
+      fi
+      echo "agictl ${_ver:-unknown}"
+      exit 0
+      ;;
+    --) break ;;
+  esac
+done
+
 # Execute the python CLI module
 export PYTHONPATH="${CORE_INFRA}:${PYTHONPATH:-}"
 exec ${PYTHON} "${CORE_INFRA}/agictl/cli.py" "$@"

@@ -12,6 +12,32 @@
 
 REAL_BINARY="/usr/local/lib/versa-agi/agictl"
 
+# --version before sudo elevation (same VERSION file as setup.sh / agitop).
+for _arg in "$@"; do
+  case "${_arg}" in
+    --version|-V)
+      _paths_env="/etc/versa-agi/paths.env"
+      [ -f "${_paths_env}" ] && . "${_paths_env}"
+      _core="${VERSA_CORE_INFRA:-/home/watchdog/core-infra}"
+      _ver="${VERSA_PRODUCT_VERSION:-}"
+      if [ -z "${_ver}" ]; then
+        for _vf in \
+            "${_core}/VERSION" \
+            "/home/watchdog/core-infra/VERSION" \
+            "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/VERSION"; do
+          if [ -f "${_vf}" ]; then
+            _ver="$(tr -d '[:space:]' < "${_vf}")"
+            break
+          fi
+        done
+      fi
+      echo "agictl ${_ver:-unknown}"
+      exit 0
+      ;;
+    --) break ;;
+  esac
+done
+
 # Determine if the caller is an agent user
 CALLER="$(whoami)"
 
