@@ -29,7 +29,8 @@ for _arg in "$@"; do
   case "${_arg}" in
     --version|-V)
       _ver="${VERSA_PRODUCT_VERSION:-}"
-      if [ -z "${_ver}" ]; then
+      if ! [[ "${_ver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        _ver=""
         for _vf in \
             "${CORE_INFRA}/VERSION" \
             "/home/watchdog/core-infra/VERSION" \

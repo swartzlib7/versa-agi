@@ -892,9 +892,8 @@ _install_acceptance_ini_get() {
 # ─── Payload builders ───────────────────────────────
 _install_acceptance_platform() {
   if [ -f /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    echo "${ID:-unknown}-${VERSION_ID:-unknown}"
+    # Command substitution is a subshell — do not leak os-release VERSION=.
+    echo "$(. /etc/os-release && echo "${ID:-unknown}-${VERSION_ID:-unknown}")"
   else
     echo "unknown"
   fi

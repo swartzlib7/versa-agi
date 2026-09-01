@@ -63,10 +63,12 @@ else
   }
 fi
 
-VERSION="3.3.8"
+# Product semver — do not name this VERSION. detect_os / install_acceptance
+# source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
+PRODUCT_VERSION="3.3.8"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
-  VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
+  PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
 fi
 INSTALL_ACCEPTANCE_LIB="${SCRIPT_DIR_EARLY}/core-infra/install_acceptance.sh"
 REGISTRATION_CONF_SRC="${SCRIPT_DIR_EARLY}/core-infra/registration.conf"
@@ -74,7 +76,7 @@ if [ -f "${INSTALL_ACCEPTANCE_LIB}" ]; then
   # shellcheck source=core-infra/install_acceptance.sh
   source "${INSTALL_ACCEPTANCE_LIB}"
 fi
-export INSTALL_ACCEPTANCE_VERSION="${VERSION}"
+export INSTALL_ACCEPTANCE_VERSION="${PRODUCT_VERSION}"
 
 # ─── Root Check ─────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
@@ -413,10 +415,10 @@ DEPLOYED_COA_ENV="${COA_HOME}/coa-env"
 TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 
 if [ "${UPDATE_MODE}" = true ]; then
-  banner "update" "${VERSION}"
+  banner "update" "${PRODUCT_VERSION}"
   echo -e "  ${DIM:-}Timestamp:  ${TIMESTAMP}${RESET:-}"
 else
-  banner "setup" "${VERSION}"
+  banner "setup" "${PRODUCT_VERSION}"
 fi
 echo -e "  ${DIM:-}Source:   ${SCRIPT_DIR}${RESET:-}"
 echo -e "  ${DIM:-}Deploy:${RESET:-}"
@@ -998,9 +1000,9 @@ if [ "${UPDATE_MODE}" = false ]; then
         echo "VERSA_CORE_INFRA=\"${DEPLOYED_CORE_INFRA}\"" >> "${PATHS_ENV}"
       fi
       if grep -q "^VERSA_PRODUCT_VERSION=" "${PATHS_ENV}" 2>/dev/null; then
-        sed -i "s|^VERSA_PRODUCT_VERSION=.*|VERSA_PRODUCT_VERSION=\"${VERSION}\"|" "${PATHS_ENV}"
+        sed -i "s|^VERSA_PRODUCT_VERSION=.*|VERSA_PRODUCT_VERSION=\"${PRODUCT_VERSION}\"|" "${PATHS_ENV}"
       else
-        echo "VERSA_PRODUCT_VERSION=\"${VERSION}\"" >> "${PATHS_ENV}"
+        echo "VERSA_PRODUCT_VERSION=\"${PRODUCT_VERSION}\"" >> "${PATHS_ENV}"
       fi
       ok "paths.env: VERSA_CORE_INFRA=${DEPLOYED_CORE_INFRA}"
 
@@ -1602,7 +1604,7 @@ cat > "${PATHS_ENV}" <<PATHSEOF
 VERSA_WATCHDOG_USER="${WATCHDOG_USER}"
 VERSA_COA_USER="${COA_USER}"
 VERSA_CORE_INFRA="${DEPLOYED_CORE_INFRA}"
-VERSA_PRODUCT_VERSION="${VERSION}"
+VERSA_PRODUCT_VERSION="${PRODUCT_VERSION}"
 VERSA_COA_ENV="${DEPLOYED_COA_ENV}"
 VERSA_AGENTS_DB="${AGENTS_DB}"
 VERSA_DEFAULT_MODEL="${INI_GEMINI_MODEL}"

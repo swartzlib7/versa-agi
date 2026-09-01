@@ -44,17 +44,20 @@ detect_os() {
     Linux)
       VERSA_OS="linux"
       if [ -f /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        case "${ID:-}" in
+        # Subshell: /etc/os-release exports VERSION= (Ubuntu pretty string).
+        # Must not leak into callers that use VERSION for product semver.
+        _os_id="$(. /etc/os-release && echo "${ID:-}")"
+        _os_vid="$(. /etc/os-release && echo "${VERSION_ID:-}")"
+        case "${_os_id}" in
           ubuntu)       VERSA_DISTRO="ubuntu" ;;
           debian)       VERSA_DISTRO="debian" ;;
           fedora)       VERSA_DISTRO="fedora" ;;
           centos|rhel)  VERSA_DISTRO="rhel" ;;
           arch|manjaro) VERSA_DISTRO="arch" ;;
-          *)            VERSA_DISTRO="${ID:-unknown}" ;;
+          *)            VERSA_DISTRO="${_os_id:-unknown}" ;;
         esac
-        VERSA_OS_VERSION="${VERSION_ID:-unknown}"
+        VERSA_OS_VERSION="${_os_vid:-unknown}"
+        unset _os_id _os_vid
       else
         VERSA_DISTRO="unknown"
         VERSA_OS_VERSION="unknown"
@@ -91,9 +94,7 @@ detect_host_runtime() {
   HOST_OS_PRETTY=""
 
   if [ -f /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    HOST_OS_PRETTY="${PRETTY_NAME:-${NAME:-Linux} ${VERSION_ID:-}}"
+    HOST_OS_PRETTY="$(. /etc/os-release && echo "${PRETTY_NAME:-${NAME:-Linux} ${VERSION_ID:-}}")"
   fi
   if [ -z "${HOST_OS_PRETTY}" ]; then
     if [ -n "${VERSA_DISTRO:-}" ] && [ "${VERSA_DISTRO}" != "unsupported" ]; then

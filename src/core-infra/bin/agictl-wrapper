@@ -20,7 +20,8 @@ for _arg in "$@"; do
       [ -f "${_paths_env}" ] && . "${_paths_env}"
       _core="${VERSA_CORE_INFRA:-/home/watchdog/core-infra}"
       _ver="${VERSA_PRODUCT_VERSION:-}"
-      if [ -z "${_ver}" ]; then
+      if ! [[ "${_ver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        _ver=""
         for _vf in \
             "${_core}/VERSION" \
             "/home/watchdog/core-infra/VERSION" \
