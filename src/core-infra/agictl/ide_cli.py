@@ -107,6 +107,7 @@ def register(agent_group, json_response):
             _set_status(name, IDE_STATUS, f"IDE mode since {now}")
         state = _read_state()
         state["last_on"] = now
+        state["resume_pending"] = False
         _write_state(state)
 
         gap = _autonomous_gap()
@@ -176,7 +177,11 @@ def register(agent_group, json_response):
         if was_ide:
             _set_status(name, "idle", None)
             state = _read_state()
-            state["last_off"] = _utc_now()
+            now = _utc_now()
+            last_on = (state.get("last_on") or "").strip()
+            state["last_off"] = now
+            state["session_minutes"] = _session_minutes(last_on, now)
+            state["resume_pending"] = True
             _write_state(state)
         json_response(
             True,
@@ -293,6 +298,16 @@ def _write_state(state):
 
 def _utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _session_minutes(last_on, last_off):
+    """Whole minutes between last_on and last_off. 0 if either stamp is bad."""
+    try:
+        start = datetime.fromisoformat(last_on.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(last_off.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((end - start).total_seconds() // 60))
 
 
 def _autonomous_gap():

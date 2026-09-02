@@ -1719,10 +1719,59 @@ CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the s
     fi
   fi
 
+  # First spawn after IDE mode: consume-once resume so triage knows the
+  # session just ended (duration + "trust recorded state, not this thread").
+  # Do not force a wake — attach to whatever already woke this pulse.
+  IDE_RESUME_CONTEXT=""
+  if [ "${IDE_GENERATE}" != "true" ] && [ "${AGENT_NAME}" = "coa" ] && [ -f /var/lib/versa-agi/coa/ide_state.json ]; then
+    _ide_pending=$(jq -r '.resume_pending // false' /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || echo "false")
+    if [ "${_ide_pending}" = "true" ]; then
+      _ide_on=$(jq -r '.last_on // empty' /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || true)
+      _ide_off=$(jq -r '.last_off // empty' /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || true)
+      _ide_mins=$(jq -r '.session_minutes // 0' /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || echo "0")
+      _ide_mins=${_ide_mins:-0}
+      if [ "${_ide_mins}" -ge 1440 ] 2>/dev/null; then
+        _ide_dur="$((_ide_mins / 1440))d $(( (_ide_mins % 1440) / 60 ))h"
+      elif [ "${_ide_mins}" -ge 60 ] 2>/dev/null; then
+        _ide_dur="$((_ide_mins / 60))h $((_ide_mins % 60))m"
+      else
+        _ide_dur="${_ide_mins}m"
+      fi
+      _ide_long=""
+      if [ "${_ide_mins}" -ge 120 ] 2>/dev/null; then
+        _ide_long=" This was a long session."
+      fi
+      if [ -n "${WAKE_REASON}" ]; then
+        WAKE_REASON="just left IDE session (${_ide_dur}); ${WAKE_REASON}"
+      else
+        WAKE_REASON="just left IDE session (${_ide_dur})"
+      fi
+      IDE_RESUME_CONTEXT="## ── IDE SESSION JUST ENDED ──
+You were in IDE mode with the Primary User from ${_ide_on:-?} to ${_ide_off:-?} (${_ide_dur}).${_ide_long}
+That session is not in this thread's LangGraph checkpoint. Outcomes should already be in memory, tasks, awareness, and games — trust those stores over this conversation history.
+If this wake is an inbound message, read the body before treating it as new work. Peer acks of work you did in the IDE session are informational, not a new assignment.
+Do not re-plan or re-do the session. Continue from recorded state."
+      _ide_tmp=$(mktemp)
+      if jq '.resume_pending = false' /var/lib/versa-agi/coa/ide_state.json > "${_ide_tmp}" 2>/dev/null; then
+        mv "${_ide_tmp}" /var/lib/versa-agi/coa/ide_state.json
+        chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || true
+        chmod 640 /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || true
+      else
+        rm -f "${_ide_tmp}"
+      fi
+      log "IDE: first spawn after session (${_ide_dur}) — resume flag consumed"
+    fi
+  fi
+
   WAKE_PROMPT="You are waking up for a new work cycle.
 Current date and time: $(date '+%Y-%m-%dT%H:%M:%S%z').
 
 Wake reason: ${WAKE_REASON}."
+  if [ -n "${IDE_RESUME_CONTEXT}" ]; then
+    WAKE_PROMPT="${WAKE_PROMPT}
+
+${IDE_RESUME_CONTEXT}"
+  fi
 
   # Spawn LangChain harness as the agent's OS user.
   # Source .env for provider credentials (CRON doesn't load .bashrc).
