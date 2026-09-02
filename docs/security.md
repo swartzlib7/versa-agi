@@ -40,6 +40,8 @@ OS boundaries only protect what you have not given.
 
 **Safer isolated workloads:** Vagrant + Ansible on VirtualBox. Root inside the VM stays inside the VM.
 
+**IDE mode** attaches the Primary User over loopback SSH as `coa`. The harness privilege-escalation guard (`agictl_execute` substring block) is not in that path — sudoers remains the boundary. `on`/`off` require root; `status` is readable by COA so it can stand down when the mode is off. See [IDE mode](ide-mode.md).
+
 ## Related
 
 - [Directories](directories.md)

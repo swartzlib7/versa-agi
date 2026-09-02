@@ -78,7 +78,7 @@ class BootstrapDetection(unittest.TestCase):
         self.db = self.root / "agents.db"
         self._init_db("")
         self.setup.write_text(
-            "[gemini]\nenabled=false\nmodel=\n\n[third_party]\n",
+            "[system]\nmodel=\n\n[third_party]\n",
             encoding="utf-8",
         )
         self.paths.write_text('VERSA_DEFAULT_MODEL=""\n', encoding="utf-8")
@@ -177,19 +177,21 @@ class BootstrapDetection(unittest.TestCase):
 
     def test_gemini_usable_respects_enabled_false(self):
         self.coa_env.write_text("GEMINI_API_KEY=test-key\n", encoding="utf-8")
-        self.setup.write_text("[gemini]\nenabled=false\n", encoding="utf-8")
+        models = self.root / "models.ini"
+        models.write_text("[providers_site]\nenabled=\n", encoding="utf-8")
         self.assertFalse(
             cb.gemini_usable(
-                coa_env=self.coa_env, vault=self.vault, setup_ini=self.setup
+                coa_env=self.coa_env, vault=self.vault, models_ini=models
             )
         )
 
     def test_gemini_usable_enabled_true(self):
         self.coa_env.write_text("GEMINI_API_KEY=test-key\n", encoding="utf-8")
-        self.setup.write_text("[gemini]\nenabled=true\n", encoding="utf-8")
+        models = self.root / "models.ini"
+        models.write_text("[providers_site]\nenabled=google\n", encoding="utf-8")
         self.assertTrue(
             cb.gemini_usable(
-                coa_env=self.coa_env, vault=self.vault, setup_ini=self.setup
+                coa_env=self.coa_env, vault=self.vault, models_ini=models
             )
         )
 

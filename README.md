@@ -16,6 +16,11 @@
     <a href="docs/Contributing%20to%20Versa%20AGi.md"><strong>Contributing</strong></a> ·
     <a href="docs/Changelog.md"><strong>Changelog</strong></a>
   </p>
+  <p>
+    <!-- VERSION -->
+    <img src="https://img.shields.io/badge/version-3.3.9-FF9800" alt="Versa AGi version 3.3.9">
+    <!-- /VERSION -->
+  </p>
 </div>
 
 <br>
@@ -48,6 +53,7 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 | 🌍 | **Cross-cultural sync** | Localized translation in the VersaVoice ecosystem. |
 | ⚡ | **Compute-zero** | No work → no spawn → no API cost. |
 | ⏱️ | **Deterministic script tasks** | Shared `.sh` tools from **AGi-Tools** on a schedule — no LLM, zero tokens. |
+| 🧑‍💻 | **IDE Integration** | Pair with your agent in VSCode, Cursor, or Antigravity. It runs on your IDE's inference, as its own OS user, talking to you in the chat. Autonomous spawning is held while you work together. [Guide](docs/ide-mode.md) |
 
 ---
 
@@ -138,6 +144,7 @@ sudo versa-agi-uninstall --dry-run
 | [Models](docs/models.md) | Catalog layers, Import, COA flag, first-login |
 | [Credentials](docs/credentials.md) | API keys, `set-key`, Google auth |
 | [Operations](docs/operations.md) | File exchange, agitop, compute-zero |
+| [IDE mode](docs/ide-mode.md) | Hold Lifeline spawn; run COA in VSCode / Cursor over Remote-SSH |
 | [Security](docs/security.md) | What agents can and cannot do |
 | [Directories](docs/directories.md) | Deployed paths + COA doc copy |
 | [Troubleshooting](docs/troubleshooting.md) | Spawn, halt, packages, emergency stop |

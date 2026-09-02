@@ -85,13 +85,19 @@ class CoaShippedMap(unittest.TestCase):
 class StockLayerParity(unittest.TestCase):
     def test_setup_stock_has_no_model_or_enable_lists(self):
         cfg = _stock_cfg("setup.ini.stock")
-        self.assertFalse(cfg.has_option("gemini", "cloud_models"))
-        self.assertFalse(cfg.has_option("gemini", "enabled"))
+        self.assertFalse(cfg.has_section("gemini"))
+        self.assertTrue(cfg.has_section("system"))
+        self.assertTrue(cfg.has_option("system", "mode"))
+        self.assertTrue(cfg.has_option("system", "model"))
+        self.assertTrue(cfg.has_option("third_party", "google_api_key"))
+        self.assertTrue(cfg.has_option("gcp", "auth_method"))
         self.assertFalse(cfg.has_option("third_party", "providers"))
         for slug in ("google", "xai", "openai", "anthropic", "openrouter"):
             self.assertFalse(cfg.has_option("third_party", f"{slug}_models"))
             self.assertFalse(cfg.has_option("third_party", f"{slug}_enabled"))
-        self.assertEqual(cfg.get("gemini", "coa_approved_models", fallback="").strip(), "")
+        for section in cfg.sections():
+            self.assertFalse(cfg.has_option(section, "coa_approved_models"))
+            self.assertFalse(cfg.has_option(section, "thinking_level"))
 
     def test_models_stock_has_registries(self):
         cfg = _stock_cfg("models.ini.stock")

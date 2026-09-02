@@ -1098,7 +1098,7 @@ CLIENTEOF
         sed -i '/^\[local_ai\]/,/^\[/{s|^remote_inference_url=.*|remote_inference_url='"${REMOTE_INFERENCE_URL}"'|}' "${_ini_file}"
         sed -i '/^\[local_ai\]/,/^\[/{s|^inference_master_key=.*|inference_master_key='"${INFERENCE_MASTER_KEY}"'|}' "${_ini_file}"
         sed -i '/^\[local_ai\]/,/^\[/{s/^enabled=.*/enabled=true/}' "${_ini_file}"
-        sed -i '/^\[gemini\]/,/^\[/{s/^mode=.*/mode=hybrid/}' "${_ini_file}"
+        sed -i '/^\[system\]/,/^\[/{s/^mode=.*/mode=hybrid/}' "${_ini_file}"
         ok "Updated: ${_ini_file}"
       fi
     done
@@ -1886,7 +1886,7 @@ for SETUP_INI in "${_INI_FILES[@]}"; do
   sed -i '/^\[local_ai\]/,/^\[/{s/^enabled=.*/enabled=true/}' "${SETUP_INI}"
   sed -i '/^\[local_ai\]/,/^\[/{s/^gpu_backend=.*/gpu_backend='"${GPU_BACKEND}"'/}' "${SETUP_INI}"
   sed -i '/^\[local_ai\]/,/^\[/{s|^topology=.*|topology=local|}' "${SETUP_INI}"
-  sed -i '/^\[gemini\]/,/^\[/{s/^mode=.*/mode=hybrid/}' "${SETUP_INI}"
+  sed -i '/^\[system\]/,/^\[/{s/^mode=.*/mode=hybrid/}' "${SETUP_INI}"
   sed -i '/^\[local_ai\]/,/^\[/{s/^default_model=.*/default_model='"${DEFAULT_MODEL}"'/}' "${SETUP_INI}"
   sed -i '/^\[local_ai\]/,/^\[/{s/^local_models=.*/local_models='"${LOCAL_MODELS}"'/}' "${SETUP_INI}"
   sed -i '/^\[model_routing\]/,/^\[/{s/^local=.*/local='"${DEFAULT_MODEL}"'/}' "${SETUP_INI}"

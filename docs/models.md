@@ -10,7 +10,7 @@ Operator page for catalog layers, first-login COA assign, and Import. Local add/
 
 Until a catalog model is assigned, COA is held (`invalid_config`, empty model). It stays protected; Lifeline does not spawn or auto-freeze overdue work. Clearing the COA model re-applies the hold.
 
-Stock system default (`[gemini] model=` / `VERSA_DEFAULT_MODEL`) is **blank** until this assign. There is no `coa_approved_models` list.
+Stock system default (`[system] model=` / `VERSA_DEFAULT_MODEL`) is **blank** until this assign. There is no `coa_approved_models` list.
 
 ## Catalog layers
 

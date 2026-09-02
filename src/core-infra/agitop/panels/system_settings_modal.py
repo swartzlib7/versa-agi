@@ -1018,7 +1018,7 @@ class SystemSettingsModal(ModalScreen):
         searxng_url = _read_ini_value("search", "searxng_url", "http://localhost:8888")
 
         # AI Mode
-        ai_mode = _read_ini_value("gemini", "mode", "cloud")
+        ai_mode = _read_ini_value("system", "mode", "cloud")
 
         # COA Autonomous Mode
         coa_autonomous = _read_ini_value("coa", "autonomous", "false").lower() == "true"
@@ -1044,7 +1044,6 @@ class SystemSettingsModal(ModalScreen):
 
         aud_enabled = _read_ini_value("audio_processing", "enabled", "true").lower() == "true"
         aud_format = _read_ini_value("audio_processing", "format", "wav").lower()
-        aud_voice = _read_ini_value("audio_processing", "voice", "alloy").lower()
 
         um_enabled = _read_ini_value("utility_models", "enabled", "true").lower() == "true"
         um_write_manifest = _read_ini_value("utility_models", "write_manifest", "true").lower() == "true"
@@ -1068,7 +1067,7 @@ class SystemSettingsModal(ModalScreen):
                                     _mode_labels = {"cloud": "Cloud", "local": "Local", "hybrid": "Hybrid"}
                                     _mode_label = _mode_labels.get(ai_mode, ai_mode)
                                     yield Static(f"[bold cyan]AI Mode[/]  [bold]{_mode_label}[/]")
-                                    yield Static("[dim]Edit setup.ini [gemini] mode + run: sudo ./setup.sh --update[/]")
+                                    yield Static("[dim]Edit setup.ini [system] mode + run: sudo ./setup.sh --update[/]")
 
                                     yield Static("")
                                     yield Static("[bold cyan]Circuit Breaker[/]")
@@ -1337,13 +1336,16 @@ class SystemSettingsModal(ModalScreen):
                                 yield Static("", classes="modal-tab-spacer")
                                 yield Static("[bold #a78bfa]Harness Audio Processing[/]")
                                 yield Static(
-                                    "[dim]Defaults for Utility Model audio generation. Streaming audio is "
-                                    "always received as PCM16 and packaged locally — WAV is native; OGG/MP3/"
+                                    "[dim]Packaging policy for Utility Model audio generation. Streaming audio "
+                                    "is always received as PCM16 and packaged locally — WAV is native; OGG/MP3/"
                                     "FLAC require ffmpeg (falls back to WAV). A Utility Model's config_json "
-                                    "may override these per-profile.[/]"
+                                    "may override the container per-profile.[/]"
                                 )
                                 yield Static("")
                                 yield ClearCheckbox("Enabled", id="chk-audio-processing-enabled", value=aud_enabled)
+                                yield Static(
+                                    "[dim]Off keeps the native WAV container and never calls ffmpeg.[/]"
+                                )
                                 yield Static("")
                                 with Horizontal(classes="task-field-row"):
                                     with Vertical(classes="task-field-col"):
@@ -1359,28 +1361,11 @@ class SystemSettingsModal(ModalScreen):
                                             id="select-audio-format",
                                             allow_blank=False,
                                         )
-                                    with Vertical(classes="task-field-col"):
-                                        yield Static("[#a78bfa]Voice[/] [dim](OpenAI-specific)[/]")
-                                        yield Select(
-                                            [
-                                                (v.title(), v) for v in (
-                                                    "alloy", "ash", "ballad", "coral", "echo",
-                                                    "fable", "nova", "onyx", "sage", "shimmer", "verse",
-                                                )
-                                            ],
-                                            value=aud_voice if aud_voice in (
-                                                "alloy", "ash", "ballad", "coral", "echo",
-                                                "fable", "nova", "onyx", "sage", "shimmer", "verse",
-                                            ) else "alloy",
-                                            id="select-audio-voice",
-                                            allow_blank=False,
-                                        )
                                 yield Static(
-                                    "[dim]Container sets the saved file extension. [b]Voice names above are "
-                                    "OpenAI-specific[/b] (alloy, verse, …) and apply to OpenAI TTS models "
-                                    "like openai/gpt-audio; other providers use different voice IDs. This "
-                                    "global default is why a single shared voice list is a stopgap — "
-                                    "per-model voice config is tracked as TD-MODALITY-CONFIG-001.[/]"
+                                    "[dim]Container sets the saved file extension. Provider-specific generation "
+                                    "knobs are not global: an OpenAI TTS voice, for example, belongs to that "
+                                    "Model's ModelDriver config, with a Utility Profile config_json override. "
+                                    "Editing those from the UI is tracked as MD-CONFIG.[/]"
                                 )
                             with Horizontal(classes="settings-tab-actions"):
                                 yield Button("Save", variant="success", id="btn-save-settings-audio")
@@ -1623,13 +1608,11 @@ class SystemSettingsModal(ModalScreen):
         """Persist the [audio_processing] defaults (own Save button)."""
         aud_enabled = self.query_one("#chk-audio-processing-enabled", Checkbox).value
         aud_format = self.query_one("#select-audio-format", Select).value or "wav"
-        aud_voice = self.query_one("#select-audio-voice", Select).value or "alloy"
         ok_a = _write_ini_value("audio_processing", "enabled", "true" if aud_enabled else "false")
         ok_b = _write_ini_value("audio_processing", "format", str(aud_format))
-        ok_c = _write_ini_value("audio_processing", "voice", str(aud_voice))
-        if ok_a and ok_b and ok_c:
+        if ok_a and ok_b:
             self.app.notify(
-                f"Audio: {'on' if aud_enabled else 'off'} · {aud_format} · {aud_voice}",
+                f"Audio: {'on' if aud_enabled else 'off'} · {aud_format}",
                 title="Settings Saved",
             )
         else:

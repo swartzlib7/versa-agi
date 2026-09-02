@@ -16,8 +16,11 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, DataTable, Input, RichLog, Select, Static, TabbedContent, TabPane, TextArea,
+    Button, Checkbox, DataTable, Input, RichLog, Select, Static, TabbedContent, TabPane,
+    TextArea,
 )
+
+from agitop.widgets.clear_checkbox import ClearCheckbox
 
 from agitop.panels.agent_memory_modal import (
     EditConnectionMemoryModal,
@@ -409,6 +412,73 @@ class AgentPromptMenu(ModalScreen):
                                 classes="panel-btn dismiss-btn agent-modal-close",
                             )
 
+                # IDE mode is COA-only (agictl refuses other names), so the tab
+                # only exists where it can do something.
+                if self.agent_name == "coa":
+                    with TabPane("IDE Integration", id="agent-ide-tab"):
+                        with Vertical(id="agent-ide-pane"):
+                            yield Static("", classes="modal-tab-spacer")
+                            with VerticalScroll(id="agent-ide-scroll"):
+                                yield Static(
+                                    "[bold cyan]IDE Integration[/]  "
+                                    "[dim]run COA inside VSCode / Cursor / Antigravity[/]"
+                                )
+                                yield Static(
+                                    "\n[dim]COA runs on your IDE's inference as the [/]"
+                                    "[cyan]coa[/][dim] OS user, and you talk to it directly "
+                                    "in the IDE chat instead of through VersaVoice. While the "
+                                    "mode is on, Lifeline does [/][bold]not[/][dim] spawn a "
+                                    "harness cycle — inbox sync, utility tasks, and script "
+                                    "tasks keep running.[/]"
+                                )
+                                with Vertical(classes="settings-section-box"):
+                                    yield Static("[bold cyan]How to use it[/]")
+                                    yield Static(
+                                        "[dim] 1.[/] Tick the box below (or run "
+                                        "[cyan]sudo versa-agi-ide[/]).\n"
+                                        "[dim] 2.[/] In your IDE: [cyan]Remote-SSH: Connect "
+                                        "to Host[/] → [cyan]versa-coa[/]\n"
+                                        "[dim] 3.[/] Open folder [cyan]/home/coa/coa-env[/] "
+                                        "in that remote window.\n"
+                                        "[dim] 4.[/] Start a chat and attach "
+                                        "[cyan].agent/versa-agi_ide.md[/] as context.\n"
+                                        "[dim] 5.[/] Untick when done — COA resumes "
+                                        "autonomous spawning on the next pulse."
+                                    )
+                                    yield Static(
+                                        "\n[dim]Step 4 is what makes it COA — the seed carries "
+                                        "its poise, live situation, and skills. Step 3 must be "
+                                        "a Remote-SSH window; opening that folder locally runs "
+                                        "as [/][cyan]you[/][dim], not COA.[/]"
+                                    )
+                                with Vertical(classes="settings-section-box"):
+                                    yield Static(
+                                        "[bold cyan]Mode[/]  [bold yellow]⚠ close the IDE "
+                                        "chat before switching off[/]"
+                                    )
+                                    yield Static(
+                                        "[dim]An open chat is not a harness process, so "
+                                        "Lifeline cannot see it. COA re-checks the mode on "
+                                        "every message and stands down when it is off.[/]"
+                                    )
+                                    yield ClearCheckbox(
+                                        "Enable IDE mode (holds Lifeline spawn)",
+                                        id="chk-ide-mode",
+                                        value=(status == "ide"),
+                                    )
+                                    yield Static("", id="agent-ide-status")
+                                yield Static("", id="agent-ide-detail")
+                            with Horizontal(classes="agent-tab-actions"):
+                                yield Button(
+                                    "🔄 Refresh", variant="default",
+                                    id="btn-agent-ide-refresh", classes="panel-btn",
+                                )
+                                yield Button(
+                                    "Close", variant="default",
+                                    id="btn-agent-ide-close",
+                                    classes="panel-btn dismiss-btn agent-modal-close",
+                                )
+
     def _close_agent_modal(self) -> None:
         if self._cycle_embed:
             self._cycle_embed.stop()
@@ -429,6 +499,163 @@ class AgentPromptMenu(ModalScreen):
         from agitop.panels.agents import apply_technical_setup_hints
         apply_technical_setup_hints(self.app, self.agent_name)
         self._sync_model_routing_ui()
+        if self.agent_name == "coa":
+            self._sync_ide_ui()
+
+    # ─── IDE Integration tab ──────────────────────────────────────────────
+    #
+    # The toggle guard is a state comparison, not a flag: setting `.value`
+    # programmatically posts Checkbox.Changed asynchronously, so a flag cleared
+    # in a `finally` would already be down by the time the handler runs.
+    # Comparing the requested state against the DB is immune to that ordering.
+
+    def _ide_widget(self, wid: str, kind):
+        try:
+            return self.query_one(wid, kind)
+        except Exception:  # noqa: BLE001 — tab absent for non-COA agents
+            return None
+
+    def _ide_is_on(self) -> bool:
+        return (self._agent_record().get("status") or "").strip() == "ide"
+
+    def _sync_ide_ui(self, payload: dict | None = None) -> None:
+        on = self._ide_is_on()
+        chk = self._ide_widget("#chk-ide-mode", Checkbox)
+        if chk is not None and chk.value != on:
+            chk.value = on
+        status = self._ide_widget("#agent-ide-status", Static)
+        if status is not None:
+            if on:
+                from agitop.panels.agents import _ide_elapsed
+
+                held = _ide_elapsed(self._agent_record().get("status_message"))
+                suffix = f" · {held}" if held else ""
+                status.update(f"[bold magenta]● ON[/][dim]{suffix} — Lifeline spawn held[/]")
+            else:
+                status.update("[dim]○ OFF — COA spawns autonomously[/]")
+        detail = self._ide_widget("#agent-ide-detail", Static)
+        if detail is not None:
+            detail.update(self._ide_detail_text(payload, on))
+
+    def _ide_detail_text(self, payload: dict | None, on: bool) -> str:
+        if not on:
+            return (
+                "\n[dim]Seed file is removed while the mode is off. Turning it on "
+                "regenerates it from COA's current live state.[/]"
+            )
+        lines = [""]
+        if payload:
+            lines.append("[bold cyan]Connect[/]")
+            lines.append(f"[dim]Workspace :[/] {payload.get('workspace', '')}")
+            lines.append(f"[dim]Seed file :[/] {payload.get('ide_file', '')}")
+            lines.append(
+                f"[dim]Remote-SSH:[/] {payload.get('ssh_user', '')}@"
+                f"{payload.get('ssh_host', '')}:{payload.get('ssh_port', '')} "
+                f"[dim](alias[/] versa-coa[dim])[/]"
+            )
+            probe = str(payload.get("ssh_probe") or "")
+            if probe == "ok":
+                lines.append("[green]✓ loopback SSH login verified[/]")
+            elif probe.startswith("failed"):
+                lines.append(f"[bold red]✗ SSH login failed — {probe}[/]")
+                lines.append("[dim]Remote-SSH will not connect. Check: sudo sshd -t[/]")
+            host_class = payload.get("host_class")
+            if host_class in ("wsl1", "wsl2"):
+                lines.append(
+                    "\n[bold yellow]⚠ WSL:[/] [dim]paste this into the Windows "
+                    "%USERPROFILE%\\.ssh\\config — the IDE does not read the Linux one:[/]"
+                )
+                lines.append(payload.get("ssh_config_block") or "")
+            elif not payload.get("ssh_config_written"):
+                lines.append(
+                    "\n[dim]Add to the SSH config your IDE reads (it was not written "
+                    "automatically):[/]"
+                )
+                lines.append(payload.get("ssh_config_block") or "")
+            cycles = payload.get("autonomous_cycles") or 0
+            if cycles:
+                lines.append(
+                    f"\n[yellow]COA ran {cycles} autonomous cycle(s) since the last IDE "
+                    "session. It will tell you and refresh live state before acting on "
+                    "chat memory.[/]"
+                )
+        else:
+            lines.append(
+                "[dim]Already on. Toggle off and on to regenerate the seed and reprint "
+                "the connect details, or run [/][cyan]sudo versa-agi-ide[/][dim].[/]"
+            )
+        return "\n".join(lines)
+
+    def _set_ide_busy(self, busy: bool) -> None:
+        for wid, kind in (("#chk-ide-mode", Checkbox), ("#btn-agent-ide-refresh", Button)):
+            w = self._ide_widget(wid, kind)
+            if w is not None:
+                w.disabled = busy
+
+    @on(Checkbox.Changed, "#chk-ide-mode")
+    def _on_ide_toggle(self, event: Checkbox.Changed) -> None:
+        want_on = bool(event.value)
+        if want_on == self._ide_is_on():
+            return  # UI caught up with the DB — a programmatic sync, not a click
+        verb = "on" if want_on else "off"
+        self._set_ide_busy(True)
+        status = self._ide_widget("#agent-ide-status", Static)
+        if status is not None:
+            status.update(f"[yellow]Running agictl agent ide {verb} coa…[/]")
+        self.run_worker(
+            lambda: self._ide_toggle_worker(verb),
+            exclusive=True,
+            thread=True,
+            name="ide-toggle",
+        )
+
+    def _ide_toggle_worker(self, verb: str) -> None:
+        """Thread: `ide on` assembles the prompt and probes SSH, so it can take
+        tens of seconds. Blocking the event loop would freeze the whole TUI."""
+        import json as _json
+        import subprocess
+
+        try:
+            proc = subprocess.run(
+                ["agictl", "agent", "ide", verb, "coa"],
+                capture_output=True, text=True, timeout=300,
+            )
+            raw, rc, stderr = proc.stdout, proc.returncode, proc.stderr
+        except subprocess.TimeoutExpired:
+            raw, rc, stderr = "", 1, "agictl agent ide timed out after 300s"
+        except OSError as e:
+            raw, rc, stderr = "", 1, str(e)
+
+        data: dict = {}
+        for line in reversed((raw or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    data = _json.loads(line)
+                    break
+                except ValueError:
+                    continue
+        ok = bool(data.get("success")) if data else rc == 0
+        err = data.get("error") or (stderr or "").strip() or "Command failed"
+        try:
+            self.app.call_from_thread(self._ide_toggle_done, verb, ok, data, err)
+        except Exception:  # noqa: BLE001 — modal closed mid-run
+            pass
+
+    def _ide_toggle_done(self, verb: str, ok: bool, data: dict, err: str) -> None:
+        self._set_ide_busy(False)
+        if ok:
+            self.app.notify(
+                f"IDE mode {'enabled' if verb == 'on' else 'disabled'} for coa",
+                severity="information", title="IDE Integration",
+            )
+        else:
+            self.app.notify(str(err)[:300], severity="error", title="IDE Integration")
+        try:
+            self._agents_panel().refresh_data()
+        except Exception:  # noqa: BLE001
+            pass
+        self._sync_ide_ui(data if (ok and verb == "on") else None)
 
     def _sync_model_routing_ui(self) -> None:
         from model_catalog import model_supports_auto_routing
@@ -686,6 +913,14 @@ class AgentPromptMenu(ModalScreen):
             self.app.push_screen(PurgeLogsConfirmModal(name, parent=self))
             return
 
+        if bid == "btn-agent-ide-refresh":
+            try:
+                self._agents_panel().refresh_data()
+            except Exception:  # noqa: BLE001
+                pass
+            self._sync_ide_ui()
+            return
+
         if bid == "btn-agent-mem-edit-conn" and self.selected_contact_uid:
             row = self._conn_rows.get(self.selected_contact_uid)
             if row:
@@ -739,6 +974,7 @@ class AgentPromptMenu(ModalScreen):
             "btn-agent-prompt-close",
             "btn-agent-cycle-close",
             "btn-agent-threads-close",
+            "btn-agent-ide-close",
         ):
             self._close_agent_modal()
         else:

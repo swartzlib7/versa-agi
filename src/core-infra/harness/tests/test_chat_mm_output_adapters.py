@@ -58,6 +58,14 @@ class _OpenAIClient:
         return self._response
 
 
+def _pcm_stream(pcm: bytes):
+    """One streamed audio delta carrying all of ``pcm``."""
+    audio = {"data": base64.b64encode(pcm).decode("ascii"), "transcript": ""}
+    yield SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(audio=audio))]
+    )
+
+
 class TestOpenAICompatibleImageAdapter(unittest.TestCase):
     def test_data_url_response_and_image_config(self):
         raw = b"\x89PNG-driver"
@@ -152,6 +160,82 @@ class TestAudioAdapter(unittest.TestCase):
                 wav_file.readframes(wav_file.getnframes()),
                 pcm,
             )
+
+    def test_voice_ignores_global_audio_processing(self):
+        """MD-AUDIO-CFG: voice never comes from [audio_processing].
+
+        A stray global ``voice`` (including a Versa AGi agent-voice word like
+        ``female``) must not leak into the TTS request.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = os.path.join(tmp, "setup.ini")
+            with open(ini, "w", encoding="utf-8") as handle:
+                handle.write("[audio_processing]\nenabled=true\nformat=wav\nvoice=female\n")
+            client = _OpenAIClient(_pcm_stream(b"\x00\x00"))
+            with patch(
+                "model_drivers.audio_processing._SETUP_INI_PATHS", (ini,)
+            ):
+                with self.assertRaises(DriverError) as raised:
+                    audio_adapter.generate(
+                        client=client,
+                        route=_route("openrouter", "openai/gpt-audio"),
+                        prompt="Say hello",
+                        config={"audio_format": "wav"},
+                    )
+        self.assertEqual(raised.exception.code, "voice_required")
+        self.assertEqual(client.captured, {})
+
+    def test_voice_comes_from_supplied_config(self):
+        """The exact binding's config (or a profile override) supplies voice."""
+        client = _OpenAIClient(_pcm_stream(b"\x00\x00"))
+        audio_adapter.generate(
+            client=client,
+            route=_route("openrouter", "openai/gpt-audio"),
+            prompt="Say hello",
+            config={"audio_format": "wav", "voice": "alloy"},
+        )
+        self.assertEqual(
+            client.captured["extra_body"]["audio"],
+            {"voice": "alloy", "format": "pcm16"},
+        )
+
+    def test_audio_bindings_carry_voice_in_driver_config(self):
+        """The OpenAI-specific knob lives on each exact binding."""
+        from model_drivers.registry import MODEL_DRIVERS
+
+        for key in ("openai/gpt-audio", "gpt-audio-1.5", "openai/gpt-audio-mini"):
+            binding = MODEL_DRIVERS[(key, "output", "audio")]
+            self.assertEqual(binding.config.get("voice"), "alloy", key)
+
+    def test_transcode_gate_forces_native_container(self):
+        """enabled=false keeps native WAV instead of shelling out to ffmpeg."""
+        from model_drivers.audio_processing import (
+            AudioProcessingConfig,
+            resolve_container,
+        )
+
+        container, meta = resolve_container(
+            "mp3", config=AudioProcessingConfig(enabled=False, container="ogg")
+        )
+        self.assertEqual(container, "wav")
+        self.assertIn("processing_skipped", meta)
+
+        container, meta = resolve_container(
+            "mp3", config=AudioProcessingConfig(enabled=True, container="ogg")
+        )
+        self.assertEqual(container, "mp3")
+        self.assertNotIn("processing_skipped", meta)
+
+    def test_container_falls_back_to_site_default(self):
+        """An absent or unsupported request uses the [audio_processing] container."""
+        from model_drivers.audio_processing import (
+            AudioProcessingConfig,
+            resolve_container,
+        )
+
+        cfg = AudioProcessingConfig(enabled=True, container="ogg")
+        self.assertEqual(resolve_container(None, config=cfg)[0], "ogg")
+        self.assertEqual(resolve_container("aiff", config=cfg)[0], "ogg")
 
     def test_missing_ffmpeg_falls_back_to_wav(self):
         with patch(

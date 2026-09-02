@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
 
 from catalog_compat import (  # noqa: E402
     GENERIC_IMPORT_PARAMS,
+    migrate_gemini_section_split,
     migrate_legacy_site_state,
     snapshot_vanishing_presets,
 )
@@ -274,6 +275,7 @@ class LegacyMigrate(unittest.TestCase):
                 "openrouter_models=x-ai/grok-4.6,openai/gpt-5.4-image-2\n"
                 "xai_enabled=false\n",
             )
+            migrate_gemini_section_split(setup)
             from catalog_compat import _ensure_section_lines
             _ensure_section_lines(
                 models,
@@ -314,6 +316,7 @@ class LegacyMigrate(unittest.TestCase):
             models = os.path.join(tmp, "models.ini")
             shutil.copyfile(os.path.join(SRC_ROOT, "models.ini.stock"), models)
             _write(setup, "[gemini]\nenabled=false\n")
+            migrate_gemini_section_split(setup)
             from catalog_compat import _ensure_section_lines
             _ensure_section_lines(
                 models,
@@ -330,6 +333,103 @@ class LegacyMigrate(unittest.TestCase):
         self.assertEqual(patch.get("label"), "Site label")
         self.assertEqual(patch.get("coa"), False)
         self.assertFalse(cfg.has_option("catalog_custom", "gemini-3.7-flash"))
+
+
+class GeminiSectionSplit(unittest.TestCase):
+    OLD_SHAPE = (
+        "[versavoice]\napi_token=tok\n"
+        "[gemini]\n"
+        "mode=hybrid\n"
+        "model=z-ai/glm-5.3-flash\n"
+        "api_key=AIza-old\n"
+        "auth_method=vertex\n"
+        "enabled=true\n"
+        "cloud_models=gemini-3.7-flash,extra-known\n"
+        "thinking_level=high\n"
+        "coa_approved_models=legacy\n"
+        "[third_party]\nxai_api_key=\n"
+        "[gcp]\nproject=p\nlocation=us-central1\n"
+    )
+
+    def test_full_old_shape_lands_in_new_homes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            setup = os.path.join(tmp, "setup.ini")
+            _write(setup, self.OLD_SHAPE)
+            stats = migrate_gemini_section_split(setup)
+            with open(setup, encoding="utf-8") as handle:
+                raw = handle.read()
+            cfg = _cfg(setup)
+        self.assertIn("mode=hybrid", raw)
+        self.assertNotIn("mode = hybrid", raw)
+        self.assertTrue(stats["deleted"])
+        self.assertIn("system.mode", stats["moved"])
+        self.assertIn("system.model", stats["moved"])
+        self.assertIn("third_party.google_api_key", stats["moved"])
+        self.assertIn("gcp.auth_method", stats["moved"])
+        self.assertFalse(cfg.has_section("gemini"))
+        self.assertEqual(cfg.get("system", "mode"), "hybrid")
+        self.assertEqual(cfg.get("system", "model"), "z-ai/glm-5.3-flash")
+        self.assertEqual(cfg.get("third_party", "google_api_key"), "AIza-old")
+        self.assertEqual(cfg.get("gcp", "auth_method"), "vertex")
+        self.assertEqual(cfg.get("third_party", "google_enabled"), "true")
+        self.assertEqual(
+            cfg.get("third_party", "google_models"),
+            "gemini-3.7-flash,extra-known",
+        )
+
+    def test_nonempty_system_target_is_not_clobbered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            setup = os.path.join(tmp, "setup.ini")
+            _write(
+                setup,
+                "[system]\nmode=local\nmodel=keep-me\n"
+                "[gemini]\nmode=hybrid\nmodel=clobber\napi_key=AIza-new\n"
+                "[third_party]\n[gcp]\n",
+            )
+            stats = migrate_gemini_section_split(setup)
+            cfg = _cfg(setup)
+        self.assertIn("system.mode", stats["skipped"])
+        self.assertIn("system.model", stats["skipped"])
+        self.assertFalse(cfg.has_section("gemini"))
+        self.assertEqual(cfg.get("system", "mode"), "local")
+        self.assertEqual(cfg.get("system", "model"), "keep-me")
+        self.assertEqual(cfg.get("third_party", "google_api_key"), "AIza-new")
+
+    def test_transients_consumed_then_dropped_by_reconcile(self):
+        from cli import _reconcile_setup_ini
+
+        with tempfile.TemporaryDirectory() as tmp:
+            setup = os.path.join(tmp, "setup.ini")
+            models = os.path.join(tmp, "models.ini")
+            shutil.copyfile(os.path.join(SRC_ROOT, "models.ini.stock"), models)
+            _write(setup, self.OLD_SHAPE)
+            migrate_gemini_section_split(setup)
+            compat = migrate_legacy_site_state(setup_path=setup, models_path=models)
+            self.assertIn("google", compat["providers_enabled"])
+            stock = os.path.join(SRC_ROOT, "setup.ini.stock")
+            _reconcile_setup_ini(stock, setup)
+            cfg = _cfg(setup)
+            models_enabled = _cfg(models).get("providers_site", "enabled")
+        self.assertFalse(cfg.has_section("gemini"))
+        self.assertEqual(cfg.get("system", "mode"), "hybrid")
+        self.assertEqual(cfg.get("system", "model"), "z-ai/glm-5.3-flash")
+        self.assertEqual(cfg.get("third_party", "google_api_key"), "AIza-old")
+        self.assertEqual(cfg.get("gcp", "auth_method"), "vertex")
+        self.assertFalse(cfg.has_option("third_party", "google_enabled"))
+        self.assertFalse(cfg.has_option("third_party", "google_models"))
+        self.assertEqual(models_enabled, "google")
+
+    def test_fresh_stock_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            setup = os.path.join(tmp, "setup.ini")
+            shutil.copyfile(os.path.join(SRC_ROOT, "setup.ini.stock"), setup)
+            with open(setup, encoding="utf-8") as handle:
+                before = handle.read()
+            stats = migrate_gemini_section_split(setup)
+            with open(setup, encoding="utf-8") as handle:
+                after = handle.read()
+        self.assertEqual(stats, {"moved": [], "skipped": [], "deleted": False})
+        self.assertEqual(before, after)
 
 
 class FullCustomSurvives(unittest.TestCase):

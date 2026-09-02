@@ -1,5 +1,6 @@
 """Agents panel — agent status table with prompt viewer modals."""
 
+import calendar
 import json
 import os
 import time
@@ -16,6 +17,33 @@ from agitop.panels.agent_prompt_menu import AgentPromptMenu
 from agitop.panels.model_params_ui import format_json_pretty, parse_json_object
 
 _TZ = time.strftime("%Z")
+
+
+def _ide_elapsed(status_message: str | None) -> str:
+    """Elapsed time from an 'IDE mode since <ISO8601 Z>' status_message.
+
+    A raw timestamp needs mental arithmetic; the point of this column is that a
+    forgotten toggle is obvious at a glance. Returns "" if unparseable.
+    """
+    if not status_message:
+        return ""
+    marker = "IDE mode since "
+    idx = status_message.find(marker)
+    if idx < 0:
+        return ""
+    stamp = status_message[idx + len(marker):].strip().split()[0]
+    try:
+        started = time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return ""
+    secs = int(time.time() - calendar.timegm(started))
+    if secs < 0:
+        return ""
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+    return f"{secs // 86400}d {(secs % 86400) // 3600}h"
 
 
 def _agent_extra_display(raw: str | None) -> str:
@@ -174,6 +202,10 @@ class AgentsPanel(DataTable):
             elif agent_status_raw == "invalid_config":
                 inactive = "[yellow]⚠ config error[/]"
                 name_markup = f"[bold yellow]{name}[/]"
+            elif agent_status_raw == "ide":
+                _held = _ide_elapsed(agent.get("status_message"))
+                inactive = f"[magenta]IDE session {_held}[/]" if _held else "[magenta]IDE session[/]"
+                name_markup = f"[bold magenta]{name}[/]"
             elif is_inactive:
                 inactive = "[yellow]○ pending[/]"
                 name_markup = f"[dim]{name}[/]"
@@ -229,6 +261,11 @@ class AgentsPanel(DataTable):
                 status_display = "[cyan]running[/]"
                 if status_msg:
                     status_display += f" [dim]— {status_msg}[/]"
+            elif agent_status == "ide":
+                status_msg = agent.get("status_message") or ""
+                _held = _ide_elapsed(status_msg)
+                status_display = f"[bold magenta]IDE {_held}[/]" if _held else "[bold magenta]IDE[/]"
+                status_display += " [dim]— Lifeline spawn held; 'agictl agent ide off coa' to resume[/]"
             elif agent_status:
                 status_display = f"[bold]{agent_status}[/]"
             else:
@@ -1509,7 +1546,7 @@ class AgentEditModal(ModalScreen):
             model_kwargs["value"] = current_model
 
         # Status options removed — all statuses are system-managed
-        # (idle, active, circuit_breaker, halted, invalid_config)
+        # (idle, active, circuit_breaker, halted, invalid_config, ide)
         # Use "✋ Halt Agent" button on the Agent Prompt Menu for manual control.
 
         with VerticalScroll(id="msg-dialog"):

@@ -102,15 +102,25 @@ fi
 
 # For any other user (agent users), elevate to watchdog via sudo.
 # Explicitly forward identity + DB env — sudo strips the environment.
+#
+# Forward only variables that actually hold a value. `VAR="${VAR:-}"` would
+# make the variable *set but empty*, and agictl reads these with
+# os.getenv(name, default) — which returns the empty string when the variable
+# exists, never the default. Every DB path then became "", i.e.
+# sqlite3.connect("") on a private temp database ("no such table: agents").
+# Lifeline always sets all four, so this only surfaced for callers outside a
+# spawn — an IDE-mode terminal being the first.
+_fwd=()
+for _var in AGICTL_DB AGICTL_AGENT_DIR AGICTL_CONFIG \
+            AGICTL_AGENTS_DB AGICTL_MESSAGES_DB AGICTL_TASKS_DB AGICTL_CYCLES_DB \
+            VERSA_AGENT_NAME VERSA_CYCLE_ID; do
+  if [ -n "${!_var:-}" ]; then
+    _fwd+=("${_var}=${!_var}")
+  fi
+done
+
+# AGICTL_AGENT_USER is the identity stamp — always forwarded.
 exec sudo -u watchdog \
-  AGICTL_DB="${AGICTL_DB:-}" \
-  AGICTL_AGENT_DIR="${AGICTL_AGENT_DIR:-}" \
-  AGICTL_CONFIG="${AGICTL_CONFIG:-}" \
   AGICTL_AGENT_USER="${CALLER}" \
-  AGICTL_AGENTS_DB="${AGICTL_AGENTS_DB:-}" \
-  AGICTL_MESSAGES_DB="${AGICTL_MESSAGES_DB:-}" \
-  AGICTL_TASKS_DB="${AGICTL_TASKS_DB:-}" \
-  AGICTL_CYCLES_DB="${AGICTL_CYCLES_DB:-}" \
-  VERSA_AGENT_NAME="${VERSA_AGENT_NAME:-}" \
-  VERSA_CYCLE_ID="${VERSA_CYCLE_ID:-}" \
+  ${_fwd[@]+"${_fwd[@]}"} \
   "${REAL_BINARY}" "$@"

@@ -29,8 +29,13 @@ After setup, two home-directory symlinks:
 
 Token usage is tracked per cycle and totaled monthly in agitop.
 
+## IDE mode
+
+`sudo versa-agi-ide` holds COA out of Lifeline spawning and writes `.agent/versa-agi_ide.md` for a Remote-SSH session. Full runbook: [IDE mode](ide-mode.md).
+
 ## Related
 
 - [Models](models.md)
 - [Credentials](credentials.md)
+- [IDE mode](ide-mode.md)
 - [Troubleshooting](troubleshooting.md)

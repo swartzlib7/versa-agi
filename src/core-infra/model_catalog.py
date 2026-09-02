@@ -387,7 +387,7 @@ def collect_model_references(
                 keys.append(key)
 
     setup_ini = setup_ini or SETUP_INI_CANONICAL
-    _add(read_setup_value("gemini", "model", ""))
+    _add(read_setup_value("system", "model", ""))
     for modality in WORK_MODALITIES:
         _add(read_setup_value("model_routing", modality, ""))
 

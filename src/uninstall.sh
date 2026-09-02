@@ -355,6 +355,16 @@ if [ -f /usr/local/bin/versa-agi-update ] || [ -L /usr/local/bin/versa-agi-updat
   rm -f /usr/local/bin/versa-agi-update
   ok "Removed /usr/local/bin/versa-agi-update"
 fi
+if [ -f /usr/local/bin/versa-agi-ide ] || [ -L /usr/local/bin/versa-agi-ide ]; then
+  rm -f /usr/local/bin/versa-agi-ide
+  ok "Removed /usr/local/bin/versa-agi-ide"
+fi
+if [ -f /etc/ssh/sshd_config.d/versa-agi-ide.conf ]; then
+  rm -f /etc/ssh/sshd_config.d/versa-agi-ide.conf
+  ok "Removed sshd IDE drop-in"
+fi
+rm -rf /etc/ssh/versa-agi-ide /etc/versa-agi/ide_ssh 2>/dev/null || true
+rm -f /home/coa/coa-env/.agent/versa-agi_ide.md /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || true
 # Legacy: remove versa-agi-patch if still present
 if [ -f /usr/local/bin/versa-agi-patch ] || [ -L /usr/local/bin/versa-agi-patch ]; then
   rm -f /usr/local/bin/versa-agi-patch

@@ -9,10 +9,27 @@
 # agents alive and environments intact.
 #
 # Usage:  ./lifeline.sh
+#         ./lifeline.sh --ide-prompt <agent>   # generate IDE seed, no harness
 # CRON:   */5 * * * * /path/to/core-infra/lifeline.sh
 # ─────────────────────────────────────────────────────
 
 set -euo pipefail
+
+# ─── Optional argv (set -u: use ${1:-}) ──────────────
+IDE_GENERATE=false
+IDE_TARGET=""
+IDE_TARGET_SEEN=false
+if [ "${1:-}" = "--ide-prompt" ]; then
+  IDE_TARGET="${2:-}"
+  if [ -z "${IDE_TARGET}" ]; then
+    echo "usage: lifeline.sh --ide-prompt <agent>" >&2
+    exit 1
+  fi
+  IDE_GENERATE=true
+elif [ -n "${1:-}" ]; then
+  echo "usage: lifeline.sh [--ide-prompt <agent>]" >&2
+  exit 1
+fi
 
 # ─── Environment ─────────────────────────────────────
 # CRON runs with restricted PATH, explicitly load /usr/local/bin for agictl wrapper
@@ -49,7 +66,7 @@ fi
 # Present = operator disabled Lifeline. Blocks CRON, Fetch/--force,
 # and File Monitor invokes — not only the crontab line.
 LIFELINE_DISABLED_FLAG="/var/lib/versa-agi/lifeline.disabled"
-if [ -f "${LIFELINE_DISABLED_FLAG}" ]; then
+if [ -f "${LIFELINE_DISABLED_FLAG}" ] && [ "${IDE_GENERATE}" != "true" ]; then
   log "Lifeline disabled (${LIFELINE_DISABLED_FLAG}) — skipping run"
   exit 0
 fi
@@ -321,6 +338,12 @@ fi
 while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE AGENT_TEMPERATURE AGENT_REASONING_EFFORT AGENT_REASONING_MAX_TOKENS AGENT_MODEL_PARAMS_EXTRA AGENT_MODEL_ROUTING_ENABLED; do
   [ -z "${AGENT_NAME}" ] && continue
   [ "${AGENT_NAME}" = "${WATCHDOG_USER}" ] && continue
+  if [ "${IDE_GENERATE}" = "true" ] && [ "${AGENT_NAME}" != "${IDE_TARGET}" ]; then
+    continue
+  fi
+  if [ "${IDE_GENERATE}" = "true" ]; then
+    IDE_TARGET_SEEN=true
+  fi
   # Use default model if no per-agent override
   [ -z "${AGENT_MODEL}" ] && AGENT_MODEL="${DEFAULT_MODEL}"
   # Default anchor style to compact
@@ -764,13 +787,17 @@ ${AGENT_REGISTRY_CONTENT}
   # invalid_config / circuit_breaker / halted use the same hold for any agent.
   HOLD_STATUS=$(sqlite3 "${AGENTS_DB}" "SELECT COALESCE(status,'') FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
   HOLD_ASSIGNED=$(sqlite3 "${AGENTS_DB}" "SELECT TRIM(COALESCE(model,'')) FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
-  if [ "${AGENT_NAME}" = "coa" ] && [ -z "${HOLD_ASSIGNED}" ]; then
+  if [ "${IDE_GENERATE}" != "true" ] && [ "${AGENT_NAME}" = "coa" ] && [ -z "${HOLD_ASSIGNED}" ]; then
     log "HOLD: coa — no model assigned (first-login). Skipping spawn and task-freeze."
     flock -u 200
     continue
   fi
-  if [ "${HOLD_STATUS}" = "invalid_config" ] || [ "${HOLD_STATUS}" = "circuit_breaker" ] || [ "${HOLD_STATUS}" = "halted" ]; then
-    log "BLOCKED: ${AGENT_NAME} — status '${HOLD_STATUS}', skipping spawn (assign a model or run 'agictl agent activate ${AGENT_NAME}')"
+  if [ "${IDE_GENERATE}" != "true" ] && { [ "${HOLD_STATUS}" = "invalid_config" ] || [ "${HOLD_STATUS}" = "circuit_breaker" ] || [ "${HOLD_STATUS}" = "halted" ] || [ "${HOLD_STATUS}" = "ide" ]; }; then
+    if [ "${HOLD_STATUS}" = "ide" ]; then
+      log "HOLD: ${AGENT_NAME} — IDE mode. Skipping spawn (inbox/utility/scripts continue)."
+    else
+      log "BLOCKED: ${AGENT_NAME} — status '${HOLD_STATUS}', skipping spawn (assign a model or run 'agictl agent activate ${AGENT_NAME}')"
+    fi
     flock -u 200
     continue
   fi
@@ -937,6 +964,11 @@ To resume:
     log "WARN: ${AGENT_NAME} — no DB at ${TASKS_DB}"
   fi
 
+  if [ "${IDE_GENERATE}" = "true" ]; then
+    SHOULD_WAKE="true"
+    WAKE_REASON="IDE seed generate"
+  fi
+
   if [ "${SHOULD_WAKE}" = "false" ]; then
     # ─── Frozen Guard ─────────────────────────────────
     # If agent has frozen tasks, only allow spawn for new messages (not task work)
@@ -952,6 +984,9 @@ To resume:
 
   # Also check frozen tasks BEFORE spawning (even with work to do)
   # Exception: new unprocessed messages override freeze (user wants to communicate)
+  # IDE generate skips frozen / budget / concurrency / breaker — no harness spawn.
+  IS_LOCAL_MODEL=false
+  if [ "${IDE_GENERATE}" != "true" ]; then
   FROZEN_COUNT=$(/usr/local/bin/agictl task count-frozen "${AGENT_NAME}" 2>/dev/null || echo "0")
   if [ "${FROZEN_COUNT:-0}" -gt 0 ] && [ "${UNPROCESSED:-0}" -eq 0 ]; then
     log "FROZEN: ${AGENT_NAME} has pending task work but ${FROZEN_COUNT} frozen task(s) and no new messages — skipping spawn"
@@ -1079,6 +1114,7 @@ To resume:
     flock -u 200
     continue
   fi
+  fi  # IDE_GENERATE skip of frozen/budget/concurrency/breaker
 
   # ─── Execute — Spawn Agent with Safety Net ───────
   TIMEOUT_DURATION="${AGENT_TIMEOUT:-60}m"
@@ -1098,7 +1134,10 @@ To resume:
   fi
 
   # Set agent status to 'active' immediately so dashboard doesn't lag behind log execution
-  sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='active', status_message='Initializing cycle...', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
+  # IDE generate must not touch status — that would drop the ide hold.
+  if [ "${IDE_GENERATE}" != "true" ]; then
+    sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='active', status_message='Initializing cycle...', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
+  fi
 
   (
     # Disable errexit AND nounset for the entire spawn block — the harness may
@@ -1695,8 +1734,11 @@ Wake reason: ${WAKE_REASON}."
   fi
 
   # Auto-start cycle so agictl cycle end works — capture cycle_id for message stamping
-  CYCLE_START_JSON=$(sudo -u "${AGENT_USER}" bash -c "cd '${AGENT_PATH}' && AGICTL_CONFIG='${SYSTEM_CONFIG}' AGICTL_AGENTS_DB='${AGENTS_DB}' AGICTL_MESSAGES_DB='${MESSAGES_DB}' AGICTL_TASKS_DB='${TASKS_DB}' AGICTL_CYCLES_DB='${CYCLES_DB}' AGICTL_AGENT_DIR='${AGENT_PATH}/.agent' agictl cycle start" 2>/dev/null) || true
-  CURRENT_CYCLE_ID=$(echo "${CYCLE_START_JSON}" | jq -r '.cycle_id // empty' 2>/dev/null)
+  CURRENT_CYCLE_ID=""
+  if [ "${IDE_GENERATE}" != "true" ]; then
+    CYCLE_START_JSON=$(sudo -u "${AGENT_USER}" bash -c "cd '${AGENT_PATH}' && AGICTL_CONFIG='${SYSTEM_CONFIG}' AGICTL_AGENTS_DB='${AGENTS_DB}' AGICTL_MESSAGES_DB='${MESSAGES_DB}' AGICTL_TASKS_DB='${TASKS_DB}' AGICTL_CYCLES_DB='${CYCLES_DB}' AGICTL_AGENT_DIR='${AGENT_PATH}/.agent' agictl cycle start" 2>/dev/null) || true
+    CURRENT_CYCLE_ID=$(echo "${CYCLE_START_JSON}" | jq -r '.cycle_id // empty' 2>/dev/null)
+  fi
 
   # Stamp unprocessed inbound messages with this cycle_id (VV + internal)
   if [ -n "${CURRENT_CYCLE_ID}" ]; then
@@ -1730,9 +1772,102 @@ Wake reason: ${WAKE_REASON}."
   # harness (running as the agent user) overwrites with the effective prompt
   # after skill injection — group-write is required (System Design §IX).
   _LAST_PROMPT="/var/lib/versa-agi/${AGENT_NAME}/last_prompt.txt"
-  cat "${SYSTEM_FILE}" "${WAKE_FILE}" > "${_LAST_PROMPT}" 2>/dev/null || true
-  chown "${WATCHDOG_USER}:${AGENT_USER}" "${_LAST_PROMPT}" 2>/dev/null || true
-  chmod 660 "${_LAST_PROMPT}" 2>/dev/null || true
+  if [ "${IDE_GENERATE}" != "true" ]; then
+    cat "${SYSTEM_FILE}" "${WAKE_FILE}" > "${_LAST_PROMPT}" 2>/dev/null || true
+    chown "${WATCHDOG_USER}:${AGENT_USER}" "${_LAST_PROMPT}" 2>/dev/null || true
+    chmod 660 "${_LAST_PROMPT}" 2>/dev/null || true
+  fi
+
+  if [ "${IDE_GENERATE}" = "true" ]; then
+    # Render seed then leave the subshell before runaway/harness (must flock first).
+    _IDE_OUT="${AGENT_PATH}/.agent/versa-agi_ide.md"
+    _IDE_SESSION="/etc/versa-agi/poise/ide_session.md"
+    _SKILLS="${AGENT_PATH}/.agent/skills"
+    _CATALOG="/var/lib/versa-agi/skills_catalog.md"
+    if [ -z "${SYSTEM_PROMPT}" ]; then
+      log "IDE: ${AGENT_NAME} — empty SYSTEM_PROMPT, aborting generate"
+      flock -u 200
+      exit 1
+    fi
+    rm -f "${_IDE_OUT}"
+    {
+      echo "# versa-agi_ide.md"
+      echo ""
+      echo "Seed generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Point-in-time. Refresh via \`agictl agent ide status ${AGENT_NAME}\` every turn."
+      echo ""
+      if [ -n "${VERSA_IDE_GAP_BANNER:-}" ]; then
+        echo "## Autonomous activity since last IDE session"
+        echo ""
+        echo "${VERSA_IDE_GAP_BANNER}"
+        echo ""
+      fi
+      echo "${SYSTEM_PROMPT}"
+      echo ""
+      if [ -f "${_IDE_SESSION}" ]; then
+        # Same contract as the poise layout above: the template carries
+        # {TOKENS} and Lifeline substitutes live values. Refresh commands are
+        # session rules, so they belong in the template, not in echo lines here.
+        # {MESSAGE_ACCOUNT} follows the established fallback (see the stamp and
+        # routing sites) so one command form covers VV and local-only installs.
+        _IDE_RULES="$(cat "${_IDE_SESSION}")"
+        _IDE_RULES="${_IDE_RULES//\{AGENT_SHORT_NAME\}/${AGENT_NAME}}"
+        _IDE_RULES="${_IDE_RULES//\{MESSAGE_ACCOUNT\}/${SUB_ACCOUNT_ID:-${AGENT_NAME}}}"
+        if printf '%s' "${_IDE_RULES}" | grep -qE '\{[A-Z_]{3,}\}'; then
+          log "IDE: WARN unsubstituted placeholder(s) remain in ${_IDE_SESSION}"
+        fi
+        echo "---"
+        echo "${_IDE_RULES}"
+        echo ""
+      else
+        log "IDE: ${_IDE_SESSION} missing — seed will lack session rules"
+      fi
+      echo "---"
+      echo ""
+      echo "## Always-on skills (IDE session)"
+      echo ""
+      for _sk in skill_authoring.md memory_management.md communication_basic.md; do
+        if [ -f "${_SKILLS}/${_sk}" ]; then
+          echo "### ${_sk}"
+          echo ""
+          cat "${_SKILLS}/${_sk}"
+          echo ""
+        fi
+      done
+      echo "---"
+      echo ""
+      echo "## CLI reference"
+      echo ""
+      echo "Type full \`agictl\` commands in the terminal. Load the operator manual on demand:"
+      echo ""
+      echo "\`cat .agent/skills/cli_reference.md\`"
+      echo ""
+      echo "---"
+      echo ""
+      echo "## Skills available"
+      echo ""
+      echo "Load before related work: \`cat .agent/skills/<name>.md\`"
+      echo ""
+      if [ -f "${_CATALOG}" ]; then
+        cat "${_CATALOG}"
+      fi
+    } > "${_IDE_OUT}"
+    if [ ! -s "${_IDE_OUT}" ]; then
+      log "IDE: ${_IDE_OUT} empty after write"
+      flock -u 200
+      exit 1
+    fi
+    _IDE_SIZE=$(wc -c < "${_IDE_OUT}" || echo 0)
+    if [ "${_IDE_SIZE}" -lt 200 ]; then
+      log "IDE: ${_IDE_OUT} too small (${_IDE_SIZE} bytes)"
+      flock -u 200
+      exit 1
+    fi
+    chown "${WATCHDOG_USER}:agi_agents" "${_IDE_OUT}" 2>/dev/null || true
+    chmod 444 "${_IDE_OUT}" 2>/dev/null || true
+    log "IDE: wrote ${_IDE_OUT} (${_IDE_SIZE} bytes)"
+    flock -u 200
+    exit 0
+  fi
 
   # Read .env from /etc/versa-agi/ (watchdog-owned, outside agent workspace)
   # Build a temp env script that injects credentials + AGICTL_CONFIG
@@ -1782,7 +1917,7 @@ Wake reason: ${WAKE_REASON}."
         log "INVALID_CONFIG: ${AGENT_NAME} has local model '${AGENT_MODEL}' but local_ai is disabled — skipping"
         sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='invalid_config', status_message='Local model assigned but local AI is disabled. Change model or run setup_local.sh.', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
         flock -u 200
-        continue
+        exit 0  # not `continue` — the agent loop is in the parent shell
       fi
     elif [ "${IS_PROXY_MODEL}" = true ]; then
       if [ "${VERSA_THIRD_PARTY_ENABLED:-false}" = "true" ]; then
@@ -1793,14 +1928,14 @@ Wake reason: ${WAKE_REASON}."
         log "INVALID_CONFIG: ${AGENT_NAME} has third-party model '${AGENT_MODEL}' but third_party is disabled — skipping"
         sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='invalid_config', status_message='Cloud third-party model assigned but third_party is disabled. Run setup_proxy.sh.', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
         flock -u 200
-        continue
+        exit 0  # not `continue` — the agent loop is in the parent shell
       fi
     elif [ "${IS_CLOUD_MODEL}" = false ]; then
       # Model not in any known list → invalid config
       log "INVALID_CONFIG: ${AGENT_NAME} has unknown model '${AGENT_MODEL}' — skipping"
-        sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='invalid_config', status_message='Unknown model: ${AGENT_MODEL}. Use a key from the live catalog (models.ini [catalog]).', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
+      sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='invalid_config', status_message='Unknown model: ${AGENT_MODEL}. Use a key from the live catalog (models.ini [catalog]).', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
       flock -u 200
-      continue
+      exit 0  # not `continue` — the agent loop is in the parent shell
     fi
 
     # Mode enforcement: cloud model in local-only mode
@@ -1808,7 +1943,7 @@ Wake reason: ${WAKE_REASON}."
       log "INVALID_CONFIG: ${AGENT_NAME} has cloud model '${AGENT_MODEL}' but system is in local-only mode — skipping"
       sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='invalid_config', status_message='Cloud model assigned but system is in local-only mode. Change model to a local variant.', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
       flock -u 200
-      continue
+      exit 0  # not `continue` — the agent loop is in the parent shell
     fi
   } > "${ENV_SCRIPT}"
   chmod 644 "${ENV_SCRIPT}"
@@ -1885,7 +2020,9 @@ Wake reason: ${WAKE_REASON}."
   MONITOR_PID=$!
 
   # Set agent status to 'active' in DB so dashboard reflects running state
-  sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='active', status_message='Spawned by Lifeline (${WAKE_REASON})', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
+  if [ "${IDE_GENERATE}" != "true" ]; then
+    sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='active', status_message='Spawned by Lifeline (${WAKE_REASON})', updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
+  fi
 
   # ─── Execute Agent Harness ───
   # Thread ID and resume flag enable cross-cycle checkpoint persistence.
@@ -2238,7 +2375,25 @@ Wake reason: ${WAKE_REASON}."
   flock -u 200
 
   ) &
+  SPAWN_PID=$!
+  if [ "${IDE_GENERATE}" = "true" ]; then
+    IDE_RC=0
+    wait "${SPAWN_PID}" || IDE_RC=$?
+    if [ "${IDE_RC}" -ne 0 ]; then
+      log "IDE: generate subshell exited ${IDE_RC}"
+      exit "${IDE_RC}"
+    fi
+  fi
 
 done <<< "${AGENT_DATA}"
+
+if [ "${IDE_GENERATE}" = "true" ]; then
+  if [ "${IDE_TARGET_SEEN}" != "true" ]; then
+    log "IDE: target '${IDE_TARGET}' not in active agents"
+    echo "IDE generate: agent '${IDE_TARGET}' not found in active list" >&2
+    exit 1
+  fi
+  log "IDE: generate complete for ${IDE_TARGET}"
+fi
 
 log "Lifeline cycle complete"

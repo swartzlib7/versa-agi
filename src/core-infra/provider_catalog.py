@@ -74,7 +74,7 @@ _KEY_ENV_VAR = {
 
 # setup.ini location of each provider's key (section, option).
 _KEY_SETUP_INI = {
-    "google": ("gemini", "api_key"),
+    "google": ("third_party", "google_api_key"),
     "xai": ("third_party", "xai_api_key"),
     "openai": ("third_party", "openai_api_key"),
     "anthropic": ("third_party", "anthropic_api_key"),

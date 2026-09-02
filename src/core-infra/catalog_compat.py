@@ -20,7 +20,6 @@ GENERIC_IMPORT_PARAMS = (
 )
 
 _LEGACY_LISTS = (
-    ("gemini", "cloud_models", "google"),
     ("third_party", "google_models", "google"),
     ("third_party", "xai_models", "xai"),
     ("third_party", "openai_models", "openai"),
@@ -50,9 +49,6 @@ def _truthy(raw: str) -> bool:
 def collect_legacy_enabled(setup_path: str) -> list[str]:
     cfg = _cfg(setup_path)
     slugs: list[str] = []
-    gemini = _get(cfg, "gemini", "enabled")
-    if gemini and _truthy(gemini):
-        slugs.append("google")
     for slug in ("google", "xai", "openai", "anthropic", "openrouter"):
         if _truthy(_get(cfg, "third_party", f"{slug}_enabled")):
             slugs.append(slug)
@@ -89,10 +85,20 @@ def _row_diff(old: dict, base: dict) -> dict:
     return out
 
 
-def _ensure_section_lines(path: str, section: str, pairs: dict[str, str]) -> None:
+def _ensure_section_lines(
+    path: str,
+    section: str,
+    pairs: dict[str, str],
+    *,
+    spaced: bool = True,
+) -> None:
     """Append or replace keys in a section without rewriting the whole file."""
     if not path or not os.path.isfile(path) or not pairs:
         return
+
+    def _fmt(key: str, value: str) -> str:
+        return f"{key} = {value}\n" if spaced else f"{key}={value}\n"
+
     with open(path, encoding="utf-8") as handle:
         lines = handle.readlines()
     header = f"[{section}]\n"
@@ -109,7 +115,7 @@ def _ensure_section_lines(path: str, section: str, pairs: dict[str, str]) -> Non
             if in_sec:
                 for key, value in pairs.items():
                     if key not in present:
-                        out.append(f"{key} = {value}\n")
+                        out.append(_fmt(key, value))
             in_sec = stripped == f"[{section}]"
             out.append(line)
             continue
@@ -117,15 +123,82 @@ def _ensure_section_lines(path: str, section: str, pairs: dict[str, str]) -> Non
             key = stripped.split("=", 1)[0].strip()
             if key in pairs:
                 present.add(key)
-                out.append(f"{key} = {pairs[key]}\n")
+                out.append(_fmt(key, pairs[key]))
                 continue
         out.append(line)
     if in_sec:
         for key, value in pairs.items():
             if key not in present:
-                out.append(f"{key} = {value}\n")
+                out.append(_fmt(key, value))
     with open(path, "w", encoding="utf-8") as handle:
         handle.writelines(out)
+
+
+_GEMINI_SPLIT_MOVES = (
+    ("mode", "system", "mode"),
+    ("model", "system", "model"),
+    ("api_key", "third_party", "google_api_key"),
+    ("auth_method", "gcp", "auth_method"),
+    ("enabled", "third_party", "google_enabled"),
+    ("cloud_models", "third_party", "google_models"),
+)
+
+
+def _drop_ini_section(path: str, section: str) -> bool:
+    """Remove ``[section]`` and its body. Returns True when a header was dropped."""
+    with open(path, encoding="utf-8") as handle:
+        lines = handle.readlines()
+    out: list[str] = []
+    in_sec = False
+    dropped = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_sec = stripped == f"[{section}]"
+            if in_sec:
+                dropped = True
+                continue
+        if in_sec:
+            continue
+        out.append(line)
+    if dropped:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.writelines(out)
+    return dropped
+
+
+def migrate_gemini_section_split(setup_path: str) -> dict:
+    """One-shot [gemini] split into [system] / [third_party] / [gcp].
+
+    Move a key only when the target is absent or empty, then delete [gemini]
+    wholesale. Idempotent: a site that already has [system] and no [gemini]
+    is a no-op. Transient google_enabled / google_models land on slots
+    collect_legacy_enabled / _LEGACY_LISTS already read.
+    """
+    stats = {"moved": [], "skipped": [], "deleted": False}
+    if not setup_path or not os.path.isfile(setup_path):
+        return stats
+    cfg = _cfg(setup_path)
+    if not cfg.has_section("gemini"):
+        return stats
+
+    to_write: dict[str, dict[str, str]] = {}
+    for src_key, dest_sec, dest_key in _GEMINI_SPLIT_MOVES:
+        src = _get(cfg, "gemini", src_key)
+        if not src:
+            continue
+        dest = _get(cfg, dest_sec, dest_key)
+        if dest:
+            stats["skipped"].append(f"{dest_sec}.{dest_key}")
+            continue
+        to_write.setdefault(dest_sec, {})[dest_key] = src
+        stats["moved"].append(f"{dest_sec}.{dest_key}")
+
+    for dest_sec, pairs in to_write.items():
+        _ensure_section_lines(setup_path, dest_sec, pairs, spaced=False)
+
+    stats["deleted"] = _drop_ini_section(setup_path, "gemini")
+    return stats
 
 
 def migrate_legacy_site_state(

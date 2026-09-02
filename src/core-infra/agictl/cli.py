@@ -486,9 +486,8 @@ def system_set_key(key_type, value):
         if _sed_replace(bashrc, r'^export GEMINI_API_KEY=".*"$', f'export GEMINI_API_KEY="{value}"'):
             updated_files.append(bashrc)
 
-        # 4. setup.ini — key + provider registry enable (WU-07)
-        _ini_set("gemini", "api_key", value)
-        _ini_set("gemini", "enabled", "true")
+        # 4. setup.ini — Google key (provider enable is step 5)
+        _ini_set("third_party", "google_api_key", value)
 
         # 5. Enable Google provider in models.ini (same pattern as TP set-key)
         _activate_google_provider_on_key(updated_files, errors)
@@ -966,7 +965,7 @@ def _is_stock_setup_key(section, key):
 
     Setup.ini is no longer a model inventory. Shipped selection lives in
     models.ini ``[shipped_models]``. Site-owned values (including the system
-    default ``[gemini] model``) carry forward on ``--update``.
+    default ``[system] model``) carry forward on ``--update``.
     """
     return False
 
@@ -1079,7 +1078,14 @@ def system_reconcile_config(setup_template, models_template):
 
     result = {}
     try:
-        from catalog_compat import migrate_legacy_site_state, snapshot_vanishing_presets
+        from catalog_compat import (
+            migrate_gemini_section_split,
+            migrate_legacy_site_state,
+            snapshot_vanishing_presets,
+        )
+        if os.path.exists(SETUP_INI_CANONICAL):
+            result["gemini_section_split"] = migrate_gemini_section_split(
+                SETUP_INI_CANONICAL)
         if os.path.exists(SETUP_INI_CANONICAL) and os.path.exists(_MODELS_INI_PATHS[0]):
             result["legacy_catalog"] = migrate_legacy_site_state(
                 setup_path=SETUP_INI_CANONICAL,
@@ -1098,6 +1104,7 @@ def system_reconcile_config(setup_template, models_template):
             result["setup_ini_values_carried"] = _reconcile_setup_ini(
                 setup_template, SETUP_INI_CANONICAL)
             result["setup_ini"] = "regenerated"
+            _sync_ini_to_source(SETUP_INI_CANONICAL)
         else:
             result["setup_ini"] = "absent (fresh install — created in Step 13)"
 
@@ -4561,8 +4568,6 @@ def _drop_setup_csv(section, option, value):
 
 def _drop_catalog_key_from_setup_ini(key):
     """Drop a catalog key from every setup.ini activation CSV."""
-    _drop_setup_csv("gemini", "cloud_models", key)
-    _drop_setup_csv("gemini", "coa_approved_models", key)
     _drop_setup_csv("local_ai", "local_models", key)
     slugs = list(_read_ini_csv("third_party", "providers")[0] or [])
     for slug in dict.fromkeys([*slugs, "xai", "openai", "anthropic", "openrouter"]):
@@ -4861,7 +4866,7 @@ def _gemini_credentials_present() -> bool:
 
 
 def _gemini_provider_enabled() -> bool:
-    """Google is on when listed in [providers_site], else legacy [gemini] enabled=."""
+    """Google is on when listed in models.ini [providers_site]."""
     try:
         from provider_registry import _read_raw_section, site_enabled_slugs
         from model_catalog import resolve_models_ini_path
@@ -4871,25 +4876,7 @@ def _gemini_provider_enabled() -> bool:
             return "google" in site_enabled_slugs(path)
     except Exception:
         pass
-    try:
-        import configparser
-        cfg = configparser.ConfigParser()
-        for p in (SETUP_INI_CANONICAL, os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "setup.ini",
-        )):
-            if os.path.isfile(p):
-                cfg.read(p)
-                break
-        else:
-            return False
-        if not cfg.has_option("gemini", "enabled"):
-            return False
-        return cfg.get("gemini", "enabled", fallback="false").strip().lower() in (
-            "true", "1", "yes", "on",
-        )
-    except Exception:
-        return False
+    return False
 
 
 def _activate_google_provider_on_key(updated_files=None, errors=None):
@@ -5010,7 +4997,7 @@ def _build_migration_rows(target):
     local_ai_enabled = (
         _read_ini_value("local_ai", "enabled", "false").strip().lower() == "true"
     )
-    exec_mode = _read_ini_value("gemini", "mode", "cloud").strip().lower()
+    exec_mode = _read_ini_value("system", "mode", "cloud").strip().lower()
     include_local = local_ai_enabled and exec_mode in ("local", "hybrid")
 
     if include_local:
@@ -12928,6 +12915,12 @@ def pkg_install(name):
 
 
 
+
+try:
+    from agictl import ide_cli
+    ide_cli.register(agent, json_response=json_response)
+except ImportError:
+    pass
 
 try:
     from agictl import utility_cli

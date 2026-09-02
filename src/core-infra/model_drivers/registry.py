@@ -129,12 +129,14 @@ def _binding(
     direction: str = "input",
     modality: str = "image",
     adapter_id: str = chat_image_in_content_parts.ADAPTER_ID,
+    config: dict[str, Any] | None = None,
 ) -> ModelDriver:
     return ModelDriver(
         catalog_key=catalog_key,
         direction=direction,
         modality=modality,
         adapter_id=adapter_id,
+        config=dict(config or {}),
     )
 
 
@@ -187,11 +189,14 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
         adapter_id=chat_mm_image_out_openai_compat.ADAPTER_ID,
     ),
     # DR-CM-02 — OpenRouter audio output.
+    # voice IDs are OpenAI-specific, so they belong to the exact binding rather
+    # than global [audio_processing]; a Utility Profile config_json overrides.
     _binding(
         "openai/gpt-audio",
         direction="output",
         modality="audio",
         adapter_id=chat_mm_audio_out_pcm16.ADAPTER_ID,
+        config={"voice": "alloy"},
     ),
     # DR-CM-03 — direct OpenAI audio output.
     _binding(
@@ -199,6 +204,7 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
         direction="output",
         modality="audio",
         adapter_id=chat_mm_audio_out_pcm16.ADAPTER_ID,
+        config={"voice": "alloy"},
     ),
     # DR-CM-05 — native Google image output.
     _binding(
@@ -220,6 +226,7 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
         direction="output",
         modality="audio",
         adapter_id=chat_mm_audio_out_pcm16.ADAPTER_ID,
+        config={"voice": "alloy"},
     ),
     # DR-LOC-02 / MD-4b — local Utility image output (sd-cli).
     _binding(

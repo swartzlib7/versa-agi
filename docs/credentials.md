@@ -19,13 +19,13 @@ Re-running `setup.sh` after editing `setup.ini` also rotates credentials.
 
 ## Google (Gemini / Vertex)
 
-Google auth still lives under `setup.ini` `[gemini]` (rename to a provider-neutral section is **TD-SETUP-INI-001**, not this page).
+Google’s API key sits with every other provider key in `setup.ini` `[third_party] google_api_key`. Vertex details (`auth_method`, `project`, `location`, `service_account_key`) live in `[gcp]`.
 
-| Method | INI `auth_method` | Env | Best for |
-|--------|-------------------|-----|----------|
-| Gemini API key | `api_key` | `GEMINI_API_KEY` (`coa.env`) | Typical |
-| Vertex service account | `service_account` | `GOOGLE_APPLICATION_CREDENTIALS` | Headless |
-| Vertex ADC | `adc` | gcloud credentials | Dev |
+| Method | INI | Env | Best for |
+|--------|-----|-----|----------|
+| Gemini API key | `[gcp] auth_method=api_key` + `[third_party] google_api_key` | `GEMINI_API_KEY` (`coa.env`) | Typical |
+| Vertex service account | `[gcp] auth_method=vertex` + service account path | `GOOGLE_APPLICATION_CREDENTIALS` | Headless |
+| Vertex ADC | `[gcp] auth_method=vertex` | gcloud credentials | Dev |
 
 Vertex harness consume is still **TD-VERTEX-024** — setup can write Vertex paths; the LangGraph client today uses `GEMINI_API_KEY` for Google.
 

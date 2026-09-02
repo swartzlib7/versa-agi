@@ -280,7 +280,7 @@ class TestModelDriverCatalogMigration(unittest.TestCase):
             with (
                 patch.object(agictl_cli, "_read_ini_value", side_effect=lambda s, k, d="": {
                     ("local_ai", "enabled"): "false",
-                    ("gemini", "mode"): "cloud",
+                    ("system", "mode"): "cloud",
                 }.get((s, k), d)),
                 patch.object(agictl_cli, "_read_ini_csv", return_value=([], "fixture")),
                 patch("provider_registry.credentials_present", return_value=True),
@@ -332,7 +332,7 @@ class TestModelDriverCatalogMigration(unittest.TestCase):
             with (
                 patch.object(agictl_cli, "_read_ini_value", side_effect=lambda s, k, d="": {
                     ("local_ai", "enabled"): "false",
-                    ("gemini", "mode"): "cloud",
+                    ("system", "mode"): "cloud",
                 }.get((s, k), d)),
                 patch.object(agictl_cli, "_read_ini_csv", return_value=([], "fixture")),
                 patch("provider_registry.credentials_present", return_value=True),

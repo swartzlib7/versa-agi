@@ -65,7 +65,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.3.8"
+PRODUCT_VERSION="3.3.9"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -187,6 +187,27 @@ if [ ! -f "${SCRIPT_DIR}/models.ini" ]; then
   chown_repo_config "${SCRIPT_DIR}/models.ini" 644
   info "Generated models.ini from stock (catalog metadata for migrate/sync)"
 fi
+
+# TD-SETUP-INI-001: split leftover [gemini] before any reader. Idempotent.
+# Reconcile repeats this on /etc; this pass makes the source/fallback reads
+# see [system] / [third_party] / [gcp] in the same run.
+_split_gemini_section() {
+  local f="$1" err=""
+  [ -f "$f" ] || return 0
+  grep -q '^\[gemini\]' "$f" 2>/dev/null || return 0
+  err="$(PYTHONPATH="${SCRIPT_DIR}/core-infra${PYTHONPATH:+:${PYTHONPATH}}" python3 -c \
+    "from catalog_compat import migrate_gemini_section_split; migrate_gemini_section_split(r'''${f}''')" \
+    2>&1)" || true
+  # Must not continue on failure: the reads below fall back to defaults, which
+  # would stamp paths.env with mode=cloud and an empty VERSA_DEFAULT_MODEL.
+  if grep -q '^\[gemini\]' "$f" 2>/dev/null; then
+    [ -n "${err}" ] && echo "${err}" >&2
+    error "Could not migrate [gemini] → [system] in ${f}. Requires python3 and ${SCRIPT_DIR}/core-infra/catalog_compat.py."
+  fi
+  ok "Migrated ${f}: [gemini] → [system] / [third_party] / [gcp]"
+}
+_split_gemini_section "${INI_FILE}"
+[ -n "${INI_FILE_FALLBACK}" ] && _split_gemini_section "${INI_FILE_FALLBACK}"
 
 ini_get() {
   local section=$1
@@ -370,8 +391,8 @@ CRON_INTERVAL="${VERSA_CRON_INTERVAL:-$(ini_get agent cron_interval 1)}"  # minu
 # Pre-loaded values from INI (used by prompts later)
 INI_VV_ENABLED="$(ini_get versavoice enabled true)"
 INI_VV_TOKEN="$(ini_get versavoice api_token)"
-INI_AUTH_METHOD="$(ini_get gemini auth_method)"
-INI_API_KEY="$(ini_get gemini api_key)"
+INI_AUTH_METHOD="$(ini_get gcp auth_method)"
+INI_API_KEY="$(ini_get third_party google_api_key)"
 INI_GCP_PROJECT="$(ini_get gcp project)"
 INI_GCP_LOCATION="$(ini_get gcp location us-central1)"
 INI_SA_KEY_PATH="$(ini_get gcp service_account_key)"
@@ -387,9 +408,8 @@ INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 45)"
 INI_RUNAWAY_THRESHOLD="$(ini_get agent runaway_threshold 2500)"
 INI_GIT_PLATFORMS="$(ini_get git platforms none)"
 INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
-INI_GEMINI_MODEL="$(ini_get gemini model '')"
-INI_EXECUTION_MODE="$(ini_get gemini mode cloud)"
-INI_CLOUD_MODELS="$(ini_get gemini cloud_models)"
+INI_SYSTEM_MODEL="$(ini_get system model '')"
+INI_EXECUTION_MODE="$(ini_get system mode cloud)"
 # Deprecated CSV — COA eligibility is the catalog row `coa` flag; model sync fills paths.env.
 INI_LOCAL_AI_ENABLED="$(ini_get local_ai enabled false)"
 INI_GPU_BACKEND="$(ini_get local_ai gpu_backend standard)"
@@ -1092,7 +1112,7 @@ if [ "${UPDATE_MODE}" = false ]; then
     if [ -f "${_ini_file}" ]; then
       sed -i '/^\[local_ai\]/,/^\[/{s/^topology=.*/topology='"${INI_TOPOLOGY}"'/}' "${_ini_file}"
       sed -i '/^\[local_ai\]/,/^\[/{s/^enabled=.*/enabled='"${INI_LOCAL_AI_ENABLED}"'/}' "${_ini_file}"
-      sed -i '/^\[gemini\]/,/^\[/{s/^mode=.*/mode='"${INI_EXECUTION_MODE}"'/}' "${_ini_file}"
+      sed -i '/^\[system\]/,/^\[/{s/^mode=.*/mode='"${INI_EXECUTION_MODE}"'/}' "${_ini_file}"
     fi
   done
 fi
@@ -1376,11 +1396,11 @@ VV_TOKEN="${VV_TOKEN:-${INI_VV_TOKEN}}"
 
 # ─── Step 5b: AI Model Selection ─────────────────────
 # Disabled: COA requires a capable model for reliable tool-calling and structured output.
-# The default model is set in setup.ini [gemini] model= and is validated against
+# The default model is set in setup.ini [system] model= and is validated against
 # the live catalog `coa` flag. Per-agent overrides are available via the Dashboard.
 # section "Step 5b — AI Model Selection"
 # ...
-ok "Default model: ${INI_GEMINI_MODEL} (from setup.ini)"
+ok "Default model: ${INI_SYSTEM_MODEL} (from setup.ini)"
 
 echo ""
 
@@ -1607,7 +1627,7 @@ VERSA_CORE_INFRA="${DEPLOYED_CORE_INFRA}"
 VERSA_PRODUCT_VERSION="${PRODUCT_VERSION}"
 VERSA_COA_ENV="${DEPLOYED_COA_ENV}"
 VERSA_AGENTS_DB="${AGENTS_DB}"
-VERSA_DEFAULT_MODEL="${INI_GEMINI_MODEL}"
+VERSA_DEFAULT_MODEL="${INI_SYSTEM_MODEL}"
 VERSA_LOGGING_ENABLED="$(ini_get logging enabled true)"
 VERSA_EXECUTION_MODE="${INI_EXECUTION_MODE}"
 VERSA_CLOUD_MODELS="${_PATHS_CLOUD_MODELS}"
@@ -1821,6 +1841,16 @@ if [ -f "${TASK_PROTOCOL_SOURCE}" ]; then
   ok "Task protocol deployed → ${TASK_PROTOCOL_DEST} (watchdog:watchdog 640)"
 fi
 
+# Deploy IDE session template (inlined into versa-agi_ide.md — not a skill)
+IDE_SESSION_SOURCE="${DEPLOYED_CORE_INFRA}/config/ide_session.md"
+IDE_SESSION_DEST="${POISE_DIR}/ide_session.md"
+if [ -f "${IDE_SESSION_SOURCE}" ]; then
+  cp "${IDE_SESSION_SOURCE}" "${IDE_SESSION_DEST}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${IDE_SESSION_DEST}"
+  chmod 640 "${IDE_SESSION_DEST}"
+  ok "IDE session template deployed → ${IDE_SESSION_DEST} (watchdog:watchdog 640)"
+fi
+
 # Deploy philosophical anchor template to /etc/versa-agi/poise/anchor_full.md
 ANCHOR_SOURCE="${DEPLOYED_CORE_INFRA}/config/anchor_full.md"
 ANCHOR_DEST="${POISE_DIR}/anchor_full.md"
@@ -1882,6 +1912,16 @@ if [ -f "${VCOA_SCRIPT}" ]; then
   chown root:root /usr/local/bin/vcoa
   chmod 755 /usr/local/bin/vcoa
   ok "vcoa → /usr/local/bin/ (COA context shortcut)"
+fi
+
+IDE_LAUNCHER="${DEPLOYED_CORE_INFRA}/bin/versa-agi-ide"
+if [ -f "${IDE_LAUNCHER}" ]; then
+  mkdir -p "${LIB_DIR}"
+  cp "${IDE_LAUNCHER}" "${LIB_DIR}/versa-agi-ide"
+  chown root:root "${LIB_DIR}/versa-agi-ide"
+  chmod 755 "${LIB_DIR}/versa-agi-ide"
+  ln -sf "${LIB_DIR}/versa-agi-ide" /usr/local/bin/versa-agi-ide
+  ok "versa-agi-ide → /usr/local/bin/ (delegates to agictl agent ide)"
 fi
 
 # Install administrative tooling: binary → /usr/local/lib/versa-agi/, symlink → /usr/local/bin/
@@ -2168,7 +2208,7 @@ if [ -f "${PRODUCT_README_SRC}" ]; then
   # Operator section files (same folder so COA can follow rewritten links).
   PRODUCT_DOCS_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)/docs"
   for _doc in models.md credentials.md operations.md security.md directories.md \
-    troubleshooting.md backup-restore.md install-wsl-server.md roadmap.md; do
+    troubleshooting.md backup-restore.md install-wsl-server.md roadmap.md ide-mode.md; do
     if [ -f "${PRODUCT_DOCS_SRC}/${_doc}" ]; then
       cp -f "${PRODUCT_DOCS_SRC}/${_doc}" "${DOCS_DEST}/${_doc}"
       chown "${WATCHDOG_USER}:agi_agents" "${DOCS_DEST}/${_doc}"
@@ -2672,8 +2712,9 @@ BASHEOF"
     fi
   fi
 
-  # Persist [gemini] enabled= (+ auth when Step 9b collected it). --update does not
-  # re-run fresh Step 13 inject, so auth_method/api_key must be written here.
+  # Persist Google auth when Step 9b collected it. --update does not
+  # re-run fresh Step 13 inject, so auth_method/google_api_key must be written here.
+  # Provider enable lives in models.ini [providers_site], not setup.ini.
   _gemini_auth_label=""
   _gemini_api_persist=""
   if [ "${AUTH_METHOD:-}" = "1" ]; then
@@ -2684,16 +2725,21 @@ BASHEOF"
     _gemini_api_persist=""
   fi
   for _ini_file in "${SCRIPT_DIR}/setup.ini" "/etc/versa-agi/setup.ini"; do
-    if [ -f "${_ini_file}" ] && grep -q '^\[gemini\]' "${_ini_file}" 2>/dev/null; then
-      sed -i "/^\[gemini\]/,/^\[/{s/^enabled=.*/enabled=${GEMINI_PROVIDER_ENABLED:-false}/}" "${_ini_file}" 2>/dev/null || true
-      if ! awk '/^\[gemini\]/{s=1;next} /^\[/{s=0} s && /^enabled=/{f=1} END{exit !f}' "${_ini_file}"; then
-        sed -i "/^\[gemini\]/a enabled=${GEMINI_PROVIDER_ENABLED:-false}" "${_ini_file}" 2>/dev/null || true
-      fi
+    if [ -f "${_ini_file}" ]; then
       if [ -n "${_gemini_auth_label}" ]; then
-        sed -i "/^\[gemini\]/,/^\[/{s/^auth_method=.*/auth_method=${_gemini_auth_label}/}" "${_ini_file}" 2>/dev/null || true
-        # Escape &/| for sed replacement of api_key value
+        if grep -q '^\[gcp\]' "${_ini_file}" 2>/dev/null; then
+          sed -i "/^\[gcp\]/,/^\[/{s/^auth_method=.*/auth_method=${_gemini_auth_label}/}" "${_ini_file}" 2>/dev/null || true
+          if ! awk '/^\[gcp\]/{s=1;next} /^\[/{s=0} s && /^auth_method=/{f=1} END{exit !f}' "${_ini_file}"; then
+            sed -i "/^\[gcp\]/a auth_method=${_gemini_auth_label}" "${_ini_file}" 2>/dev/null || true
+          fi
+        fi
         _api_esc=$(printf '%s' "${_gemini_api_persist}" | sed -e 's/[&|\\]/\\&/g')
-        sed -i "/^\[gemini\]/,/^\[/{s|^api_key=.*|api_key=${_api_esc}|}" "${_ini_file}" 2>/dev/null || true
+        if grep -q '^\[third_party\]' "${_ini_file}" 2>/dev/null; then
+          sed -i "/^\[third_party\]/,/^\[/{s|^google_api_key=.*|google_api_key=${_api_esc}|}" "${_ini_file}" 2>/dev/null || true
+          if ! awk '/^\[third_party\]/{s=1;next} /^\[/{s=0} s && /^google_api_key=/{f=1} END{exit !f}' "${_ini_file}"; then
+            sed -i "/^\[third_party\]/a google_api_key=${_api_esc}" "${_ini_file}" 2>/dev/null || true
+          fi
+        fi
       fi
       # Drop deprecated Gemini CLI pin if still present (harness-only runtime).
       sed -i '/^gemini_cli_version=/d' "${_ini_file}" 2>/dev/null || true
@@ -2896,10 +2942,10 @@ if [ -d "${PROVIDERS_DIR}" ]; then
       fi
       for _ini_df in "/etc/versa-agi/setup.ini" "${SCRIPT_DIR}/setup.ini"; do
         if [ -f "${_ini_df}" ]; then
-          sed -i "/^\[gemini\]/,/^\[/{s|^model=.*|model=${_picked_default}|}" "${_ini_df}" 2>/dev/null || true
+          sed -i "/^\[system\]/,/^\[/{s|^model=.*|model=${_picked_default}|}" "${_ini_df}" 2>/dev/null || true
         fi
       done
-      INI_GEMINI_MODEL="${_picked_default}"
+      INI_SYSTEM_MODEL="${_picked_default}"
       if [ -f "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" ]; then
         sqlite3 "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" \
           "UPDATE agents SET model='${_picked_default}', num_ctx=0 WHERE name='coa' AND (model IS NULL OR TRIM(model)='');" 2>/dev/null || true
@@ -3096,7 +3142,7 @@ if [ "${UPDATE_MODE}" = true ]; then
 
     # ── Local AI settings ──
     PATHS_ENV="/etc/versa-agi/paths.env"
-    EXEC_MODE="$(ini_get gemini mode cloud)"
+    EXEC_MODE="$(ini_get system mode cloud)"
     LOCAL_ENABLED="$(ini_get local_ai enabled false)"
     LOCAL_MODELS="$(ini_get local_ai local_models '')"
     PROXY_PORT="$(ini_get local_ai proxy_port 4000)"
@@ -4034,12 +4080,13 @@ else
     cat > "${INI_FILE}" <<'MINSEED'
 [versavoice]
 api_token=
-[gemini]
-auth_method=api_key
-api_key=
+[system]
 mode=cloud
 model=
-enabled=false
+[third_party]
+google_api_key=
+[gcp]
+auth_method=api_key
 [agent]
 cron_interval=1
 [users]
@@ -4059,21 +4106,19 @@ MINSEED
   # stub). Skip / keep-without-update leaves it unset — do NOT default to
   # vertex or wipe api_key (that was flipping auth_method=api_key → vertex).
   if [ "${AUTH_METHOD:-}" = "1" ]; then
-    _ini_set_in "gemini" "auth_method" "api_key"
-    _ini_set_in "gemini" "api_key" "${api_key:-}"
+    _ini_set_in "gcp" "auth_method" "api_key"
+    _ini_set_in "third_party" "google_api_key" "${api_key:-}"
   elif [ "${AUTH_METHOD:-}" = "2" ]; then
-    _ini_set_in "gemini" "auth_method" "vertex"
+    _ini_set_in "gcp" "auth_method" "vertex"
     # Exclusive with API key — do not leave a stale key beside Vertex.
-    _ini_set_in "gemini" "api_key" ""
+    _ini_set_in "third_party" "google_api_key" ""
   fi
-  _ini_set_in "gemini" "mode" "${SELECTED_EXEC_MODE:-cloud}"
-  _ini_set "model"      "${INI_GEMINI_MODEL:-}"
-  _ini_set_in "gemini" "enabled" "${GEMINI_PROVIDER_ENABLED:-false}"
+  _ini_set_in "system" "mode" "${SELECTED_EXEC_MODE:-cloud}"
+  _ini_set_in "system" "model" "${INI_SYSTEM_MODEL:-}"
   if [ "${GEMINI_PROVIDER_ENABLED:-false}" = "true" ]; then
     enable_site_provider "google" "/etc/versa-agi/models.ini"
     enable_site_provider "google" "${SCRIPT_DIR}/models.ini"
   fi
-  _ini_set "thinking_level" "$(ini_get gemini thinking_level high)"
   _ini_set_in "local_ai" "enabled" "${INI_LOCAL_AI_ENABLED:-false}"
   _ini_set "ollama_host" "${INI_OLLAMA_HOST:-http://localhost:11434}"
   _ini_set "proxy_port" "${INI_PROXY_PORT:-4000}"

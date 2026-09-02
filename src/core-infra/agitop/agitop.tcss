@@ -3801,9 +3801,24 @@ AgentPromptMenu {
 #agent-poise-pane,
 #agent-prompt-pane,
 #agent-cycle-pane,
-#agent-threads-pane {
+#agent-threads-pane,
+#agent-ide-pane {
     height: 100%;
     layout: vertical;
+}
+
+#agent-ide-scroll {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#agent-ide-scroll .settings-section-box {
+    border: solid $primary;
+}
+
+#agent-ide-detail {
+    height: auto;
+    margin-top: 1;
 }
 
 #agent-general-scroll .setup-form-row {
@@ -4096,6 +4111,18 @@ AgentPromptMenu {
     background: $error 25%;
     color: $text;
     border: heavy $error;
+    text-style: bold;
+}
+
+/* IDE Integration tab — magenta, matching the 'ide' agent status colour */
+#agent-tabs #--content-tab-agent-ide-tab {
+    border-top: heavy #c026d3;
+}
+
+#agent-tabs #--content-tab-agent-ide-tab.-active {
+    background: #c026d3 25%;
+    color: #f0abfc;
+    border: heavy #c026d3;
     text-style: bold;
 }
 

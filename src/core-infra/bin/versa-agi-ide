@@ -1,0 +1,103 @@
+#!/bin/bash
+# versa-agi-ide — thin launcher for COA IDE mode
+# Delegates to agictl agent ide. Prints connect instructions from JSON.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: versa-agi-ide [--off|--status]
+  (default)  Enable IDE mode and print Remote-SSH steps
+  --off      Turn IDE mode off (close the IDE chat first)
+  --status   Show whether IDE mode is on
+EOF
+}
+
+CMD="on"
+case "${1:-}" in
+  --off|-off) CMD="off" ;;
+  --status|-status) CMD="status" ;;
+  --help|-h) usage; exit 0 ;;
+  "") CMD="on" ;;
+  *) usage; exit 1 ;;
+esac
+
+if ! command -v agictl >/dev/null 2>&1; then
+  echo "agictl not found. Run setup.sh first." >&2
+  exit 1
+fi
+
+# Do NOT nest sudo. Under `sudo versa-agi-ide` an inner sudo rewrites SUDO_USER
+# to root, and agictl uses SUDO_USER to find the Primary User's ~/.ssh.
+RC=0
+if [ "$(id -u)" -eq 0 ]; then
+  JSON=$(agictl agent ide "${CMD}" coa) || RC=$?
+else
+  JSON=$(sudo agictl agent ide "${CMD}" coa) || RC=$?
+fi
+if [ "${RC}" -ne 0 ]; then
+  python3 -c 'import json,sys
+raw = sys.argv[1]
+try:
+    print(json.loads(raw).get("error") or raw, file=sys.stderr)
+except Exception:
+    print(raw or "agictl agent ide failed", file=sys.stderr)' "${JSON:-}" >&2 || true
+  exit 1
+fi
+
+python3 - "${JSON}" "${CMD}" <<'PY'
+import json, sys
+raw, cmd = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError:
+    print(raw)
+    sys.exit(1)
+if not data.get("success"):
+    print(data.get("error") or raw, file=sys.stderr)
+    sys.exit(1)
+if cmd == "off":
+    print(data.get("warn") or "IDE mode off.")
+    sys.exit(0)
+if cmd == "status":
+    print(data.get("message") or data.get("status"))
+    sys.exit(0)
+
+host = data.get("host_class") or "native_linux"
+print(data.get("message") or "IDE mode on.")
+print()
+print("Workspace:", data.get("workspace"))
+print("Seed file:", data.get("ide_file"))
+print()
+print("Remote-SSH as user", data.get("ssh_user"), "to", data.get("ssh_host"))
+print()
+if host in ("wsl1", "wsl2"):
+    print("WSL: add this to your Windows %USERPROFILE%\\.ssh\\config")
+    print("(the IDE reads the Windows file, not the Linux home):")
+    print()
+    print(data.get("ssh_config_block") or "")
+    print("If sshd is down: sudo service ssh start")
+elif data.get("host_virt") and data.get("host_virt") not in ("none", "", None):
+    print("Virtualized guest (e.g. OrbStack). Paste this Host block into")
+    print("the desktop OS SSH config the IDE actually reads:")
+    print()
+    print(data.get("ssh_config_block") or "")
+else:
+    if data.get("ssh_config_written"):
+        print("Wrote Host versa-coa to your ~/.ssh/config.")
+    else:
+        print("SSH config (add if missing):")
+        print(data.get("ssh_config_block") or "")
+probe = data.get("ssh_probe") or ""
+if probe.startswith("failed"):
+    print()
+    print("WARNING: loopback SSH login as coa did not succeed —", probe)
+    print("Remote-SSH will not connect until this is fixed.")
+    print("Check: sudo sshd -t && sudo systemctl status ssh")
+print()
+print("In the IDE: Remote-SSH to versa-coa, open the workspace,")
+print("start a chat with versa-agi_ide.md.")
+warn = data.get("warn")
+if warn:
+    print()
+    print(warn)
+PY

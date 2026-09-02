@@ -14,34 +14,19 @@
 enabled=true
 api_token=
 
-[gemini]
-# Auth method: exactly one of "api_key" or "vertex" (optional — Gemini is not required).
-# Runtime uses the LangChain harness — not the Gemini CLI.
-auth_method=api_key
-api_key=
+[system]
 # Execution mode: "cloud", "local", or "hybrid"
-#   cloud  — cloud models (Gemini and/or other providers — keys optional per provider)
+#   cloud  — cloud models (keys optional per provider)
 #   local  — Local AI only via Ollama (no cloud keys needed)
 #   hybrid — Both cloud and local agents available
+# Written to paths.env as VERSA_EXECUTION_MODE.
 mode=cloud
 
 # System default model (catalog key). Written to paths.env as VERSA_DEFAULT_MODEL.
 # Stock blank until first-login COA bootstrap assigns one (WU-02/03).
 # Empty agents.model falls back here. Per-agent overrides: agitop / set-model.
+# Routinely a Grok/GLM key — not provider-specific.
 model=
-
-# Deprecated — not an allowlist. COA eligibility is the catalog row `coa` flag
-# (tick on Import / catalog edit). This key is not stock-owned; --update does
-# not restamp it. Left empty so older readers do not treat leftovers as law.
-coa_approved_models=
-
-# Default thinking level for agent spawns (Gemini 3+ only).
-# Replaces legacy thinking_budget. Cannot mix with thinking_budget.
-#   minimal  — Fewest tokens for thinking. Low-complexity tasks, fastest response.
-#   low      — Fewer tokens. Simple instruction-following, high-throughput.
-#   medium   — Balanced. Moderate complexity tasks. (Gemini 3 Flash only)
-#   high     — Deep reasoning. Multi-step planning, code gen. (Default for Gemini 3 Flash)
-thinking_level=high
 
 [local_ai]
 # Enable local AI backend (Inference Endpoint + backend).
@@ -187,9 +172,14 @@ anthropic_api_key=
 # ── OpenRouter (multi-vendor aggregator) ─────────────
 openrouter_api_key=
 
+# ── Google (Gemini API key) ──────────────────────────
+google_api_key=
+
 [gcp]
 # Only needed for vertex auth. If service_account_key is set, it's used;
 # otherwise falls back to Application Default Credentials (ADC).
+# auth_method: "api_key" (GEMINI_API_KEY / google_api_key) or "vertex".
+auth_method=api_key
 project=versavoice-s777
 location=us-central1
 service_account_key=
@@ -245,7 +235,9 @@ language=en
 # Country: Full name as shown in VersaVoice app (optional, leave blank if unsure)
 # Examples: United States, Mexico, Japan, Germany, Brazil, South Africa
 country=United States
-# Voice: male or female
+# Voice: agent voice identity for VersaVoice spoken modes.
+#   male (X) · female (Y) · reflective (clones the Primary User's voice)
+# Unrelated to [audio_processing] — that section is multimodal TTS packaging.
 voice=female
 # Role: Agent primary role (seeded as first ability)
 role=Chief Orchestrator Agent
@@ -315,13 +307,15 @@ max_width=2048
 max_height=2048
 
 [audio_processing]
-# Defaults for Utility Model audio generation. Edit via agitop → System Settings
-# → Audio Processing. Streaming audio is always received as PCM16 and packaged
-# locally: 'wav' is native, 'ogg'/'mp3'/'flac' require ffmpeg (falls back to wav).
-# A Utility Model's config_json may override 'format'/'voice' per-profile.
+# Generic packaging policy for Utility Model audio generation. Edit via agitop
+# → System Settings → Audio Processing. Streaming audio is always received as
+# PCM16 and packaged locally: 'wav' is native, 'ogg'/'mp3'/'flac' need ffmpeg.
+# A Utility Model's config_json may override 'format' per-profile.
+# enabled=false keeps the native container and never calls ffmpeg.
+# Provider-specific knobs (e.g. OpenAI TTS voice) live on the exact
+# ModelDriver config, not here — see model_drivers/registry.py.
 enabled=true
 format=ogg
-voice=female
 
 [utility_models]
 # Phase F — Utility Model global defaults (PU-owned; reconcile carries forward).

@@ -146,36 +146,25 @@ def _read_paths_env(key: str, default: str = "", paths_env: Path | None = None) 
     return default
 
 
-def _read_setup_ini(section: str, key: str, default: str = "", setup_ini: Path | None = None) -> str:
-    p = setup_ini or SETUP_INI
+def gemini_enabled(
+    setup_ini: Path | None = None,
+    models_ini: Path | None = None,
+) -> bool | None:
+    """Return True/False when Google is site-enabled; None when unset.
+
+    ``setup_ini`` is unused (legacy Google toggle left setup.ini). Kept so
+    callers that still pass it do not break.
+    """
+    del setup_ini
     try:
-        import configparser
-        cfg = configparser.ConfigParser()
-        cfg.read(p)
-        return cfg.get(section, key, fallback=default).strip()
+        from model_catalog import resolve_models_ini_path
+        from provider_registry import _read_raw_section, site_enabled_slugs
+        path = str(models_ini) if models_ini is not None else resolve_models_ini_path()
+        site = _read_raw_section(path, "providers_site")
+        if "enabled" in site:
+            return "google" in site_enabled_slugs(path)
     except Exception:
-        return default
-
-
-def gemini_enabled(setup_ini: Path | None = None) -> bool | None:
-    """Return True/False when Google is site-enabled; None when unset (legacy)."""
-    if setup_ini is None:
-        try:
-            from model_catalog import resolve_models_ini_path
-            from provider_registry import _read_raw_section, site_enabled_slugs
-            path = resolve_models_ini_path()
-            site = _read_raw_section(path, "providers_site")
-            if "enabled" in site:
-                return "google" in site_enabled_slugs(path)
-        except Exception:
-            pass
-    raw = _read_setup_ini("gemini", "enabled", "", setup_ini=setup_ini).lower()
-    if not raw:
-        return None
-    if raw in ("true", "1", "yes", "on"):
-        return True
-    if raw in ("false", "0", "no", "off"):
-        return False
+        pass
     return None
 
 
@@ -202,14 +191,16 @@ def gemini_usable(
     coa_env: Path | None = None,
     vault: Path | None = None,
     setup_ini: Path | None = None,
+    models_ini: Path | None = None,
 ) -> bool:
     """True when Gemini credentials exist and provider is enabled.
 
-    Legacy installs with no ``enabled=`` key: credentials alone count as usable.
+    Legacy installs with no ``[providers_site] enabled=`` key: credentials
+    alone count as usable.
     """
     if not gemini_credentials_present(coa_env=coa_env, vault=vault):
         return False
-    flag = gemini_enabled(setup_ini=setup_ini)
+    flag = gemini_enabled(setup_ini=setup_ini, models_ini=models_ini)
     if flag is None:
         return True
     return flag
@@ -477,7 +468,7 @@ def sync_system_default_model(
     paths_env: Path | None = None,
     setup_ini: Path | None = None,
 ) -> list[str]:
-    """Write VERSA_DEFAULT_MODEL + setup.ini [gemini] model=. Returns updated paths."""
+    """Write VERSA_DEFAULT_MODEL + setup.ini [system] model=. Returns updated paths."""
     updated: list[str] = []
     model = (model or "").strip()
     paths = paths_env or PATHS_ENV
@@ -510,7 +501,7 @@ def sync_system_default_model(
                 if s.startswith("[") and s.endswith("]"):
                     section = s[1:-1]
                     continue
-                if section == "gemini" and s.startswith("model="):
+                if section == "system" and s.startswith("model="):
                     lines[i] = f"model={model}"
                     replaced = True
                     break

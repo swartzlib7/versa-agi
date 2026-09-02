@@ -185,7 +185,7 @@ def _provider_key_present(env_var: str, slug: str) -> bool:
         except OSError:
             continue
     setup_keys = {
-        "google": ("gemini", "api_key"),
+        "google": ("third_party", "google_api_key"),
         "xai": ("third_party", "xai_api_key"),
         "openai": ("third_party", "openai_api_key"),
         "anthropic": ("third_party", "anthropic_api_key"),

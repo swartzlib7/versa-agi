@@ -225,10 +225,10 @@ for SETUP_INI in "${_INI_FILES[@]}"; do
   sed -i '/^\[local_ai\]/,/^\[/{s/^enabled=.*/enabled=false/}' "${SETUP_INI}"
   sed -i '/^\[local_ai\]/,/^\[/{s/^gpu_backend=.*/gpu_backend=standard/}' "${SETUP_INI}"
   # Reset execution mode to cloud — local AI is being removed
-  CURRENT_INI_MODE=$(awk -F '=' '/^\[gemini\]/{f=1; next} /^\[/{f=0} f && $1=="mode"{print $2}' "${SETUP_INI}" 2>/dev/null | xargs)
+  CURRENT_INI_MODE=$(awk -F '=' '/^\[system\]/{f=1; next} /^\[/{f=0} f && $1=="mode"{print $2}' "${SETUP_INI}" 2>/dev/null | xargs)
   if [ "${CURRENT_INI_MODE}" = "local" ] || [ "${CURRENT_INI_MODE}" = "hybrid" ]; then
-    sed -i '/^\[gemini\]/,/^\[/{s/^mode=.*/mode=cloud/}' "${SETUP_INI}"
-    ok "setup.ini [gemini] mode reset to cloud (was ${CURRENT_INI_MODE})"
+    sed -i '/^\[system\]/,/^\[/{s/^mode=.*/mode=cloud/}' "${SETUP_INI}"
+    ok "setup.ini [system] mode reset to cloud (was ${CURRENT_INI_MODE})"
   fi
   ok "Updated: ${SETUP_INI}"
 done

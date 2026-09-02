@@ -92,7 +92,7 @@ fi
 CURRENT_AUTH_METHOD="api_key"
 
 if [ -f "${INI_FILE}" ]; then
-  CURRENT_AUTH_METHOD=$(awk -F '=' '/^\[gemini\]/{found=1} found && /^auth_method=/{print $2; exit}' "${INI_FILE}" 2>/dev/null | tr -d '[:space:]')
+  CURRENT_AUTH_METHOD=$(awk -F '=' '/^\[/{found=0} /^\[gcp\]/{found=1} found && /^auth_method=/{print $2; exit}' "${INI_FILE}" 2>/dev/null | tr -d '[:space:]')
   CURRENT_AUTH_METHOD="${CURRENT_AUTH_METHOD:-api_key}"
 fi
 
@@ -107,7 +107,7 @@ fi
 # ─── Show Current Key (masked) ──────────────────────
 CURRENT_KEY=""
 if [ -f "${INI_FILE}" ]; then
-  CURRENT_KEY=$(awk -F '=' '/^\[gemini\]/{found=1} found && /^api_key=/{print $2; exit}' "${INI_FILE}" 2>/dev/null | tr -d '[:space:]')
+  CURRENT_KEY=$(awk -F '=' '/^\[/{found=0} /^\[third_party\]/{found=1} found && /^google_api_key=/{print $2; exit}' "${INI_FILE}" 2>/dev/null | tr -d '[:space:]')
 fi
 
 if [ -n "${CURRENT_KEY}" ]; then
@@ -160,7 +160,7 @@ if [ -f "${INI_FILE}" ]; then
   if [ "${DRY_RUN}" = true ]; then
     info "Would update: ${INI_FILE}"
   else
-    sed -i "s|^api_key=.*|api_key=${NEW_KEY}|" "${INI_FILE}"
+    sed -i "/^\[third_party\]/,/^\[/{s|^google_api_key=.*|google_api_key=${NEW_KEY}|}" "${INI_FILE}"
     ok "Updated ${INI_FILE}"
     UPDATED=$((UPDATED + 1))
   fi

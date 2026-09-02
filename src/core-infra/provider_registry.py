@@ -42,7 +42,7 @@ _KEY_ENV_VAR = {
 }
 
 _KEY_SETUP_INI = {
-    "google": ("gemini", "api_key"),
+    "google": ("third_party", "google_api_key"),
     "xai": ("third_party", "xai_api_key"),
     "openai": ("third_party", "openai_api_key"),
     "anthropic": ("third_party", "anthropic_api_key"),
@@ -111,7 +111,7 @@ def _adapter_google_gemini(_slug: str) -> bool:
         return True
     if os.path.isfile(GCP_VAULT):
         return True
-    return bool(read_setup_value("gemini", "api_key", "").strip())
+    return bool(read_setup_value("third_party", "google_api_key", "").strip())
 
 
 def _adapter_api_key(slug: str) -> bool:

@@ -25,7 +25,7 @@ set -euo pipefail
 REPO_URL="https://github.com/swartzlib7/versa-agi.git"
 REPO_BRANCH="main"
 INSTALL_DIR="/tmp/versa-agi-install-$$"
-VERSION="3.3.8"
+VERSION="3.3.9"
 TEST_MODE=false
 
 # ─── Parse Arguments ────────────────────────────────
