@@ -34,7 +34,7 @@ Both the workspace and the seed live on the remote side, so the IDE's agent shar
 
 ## Every turn
 
-COA must run `agictl agent ide status coa` first. If the mode is off, it stops. If `message` reports autonomous cycles since the last IDE session, it tells you and refreshes live state before using anything remembered from the chat.
+COA must run `agictl agent ide status coa` first. If the mode is off, it stops. If `message` reports Lifeline cycles since the last IDE session, it tells you and refreshes live state before using anything remembered from the chat.
 
 ## Disable
 
@@ -46,7 +46,7 @@ sudo versa-agi-ide --off
 sudo agictl agent ide off coa
 ```
 
-COA returns to autonomous spawning on the next pulse. An open IDE chat is **not** a harness process — Lifeline will not see it. The per-turn status check is what stops COA in that chat.
+COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] autonomous=true` (full sudo) — IDE mode never touches that setting. An open IDE chat is **not** a harness process — Lifeline will not see it. The per-turn status check is what stops COA in that chat.
 
 ## What this is not
 

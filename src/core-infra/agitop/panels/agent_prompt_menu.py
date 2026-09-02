@@ -443,7 +443,7 @@ class AgentPromptMenu(ModalScreen):
                                         "[dim] 4.[/] Start a chat and attach "
                                         "[cyan].agent/versa-agi_ide.md[/] as context.\n"
                                         "[dim] 5.[/] Untick when done — COA resumes "
-                                        "autonomous spawning on the next pulse."
+                                        "normal Lifeline spawning on the next pulse."
                                     )
                                     yield Static(
                                         "\n[dim]Step 4 is what makes it COA — the seed carries "
@@ -532,7 +532,7 @@ class AgentPromptMenu(ModalScreen):
                 suffix = f" · {held}" if held else ""
                 status.update(f"[bold magenta]● ON[/][dim]{suffix} — Lifeline spawn held[/]")
             else:
-                status.update("[dim]○ OFF — COA spawns autonomously[/]")
+                status.update("[dim]○ OFF — normal Lifeline spawning[/]")
         detail = self._ide_widget("#agent-ide-detail", Static)
         if detail is not None:
             detail.update(self._ide_detail_text(payload, on))
@@ -575,7 +575,7 @@ class AgentPromptMenu(ModalScreen):
             cycles = payload.get("autonomous_cycles") or 0
             if cycles:
                 lines.append(
-                    f"\n[yellow]COA ran {cycles} autonomous cycle(s) since the last IDE "
+                    f"\n[yellow]COA ran {cycles} Lifeline cycle(s) since the last IDE "
                     "session. It will tell you and refresh live state before acting on "
                     "chat memory.[/]"
                 )

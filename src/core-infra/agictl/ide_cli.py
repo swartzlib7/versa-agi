@@ -189,7 +189,7 @@ def register(agent_group, json_response):
             cleaned=True,
             was_ide=was_ide,
             warn=(
-                "COA resumes autonomous spawning on the next pulse. "
+                "COA resumes normal Lifeline spawning on the next pulse. "
                 "Close the IDE chat first — an open chat is not a harness "
                 "process and will not block Lifeline."
             ),
@@ -344,7 +344,7 @@ def _autonomous_gap():
     summary = (last[1] or "").replace("\n", " ").strip()[:120]
     wake = f", wake: {summary}" if summary else ""
     banner = (
-        f"Autonomous COA ran {count} cycle(s) since the last IDE session "
+        f"COA ran {count} Lifeline cycle(s) since the last IDE session "
         f"(last {last_at}{wake}). Refresh tasks and messages before acting."
     )
     return {"count": count, "last_at": last_at, "summary": summary, "banner": banner}

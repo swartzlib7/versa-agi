@@ -8,7 +8,7 @@ This file is a **seed**, not a live document. The LIVE SITUATION block below is 
 
 1. Run `agictl agent ide status coa`. Read the entire `message` field, not just on/off.
    - If the mode is **off**: say so plainly, take no further action, and end the turn. Do not touch tasks, memory, or messages.
-   - If `message` reports **autonomous cycles** since the last IDE session: tell the Primary User, then finish step 2 before acting on anything remembered from this chat.
+   - If `message` reports **Lifeline cycles** since the last IDE session: tell the Primary User, then finish step 2 before acting on anything remembered from this chat.
    - If the command fails: check whether `.agent/versa-agi_ide.md` is still present. Missing file → treat as off.
 2. Refresh live state. Do not trust the seed snapshot. Run these exactly as written:
 
@@ -27,8 +27,8 @@ If the count is above zero, read them with `agictl message get` — `cat .agent/
 `planned` / `waiting` / `blocked` whose `due_date` has already passed. A task that
 is open but scheduled for later does not appear, and neither does a `frozen` one.
 
-**An empty `agictl task list` does not mean there is nothing to do.** In autonomous
-mode that emptiness is the schedule working. In this mode the Primary User is
+**An empty `agictl task list` does not mean there is nothing to do.** Under
+normal Lifeline spawning that emptiness is the schedule working. In this mode the Primary User is
 present and may want to pull work forward, so always run `--all` too and tell them
 what is actually on the board — how many are open, and when the next one comes due.
 Never report "no tasks" on the strength of the first command alone.
@@ -53,7 +53,7 @@ no `--status`. If a command is rejected, run `agictl <group> <verb> --help` or
 
 `memory_management.md` says its awareness procedure must run before ending every **cycle**. There are no cycles in this mode. Run that procedure at the **end of a turn** when you did real work.
 
-This session is not in the LangGraph checkpoint. Record outcomes with `agictl memory` and the task journal or they will not survive the return to autonomous spawning.
+This session is not in the LangGraph checkpoint. Record outcomes with `agictl memory` and the task journal or they will not survive the return to normal Lifeline spawning.
 
 ## Closing the session
 
@@ -62,7 +62,7 @@ When the Primary User signals wrap-up — or you can tell the session is ending 
 Order:
 
 1. **State first.** Games, awareness, memory, project records, and the task journal. Same procedure as `memory_management.md`, plus any game / project updates the session actually changed. Do this while the mode is still on.
-2. **Then ask about outbound.** A message to a peer or VersaVoice contact becomes the next autonomous wake. Do not send a closing FYI, punch-list, or “loop closed” note unless the Primary User wants that handoff. If they do, send it after state is written, not instead of it.
+2. **Then ask about outbound.** A message to a peer or VersaVoice contact becomes the next Lifeline wake. Do not send a closing FYI, punch-list, or “loop closed” note unless the Primary User wants that handoff. If they do, send it after state is written, not instead of it.
 3. **Tell them you are ready.** One sentence: state is recorded, what (if anything) you sent, and that they can turn the mode off.
 
 A long session makes this more important, not less — more of the night lives only in this chat until you write it down.
