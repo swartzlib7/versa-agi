@@ -65,7 +65,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.3.9"
+PRODUCT_VERSION="3.4.0"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -410,6 +410,7 @@ INI_GIT_PLATFORMS="$(ini_get git platforms none)"
 INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
 INI_SYSTEM_MODEL="$(ini_get system model '')"
 INI_EXECUTION_MODE="$(ini_get system mode cloud)"
+INI_INSTALL_ROLE="$(ini_get system install_role normal)"
 # Deprecated CSV — COA eligibility is the catalog row `coa` flag; model sync fills paths.env.
 INI_LOCAL_AI_ENABLED="$(ini_get local_ai enabled false)"
 INI_GPU_BACKEND="$(ini_get local_ai gpu_backend standard)"
@@ -1115,6 +1116,49 @@ if [ "${UPDATE_MODE}" = false ]; then
       sed -i '/^\[system\]/,/^\[/{s/^mode=.*/mode='"${INI_EXECUTION_MODE}"'/}' "${_ini_file}"
     fi
   done
+
+  # ── Install flavor: normal (default) or Sentinel (remote team COA) ──
+  # Not a topology. Full client stack either way. Server type already exited.
+  echo ""
+  echo "  ┌─────────────────────────────────────────────┐"
+  echo "  │  INSTALL FLAVOR                             │"
+  echo "  │                                             │"
+  echo "  │  Normal  — this machine's home COA          │"
+  echo "  │  Sentinel — remote agent on the team,       │"
+  echo "  │             carrying operational duties     │"
+  echo "  │             defined by the Primary User     │"
+  echo "  └─────────────────────────────────────────────┘"
+  echo ""
+  if confirm "Normal install?" "y"; then
+    INI_INSTALL_ROLE="normal"
+    if declare -F install_acceptance_coa_name_prompt >/dev/null 2>&1; then
+      install_acceptance_coa_name_prompt normal
+    else
+      error "install_acceptance_coa_name_prompt missing — cannot collect COA name"
+    fi
+    info "Install flavor: normal — name ${INI_AGENT_FIRST_NAME}"
+  else
+    INI_INSTALL_ROLE="sentinel"
+    INI_AGENT_ROLE="Remote Sentinel"
+    if declare -F install_acceptance_coa_name_prompt >/dev/null 2>&1; then
+      install_acceptance_coa_name_prompt sentinel
+    else
+      error "install_acceptance_coa_name_prompt missing — cannot collect Sentinel name"
+    fi
+    info "Install flavor: Sentinel — name ${INI_AGENT_FIRST_NAME}"
+  fi
+  for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+    if [ -f "${_ini_file}" ]; then
+      if grep -q "^install_role=" "${_ini_file}" 2>/dev/null; then
+        sed -i '/^\[system\]/,/^\[/{s/^install_role=.*/install_role='"${INI_INSTALL_ROLE}"'/}' "${_ini_file}"
+      else
+        sed -i '/^\[system\]/a install_role='"${INI_INSTALL_ROLE}" "${_ini_file}"
+      fi
+      if [ "${INI_INSTALL_ROLE}" = "sentinel" ] && grep -q "^role=" "${_ini_file}" 2>/dev/null; then
+        sed -i "s|^role=.*|role=${INI_AGENT_ROLE}|" "${_ini_file}"
+      fi
+    fi
+  done
 fi
 
 # ─── Feature Flags Prompt (D34) — after topology selection ─
@@ -1303,6 +1347,14 @@ deploy_repo() {
 }
 
 deploy_repo "${SRC_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}" "${WATCHDOG_USER}" "Core Infrastructure"
+
+# Retired shipped skill rename: deploy_repo rsync is not --delete, so leftover
+# files would stay in the deployed tree and reconcile_skills_db.py would keep
+# the old DB row. Remove only names that are no longer in source.
+if [ ! -f "${SRC_CORE_INFRA}/skills/feature_statefold.md" ]; then
+  rm -f "${DEPLOYED_CORE_INFRA}/skills/feature_statefold.md"
+  rm -rf "${DEPLOYED_CORE_INFRA}/skills/feature_statefold"
+fi
 
 # COA environment — only deploy if the COA user exists (server-only topology skips this)
 if id "${COA_USER}" &>/dev/null; then
@@ -1786,6 +1838,16 @@ POISE_SOURCE="${DEPLOYED_CORE_INFRA}/config/coa_poise.md"
 POISE_DEST="${POISE_DIR}/coa.md"
 if [ -f "${POISE_SOURCE}" ]; then
   cp "${POISE_SOURCE}" "${POISE_DEST}"
+  APPLY_ROLE="${DEPLOYED_CORE_INFRA}/scripts/apply_coa_install_role.py"
+  if [ -f "${APPLY_ROLE}" ]; then
+    python3 "${APPLY_ROLE}" "${POISE_DEST}" "${INI_INSTALL_ROLE:-normal}" \
+      || error "COA poise overlay failed (install_role=${INI_INSTALL_ROLE:-normal})"
+    if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+      ok "COA poise: Sentinel mode overlay applied"
+    fi
+  elif [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+    error "apply_coa_install_role.py missing — cannot deploy Sentinel poise"
+  fi
   chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${POISE_DEST}"
   chmod 640 "${POISE_DEST}"
 
@@ -2331,27 +2393,39 @@ ok "Security hardening complete"
 
 echo ""
 
-# ─── Step 8c: Seed Welcome Task ───────────────────
-# Insert a task so the COA sends a welcome message on first cycle.
-# Content is kept concise — the self_introduction.md skill handles the full template.
+# ─── Step 8c: Seed first-contact task ───────────────────
+# Fresh DB only — prevents re-triggering on restores where the task was completed.
 DB_FILE="/var/lib/versa-agi/coa/tasks.db"
 if [ -f "${DB_FILE}" ]; then
-  # Only seed on completely fresh databases — prevents re-triggering on restores where the task was completed and deleted
   TOTAL_TASKS=$(sqlite3 "${DB_FILE}" "SELECT COUNT(*) FROM tasks;" 2>/dev/null || echo "0")
   if [ "${TOTAL_TASKS:-0}" -eq 0 ]; then
-    sqlite3 "${DB_FILE}" \
-      "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
-        'Initial Welcome Sequence',
-        'FIRST CONTACT: This is an important message to send. Your Primary User has just provisioned Versa AGi — they built the infrastructure, created your identity, and started the system. You are now alive on their hardware. Follow the self_introduction.md skill exactly (speak/speak_translated when VersaVoice is enabled; typed when VersaVoice is disabled — trust FEATURE AVAILABILITY; do NOT troubleshoot VV or setup). Keep it short, warm, and memorable — three beats: The Moment, The Partnership, The Invitation. Do NOT list features or capabilities in this message. Do NOT investigate providers, API keys, or system configuration before completing this introduction. After sending your welcome, ask the Primary User if they would like to work together and clarify basic operating principles (communication style, work hours, priorities). Store their preferences in global system memory using agictl memory system set. DO NOT mark this task as done! You MUST change this task status to waiting and set its due_date to 24 hours in the future to await their initial feedback before acting further.',
-        'planned',
-        'urgent',
-        'coa',
-        'system',
-        datetime('now')
-      );"
-    ok "Welcome task seeded for COA"
+    if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+      sqlite3 "${DB_FILE}" \
+        "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
+          'Remote Sentinel Routine',
+          'FIRST CONTACT (REMOTE SENTINEL): This host is a Sentinel — a remote agent on the Primary User team carrying operational duties they define. Follow remote_sentinel.md exactly (speak/speak_translated when VersaVoice is enabled; typed when VersaVoice is disabled — trust FEATURE AVAILABILITY; do NOT troubleshoot VV or setup). Do NOT run self_introduction.md or the home welcome awakening. Three beats in one ceremonial register: (1) identify yourself by your configured name, congratulate them on a new addition to their Versa AGi constellation, speak the date and time from your wake prompt (host timezone), and thank them for this opportunity; (2) acknowledge operational duty and readiness; (3) ask for instructions. Do NOT list features. Do NOT investigate providers, API keys, or system configuration before this message. After sending, set this task to waiting with due_date 24 hours ahead. DO NOT mark it done until the Primary User has given instructions.',
+          'planned',
+          'urgent',
+          'coa',
+          'system',
+          datetime('now')
+        );"
+      ok "Remote Sentinel Routine seeded for COA"
+    else
+      sqlite3 "${DB_FILE}" \
+        "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
+          'Initial Welcome Sequence',
+          'FIRST CONTACT: This is an important message to send. Your Primary User has just provisioned Versa AGi — they built the infrastructure, created your identity, and started the system. You are now alive on their hardware. Follow the self_introduction.md skill exactly (speak/speak_translated when VersaVoice is enabled; typed when VersaVoice is disabled — trust FEATURE AVAILABILITY; do NOT troubleshoot VV or setup). Keep it short, warm, and memorable — three beats: The Moment, The Partnership, The Invitation. Do NOT list features or capabilities in this message. Do NOT investigate providers, API keys, or system configuration before completing this introduction. After sending your welcome, ask the Primary User if they would like to work together and clarify basic operating principles (communication style, work hours, priorities). Store their preferences in global system memory using agictl memory system set. DO NOT mark this task as done! You MUST change this task status to waiting and set its due_date to 24 hours in the future to await their initial feedback before acting further.',
+          'planned',
+          'urgent',
+          'coa',
+          'system',
+          datetime('now')
+        );"
+      ok "Welcome task seeded for COA"
+    fi
   else
-    ok "Welcome task already exists"
+    ok "First-contact task already exists"
   fi
 fi
 
@@ -4083,6 +4157,7 @@ api_token=
 [system]
 mode=cloud
 model=
+install_role=normal
 [third_party]
 google_api_key=
 [gcp]
@@ -4115,6 +4190,7 @@ MINSEED
   fi
   _ini_set_in "system" "mode" "${SELECTED_EXEC_MODE:-cloud}"
   _ini_set_in "system" "model" "${INI_SYSTEM_MODEL:-}"
+  _ini_set_in "system" "install_role" "${INI_INSTALL_ROLE:-normal}"
   if [ "${GEMINI_PROVIDER_ENABLED:-false}" = "true" ]; then
     enable_site_provider "google" "/etc/versa-agi/models.ini"
     enable_site_provider "google" "${SCRIPT_DIR}/models.ini"
@@ -4137,7 +4213,7 @@ MINSEED
   _ini_set "sycl_models_max" "$(ini_get local_ai sycl_models_max 1)"
   _ini_set "hf_token" "$(ini_get local_ai hf_token '')"
   _ini_set "sycl_llama_cpp_tag" "$(ini_get local_ai sycl_llama_cpp_tag b10430)"
-  _ini_set "sd_cpp_tag" "$(ini_get local_ai sd_cpp_tag master-820-de298c2)"
+  _ini_set "sd_cpp_tag" "$(ini_get local_ai sd_cpp_tag master-841-6b3edaa)"
   _ini_set_in "local_ai" "topology" "${INI_TOPOLOGY:-local}"
   _ini_set "model_loading_strategy" "$(ini_get local_ai model_loading_strategy router)"
   _ini_set "project"    "${gcp_project:-$INI_GCP_PROJECT}"
@@ -4283,7 +4359,7 @@ else
   echo ""
 
   echo -e "  ${BOLD:-}Next Steps:${RESET:-}"
-  echo -e "  ${YELLOW:-}Follow this sequence. The welcome message needs the VersaVoice${NC:-}"
+  echo -e "  ${YELLOW:-}Follow this sequence. The first-contact message needs the VersaVoice${NC:-}"
   echo -e "  ${YELLOW:-}connection first — do not skip ahead to agitop or the first pulse.${NC:-}"
   echo ""
 step_arrow "${YELLOW:-}1. Accept the Connection Request${NC:-}"
@@ -4295,7 +4371,12 @@ echo -e "     held until that assignment, then it is ready for the first pulse."
 step_arrow "${YELLOW:-}3. The First Pulse (Agent Activation)${NC:-}"
 echo -e "     Wait for the CRON schedule to awaken the agent (or run manually:"
 echo -e "     ${BOLD:-}sudo ${DEPLOYED_CORE_INFRA}/lifeline.sh --force${RESET:-})."
-echo -e "     The agent will process its seeded Welcome Task and introduce itself."
+  if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+    echo -e "     The Sentinel will run the Remote Sentinel Routine — name, constellation"
+    echo -e "     congratulations with date and time, thanks, then duty and instructions."
+  else
+    echo -e "     The agent will process its seeded Welcome Task and introduce itself."
+  fi
 echo ""
 echo -e "  ${DIM:-}You are now running a production infrastructure featuring:${RESET:-}"
   echo -e "  ${DIM:-} • Native Emotional Intelligence     • Compute-Zero Efficiency${RESET:-}"

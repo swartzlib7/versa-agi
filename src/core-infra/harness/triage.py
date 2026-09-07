@@ -90,7 +90,7 @@ Determine which skills should be injected (filenames only, select ALL the weaker
 - **Forbid** in strategy_notes and task_actions: CLI commands, `agictl` invocations, mark-processed ordering, snooze recipes, attachment filesystem paths, and imperative protocol ("Do NOT reply", "You MUST end").
 - **Allow** suggested reply posture (likely reply vs likely silent) as high-altitude advice.
 - **task_actions**: High-level work labels only (e.g. "reply-to-sender-with-analysis", "update-game-barriers", "brief-warm-ack"). Prefer labels that describe outcomes, not orders.
-- Set `has_attachments: true` when wake/conversation indicates media/files attached — do not instruct how to view them.
+- Set `has_attachments: true` when wake/conversation indicates media/files attached — do not instruct how to view them, and do not add view/watch/listen to `task_actions`. Viewing is only when the PU or a Connection explicitly asked in the inbound text.
 
 Output ONLY valid JSON in this exact format:
 ```json
@@ -194,6 +194,7 @@ _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and resp
 - "security_protocol.md" — Security-sensitive operations
 - "reminder_management.md" — Creating and managing reminders
 - "self_introduction.md" — Introducing the agent to new contacts
+- "remote_sentinel.md" — Sentinel first contact (formal duty/readiness; COA only)
 - "founder_story.md" — Sharing the VersaVoice origin story
 - "solution_architect.md" — System/environment setup guidance for PU
 - "system_packages.md" — Requesting and installing system packages (apt)
@@ -558,6 +559,8 @@ def _get_skill_reasons(result: TriageResult) -> dict:
         reasons["connection_lifecycle.md"] = "Connection management actions may be needed."
     if "self_introduction.md" in result.skills_to_inject:
         reasons["self_introduction.md"] = "New contact may need introduction."
+    if "remote_sentinel.md" in result.skills_to_inject:
+        reasons["remote_sentinel.md"] = "Sentinel first-contact routine (duty and readiness)."
     if "memory_management.md" in result.skills_to_inject:
         reasons["memory_management.md"] = "Persistent memory store/retrieve may be needed."
     if "message_relay.md" in result.skills_to_inject:
@@ -606,8 +609,10 @@ def build_triage_context(result: TriageResult) -> str:
         lines.append(f"Skills selected: {', '.join(result.skills_to_inject)}")
     if result.has_attachments:
         lines.append(
-            "⚠ Inbound attachment(s) flagged — locate under `.agent/attachments/` "
-            "(see poise) and use `agictl_view_image` per cli_reference / communication skill before replying."
+            "⚠ Inbound attachment(s) are on disk under `.agent/attachments/` (see poise). "
+            "Do not view or load them unless the PU or a Connection explicitly asked in this wake. "
+            "If they asked, use `agictl_view_image` / `agictl_view_video` before describing the media. "
+            "Do not invent paths or content."
         )
     if result.task_actions:
         lines.append(f"Task actions (labels): {json.dumps(result.task_actions)}")

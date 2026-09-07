@@ -55,7 +55,7 @@ class TestBuildTriageContext(unittest.TestCase):
         self.assertIn("requirements_elicitation", text)
         self.assertNotIn("### Execution Order", text)
 
-    def test_attachment_flag_points_to_skills(self):
+    def test_attachment_flag_does_not_auto_view(self):
         result = TriageResult(
             classification="follow_up",
             confidence=0.8,
@@ -65,6 +65,9 @@ class TestBuildTriageContext(unittest.TestCase):
         text = build_triage_context(result)
         self.assertIn("attachment", text.lower())
         self.assertIn("poise", text.lower())
+        self.assertIn("Do not view or load", text)
+        self.assertIn("explicitly asked", text)
+        self.assertNotIn("before replying", text)
 
     def test_informational_advisory_distinguishes_human_vs_peer(self):
         result = TriageResult(

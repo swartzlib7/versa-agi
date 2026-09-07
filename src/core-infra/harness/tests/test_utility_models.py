@@ -2,7 +2,7 @@
 
 Covers the dependency-light pieces of the Utility Model stack — modality mime
 maps (default derivation + input/output validation), the output-driver registry
-dispatch (text writer + image/audio/video stub), and the ``utility_models`` store
+dispatch (text/image/audio/video writers), and the ``utility_models`` store
 CRUD. The chat/generation invocation path (``utility_runner._invoke_chat_model``)
 needs a live provider + langchain and is exercised by the §13 manual matrix, not
 here.
@@ -15,6 +15,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -174,12 +175,13 @@ class TestOutputDriverRegistry(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), "phase-f")
 
-    def test_media_modalities_are_stubs(self):
-        # image/audio are real drivers now; only video remains a stub.
-        self.assertFalse(has_real_driver("video"))
-        with self.assertRaises(UtilityRunError) as ctx:
-            get_output_driver("video")()
-        self.assertEqual(ctx.exception.code, "driver_pending")
+    def test_media_writers_are_real(self):
+        self.assertTrue(has_real_driver("video"))
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "out.webm")
+        get_output_driver("video")(path, b"\x00" * 32)
+        with open(path, "rb") as fh:
+            self.assertEqual(len(fh.read()), 32)
 
     def test_unknown_modality_raises(self):
         with self.assertRaises(ValueError):
@@ -292,7 +294,13 @@ class TestGenerationParsers(unittest.TestCase):
             raise ProviderRuntimeError("provider_unsupported", "not wired")
 
         gen.resolve_provider_route = fail
-        gen.resolve_model_driver = lambda *args, **kwargs: object()
+        gen.resolve_model_driver = lambda *args, **kwargs: SimpleNamespace(
+            adapter=SimpleNamespace(
+                adapter_id="chat_mm_image_out_openai_compat",
+                entrypoint=lambda **_k: None,
+            ),
+            binding=SimpleNamespace(config={}),
+        )
         try:
             with self.assertRaises(UtilityRunError) as raised:
                 gen.generate_media("model", "image", prompt="test")
@@ -494,7 +502,7 @@ class TestMediaDrivers(unittest.TestCase):
     def test_image_audio_drivers_write_bytes(self):
         self.assertTrue(has_real_driver("image"))
         self.assertTrue(has_real_driver("audio"))
-        self.assertFalse(has_real_driver("video"))
+        self.assertTrue(has_real_driver("video"))
         d = tempfile.mkdtemp()
         ip = os.path.join(d, "a.png")
         ap = os.path.join(d, "a.mp3")
@@ -529,7 +537,7 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
             "gen-model",
             {
                 "input": {"text": ["*"], "image": ["png", "jpg"]},
-                "output": {"image": ["png"], "audio": ["mp3"], "text": ["*"]},
+                "output": {"image": ["png"], "audio": ["mp3"], "video": ["webm"], "text": ["*"]},
             },
             agents_db=self.db,
         )
@@ -643,16 +651,34 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
             )
         self.assertEqual(raised.exception.code, "no_driver")
 
-    def test_video_um_still_stubs_driver_pending(self):
-        # Video has no output model/driver — must raise driver_pending, never
-        # reach generate_media or the text path.
-        def _boom_gen(*a, **k):
-            raise AssertionError("generate_media must not run for video")
+    def test_bound_video_um_writes_webm(self):
+        seen: list[str] = []
 
-        gen.generate_media = _boom_gen
-        with self.assertRaises(UtilityRunError) as ctx:
-            self.runner.run_utility_model(self._add_um("video"), output_dir=self._dir, context_agent="coa")
-        self.assertEqual(ctx.exception.code, "driver_pending")
+        def _fake_gen(*a, **k):
+            seen.append("gen")
+            return (b"\x1aE\xdf\xa3" + b"\x00" * 32, "webm", "video/webm", None)
+
+        gen.generate_media = _fake_gen
+        result = self.runner.run_utility_model(
+            self._add_um("video"), output_dir=self._dir, context_agent="coa",
+        )
+        self.assertEqual(seen, ["gen"])
+        self.assertTrue(result["artifacts"][0]["path"].endswith(".webm"))
+
+    def test_unbound_video_um_returns_no_driver(self):
+        self.registry.resolve_model_driver = lambda *args, **kwargs: None
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("generate_media must not run without an exact driver")
+
+        gen.generate_media = _boom
+        with self.assertRaises(UtilityRunError) as raised:
+            self.runner.run_utility_model(
+                self._add_um("video"),
+                output_dir=self._dir,
+                context_agent="coa",
+            )
+        self.assertEqual(raised.exception.code, "no_driver")
 
 
 class TestUtilityToolTimeout(unittest.TestCase):

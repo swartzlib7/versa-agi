@@ -38,7 +38,7 @@ def build_image_content_parts(
 
 def build_trimmed_text_part(path: str, *, caption: str | None = None) -> list[dict[str, Any]]:
     """Text-only replacement after surgical trim of injected modality blocks."""
-    text = caption or f"[Viewed image — payload trimmed from checkpoint: {path}]"
+    text = caption or f"[Viewed media — payload trimmed from checkpoint: {path}]"
     return [{"type": "text", "text": text}]
 
 

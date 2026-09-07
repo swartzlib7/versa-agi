@@ -583,6 +583,8 @@ agictl view video <path>                              # Validate local video (mp
 agictl view video <path> --execution-model <key>      # Test video-input ModelDriver gate
 ```
 
+**When:** inbound attachments are not a request to view. Call these tools only when the PU or a Connection **explicitly asked**. Presence of a file on disk is not enough. IDE mode is exempt.
+
 **Harness tool:** agents call `agictl_view_image(path="...")` or `agictl_view_video(path="...")` during a cycle. On success the harness injects a multimodal message (same spawn) and trims image/video payloads from checkpoint history after the next reasoning turn.
 
 **Gate:** the spawn's execution model must have an exact executable input ModelDriver for that modality (◆). Text-only models receive a clear tool refusal. Refused when fewer than 8 steps remain in the cycle.

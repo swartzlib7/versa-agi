@@ -18,6 +18,7 @@ Use a UM when you need a **deterministic one-shot** (image, audio, text artifact
 
 Local Qwen-Image-2512: read **`local_media_qwen_image_2512.md`** and `agictl model media usage qwen-image-2512` before painting.
 Local FLUX.1-dev: read **`local_media_flux1_dev.md`** and `agictl model media usage flux1-dev` before painting.
+Local LTX-2.5 Distilled video: read **`local_media_ltx_2_5_distilled.md`** and `agictl model media usage ltx-2.5-distilled` before generating. Do not use ComfyUI graphs.
 
 ## Listing profiles
 

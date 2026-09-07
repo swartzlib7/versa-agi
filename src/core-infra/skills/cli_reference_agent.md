@@ -272,6 +272,8 @@ Use for: technical research, version compatibility checks, documentation lookups
 
 ## 12. view — Image / video perception
 
+**When:** only if the PU or a Connection **explicitly asked** to look at the file. An inbound attachment by itself is not a request. IDE mode is exempt.
+
 **Harness tool:** `agictl_view_image(path="...")` or `agictl_view_video(path="...")` — preferred in-cycle (validates, injects media into context). Video accepts mp4, mkv, or mov up to 200 MB (VIEW gate). Native Google (`gemini-3.7-flash`) inline video is ~20 MB.
 
 **CLI (standalone validation):**

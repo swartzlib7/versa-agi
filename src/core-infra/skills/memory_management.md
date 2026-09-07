@@ -158,4 +158,4 @@ agictl memory system list
 - **Be concise** — memory is injected into your context on wake; verbose memory wastes tokens.
 - **Emotion tags take priority** — if VersaVoice emotion tags are present in messages, use them as the primary signal for relational memory.
 - **If you didn't communicate with anyone** — skip connection memory in Step 4 but still do Steps 1-3 for any other observations.
-- **Enforcement gate** — `cycle end` validates that awareness was recorded this session. A warning is logged if no awareness entries were created.
+- **Enforcement gate** — `cycle end` validates that awareness was recorded this session. A warning is logged if no awareness entries were created. **IDE session:** there is no cycle — do not run `cycle end`.

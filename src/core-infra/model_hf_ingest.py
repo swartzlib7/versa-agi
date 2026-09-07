@@ -58,13 +58,14 @@ VLM_PIPELINE_TAGS = {
 }
 MEDIA_ARCH_RE = re.compile(
     r"(qwenimage|flux|stablediffusion|stable[\s_-]?diffusion|sd3|sdxl|"
-    r"unet2d|autoencoderkl|hunyuanvideo|wanvideo|ltxvideo|minimax.?h3|krea2)",
+    r"unet2d|autoencoderkl|hunyuanvideo|wanvideo|ltxvideo|ltx2|ltx[-_.]?2|"
+    r"minimax.?h3|krea2)",
     re.I,
 )
 STRONG_MEDIA_FILE_RE = re.compile(
     r"(qwen-image|flux[\s._-]|sd3|sdxl|stable-diffusion|[\s._-]unet[\s._-]|"
     r"[\s._-]vae[\s._-]|vae_|_vae|[\s._-]dit[\s._-]|fl2va|hunyuan-video|"
-    r"wan[-_]?video|ltx[-_]?video|minimax[_-]?h3|krea2)",
+    r"wan[-_]?video|ltx[-_]?video|ltx[-_.]?2\.?5|minimax[_-]?h3|krea2)",
     re.I,
 )
 MMPROJ_RE = re.compile(r"(^|/)mmproj[^/]*\.gguf$", re.I)

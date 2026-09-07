@@ -15,7 +15,7 @@
 | **task_scheduling** | Creating/updating `agictl task` (due dates, decompose, progress journal) |
 | **solution_architect** | **Host environment / stack install** (apt, services) — not app logic |
 | **git_operations** | Clone, branch, push, credentials |
-| **feature_statefold** | Feature documentation discipline (`state_*.md`) — load alongside this for feature work |
+| **production_statefold** | Feature documentation discipline (`state_*.md` in the project's resolved doc home) — load alongside this for feature work |
 
 ## Building vs Maintaining
 
@@ -24,7 +24,7 @@ Reuse the phase definitions in **project_management** (Building = pre-release fr
 ## Procedure
 
 1. **Orient** — Identify the target project (`work_initiation`). Open existing patterns in the same module before inventing new ones.
-2. **Contract** — For feature work, open or create the living `state_*.md` (**feature_statefold**). Do not start a parallel `*_spec.md` / `context_*.md`. Fold interim `COLLABORATION.md` into § Collaboration if present.
+2. **Contract** — For feature work, resolve the doc home (**production_statefold**), then open or create the living `state_*.md`. Do not start a parallel `*_spec.md` / `context_*.md`. Fold interim `COLLABORATION.md` into § Collaboration if present.
 3. **Delivery mode** — After Orient (+ Contract for features):
    - Honor the project/feature **collaboration plan** (pattern + `qa_reviewer`) if set.
    - If unset and work is **multi-step** or the PU will quality-test: offer **staged / milestone / continuous** (same meanings as `project_management` Step 4), or ask COA/PU. Defaults: **staged** for multi-step; **continuous** for tiny one-shot fixes.
@@ -54,5 +54,5 @@ Reuse the phase definitions in **project_management** (Building = pre-release fr
 
 - Read before write — search neighboring files and existing helpers first.
 - One job per change set — split unrelated fixes.
-- Documentation of **feature status/plan/results** lives in **feature_statefold**, not duplicated here.
+- Documentation of **feature status/plan/results** lives in **production_statefold**, not duplicated here.
 - Host package installs and systemd stacks → **solution_architect**, not this skill.

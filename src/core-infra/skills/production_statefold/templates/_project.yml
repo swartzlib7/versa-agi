@@ -1,0 +1,5 @@
+# Versa AGi production statefold config for this project.
+# Paths are relative to the project root (workspace/{slug}/).
+doc_home: docs/production/state/
+archive_home: docs/production/state/__archive/
+shape_file:          # optional; a shape_<solution>.md map, leave empty if none

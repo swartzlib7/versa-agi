@@ -1,6 +1,7 @@
-"""Client → GPU-host media SSH (import/generate) and PNG return.
+"""Client → GPU-host media SSH (import/generate) and artifact return.
 
-No Textual import. Weights stay on the GPU host. The client only copies the PNG.
+No Textual import. Weights stay on the GPU host. The client only copies the
+PNG or WebM.
 """
 
 from __future__ import annotations
@@ -191,6 +192,9 @@ def build_media_generate_args(
     cfg_scale: float | None = None,
     seed: int | None = None,
     offload: bool = False,
+    frames: int | None = None,
+    fps: int | None = None,
+    image: str = "",
 ) -> list[str]:
     args = [
         "model", "media", "generate",
@@ -208,6 +212,12 @@ def build_media_generate_args(
         args += ["--cfg-scale", str(cfg_scale)]
     if seed is not None:
         args += ["--seed", str(int(seed))]
+    if frames is not None:
+        args += ["--frames", str(int(frames))]
+    if fps is not None:
+        args += ["--fps", str(int(fps))]
+    if image:
+        args += ["--image", image]
     if offload:
         args.append("--offload")
     return args
@@ -316,6 +326,9 @@ def remote_media_generate(
     cfg_scale: float | None = None,
     seed: int | None = None,
     offload: bool = False,
+    frames: int | None = None,
+    fps: int | None = None,
+    image: str = "",
     topology: str | None = None,
     tunnel_host: str = "",
     ssh_key: str = "",
@@ -323,7 +336,7 @@ def remote_media_generate(
     on_progress: ProgressFn | None = None,
     run_fn: RunFn | None = None,
 ) -> dict[str, Any]:
-    """Paint on the GPU host and copy the PNG to ``dest_path`` on this machine."""
+    """Generate on the GPU host and copy the artifact to ``dest_path`` here."""
     topo = (topology if topology is not None else read_local_ai_topology()).strip().lower()
     if topo != "client":
         raise MediaRemoteError(
@@ -339,8 +352,9 @@ def remote_media_generate(
     dest = os.path.abspath(dest_path)
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     stamp = int(time.time())
-    remote_out = f"{_REMOTE_OUT_DIR}/{name}-{stamp}.png"
-    local_tmp = f"/tmp/versa-agi-media-in-{name}-{stamp}.png"
+    ext = os.path.splitext(dest)[1].lstrip(".") or "png"
+    remote_out = f"{_REMOTE_OUT_DIR}/{name}-{stamp}.{ext}"
+    local_tmp = f"/tmp/versa-agi-media-in-{name}-{stamp}.{ext}"
 
     args = build_media_generate_args(
         name,
@@ -352,6 +366,9 @@ def remote_media_generate(
         cfg_scale=cfg_scale,
         seed=seed,
         offload=offload,
+        frames=frames,
+        fps=fps,
+        image=image,
     )
     ssh_cmd = build_gpu_host_agictl_cmd(
         args,
@@ -407,7 +424,7 @@ def remote_media_generate(
     if on_progress and parsed.get("seed") is not None:
         on_progress(f"seed {parsed['seed']}")
     if on_progress:
-        on_progress("Copying PNG back to this machine…")
+        on_progress(f"Copying {ext} back to this machine…")
     try:
         copied = _run(scp_cmd, cmd_timeout=120)
     except subprocess.TimeoutExpired as exc:

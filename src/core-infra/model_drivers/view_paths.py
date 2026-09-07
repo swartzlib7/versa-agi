@@ -107,7 +107,29 @@ def inspect_image_for_view(path: str, agent_name: str) -> dict:
     return result
 
 
-def resolve_view_video_path(path: str, agent_name: str = "") -> str:
+def video_byte_limit_for_model(execution_model: str | None) -> int:
+    """OpenRouter ``video_url`` is 200 MB; native Google inline is 20 MB."""
+    from model_drivers.libraries.chat_video_in_google_media import (
+        ADAPTER_ID as GOOGLE_VIDEO_ADAPTER,
+        MAX_VIDEO_BYTES as GOOGLE_VIDEO_BYTES,
+    )
+    from model_drivers.registry import resolve_model_driver
+
+    key = (execution_model or "").strip()
+    if not key:
+        return MAX_VIDEO_BYTES
+    resolved = resolve_model_driver(key, "input", "video")
+    if resolved and resolved.adapter.adapter_id == GOOGLE_VIDEO_ADAPTER:
+        return GOOGLE_VIDEO_BYTES
+    return MAX_VIDEO_BYTES
+
+
+def resolve_view_video_path(
+    path: str,
+    agent_name: str = "",
+    *,
+    max_bytes: int | None = None,
+) -> str:
     """Resolve a local video path. Relative paths resolve from the agent workspace."""
     if not path or not str(path).strip():
         raise ViewPathError("path_required", "Video path is required")
@@ -139,17 +161,25 @@ def resolve_view_video_path(path: str, agent_name: str = "") -> str:
             "not_video",
             f"Not a supported video file (mp4, mkv, mov): {real}",
         )
-    if os.path.getsize(real) > MAX_VIDEO_BYTES:
+    limit = MAX_VIDEO_BYTES if max_bytes is None else int(max_bytes)
+    size = os.path.getsize(real)
+    if size > limit:
+        limit_mb = max(1, limit // (1024 * 1024))
         raise ViewPathError(
             "too_large",
-            f"Video exceeds the 200 MB ingest limit: {real}",
+            f"Video exceeds the {limit_mb} MB ingest limit: {real}",
         )
     return real
 
 
-def inspect_video_for_view(path: str, agent_name: str) -> dict:
+def inspect_video_for_view(
+    path: str,
+    agent_name: str,
+    execution_model: str | None = None,
+) -> dict:
     """Validate path and return JSON-serializable metadata for video view tools."""
-    real = resolve_view_video_path(path, agent_name)
+    limit = video_byte_limit_for_model(execution_model)
+    real = resolve_view_video_path(path, agent_name, max_bytes=limit)
     mime = _guess_video_mime(real)
     return {
         "success": True,

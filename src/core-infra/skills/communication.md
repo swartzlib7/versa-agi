@@ -25,7 +25,7 @@ agictl message get YOUR_SUB_ACCOUNT_ID --contact <uid> --last-n-count 10  # Cont
 
 Results are **oldest to newest** (same as injected NEW MESSAGES). `--last-n-count` / `--limit` still take the newest N, then return that window oldest first.
 
-**Inbound handling:** `message send` (reply/ack) **before** `mark-processed`. Never mark-processed first. Cycle-end journals are not a reply to the sender. Attachments: `.agent/attachments/{message_id}/` + `agictl_view_image` / `agictl_view_video`.
+**Inbound handling:** `message send` (reply/ack) **before** `mark-processed`. Never mark-processed first. Cycle-end journals are not a reply to the sender. Attachments stay on disk under `.agent/attachments/{message_id}/`. Do not view or load unless the PU or a Connection **explicitly asked**; if they asked, `agictl_view_image` / `agictl_view_video` before describing.
 
 ### Recipient IDs
 
@@ -335,6 +335,8 @@ Voice messages should be written in proper paragraphs with natural flow. Bullets
 ---
 
 ## Attachments
+
+**Inbound viewing (mandatory):** Do not call `agictl_view_image` / `agictl_view_video` (or otherwise load an inbound file) unless the Primary User or a Connection **explicitly asked** in that message. Presence of a file is not a request. If they did ask, view before describing — do not invent content. IDE mode is exempt (no harness spawn).
 
 VersaVoice AI supports attachments alongside messages. Attachment types:
 

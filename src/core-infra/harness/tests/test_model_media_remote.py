@@ -75,6 +75,19 @@ class TestGenerateArgs(unittest.TestCase):
         self.assertEqual(args[args.index("--seed") + 1], "42")
         self.assertNotIn("--seed", build_media_generate_args("flux1-dev", "a", "/tmp/o.png"))
 
+    def test_frames_and_image_are_sent(self):
+        args = build_media_generate_args(
+            "ltx-2.5-distilled",
+            "a scene",
+            "/tmp/out.webm",
+            frames=33,
+            fps=24,
+            image="/tmp/start.png",
+        )
+        self.assertEqual(args[args.index("--frames") + 1], "33")
+        self.assertEqual(args[args.index("--fps") + 1], "24")
+        self.assertEqual(args[args.index("--image") + 1], "/tmp/start.png")
+
     def test_scp_argv(self):
         cmd = build_gpu_host_scp_cmd(
             "/tmp/versa-agi-media-out/qwen.png",

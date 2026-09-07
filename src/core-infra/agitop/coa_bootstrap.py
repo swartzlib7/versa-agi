@@ -282,7 +282,7 @@ def hold_coa_without_model(con: sqlite3.Connection) -> bool:
     if (row[0] or "").strip():
         return False
     status = (row[1] or "").strip()
-    if status in ("circuit_breaker", "halted", COA_HOLD_STATUS):
+    if status in ("circuit_breaker", "halted", COA_HOLD_STATUS, "ide"):
         return False
     con.execute(
         "UPDATE agents SET status=?, status_message=?, updated_at=datetime('now') "

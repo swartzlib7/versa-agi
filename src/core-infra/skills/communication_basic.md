@@ -24,8 +24,8 @@ agictl message mark-processed <id>                    # Mark as handled
 1. **Decide reply vs silence first** — if the inbound is a terminal inter-agent ack/FYI (below), **do not reply**; `mark-processed` and end.
 2. **When a reply is needed** — `agictl message send` to the sender **before** `mark-processed`.
 3. **mark-processed last** — after a meaningful reply, or after a deliberate silence decision. Never treat "send a courtesy thanks" as mandatory.
-4. **Cycle end is not a reply** — journal / `cycle end` text does not reach the sender.
-5. **Attachments** — under `.agent/attachments/{message_id}/`; use `agictl_view_image` / `agictl_view_video` per full `communication.md` before describing media content.
+4. **Cycle end is not a reply** — journal / `cycle end` text does not reach the sender. **IDE session:** there is no cycle. Do not run `cycle end` or `agent status set`. Those verbs cannot turn IDE mode off — only the Primary User toggle can. End the turn in chat.
+5. **Attachments** — under `.agent/attachments/{message_id}/`. Do not view or load unless the PU or a Connection **explicitly asked**. If they asked, use `agictl_view_image` / `agictl_view_video` per full `communication.md` before describing media. Do not invent content.
 
 ### Inter-agent terminal acknowledgments (no reply)
 

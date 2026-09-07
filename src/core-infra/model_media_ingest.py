@@ -31,7 +31,9 @@ RUNTIME_MEDIA = "media"
 PROVIDER_SLUG = "local_media"
 MEDIA_STORE = "/opt/versa-agi/media-models"
 SD_CLI_WRAPPER = "/usr/local/bin/versa-agi-sd-cli"
-SDCPP_DEFAULT_IMAGE = "versa-agi-sdcpp:master-820-de298c2"
+# LTX-2.5 landed in sd.cpp 2026-08-30 (afd5306). Current HEAD tag includes it.
+SDCPP_PIN_TAG = "master-841-6b3edaa"
+SDCPP_DEFAULT_IMAGE = f"versa-agi-sdcpp:{SDCPP_PIN_TAG}"
 SDCPP_ENV = "/etc/versa-agi/sdcpp.env"
 
 ROLE_DIT = "dit"
@@ -39,11 +41,16 @@ ROLE_TEXT_ENCODER = "text_encoder"
 ROLE_CLIP_L = "clip_l"
 ROLE_T5XXL = "t5xxl"
 ROLE_VAE = "vae"
+ROLE_AUDIO_VAE = "audio_vae"
 
 RECIPE_QWEN_IMAGE = "qwen_image_2512"
 CATALOG_KEY_QWEN_IMAGE = "qwen-image-2512"
 RECIPE_FLUX = "flux1_dev"
 CATALOG_KEY_FLUX = "flux1-dev"
+RECIPE_LTX_25 = "ltx_2_5_distilled"
+CATALOG_KEY_LTX = "ltx-2.5-distilled"
+CATALOG_KEY_LTX_Q6 = "ltx-2.5-d-q6"
+CATALOG_KEY_LTX_Q8 = "ltx-2.5-d-q8"
 
 QWEN_DIT_RE = re.compile(r"qwen-image-2512.+\.gguf$", re.I)
 QWEN_TE_DEFAULT = "Qwen2.5-VL-7B-Instruct-UD-Q4_K_XL.gguf"
@@ -61,10 +68,191 @@ FLUX_T5_FILE = "t5xxl_fp16.safetensors"
 FLUX_VAE_REPO = "black-forest-labs/FLUX.1-dev"
 FLUX_VAE_FILE = "ae.safetensors"
 
-STOCK_MEDIA_CATALOG_KEYS = (CATALOG_KEY_QWEN_IMAGE, CATALOG_KEY_FLUX)
+LTX_DIT_REPO = "Abiray/LTX-2.5-Distilled-GGUF"
+LTX_DIT_RE = re.compile(r"ltx-2\.5-distilled.+\.gguf$", re.I)
+LTX_DIT_Q4 = "LTX-2.5-Distilled-Q4_K_M.gguf"
+LTX_DIT_Q6 = "LTX-2.5-Distilled-Q6_K.gguf"
+LTX_DIT_Q8 = "LTX-2.5-Distilled-Q8_0.gguf"
+LTX_ALLOWED_DIT = {
+    LTX_DIT_Q4: CATALOG_KEY_LTX,
+    LTX_DIT_Q6: CATALOG_KEY_LTX_Q6,
+    LTX_DIT_Q8: CATALOG_KEY_LTX_Q8,
+}
+LTX_TE_REPO = "Lightricks/LTX-2.5"
+LTX_TE_FILE = "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
+LTX_VAE_FILE = "vae/ltx-2.5-video-vae-conv-bf16.safetensors"
+LTX_AUDIO_VAE_FILE = "vae/ltx-2.5-audio-vae-bf16.safetensors"
+# Official sd.cpp LTX-2.5 T2V example is 1280×720 × 121 @ 24 fps. Spatial
+# axes must be multiples of 32 (360 became 384 on the first clip). 720 → 736.
+LTX_SPATIAL_ALIGN = 32
+LTX_DEFAULT_WIDTH = 1280
+LTX_DEFAULT_HEIGHT = 720
+LTX_DEFAULT_FRAMES = 121
+LTX_DEFAULT_FPS = 24
+# Live B70 32 GB (2026-09-04): 1280×736×121 sampled in ~994s, then VAE decode
+# asked for ~49 GB + ~83 GB SYCL buffers and failed. 640×384×33 decoded.
+# Weights (~44 GB) already exceed 32 GB VRAM, so --offload-to-cpu stays required
+# even with --vae-tiling. PU parked usable 720p-class as >64 GB VRAM.
+LTX_VAE_FAIL_VOXELS = 1280 * 736 * 121
+LTX_VAE_OK_VOXELS = 640 * 384 * 33
+# Native generate sizes (landscape). Heights that are not multiples of 32
+# are ceiled (720→736, 1080→1088). 1440 is already aligned.
+# 4K is 1080p + spatial 2× (ME-LTX-HIRES) — not a native 3840 generate.
+LTX_SIZE_PRESETS = {
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+    "2k": (2560, 1440),
+}
+LTX_SIZE_ALIASES = {
+    "1440p": "2k",
+    "qhd": "2k",
+}
+LTX_HIRES_SIZES = {
+    "4k": {
+        "via": "1080p",
+        "scale": 2,
+        "note": "1080p generate + spatial 2× upscaler (ME-LTX-HIRES)",
+    },
+    "2160p": {
+        "via": "1080p",
+        "scale": 2,
+        "note": "1080p generate + spatial 2× upscaler (ME-LTX-HIRES)",
+    },
+    "uhd": {
+        "via": "1080p",
+        "scale": 2,
+        "note": "1080p generate + spatial 2× upscaler (ME-LTX-HIRES)",
+    },
+}
+LTX_ORIENTATIONS = ("landscape", "portrait")
+
+
+def align_ltx_spatial(n: int) -> int:
+    """Ceil to a multiple of 32 (sd-cli: 360 → 384, 720 → 736). Minimum 32."""
+    value = max(LTX_SPATIAL_ALIGN, int(n))
+    remainder = value % LTX_SPATIAL_ALIGN
+    if remainder:
+        return value + (LTX_SPATIAL_ALIGN - remainder)
+    return value
+
+
+def ltx_vae_voxels(width: int, height: int, frames: int) -> int:
+    return max(0, int(width)) * max(0, int(height)) * max(0, int(frames))
+
+
+def ltx_vae_decode_note(width: int, height: int, frames: int) -> str:
+    """Parked envelope: usable 720p-class is >64 GB VRAM (not NVRAM)."""
+    voxels = ltx_vae_voxels(width, height, frames)
+    if voxels >= LTX_VAE_FAIL_VOXELS:
+        return (
+            f"{width}×{height} × {frames} frames OOM'd VAE decode on Intel B70 32 GB "
+            f"(asked ~49–83 GB SYCL). Sampling had already finished (~17 min). "
+            "Parked: usable 720p-class needs >64 GB VRAM. --vae-tiling does not "
+            "remove CPU offload (weights ~44 GB). Do not retry this size on 32 GB."
+        )
+    if voxels > LTX_VAE_OK_VOXELS:
+        return (
+            f"{width}×{height} × {frames} is larger than the proven 32 GB decode "
+            f"(640×384 × 33). LTX video is parked for >64 GB VRAM."
+        )
+    return ""
+
+
+def align_ltx_frames(n: int) -> int:
+    """LTX frame count is 8k+1 (1, 9, …, 33, 121)."""
+    value = max(1, int(n))
+    k = max(0, int(round((value - 1) / 8.0)))
+    return 8 * k + 1
+
+
+def resolve_ltx_orientation(label: str | None) -> str:
+    raw = (label or "landscape").strip().lower()
+    aliases = {
+        "landscape": "landscape",
+        "horizontal": "landscape",
+        "wide": "landscape",
+        "16:9": "landscape",
+        "portrait": "portrait",
+        "vertical": "portrait",
+        "tall": "portrait",
+        "9:16": "portrait",
+    }
+    if raw not in aliases:
+        raise HfIngestError(
+            f"Unknown orientation '{label}'. Use landscape or portrait.",
+            "bad_ltx_orientation",
+        )
+    return aliases[raw]
+
+
+def apply_ltx_orientation(width: int, height: int, orientation: str | None) -> tuple[int, int]:
+    """Swap so landscape is wide and portrait is tall. LTX handles both."""
+    wide, tall = align_ltx_spatial(width), align_ltx_spatial(height)
+    if wide < tall:
+        wide, tall = tall, wide
+    if resolve_ltx_orientation(orientation) == "portrait":
+        return tall, wide
+    return wide, tall
+
+
+def resolve_ltx_size(label: str, orientation: str | None = "landscape") -> tuple[int, int]:
+    """Return aligned (width, height) for a native size + orientation."""
+    raw = (label or "").strip().lower().replace(" ", "")
+    key = LTX_SIZE_ALIASES.get(raw, raw)
+    if key in LTX_HIRES_SIZES or raw in LTX_HIRES_SIZES:
+        spec = LTX_HIRES_SIZES.get(key) or LTX_HIRES_SIZES[raw]
+        raise HfIngestError(
+            f"{label} is {spec['note']}. Not a native generate. "
+            f"Use --size {spec['via']} until the upscaler ships.",
+            "needs_hires",
+        )
+    if key not in LTX_SIZE_PRESETS:
+        known = ", ".join(LTX_SIZE_PRESETS)
+        raise HfIngestError(
+            f"Unknown LTX size '{label}'. Native: {known}. 4k waits on the spatial upscaler.",
+            "bad_ltx_size",
+        )
+    width, height = LTX_SIZE_PRESETS[key]
+    return apply_ltx_orientation(
+        align_ltx_spatial(width),
+        align_ltx_spatial(height),
+        orientation,
+    )
+
+
+def ltx_size_table() -> list[dict[str, Any]]:
+    rows = []
+    for key, (width, height) in LTX_SIZE_PRESETS.items():
+        aligned_w, aligned_h = align_ltx_spatial(width), align_ltx_spatial(height)
+        rows.append({
+            "size": key,
+            "native": True,
+            "nominal": f"{width}×{height}",
+            "width": aligned_w,
+            "height": aligned_h,
+        })
+    rows.append({
+        "size": "4k",
+        "native": False,
+        "via": "1080p",
+        "note": "1080p generate + spatial 2× upscaler (ME-LTX-HIRES)",
+    })
+    return rows
+
+STOCK_MEDIA_CATALOG_KEYS = (
+    CATALOG_KEY_QWEN_IMAGE,
+    CATALOG_KEY_FLUX,
+    CATALOG_KEY_LTX,
+    CATALOG_KEY_LTX_Q6,
+    CATALOG_KEY_LTX_Q8,
+)
+LTX_CATALOG_KEYS = (CATALOG_KEY_LTX, CATALOG_KEY_LTX_Q6, CATALOG_KEY_LTX_Q8)
 CATALOG_LABELS = {
     CATALOG_KEY_QWEN_IMAGE: "Qwen-Image-2512 — Local sd-cli paint",
     CATALOG_KEY_FLUX: "FLUX.1-dev — Local sd-cli paint",
+    CATALOG_KEY_LTX: "LTX-2.5 Distilled Q4 — Local sd-cli video",
+    CATALOG_KEY_LTX_Q6: "LTX-2.5 Distilled Q6 — Local sd-cli video",
+    CATALOG_KEY_LTX_Q8: "LTX-2.5 Distilled Q8 — Local sd-cli video",
 }
 
 def list_hf_media_recipes() -> list[dict[str, Any]]:
@@ -101,6 +289,45 @@ def list_hf_media_recipes() -> list[dict[str, Any]]:
             "output_modalities": "image",
             "classification": CLASS_MEDIA,
             "recipe": RECIPE_FLUX,
+        },
+        {
+            "id": CATALOG_KEY_LTX,
+            "label": "LTX-2.5 Distilled Q4",
+            "source": f"hf://{LTX_DIT_REPO}/{LTX_DIT_Q4}",
+            "provider": PROVIDER_SLUG,
+            "class": "local",
+            "kind": "media",
+            "work_modality": "local",
+            "input_modalities": "text,image",
+            "output_modalities": "video",
+            "classification": CLASS_MEDIA,
+            "recipe": RECIPE_LTX_25,
+        },
+        {
+            "id": CATALOG_KEY_LTX_Q6,
+            "label": "LTX-2.5 Distilled Q6",
+            "source": f"hf://{LTX_DIT_REPO}/{LTX_DIT_Q6}",
+            "provider": PROVIDER_SLUG,
+            "class": "local",
+            "kind": "media",
+            "work_modality": "local",
+            "input_modalities": "text,image",
+            "output_modalities": "video",
+            "classification": CLASS_MEDIA,
+            "recipe": RECIPE_LTX_25,
+        },
+        {
+            "id": CATALOG_KEY_LTX_Q8,
+            "label": "LTX-2.5 Distilled Q8",
+            "source": f"hf://{LTX_DIT_REPO}/{LTX_DIT_Q8}",
+            "provider": PROVIDER_SLUG,
+            "class": "local",
+            "kind": "media",
+            "work_modality": "local",
+            "input_modalities": "text,image",
+            "output_modalities": "video",
+            "classification": CLASS_MEDIA,
+            "recipe": RECIPE_LTX_25,
         },
     ]
 
@@ -290,6 +517,85 @@ def _is_flux(repo: str, filename: str) -> bool:
     return low == FLUX_DIT_REPO.lower() or bool(FLUX_DIT_RE.search(filename or ""))
 
 
+def _is_ltx(repo: str, filename: str) -> bool:
+    low_repo = (repo or "").lower()
+    return (
+        low_repo == LTX_DIT_REPO.lower()
+        or "ltx-2.5-distilled" in low_repo
+        or bool(LTX_DIT_RE.search(filename or ""))
+    )
+
+
+def ltx_dit_for_filename(filename: str) -> tuple[str, str]:
+    """Return (dit_filename, catalog_key) for an allowed LTX Distilled quant."""
+    base = os.path.basename(filename or "")
+    if base in LTX_ALLOWED_DIT:
+        return base, LTX_ALLOWED_DIT[base]
+    return LTX_DIT_Q4, CATALOG_KEY_LTX
+
+
+def ltx_2_5_plan(*, dit_filename: str, dest_key: str) -> BundlePlan:
+    planned_dit, default_key = ltx_dit_for_filename(dit_filename)
+    warnings: list[str] = []
+    if os.path.basename(dit_filename or "") not in LTX_ALLOWED_DIT:
+        warnings.append(
+            f"Unsupported Distilled quant '{os.path.basename(dit_filename or '')}'. "
+            f"Planning {planned_dit} (Q4 / Q6 / Q8 only)."
+        )
+    warnings.append(
+        "Companions are on gated Hub repo Lightricks/LTX-2.5. Import needs "
+        "[local_ai] hf_token and a license accept on that card."
+    )
+    warnings.append(
+        "LTX-2 community license: commercial use is free under $10M annual revenue."
+    )
+    return BundlePlan(
+        recipe=RECIPE_LTX_25,
+        catalog_key_hint=dest_key or default_key,
+        provider=PROVIDER_SLUG,
+        runtime="sd-cli",
+        store_dir=os.path.join(MEDIA_STORE, dest_key or default_key),
+        components=[
+            BundleComponent(
+                role=ROLE_DIT,
+                repo=LTX_DIT_REPO,
+                filename=planned_dit,
+                validate="gguf",
+                note="Abiray LTX-2.5 Distilled DiT (Q4_K_M / Q6_K / Q8_0)",
+            ),
+            BundleComponent(
+                role=ROLE_TEXT_ENCODER,
+                repo=LTX_TE_REPO,
+                filename=LTX_TE_FILE,
+                validate="safetensors",
+                note="Gemma 4 12B LTX-tuned with bundled projection — not stock Gemma 4",
+            ),
+            BundleComponent(
+                role=ROLE_VAE,
+                repo=LTX_TE_REPO,
+                filename=LTX_VAE_FILE,
+                validate="safetensors",
+                note="Conv video VAE only. The diffusion decoder is not implemented in sd.cpp",
+            ),
+            BundleComponent(
+                role=ROLE_AUDIO_VAE,
+                repo=LTX_TE_REPO,
+                filename=LTX_AUDIO_VAE_FILE,
+                validate="safetensors",
+                note="Audio VAE + vocoder for synced sound in the WebM",
+            ),
+        ],
+        warnings=warnings,
+        notes=[
+            "Pinned runtime is stable-diffusion.cpp sd-cli -M vid_gen (not ComfyUI).",
+            "No --embeddings-connectors (2.5 bundles the projection in the text encoder).",
+            "Defaults: 1280×736 (720 aligned to 32), 121 frames, 24 fps, 8 steps, CFG 3.0, --offload-to-cpu.",
+            "Parked on ≤64 GB VRAM: weights ~44 GB force CPU offload even with --vae-tiling. Usable 720p-class is >64 GB VRAM.",
+            "Import does not create a Utility Profile or ◆.",
+        ],
+    )
+
+
 def plan_media_bundle(
     inspected: InspectResult,
     *,
@@ -299,6 +605,14 @@ def plan_media_bundle(
     selected = inspected.selected_file
     filename = (selected.path if selected else inspected.source.filename) or ""
     repo = inspected.source.repo_id
+    if _is_ltx(repo, filename):
+        if inspected.classification not in (CLASS_MEDIA, CLASS_UNKNOWN) and not LTX_DIT_RE.search(filename):
+            return None
+        _planned_dit, default_key = ltx_dit_for_filename(filename)
+        return ltx_2_5_plan(
+            dit_filename=filename or LTX_DIT_Q4,
+            dest_key=dest_key or default_key,
+        )
     if _is_flux(repo, filename):
         if inspected.classification not in (CLASS_MEDIA, CLASS_UNKNOWN) and not FLUX_DIT_RE.search(filename):
             return None
@@ -315,11 +629,57 @@ def plan_media_bundle(
 
 
 def recipe_generate_defaults(name: str) -> dict[str, Any]:
-    """Paint knobs for a catalog key. Turbo CFG 0 must not be treated as missing."""
+    """Paint/video knobs for a catalog key. Turbo CFG 0 must not be treated as missing."""
     key = (name or "").strip()
+    if key in LTX_CATALOG_KEYS or key == RECIPE_LTX_25:
+        return {
+            "width": align_ltx_spatial(LTX_DEFAULT_WIDTH),
+            "height": align_ltx_spatial(LTX_DEFAULT_HEIGHT),
+            "steps": 8,
+            "cfg_scale": 3.0,
+            "video_frames": align_ltx_frames(LTX_DEFAULT_FRAMES),
+            "fps": LTX_DEFAULT_FPS,
+            "offload": True,
+            "output_ext": "webm",
+            "output_modality": "video",
+        }
     if key in (CATALOG_KEY_FLUX, RECIPE_FLUX):
-        return {"width": 768, "height": 768, "steps": 20, "cfg_scale": 1.0}
-    return {"width": 768, "height": 768, "steps": 40, "cfg_scale": 2.5}
+        return {
+            "width": 768,
+            "height": 768,
+            "steps": 20,
+            "cfg_scale": 1.0,
+            "output_ext": "png",
+            "output_modality": "image",
+        }
+    return {
+        "width": 768,
+        "height": 768,
+        "steps": 40,
+        "cfg_scale": 2.5,
+        "output_ext": "png",
+        "output_modality": "image",
+    }
+
+
+def media_output_kind(name: str, bundle_dir: str = "") -> str:
+    """image or video for a bundle/catalog key."""
+    key = (name or "").strip()
+    if key in LTX_CATALOG_KEYS or key == RECIPE_LTX_25:
+        return "video"
+    if bundle_dir:
+        try:
+            recipe = str(load_bundle_manifest(bundle_dir).get("recipe") or "")
+        except HfIngestError:
+            recipe = ""
+        if recipe == RECIPE_LTX_25:
+            return "video"
+    return str(recipe_generate_defaults(key).get("output_modality") or "image")
+
+
+def media_output_ext(name: str, bundle_dir: str = "") -> str:
+    kind = media_output_kind(name, bundle_dir)
+    return "webm" if kind == "video" else "png"
 
 
 def inspect_media_source(source: str, *, dest_key: str = "") -> dict[str, Any]:
@@ -515,6 +875,8 @@ def media_usage(name: str = "") -> dict[str, Any]:
     key = (name or CATALOG_KEY_QWEN_IMAGE).strip()
     if key in (CATALOG_KEY_FLUX, RECIPE_FLUX):
         return _flux_usage()
+    if key in LTX_CATALOG_KEYS or key == RECIPE_LTX_25:
+        return _ltx_usage(key if key in LTX_CATALOG_KEYS else CATALOG_KEY_LTX)
     if key not in (CATALOG_KEY_QWEN_IMAGE, "qwen-image"):
         known = ", ".join(STOCK_MEDIA_CATALOG_KEYS)
         raise HfIngestError(
@@ -610,5 +972,85 @@ def _flux_usage() -> dict[str, Any]:
         "summary": (
             "Local Utility paint (not chat). FLUX.1-dev Q8_0, 20 steps, CFG 1.0, sd-cli. "
             "Non-commercial license. Client runs copy the PNG back here."
+        ),
+    }
+
+
+def _ltx_usage(key: str) -> dict[str, Any]:
+    dit = LTX_DIT_Q4
+    if key == CATALOG_KEY_LTX_Q6:
+        dit = LTX_DIT_Q6
+    elif key == CATALOG_KEY_LTX_Q8:
+        dit = LTX_DIT_Q8
+    return {
+        "catalog_key": key,
+        "recipe": RECIPE_LTX_25,
+        "runtime": "sd-cli",
+        "mode": "vid_gen",
+        "store": os.path.join(MEDIA_STORE, key),
+        "skill": "local_media_ltx_2_5_distilled.md",
+        "default_width": align_ltx_spatial(LTX_DEFAULT_WIDTH),
+        "default_height": align_ltx_spatial(LTX_DEFAULT_HEIGHT),
+        "default_size": "720p",
+        "sizes": ltx_size_table(),
+        "video_frames": align_ltx_frames(LTX_DEFAULT_FRAMES),
+        "fps": LTX_DEFAULT_FPS,
+        "preferred_dit_quant": os.path.splitext(dit)[0].rsplit("-", 1)[-1],
+        "dit": f"{LTX_DIT_REPO}/{dit}",
+        "text_encoder": f"{LTX_TE_REPO}/{LTX_TE_FILE}",
+        "vae": f"{LTX_TE_REPO}/{LTX_VAE_FILE}",
+        "audio_vae": f"{LTX_TE_REPO}/{LTX_AUDIO_VAE_FILE}",
+        "steps": 8,
+        "cfg_scale": 3.0,
+        "output_ext": "webm",
+        "gpu_sharing": (
+            "Experimental (parked): usable 720p-class LTX needs >64 GB VRAM (GPU memory, not NVRAM). "
+            "Weights are ~44 GB (Q4 DiT ~16 GB + Gemma 4 LTX TE ~26 GB + VAEs), so "
+            "--offload-to-cpu is required on 32 GB even with --vae-tiling. "
+            "Intel B70 32 GB: 720p×121 sampled (~17 min) then VAE decode OOM (~49–83 GB). "
+            "Proven decode on that card: 640×384 × 33 (rejected as too short). "
+            "Video does not use llama-server slots; chat still shares the GPU."
+        ),
+        "commands": {
+            "usage": f"agictl model media usage {key}",
+            "generate": (
+                f"agictl model media generate --name {key} "
+                "--prompt '…'"
+            ),
+            "generate_1080p": (
+                f"agictl model media generate --name {key} "
+                "--size 1080p --prompt '…'"
+            ),
+            "generate_2k": (
+                f"agictl model media generate --name {key} "
+                "--size 2k --prompt '…'"
+            ),
+            "generate_portrait": (
+                f"agictl model media generate --name {key} "
+                "--orientation portrait --prompt '…'"
+            ),
+            "generate_4k": (
+                "not yet — 1080p + spatial 2× upscaler (ME-LTX-HIRES)"
+            ),
+            "i2v": (
+                f"agictl model media generate --name {key} "
+                "--image start.png --prompt '…'"
+            ),
+            "utility": f"agictl utility run {key}",
+        },
+        "sources": {
+            "card": f"https://huggingface.co/{LTX_DIT_REPO}",
+            "sdcpp": "https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/ltx2.md",
+            "companions": f"https://huggingface.co/{LTX_TE_REPO}",
+        },
+        "prompt_tips": (
+            "Write a long cinematic shot: subject, motion, camera, light, and any speech. "
+            "Distilled is faster than the 22B dev transformer. "
+            "Do not use Abiray ComfyUI T2V/I2V graphs — product path is agictl / sd-cli. "
+            "I2V: pass --image. We omit --seed unless you pass one (sd-cli then uses 42)."
+        ),
+        "summary": (
+            "Local Utility video (not chat). LTX-2.5 Distilled, sd-cli -M vid_gen, WebM. "
+            "Read this before generating. Client runs copy the WebM back here."
         ),
     }

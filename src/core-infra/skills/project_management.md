@@ -43,7 +43,7 @@ This mindset applies **after** the product is released and has live users.
 - During **Building**: bias toward simplicity and clean re-implementation over workarounds.
 - During **Maintaining**: bias toward safety and incremental changes over wholesale rewrites.
 - If unsure, **ask the Primary User** which phase applies.
-- Once a project is registered and work is **product code / a named feature**, load **`software_engineering`** and **`feature_statefold`** (one living `state_*.md` per feature — no parallel specs).
+- Once a project is registered and work is **product code / a named feature**, load **`software_engineering`** and **`production_statefold`** (one living `state_*.md` per feature in the project's resolved doc home — no parallel specs).
 
 ## Trigger
 
@@ -123,7 +123,7 @@ agictl task add "Project setup: collaboration plan + WBS" \
   --project <project_id> \
   --assignee <owner_agent_name> \
   --due-date "YYYY-MM-DD HH:MM:SS" \
-  --desc "Run project_management Step 4 (collaboration interview + QA reviewer). Write the collaboration plan (state_*.md § Collaboration or interim COLLABORATION.md). On the first feature, establish a WBS backlog table (feature_statefold). Keep WBS rows mirrored to project tasks (task_scheduling / software_engineering bridge)."
+  --desc "Run project_management Step 4 (collaboration interview + QA reviewer). Write the collaboration plan (state_*.md § Collaboration or interim COLLABORATION.md). On the first feature, establish a WBS backlog table (production_statefold). Keep WBS rows mirrored to project tasks (task_scheduling / software_engineering bridge)."
 ```
 
 Before creating, check `agictl task list --all` so you do not duplicate an existing setup task for this project.
@@ -175,7 +175,7 @@ If PU: record `qa_reviewer=pu`.
 
 Write a short plan (pattern, Building/Maintaining, `qa_reviewer`, any notes) to:
 
-1. **Preferred once a feature exists:** that feature’s living `state_*.md` under a **§ Collaboration** section (`feature_statefold`).
+1. **Preferred once a feature exists:** that feature’s living `state_*.md` under a **§ Collaboration** section (`production_statefold`; resolved doc home).
 2. **Interim (no feature yet):** `workspace/{slug}/COLLABORATION.md` only.
 
 **Fold rule:** When the first feature `state_*.md` is created, copy/merge `COLLABORATION.md` into § Collaboration and remove or archive the interim file so it is not a second live tracker. Do **not** create `*_spec.md` or `context_*.md` for this.
@@ -247,14 +247,15 @@ Reference for managing projects after onboarding:
 4. Each project directory is self-contained
 5. Commit project work with clear, project-scoped messages
 6. Use `agictl project list` to check active projects each cycle
+7. Feature state docs live under `docs/production/state/` (or the home recorded in `_project.yml`). Load **production_statefold** before writing them.
 
 ## New Project Workflow
 
-Aligned with **feature_statefold**: one living `state_*.md` per feature. Do **not** create `*_spec.md`, `context_*.md`, or parallel “Technical Specification” files.
+Aligned with **production_statefold**: one living `state_*.md` per feature under the project's resolved doc home (default `docs/production/state/`). Do **not** create `*_spec.md`, `context_*.md`, or parallel “Technical Specification” files.
 
-**Phase 1 — Register & orient:** Create `workspace/{slug}/`, register with `agictl project add`, seed the owner setup task (Step 3). Capture the project essence in the first feature’s `state_*.md` (Behavior / Current / Target). Product-level Orientation / Production Plan / Change Logs stay as official overviews only when a backlog `DOC-*` item says to sync them — they are not a substitute for the feature state doc.
+**Phase 1 — Register & orient:** Create `workspace/{slug}/`, register with `agictl project add` (local and `--git-init` scaffold `docs/production/state/_project.yml`), seed the owner setup task (Step 3). Capture the project essence in the first feature’s `state_*.md` (Behavior / Current / Target). Product-level Orientation / Production Plan / Change Logs stay as official overviews only when a backlog `DOC-*` item says to sync them — they are not a substitute for the feature state doc.
 
-**Phase 2 — Collaborate & plan:** Run Step 4 (collaboration pattern + QA reviewer). Write § Collaboration. Build a WBS backlog table in that state doc (§4 Backlog — see `feature_statefold`). Human-readable progress lives in the WBS table.
+**Phase 2 — Collaborate & plan:** Run Step 4 (collaboration pattern + QA reviewer). Write § Collaboration. Build a WBS backlog table in that state doc (§4 Backlog — see `production_statefold`). Human-readable progress lives in the WBS table.
 
 **Phase 3 — Iterative build:** Work the WBS one unit (or milestone batch) at a time per the collaboration plan. Mirror active WBS rows to `agictl task … --project <id>` for Lifeline wake and progress journals (`task_scheduling`; bridge detail in `software_engineering`). SQLite/tasks are the runtime tracker — **not** a replacement for the WBS table.
 

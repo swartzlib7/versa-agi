@@ -15,7 +15,7 @@
 - **Hybrid skill injection** — `hybrid` / `full` / `lazy` per agent.
 - **Context window** — `pre_model_hook` trim; conversation depth per agent.
 - **Budget warnings** — 80% / 95% HumanMessage; hard stop at 100%.
-- **Local AI** — Ollama (NVIDIA/AMD) and Docker SYCL (Intel ARC). ☁ / 🖥 in agitop.
+- **Local AI** — three runtimes: Ollama chat (NVIDIA/AMD), Docker SYCL chat (Intel ARC), `sd-cli` media (`local_media` paint). LTX video is **experimental** (parked; **>64 GB VRAM**). Matrix: [Local AI support](local-ai-support.md).
 - **Cloud providers** — vendor-agnostic catalog (`class=cloud`) via `provider_runtime` (Google, xAI, OpenAI, Anthropic, OpenRouter). Exact ModelDriver bindings for non-text (◆ / ◇).
 - **Web search** — local SearXNG (`agictl search web`).
 - **Headless browser** — Playwright Chromium (`agictl browser`).

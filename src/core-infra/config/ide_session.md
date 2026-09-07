@@ -53,17 +53,72 @@ no `--status`. If a command is rejected, run `agictl <group> <verb> --help` or
 
 `memory_management.md` says its awareness procedure must run before ending every **cycle**. There are no cycles in this mode. Run that procedure at the **end of a turn** when you did real work.
 
-This session is not in the LangGraph checkpoint. Record outcomes with `agictl memory` and the task journal or they will not survive the return to normal Lifeline spawning.
+This session is not in the LangGraph checkpoint. If you do not write it, the next Lifeline spawn will not have it.
+
+Do **not** run `agictl cycle start`, `agictl cycle end`, or `agictl agent status set`. Those belong to a harness cycle. They cannot turn IDE mode off. Only the Primary User can, via agitop **IDE Integration** or `sudo agictl agent ide off`.
 
 ## Closing the session
 
-When the Primary User signals wrap-up — or you can tell the session is ending — treat close-out as **its own turn**, not a last sentence after other work. Once they flip the mode off you cannot write anything (step 1 of the opener stands you down).
+This is the substitute for `cycle end`. When the Primary User signals wrap-up — or the session is clearly ending — make close-out **its own turn**, not a last sentence after other work. Once they flip the mode off, step 1 of the opener stands you down and you cannot write.
 
-Order:
+Run all four buckets while the mode is still on. Skip a bucket only when that area did not change this session, and say so. Thin one-liners are not enough — treat the whole session the way you treat a cycle end.
 
-1. **State first.** Games, awareness, memory, project records, and the task journal. Same procedure as `memory_management.md`, plus any game / project updates the session actually changed. Do this while the mode is still on.
-2. **Then ask about outbound.** A message to a peer or VersaVoice contact becomes the next Lifeline wake. Do not send a closing FYI, punch-list, or “loop closed” note unless the Primary User wants that handoff. If they do, send it after state is written, not instead of it.
-3. **Tell them you are ready.** One sentence: state is recorded, what (if anything) you sent, and that they can turn the mode off.
+### 1. Awareness
+
+`cat .agent/skills/memory_management.md` and run steps 1–3 on **this whole session** (not one turn):
+
+- Reflect across system, user, intention, and reason.
+- `agictl awareness table --status active` first — revise or supersede; do not duplicate.
+- Write conclusions and linked actions that are actually new.
+
+### 2. Memory
+
+`memory_management.md` step 4 — only what changed:
+
+```bash
+agictl memory system set <key> "<value>"
+agictl memory project set <project_id> --phase "…" --decisions "…" --blockers "…" --next-steps "…"
+agictl memory connection set <uid> …
+```
+
+- **System** — constraints, discoveries, standing instructions (`constraint_*`, `discovery_*`, `user_instruction_*`).
+- **Project** — each project you touched.
+- **Connection** — only contacts you actually talked to.
+
+### 3. Tasks
+
+For every task you touched this session:
+
+```bash
+agictl task progress <id> "DONE: … NEXT: … BLOCKERS: …"
+```
+
+Move status only if the work actually moved (`in_progress`, `waiting` + snooze, `done`, `blocked`). Do not leave session work only in this chat.
+
+### 4. Projects and games
+
+Project memory is bucket 2. Also update registration if facts changed:
+
+```bash
+agictl project update <id> …
+agictl game list --status active
+agictl game update <id> …
+```
+
+Skip game/project **registration** updates when nothing about the record changed. Do not skip project **memory** if you did project work.
+
+Then verify:
+
+```bash
+agictl awareness table --status active
+agictl memory system list
+agictl task list --all
+```
+
+Then:
+
+1. **Ask about outbound.** A message to a peer or VersaVoice contact becomes the next Lifeline wake. Do not send a closing FYI, punch-list, or “loop closed” note unless the Primary User wants that handoff. If they do, send it after state is written, not instead of it.
+2. **Tell them you are ready.** One sentence: the four buckets are written (or which you skipped and why), what (if anything) you sent, and that they turn the mode off in agitop or `ide off`. You cannot flip it.
 
 A long session makes this more important, not less — more of the night lives only in this chat until you write it down.
 

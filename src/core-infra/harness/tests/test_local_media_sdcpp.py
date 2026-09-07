@@ -23,13 +23,16 @@ sys.path.insert(0, CORE_INFRA)
 from harness.generation import generate_media  # noqa: E402
 from model_catalog import load_catalog, load_providers  # noqa: E402
 from model_drivers.errors import DriverError  # noqa: E402
-from model_drivers.libraries import local_media_image_out_sdcpp as sdcpp  # noqa: E402
+from model_drivers.libraries import (  # noqa: E402
+    local_media_image_out_sdcpp as sdcpp,
+    local_media_video_out_sdcpp as sdcpp_video,
+)
 from model_drivers.registry import (  # noqa: E402
     ADAPTERS,
     catalog_driver_enrichment,
     resolve_model_driver,
 )
-from model_media_ingest import resolve_bundle_dir  # noqa: E402
+from model_media_ingest import SDCPP_PIN_TAG, resolve_bundle_dir  # noqa: E402
 from provider_runtime import resolve_provider_route  # noqa: E402
 
 MODELS_INI = os.path.join(os.path.dirname(CORE_INFRA), "models.ini")
@@ -258,6 +261,113 @@ class TestQwenImageMe5(unittest.TestCase):
         self.assertEqual(ext, "png")
         self.assertEqual(mime, "image/png")
         self.assertEqual(data[:4], b"\x89PNG")
+
+
+WEBM = b"\x1aE\xdf\xa3" + b"\x00" * 40
+
+
+def _ltx_bundle(tmp: str) -> str:
+    os.makedirs(tmp, exist_ok=True)
+    for name in (
+        "LTX-2.5-Distilled-Q4_K_M.gguf",
+        "gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+        "ltx-2.5-video-vae-conv-bf16.safetensors",
+        "ltx-2.5-audio-vae-bf16.safetensors",
+    ):
+        with open(os.path.join(tmp, name), "wb") as fh:
+            fh.write(b"stub")
+    with open(os.path.join(tmp, "bundle.json"), "w", encoding="utf-8") as fh:
+        fh.write('{"recipe":"ltx_2_5_distilled","components":[]}')
+    return tmp
+
+
+class TestLtxVideoAdapter(unittest.TestCase):
+    def test_pin_includes_ltx(self):
+        self.assertEqual(SDCPP_PIN_TAG, "master-841-6b3edaa")
+
+    def test_binding_and_diamond(self):
+        catalog = load_catalog(MODELS_INI)
+        providers = load_providers(MODELS_INI)
+        self.assertEqual(catalog["ltx-2.5-distilled"]["provider"], "local_media")
+        self.assertIn("video", catalog["ltx-2.5-distilled"]["output_modalities"])
+        resolved = resolve_model_driver(
+            "ltx-2.5-distilled",
+            "output",
+            "video",
+            catalog=catalog,
+            providers=providers,
+        )
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.adapter.adapter_id, sdcpp_video.ADAPTER_ID)
+        enrich = catalog_driver_enrichment(
+            "ltx-2.5-distilled",
+            catalog["ltx-2.5-distilled"],
+            catalog=catalog,
+            providers=providers,
+        )
+        self.assertEqual(enrich["driver_badges"]["output"]["video"], "◆")
+
+    def test_vid_gen_command(self):
+        captured: list[list[str]] = []
+
+        def runner(cmd, **_kwargs):
+            captured.append(cmd)
+            out = cmd[cmd.index("-o") + 1]
+            with open(out, "wb") as fh:
+                fh.write(WEBM)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _ltx_bundle(tmp)
+            art = sdcpp_video.generate(
+                prompt="a red convertible on a coastal road",
+                config={"bundle_dir": tmp, "out_dir": os.path.join(tmp, "out")},
+                runner=runner,
+            )
+        self.assertEqual(art.ext, "webm")
+        cmd = captured[0]
+        self.assertEqual(cmd[1:3], ["-M", "vid_gen"])
+        self.assertIn("--audio-vae", cmd)
+        self.assertIn("--llm", cmd)
+        self.assertNotIn("--embeddings-connectors", cmd)
+        self.assertEqual(cmd[cmd.index("--video-frames") + 1], "121")
+        self.assertEqual(cmd[cmd.index("-W") + 1], "1280")
+        self.assertEqual(cmd[cmd.index("-H") + 1], "736")
+        self.assertIn("--offload-to-cpu", cmd)
+        self.assertIn("--vae-tiling", cmd)
+
+    def test_generate_media_mocked(self):
+        catalog = load_catalog(MODELS_INI)
+        providers = load_providers(MODELS_INI)
+
+        def fake_run(cmd, **_kwargs):
+            out = cmd[cmd.index("-o") + 1]
+            with open(out, "wb") as fh:
+                fh.write(WEBM)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = _ltx_bundle(tmp)
+            with (
+                patch(
+                    "model_drivers.registry.load_catalog",
+                    return_value=catalog,
+                ),
+                patch(
+                    "model_drivers.registry.load_providers",
+                    return_value=providers,
+                ),
+                patch.object(sdcpp_video.subprocess, "run", side_effect=fake_run),
+            ):
+                data, ext, mime, _transcript = generate_media(
+                    "ltx-2.5-distilled",
+                    "video",
+                    prompt="a coastal cliff road at sunset",
+                    config={"bundle_dir": bundle},
+                )
+        self.assertEqual(ext, "webm")
+        self.assertEqual(mime, "video/webm")
+        self.assertGreater(len(data), 32)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@
 #     --build-arg="GGML_SYCL_F16=ON" \
 #     -f intel-sdcpp.Dockerfile <stable-diffusion.cpp-source>
 #
-# Pinned source tag: master-820-de298c2 (2026-08-12)
+# Pinned source tag: master-841-6b3edaa (2026-08-30; includes LTX-2.5)
 # ─────────────────────────────────────────────────
 
 ARG ONEAPI_VERSION=2025.3.3-0-devel-ubuntu24.04

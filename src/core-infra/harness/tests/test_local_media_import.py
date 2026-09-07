@@ -26,19 +26,30 @@ from model_hf_ingest import (  # noqa: E402
     CLASS_MEDIA,
     CLASS_UNKNOWN,
     HfFile,
+    HfIngestError,
     InspectResult,
     HfSource,
 )
 from model_media_ingest import (  # noqa: E402
     CATALOG_KEY_FLUX,
+    CATALOG_KEY_LTX,
+    CATALOG_KEY_LTX_Q6,
+    CATALOG_KEY_LTX_Q8,
     CATALOG_KEY_QWEN_IMAGE,
     FLUX_CLIP_FILE,
     FLUX_DIT_FILE,
     FLUX_T5_FILE,
     FLUX_VAE_FILE,
+    LTX_AUDIO_VAE_FILE,
+    LTX_DIT_Q4,
+    LTX_DIT_Q6,
+    LTX_TE_FILE,
+    LTX_VAE_FILE,
     RECIPE_FLUX,
+    RECIPE_LTX_25,
     MEDIA_STORE,
     RECIPE_QWEN_IMAGE,
+    ROLE_AUDIO_VAE,
     ROLE_DIT,
     ROLE_TEXT_ENCODER,
     ROLE_VAE,
@@ -164,6 +175,84 @@ class TestFluxBundlePlan(unittest.TestCase):
         flux = recipe_generate_defaults("flux1-dev")
         self.assertEqual(flux["steps"], 20)
         self.assertEqual(flux["cfg_scale"], 1.0)
+        ltx = recipe_generate_defaults("ltx-2.5-distilled")
+        self.assertEqual(ltx["steps"], 8)
+        self.assertEqual(ltx["cfg_scale"], 3.0)
+        self.assertEqual(ltx["width"], 1280)
+        self.assertEqual(ltx["height"], 736)
+        self.assertEqual(ltx["video_frames"], 121)
+        self.assertEqual(ltx["output_ext"], "webm")
+        from model_media_ingest import align_ltx_frames, align_ltx_spatial
+
+        self.assertEqual(align_ltx_spatial(360), 384)
+        self.assertEqual(align_ltx_spatial(720), 736)
+        self.assertEqual(align_ltx_spatial(1280), 1280)
+        self.assertEqual(align_ltx_frames(33), 33)
+        self.assertEqual(align_ltx_frames(120), 121)
+        self.assertEqual(align_ltx_frames(121), 121)
+        from model_media_ingest import resolve_ltx_size
+
+        self.assertEqual(resolve_ltx_size("720p"), (1280, 736))
+        self.assertEqual(resolve_ltx_size("720p", "portrait"), (736, 1280))
+        self.assertEqual(resolve_ltx_size("1080p"), (1920, 1088))
+        self.assertEqual(resolve_ltx_size("2k"), (2560, 1440))
+        with self.assertRaises(HfIngestError) as raised:
+            resolve_ltx_size("4k")
+        self.assertEqual(raised.exception.code, "needs_hires")
+        from model_media_ingest import ltx_vae_decode_note
+
+        self.assertIn("OOM", ltx_vae_decode_note(1280, 736, 121))
+        self.assertEqual(ltx_vae_decode_note(640, 384, 33), "")
+
+
+class TestLtxBundlePlan(unittest.TestCase):
+    def test_four_roles_q4(self):
+        plan = plan_media_bundle(
+            _inspect(
+                CLASS_MEDIA,
+                LTX_DIT_Q4,
+                "Abiray/LTX-2.5-Distilled-GGUF",
+            ),
+        )
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.recipe, RECIPE_LTX_25)
+        self.assertEqual(plan.catalog_key_hint, CATALOG_KEY_LTX)
+        roles = [c.role for c in plan.components]
+        self.assertEqual(roles, [ROLE_DIT, ROLE_TEXT_ENCODER, ROLE_VAE, ROLE_AUDIO_VAE])
+        dit, te, vae, audio = plan.components
+        self.assertEqual(dit.filename, LTX_DIT_Q4)
+        self.assertEqual(te.filename, LTX_TE_FILE)
+        self.assertEqual(te.validate, "safetensors")
+        self.assertIn("conv", vae.filename)
+        self.assertEqual(vae.filename, LTX_VAE_FILE)
+        self.assertEqual(audio.filename, LTX_AUDIO_VAE_FILE)
+        self.assertTrue(any("gated" in w.lower() for w in plan.warnings))
+
+    def test_q6_and_q8_keep_their_files(self):
+        q6 = plan_media_bundle(
+            _inspect(CLASS_MEDIA, LTX_DIT_Q6, "Abiray/LTX-2.5-Distilled-GGUF"),
+        )
+        self.assertEqual(q6.catalog_key_hint, CATALOG_KEY_LTX_Q6)
+        self.assertEqual(q6.components[0].filename, LTX_DIT_Q6)
+        q8 = plan_media_bundle(
+            _inspect(
+                CLASS_MEDIA,
+                "LTX-2.5-Distilled-Q8_0.gguf",
+                "Abiray/LTX-2.5-Distilled-GGUF",
+            ),
+        )
+        self.assertEqual(q8.catalog_key_hint, CATALOG_KEY_LTX_Q8)
+
+    def test_q3_remaps_to_q4(self):
+        plan = plan_media_bundle(
+            _inspect(
+                CLASS_MEDIA,
+                "LTX-2.5-Distilled-Q3_K_M.gguf",
+                "Abiray/LTX-2.5-Distilled-GGUF",
+            ),
+        )
+        self.assertEqual(plan.components[0].filename, LTX_DIT_Q4)
+        self.assertTrue(any("Unsupported" in w for w in plan.warnings))
 
 
 class TestInspectMediaSource(unittest.TestCase):
@@ -269,6 +358,25 @@ class TestMediaUsage(unittest.TestCase):
         self.assertIn(CATALOG_KEY_QWEN_IMAGE, ids)
         self.assertNotIn("krea2-turbo", ids)
         self.assertIn(CATALOG_KEY_FLUX, ids)
+        self.assertIn(CATALOG_KEY_LTX, ids)
+        self.assertIn(CATALOG_KEY_LTX_Q6, ids)
+        self.assertIn(CATALOG_KEY_LTX_Q8, ids)
+
+    def test_ltx(self):
+        payload = media_usage("ltx-2.5-distilled")
+        self.assertEqual(payload["catalog_key"], CATALOG_KEY_LTX)
+        self.assertEqual(payload["steps"], 8)
+        self.assertEqual(payload["default_width"], 1280)
+        self.assertEqual(payload["default_height"], 736)
+        self.assertEqual(payload["default_size"], "720p")
+        self.assertEqual(payload["video_frames"], 121)
+        size_keys = [row["size"] for row in payload["sizes"]]
+        self.assertEqual(size_keys, ["720p", "1080p", "2k", "4k"])
+        four_k = next(row for row in payload["sizes"] if row["size"] == "4k")
+        self.assertFalse(four_k["native"])
+        self.assertIn("ME-LTX-HIRES", payload["commands"]["generate_4k"])
+        self.assertIn("local_media_ltx_2_5_distilled.md", payload["skill"])
+        self.assertIn(LTX_DIT_Q4, payload["dit"])
 
 
 class TestMediaRename(unittest.TestCase):

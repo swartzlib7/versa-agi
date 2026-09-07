@@ -192,6 +192,9 @@ gemma4:e2b                    = local|llamacpp|true|false|16384|131072|local|tex
 gemma4:31b                    = local|llamacpp|true|false|32768|262144|local|text|text|false|Gemma 4 31B — Dense flagship, 256K context
 qwen-image-2512               = local|local_media|true|false|0|0|local|text|image|false|Qwen-Image-2512 — Local sd-cli paint
 flux1-dev                     = local|local_media|true|false|0|0|local|text|image|false|FLUX.1-dev — Local sd-cli paint
+ltx-2.5-distilled             = local|local_media|true|false|0|0|local|text,image|video|false|LTX-2.5 Distilled Q4 — Local sd-cli video
+ltx-2.5-d-q6                  = local|local_media|true|false|0|0|local|text,image|video|false|LTX-2.5 Distilled Q6 — Local sd-cli video
+ltx-2.5-d-q8                  = local|local_media|true|false|0|0|local|text,image|video|false|LTX-2.5 Distilled Q8 — Local sd-cli video
 
 # ─────────────────────────────────────────────────
 # Unified Model Catalog — USER LAYER (owned by `agictl model catalog` / the dashboard)

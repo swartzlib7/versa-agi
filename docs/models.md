@@ -51,6 +51,8 @@ Model Manager (agitop) is the same surface: Import, `coa` tick, params. After a 
 
 ## Local models (pointer)
 
+**What is supported:** [Local AI support](local-ai-support.md) (Ollama vs SYCL vs sd-cli). Design detail: [System Design §4.5.0](../design/Versa%20AGi%20-%20System%20Design.md).
+
 Weights live only on the GPU host (`topology=local` or `server`). A `topology=client` host never downloads weights — import on the server, then `sudo agictl model refresh`.
 
 ```bash
@@ -59,10 +61,11 @@ sudo agictl model sycl import 'hf://…/….gguf' --name gemma4:e4b --runtime ch
 sudo agictl model activate gemma4:e4b
 ```
 
-Inspect first. Chat GGUFs go to SYCL / Ollama. Media bundles are a separate Provider (`local_media`). Local vision (`mmproj`) is chat image-in on the SYCL keys that already have it (`qwen3.6:35b`, `qwen3.8:27b`).
+Inspect first. Chat GGUFs go to SYCL / Ollama. Media bundles are a separate Provider (`local_media`) — Qwen-Image and Flux paint. LTX-2.5 Distilled video is **experimental** (parked; usable 720p-class needs **>64 GB VRAM**). Local vision (`mmproj`) is chat image-in on the SYCL keys that already have it (`qwen3.6:35b`, `qwen3.8:27b`).
 
 ## Related
 
+- [Local AI support](local-ai-support.md) — Ollama vs SYCL vs sd-cli
 - [Credentials](credentials.md) — keys and `agictl system set-key`
 - [Operations](operations.md) — agitop
 - [Troubleshooting](troubleshooting.md)

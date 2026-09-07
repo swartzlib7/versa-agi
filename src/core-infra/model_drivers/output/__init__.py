@@ -15,14 +15,13 @@ from __future__ import annotations
 import importlib
 from typing import Callable
 
-# modality -> (module, callable). `.stub` entries are placeholders that raise
-# `driver_pending` until a real generation model/driver is wired (e.g. video, which
-# has no output model and uses a separate async API).
+# modality -> (module, callable). The writer only persists bytes; generation
+# still requires an exact ModelDriver binding.
 _DRIVERS: dict[str, tuple[str, str]] = {
     "text": ("model_drivers.output.text", "write_text_artifact"),
     "image": ("model_drivers.output.image", "write_image_artifact"),
     "audio": ("model_drivers.output.audio", "write_audio_artifact"),
-    "video": ("model_drivers.output.stub", "not_implemented"),
+    "video": ("model_drivers.output.video", "write_video_artifact"),
 }
 
 

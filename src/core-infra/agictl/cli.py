@@ -76,10 +76,17 @@ from model_media_ingest import (
     load_media_bundles,
     media_bundle_value,
     media_import_block_reason,
+    media_output_ext,
+    media_output_kind,
     media_runtime_status,
     media_usage,
+    align_ltx_frames,
+    align_ltx_spatial,
+    apply_ltx_orientation,
+    ltx_vae_decode_note,
     plan_media_bundle,
     recipe_generate_defaults,
+    resolve_ltx_size,
     remove_media_bundle_dir,
     rename_media_bundle_dir,
     resolve_bundle_dir,
@@ -3056,7 +3063,7 @@ def model_sycl_remove(name, dry_run, confirm_agent_assignments):
 
 @model.group("media")
 def model_media():
-    """Local Utility media bundles (not llama-server). Qwen-Image first."""
+    """Local Utility media bundles (not llama-server). Image paint + LTX video."""
     pass
 
 
@@ -3206,10 +3213,9 @@ def model_media_import(source, name, runtime, confirm_unknown, dry_run):
         action="imported",
         steps=steps,
         hint=(
-            "Bundle stored. Check usage, then paint: "
+            "Bundle stored. Not a chat model. Next: "
             f"agictl model media usage {name} && "
-            f"agictl model media generate --name {name} --prompt '…' "
-            "(default 768²; add --offload if VRAM is tight). Not a chat model."
+            f"agictl model media generate --name {name} --prompt '…'"
         ),
         **payload,
     )
@@ -3393,17 +3399,26 @@ def model_media_register(name):
 @click.option("--usage", "show_usage", is_flag=True,
               help="Print usage for --name and exit (does not paint)")
 @click.option("--prompt", default="", help="Paint brief (required unless --usage)")
+@click.option("--size", default=None, help="LTX size: 720p, 1080p, 2k (4k needs the spatial upscaler)")
+@click.option("--orientation", default=None, help="LTX: landscape or portrait (swaps width/height)")
 @click.option("--width", default=None, type=int, help="Width (recipe default if omitted)")
 @click.option("--height", default=None, type=int, help="Height (recipe default if omitted)")
 @click.option("--steps", default=None, type=int, help="Steps (recipe default if omitted)")
 @click.option("--cfg-scale", default=None, type=float, help="CFG (recipe default if omitted)")
 @click.option("--offload", is_flag=True, help="sd-cli --offload-to-cpu if VRAM is tight")
 @click.option("--seed", default=None, type=int, help="RNG seed (random if omitted; sd-cli default is 42)")
-@click.option("--out", "out_path", default="", help="Destination PNG path")
-def model_media_generate(name, prompt, width, height, steps, offload, out_path, show_usage, cfg_scale, seed):
-    """Paint a PNG from a local media bundle. Not llama-server.
+@click.option("--frames", default=None, type=int, help="Video frames (LTX recipe default if omitted)")
+@click.option("--fps", default=None, type=int, help="Video fps (LTX recipe default if omitted)")
+@click.option("--image", "image_path", default="", help="Start image for LTX I2V")
+@click.option("--out", "out_path", default="", help="Destination PNG or WebM path")
+def model_media_generate(
+    name, prompt, size, orientation, width, height, steps, offload, out_path,
+    show_usage, cfg_scale, seed, frames, fps, image_path,
+):
+    """Generate a PNG or WebM from a local media bundle. Not llama-server.
 
-    On topology=client, paints on the GPU host over SSH and copies the PNG here.
+    On topology=client, generates on the GPU host over SSH and copies the
+    artifact here.
     """
     if show_usage:
         try:
@@ -3417,11 +3432,39 @@ def model_media_generate(name, prompt, width, height, steps, offload, out_path, 
         json_response(False, error="--prompt is required unless you pass --usage")
         sys.exit(1)
 
+    if size:
+        if width is not None or height is not None:
+            json_response(
+                False,
+                error="Pass --size or --width/--height, not both.",
+            )
+            sys.exit(1)
+        try:
+            width, height = resolve_ltx_size(size, orientation)
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code)
+            sys.exit(1)
+    elif orientation:
+        if media_output_kind(name) != "video":
+            json_response(False, error="--orientation is for LTX video only.")
+            sys.exit(1)
+        defaults = recipe_generate_defaults(name)
+        try:
+            width, height = apply_ltx_orientation(
+                defaults["width"] if width is None else width,
+                defaults["height"] if height is None else height,
+                orientation,
+            )
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code)
+            sys.exit(1)
+
     topo = _resolve_topology()
     if topo == "client":
+        dest_ext = media_output_ext(name)
         dest = out_path.strip() or os.path.join(
             "/tmp/versa-agi-media-out",
-            f"{name}-{int(time.time())}.png",
+            f"{name}-{int(time.time())}.{dest_ext}",
         )
         from model_media_remote import MediaRemoteError, remote_media_generate
 
@@ -3436,6 +3479,9 @@ def model_media_generate(name, prompt, width, height, steps, offload, out_path, 
                 cfg_scale=cfg_scale,
                 seed=seed,
                 offload=offload,
+                frames=frames,
+                fps=fps,
+                image=image_path,
                 topology="client",
                 on_progress=lambda line: print(line, flush=True),
             )
@@ -3446,7 +3492,7 @@ def model_media_generate(name, prompt, width, height, steps, offload, out_path, 
             True,
             topology=topo,
             hint=(
-                "Painted on the GPU host; PNG is on this machine. "
+                f"Generated on the GPU host; {dest_ext} is on this machine. "
                 f"Standing profile: agictl utility run {name}."
             ),
             **payload,
@@ -3483,9 +3529,10 @@ def model_media_generate(name, prompt, width, height, steps, offload, out_path, 
         )
         sys.exit(1)
 
+    dest_ext = media_output_ext(name, bundle_dir)
     dest = out_path.strip() or os.path.join(
         "/tmp/versa-agi-media-out",
-        f"{name}-{int(time.time())}.png",
+        f"{name}-{int(time.time())}.{dest_ext}",
     )
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
 
@@ -3498,35 +3545,64 @@ def model_media_generate(name, prompt, width, height, steps, offload, out_path, 
         if "versa-agi-sycl" in (ps.stdout or ""):
             warning = (
                 "llama-server container versa-agi-sycl is running and shares the GPU. "
-                "Q8 plus llama-server may OOM; retry with --offload or stop chat inference first."
+                "Large media plus llama-server may OOM; retry with --offload or stop chat first."
             )
     except OSError:
         pass
 
     from model_drivers.errors import DriverError
-    from model_drivers.libraries.local_media_image_out_sdcpp import generate as paint
 
-    defaults = recipe_generate_defaults(name)
+    try:
+        recipe = str(load_bundle_manifest(bundle_dir).get("recipe") or name)
+    except Exception:  # noqa: BLE001
+        recipe = name
+    kind = media_output_kind(name, bundle_dir)
+    if kind == "video":
+        from model_drivers.libraries.local_media_video_out_sdcpp import generate as produce
+    else:
+        from model_drivers.libraries.local_media_image_out_sdcpp import generate as produce
+
+    defaults = recipe_generate_defaults(recipe)
     width = defaults["width"] if width is None else width
     height = defaults["height"] if height is None else height
     steps = defaults["steps"] if steps is None else steps
     cfg_scale = defaults["cfg_scale"] if cfg_scale is None else cfg_scale
+    frames = defaults.get("video_frames") if frames is None else frames
+    fps = defaults.get("fps") if fps is None else fps
+    if kind == "video":
+        width = align_ltx_spatial(width)
+        height = align_ltx_spatial(height)
+        frames = align_ltx_frames(frames)
+    offload_eff = bool(offload or defaults.get("offload"))
+
+    produce_config = {
+        "bundle_dir": bundle_dir,
+        "recipe": recipe,
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "offload": offload_eff,
+        "seed": seed,
+        "out_dir": os.path.dirname(dest) or "/tmp/versa-agi-media-out",
+        "out_name": os.path.basename(dest),
+    }
+    if kind == "video":
+        produce_config["video_frames"] = frames
+        produce_config["fps"] = fps
+        if image_path:
+            produce_config["init_img"] = image_path
+        vae_note = ltx_vae_decode_note(width, height, frames)
+        print(
+            f"Generating {width}×{height} × {frames} frames @ {fps} fps, "
+            f"{steps} steps. This can take a long time; progress follows.",
+            flush=True,
+        )
+        if vae_note:
+            print(vae_note, flush=True)
 
     try:
-        artifact = paint(
-            prompt=prompt,
-            config={
-                "bundle_dir": bundle_dir,
-                "width": width,
-                "height": height,
-                "steps": steps,
-                "cfg_scale": cfg_scale,
-                "offload": offload,
-                "seed": seed,
-                "out_dir": os.path.dirname(dest) or "/tmp/versa-agi-media-out",
-                "out_name": os.path.basename(dest),
-            },
-        )
+        artifact = produce(prompt=prompt, config=produce_config)
     except DriverError as exc:
         json_response(False, error=exc.message, code=exc.code, warning=warning or None)
         sys.exit(1)
@@ -3536,25 +3612,28 @@ def model_media_generate(name, prompt, width, height, steps, offload, out_path, 
             fh.write(artifact.data)
 
     registered = name in load_media_bundles(_resolve_models_ini_path())
-    json_response(
-        True,
-        action="generated",
-        name=name,
-        path=dest,
-        bytes=len(artifact.data),
-        width=width,
-        height=height,
-        steps=steps,
-        cfg_scale=cfg_scale,
-        seed=(artifact.usage or {}).get("seed"),
-        offload=offload,
-        registered=registered,
-        warning=warning or None,
-        hint=(
-            f"Painted without a Utility run. Standing profile: "
+    payload = {
+        "action": "generated",
+        "name": name,
+        "path": dest,
+        "bytes": len(artifact.data),
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "seed": (artifact.usage or {}).get("seed"),
+        "offload": offload_eff,
+        "registered": registered,
+        "warning": warning or None,
+        "hint": (
+            f"Generated without a Utility run. Standing profile: "
             f"agictl utility run {name}."
         ),
-    )
+    }
+    if kind == "video":
+        payload["video_frames"] = frames
+        payload["fps"] = fps
+    json_response(True, **payload)
 
 
 @model.command("remove")
@@ -7802,7 +7881,7 @@ def agent_set_model(name, model, clear_model):
                 "UPDATE agents SET status='invalid_config', "
                 "status_message='Assign a COA model via first-login setup', "
                 "updated_at=datetime('now') WHERE name='coa' "
-                "AND COALESCE(status,'') NOT IN ('circuit_breaker', 'halted')"
+                "AND COALESCE(status,'') NOT IN ('circuit_breaker', 'halted', 'ide')"
             )
         if new_model:
             try:
@@ -7883,8 +7962,34 @@ def agent_status_show():
 def agent_status_set(state, summary):
     """Write agent status + message to agents.db."""
     agent_name = get_agent_name()
+    _holds = frozenset({"ide", "halted", "circuit_breaker", "invalid_config"})
     try:
         conn = db_connect.connect_compat(agents_db, timeout=5)
+        row = conn.execute(
+            "SELECT status FROM agents WHERE name=?", (agent_name,)
+        ).fetchone()
+        current = (row[0] if row else "") or ""
+        if current == "ide":
+            conn.close()
+            json_response(
+                False,
+                error=(
+                    "IDE mode is cleared only by the Primary User "
+                    "(agitop IDE Integration, or `agictl agent ide off`)."
+                ),
+            )
+            sys.exit(1)
+        if current in _holds and (state or "") not in _holds:
+            conn.close()
+            json_response(
+                False,
+                error=(
+                    f"Refusing to overwrite hold status '{current}'. "
+                    "IDE mode is cleared only by the Primary User "
+                    "(agitop IDE Integration, or `agictl agent ide off`)."
+                ),
+            )
+            sys.exit(1)
         conn.execute("UPDATE agents SET status=?, status_message=?, updated_at=datetime('now') WHERE name=?", (state, summary, agent_name))
         conn.commit()
         conn.close()
@@ -9447,8 +9552,9 @@ def cycle_end(summary, agent_name):
         if os.path.exists(agents_db_path):
             aconn = db_connect.connect_compat(agents_db_path, timeout=5)
             aconn.execute(
-                "UPDATE agents SET status='idle', updated_at=datetime('now') WHERE name=?",
-                (agent_name,)
+                "UPDATE agents SET status='idle', updated_at=datetime('now') "
+                "WHERE name=? AND status='active'",
+                (agent_name,),
             )
             aconn.commit()
             aconn.close()
@@ -9605,6 +9711,37 @@ except ImportError:
         raise RuntimeError("project_workspace module required")
 
 
+def _scaffold_production_statefold(project_path):
+    """Create docs/production/state/ and _project.yml for local / git-init projects."""
+    import getpass
+    state_dir = os.path.join(project_path, "docs", "production", "state")
+    dest = os.path.join(state_dir, "_project.yml")
+    core_infra = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    template = os.path.join(
+        core_infra, "skills", "production_statefold", "templates", "_project.yml"
+    )
+    prefix = [] if getpass.getuser() == "coa" else ["sudo", "-u", "coa"]
+    subprocess.run(prefix + ["mkdir", "-p", state_dir], check=False)
+    if os.path.exists(dest):
+        return
+    if os.path.isfile(template):
+        subprocess.run(prefix + ["cp", template, dest], check=False)
+        return
+    stub = (
+        "# Versa AGi production statefold config for this project.\n"
+        "# Paths are relative to the project root (workspace/{slug}/).\n"
+        "doc_home: docs/production/state/\n"
+        "archive_home: docs/production/state/__archive/\n"
+        "shape_file:          # optional; a shape_<solution>.md map, leave empty if none\n"
+    )
+    subprocess.run(
+        prefix + ["bash", "-c", f"cat > '{dest}'"],
+        input=stub,
+        text=True,
+        check=False,
+    )
+
+
 @project.command("list")
 def project_list():
     """List all projects as JSON."""
@@ -9694,6 +9831,7 @@ def project_add(name_arg, name_opt, dir_name, desc, remote, git_init, agent_name
             if not os.path.exists(readme):
                 readme_content = f"# {name}\n\n{desc or 'Project workspace.'}\n"
                 subprocess.run(["sudo", "-u", "coa", "bash", "-c", f"cat > '{readme}'"], input=readme_content, text=True, check=False)
+            _scaffold_production_statefold(project_path)
             subprocess.run(
                 ["sudo", "-u", "coa", "git", "-C", project_path, "add", "."],
                 capture_output=True, text=True, timeout=30
@@ -9714,6 +9852,7 @@ def project_add(name_arg, name_opt, dir_name, desc, remote, git_init, agent_name
             if not os.path.exists(readme):
                 readme_content = f"# {name}\n\n{desc or 'Project workspace.'}\n"
                 subprocess.run(["sudo", "-u", "coa", "bash", "-c", f"cat > '{readme}'"], input=readme_content, text=True, check=False)
+            _scaffold_production_statefold(project_path)
         
         # Enforce shared workspace group permissions for all agents assigned to this project
         fix_cmd = (
@@ -11772,7 +11911,10 @@ def view_video(path, execution_model):
     """Validate a local video path and return metadata for multimodal inject."""
     from model_drivers.view_paths import inspect_video_for_view
 
-    _view_asset(path, execution_model, modality="video", inspect=inspect_video_for_view)
+    def _inspect(p, agent_name):
+        return inspect_video_for_view(p, agent_name, execution_model=execution_model)
+
+    _view_asset(path, execution_model, modality="video", inspect=_inspect)
 
 
 # ═══════════════════════════════════════════════════════

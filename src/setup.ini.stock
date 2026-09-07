@@ -28,6 +28,13 @@ mode=cloud
 # Routinely a Grok/GLM key — not provider-specific.
 model=
 
+# Install flavor (client installs only; not a topology).
+#   normal   — home/workstation COA; Initial Welcome Sequence
+#   sentinel — remote team agent; Remote Sentinel Routine
+#              (setup prompts for first_name — typically this server's name)
+# Fresh client setup asks "Normal install? [Y/n]". --update never re-asks.
+install_role=normal
+
 [local_ai]
 # Enable local AI backend (Inference Endpoint + backend).
 # Run setup_local.sh to install, or uninstall_local.sh to remove.
@@ -94,7 +101,7 @@ hf_token=
 # Image is versa-agi-sycl:<tag>. Site-accepted pin: b10430.
 sycl_llama_cpp_tag=b10430
 # stable-diffusion.cpp release tag for Intel SYCL sd-cli (local Utility media)
-sd_cpp_tag=master-820-de298c2
+sd_cpp_tag=master-841-6b3edaa
 # Total GPU VRAM in GB (auto-detected during setup, used for concurrency calculation)
 sycl_vram_gb=32
 #
@@ -224,6 +231,9 @@ model_routing_enabled=false
 model_routing_mode=preferred
 
 # COA VersaVoice identity (used by identity provision / setup prompts)
+# first_name is the COA's name. Fresh client setup prompts: Normal defaults to
+# Versa (Enter accepts); Sentinel requires a typed name (typically the server).
+# Sentinel rejects the name Versa (reserved for a normal install).
 # call_sign = bare 6-char (or custom) identifier; last_name is always (call_sign).
 # Setup derives call_sign from the required install email (first3+last3 of local-part)
 # and prompts to confirm/override. Do not use a literal (COA) last name on new installs.

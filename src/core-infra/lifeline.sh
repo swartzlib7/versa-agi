@@ -510,7 +510,7 @@ ${AGENT_REGISTRY_FOR_SYSTEM}"
       esac
       if [ "${_vv_enabled}" != "true" ]; then
         _features_off="${_features_off}
-- VersaVoice cloud messaging is OFF — outbound routes as internal/SQLite. This is intentional, NOT an error. Do NOT troubleshoot the VV API, identity provision, or sub-account recovery. Use normal \`agictl message send\` (routes internally) or \`agictl message internal\` as skills describe. Stay on your active tasks (e.g. Welcome / introduction)."
+- VersaVoice cloud messaging is OFF — outbound routes as internal/SQLite. This is intentional, NOT an error. Do NOT troubleshoot the VV API, identity provision, or sub-account recovery. Use normal \`agictl message send\` (routes internally) or \`agictl message internal\` as skills describe. Stay on your active tasks (e.g. Welcome / Remote Sentinel Routine)."
       fi
       if [ -n "${_features_off}" ]; then
         FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
@@ -792,12 +792,21 @@ ${AGENT_REGISTRY_CONTENT}
     flock -u 200
     continue
   fi
-  if [ "${IDE_GENERATE}" != "true" ] && { [ "${HOLD_STATUS}" = "invalid_config" ] || [ "${HOLD_STATUS}" = "circuit_breaker" ] || [ "${HOLD_STATUS}" = "halted" ] || [ "${HOLD_STATUS}" = "ide" ]; }; then
-    if [ "${HOLD_STATUS}" = "ide" ]; then
-      log "HOLD: ${AGENT_NAME} — IDE mode. Skipping spawn (inbox/utility/scripts continue)."
-    else
-      log "BLOCKED: ${AGENT_NAME} — status '${HOLD_STATUS}', skipping spawn (assign a model or run 'agictl agent activate ${AGENT_NAME}')"
+  if [ "${IDE_GENERATE}" != "true" ] && { [ "${HOLD_STATUS}" = "invalid_config" ] || [ "${HOLD_STATUS}" = "circuit_breaker" ] || [ "${HOLD_STATUS}" = "halted" ]; }; then
+    log "BLOCKED: ${AGENT_NAME} — status '${HOLD_STATUS}', skipping spawn (assign a model or run 'agictl agent activate ${AGENT_NAME}')"
+    flock -u 200
+    continue
+  fi
+  # IDE hold: status='ide' OR the seed still on disk. cycle end / status set can
+  # smash the column to idle without deleting the seed — that leaked a harness
+  # spawn on 2026-09-06 while the PU was in an IDE session (due-task wake).
+  _IDE_SEED="${AGENT_PATH}/.agent/versa-agi_ide.md"
+  if [ "${IDE_GENERATE}" != "true" ] && { [ "${HOLD_STATUS}" = "ide" ] || [ -f "${_IDE_SEED}" ]; }; then
+    if [ "${HOLD_STATUS}" != "ide" ]; then
+      log "HOLD: ${AGENT_NAME} — IDE seed present but status='${HOLD_STATUS}'; restoring ide (will not spawn)."
+      sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='ide', status_message=COALESCE(NULLIF(status_message,''),'IDE mode (hold restored)'), updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
     fi
+    log "HOLD: ${AGENT_NAME} — IDE mode. Skipping spawn (inbox/utility/scripts continue)."
     flock -u 200
     continue
   fi
@@ -1203,8 +1212,14 @@ ${HIDDEN_STR}
     agent_title="Assistant"
     agent_role="Agent"
     if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
-      agent_role="Chief Orchestrator Agent (COA)"
-      agent_title="Chief Assistant"
+      _install_role=$(sed -n '/^\[system\]/,/^\[/{s/^install_role=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+      if [ "${_install_role}" = "sentinel" ]; then
+        agent_role="Remote Sentinel (COA)"
+        agent_title="operational agent on this host"
+      else
+        agent_role="Chief Orchestrator Agent (COA)"
+        agent_title="Chief Assistant"
+      fi
     fi
     if [ "${_vv_on_for_identity}" = "true" ]; then
       AGENT_IDENTITY="Your name is ${id_first} ${id_last}.
@@ -1571,6 +1586,49 @@ The following system packages you requested have been approved. You may now inst
     fi
   fi
 
+  # ─── First-contact poise block (COA) ──
+  # Lifeline fills {FIRST_CONTACT} from install_role + seeded task status.
+  # Harness reads VERSA_FIRST_CONTACT to strip self_introduction.md.
+  FIRST_CONTACT_CONTENT=""
+  VERSA_FIRST_CONTACT=""
+  if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
+    _fc_role=$(sed -n '/^\[system\]/,/^\[/{s/^install_role=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+    _fc_role="${_fc_role:-normal}"
+    if [ "${_fc_role}" = "sentinel" ]; then
+      _fc_status=$(sqlite3 "${TASKS_DB}" \
+        "SELECT status FROM tasks WHERE title='Remote Sentinel Routine' ORDER BY id DESC LIMIT 1;" \
+        2>/dev/null || true)
+      _fc_status=$(printf '%s' "${_fc_status}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+      case "${_fc_status}" in
+        planned|in_progress)
+          _fc_skill="${SCRIPT_DIR}/skills/remote_sentinel.md"
+          if [ -f "${_fc_skill}" ]; then
+            FIRST_CONTACT_CONTENT="## FIRST CONTACT
+
+$(cat "${_fc_skill}")
+"
+            VERSA_FIRST_CONTACT="sentinel"
+            log "FIRST_CONTACT: ${AGENT_NAME} — Remote Sentinel Routine (${_fc_status}); injected remote_sentinel.md"
+          else
+            log "FIRST_CONTACT: WARN ${_fc_skill} missing"
+          fi
+          ;;
+        waiting)
+          FIRST_CONTACT_CONTENT="> **Remote Sentinel first contact already sent.** Await instructions on the **Remote Sentinel Routine** task. Do **not** re-introduce. Do **not** run the home-install welcome or \`self_introduction.md\`."
+          VERSA_FIRST_CONTACT="sentinel"
+          log "FIRST_CONTACT: ${AGENT_NAME} — Remote Sentinel Routine waiting; await-instructions note"
+          ;;
+        *)
+          log "FIRST_CONTACT: ${AGENT_NAME} — Sentinel, no active first-contact task (${_fc_status:-none})"
+          ;;
+      esac
+    else
+      FIRST_CONTACT_CONTENT="> **Welcome / introduction first.** If **Initial Welcome Sequence** (or any active self-introduction / first-contact task) is in YOUR ACTIVE TASKS, complete that task before anything else. Follow \`self_introduction.md\` (speak when VersaVoice is enabled; typed when disabled). Do **not** derail first contact to investigate system configuration, model providers, or optional features. Config that does not block messaging can wait until Welcome is in \`waiting\` (or the PU asks)."
+    fi
+  fi
+  FIRST_CONTACT_CONTENT="${FIRST_CONTACT_CONTENT//&/\\&}"
+  MERGED_CONTENT="${MERGED_CONTENT//\{FIRST_CONTACT\}/${FIRST_CONTACT_CONTENT}}"
+
   # ─── System Prompt Assembly ──
   # Template mode: replace {PLACEHOLDER} markers in the poise template with real data.
   # Legacy mode: concatenate blocks in the original WHO→WHY→WHAT→OPERATIONAL order.
@@ -1930,6 +1988,7 @@ ${IDE_RESUME_CONTEXT}"
     echo "export AGICTL_CYCLES_DB='${CYCLES_DB}'"
     echo "export AGICTL_AGENT_DIR='${AGENT_PATH}/.agent'"
     echo "export VERSA_AGENT_NAME='${AGENT_NAME}'"
+    [ -n "${VERSA_FIRST_CONTACT:-}" ] && echo "export VERSA_FIRST_CONTACT='${VERSA_FIRST_CONTACT}'"
     echo "export NODE_OPTIONS='--no-deprecation'"
     [ -n "${CURRENT_CYCLE_ID}" ] && echo "export VERSA_CYCLE_ID='${CURRENT_CYCLE_ID}'"
 

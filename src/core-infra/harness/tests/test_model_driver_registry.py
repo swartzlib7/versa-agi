@@ -119,6 +119,21 @@ EXPECTED_OUTPUT_BINDINGS = {
         "image",
         "local_media_image_out_sdcpp",
     ),
+    "ltx-2.5-distilled": (
+        "local_media",
+        "video",
+        "local_media_video_out_sdcpp",
+    ),
+    "ltx-2.5-d-q6": (
+        "local_media",
+        "video",
+        "local_media_video_out_sdcpp",
+    ),
+    "ltx-2.5-d-q8": (
+        "local_media",
+        "video",
+        "local_media_video_out_sdcpp",
+    ),
 }
 
 
@@ -343,6 +358,7 @@ class TestRegistryIntegrity(RegistryTestCase):
                 "chat_mm_audio_out_pcm16",
                 "chat_mm_image_out_google_generate_content",
                 "local_media_image_out_sdcpp",
+                "local_media_video_out_sdcpp",
             },
         )
         for stale_id in (

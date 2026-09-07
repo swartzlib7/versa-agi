@@ -31,6 +31,7 @@ Before beginning execution:
 *   If using an existing project: `agictl agent status set active "Working on project: [project_name]"`
 *   If registering a new project: Follow onboarding and then update status.
 *   If disposable: `agictl agent status set active "Processing temporary request"`
+*   **IDE session:** skip `status set`. IDE mode stays on until the Primary User turns it off.
 
 ### Step 3: Load craft skills (when applicable)
 
@@ -39,7 +40,7 @@ If registering or onboarding a **new project**, follow **`project_management`** 
 If the work is **product/feature code** (implement, fix, refactor, close a feature):
 
 1. Load **`software_engineering`** before changing code (includes optional staged QT units and WBS ↔ task bridge).
-2. Load **`feature_statefold`** and open (or create) the feature’s living `state_*.md` — do not start a parallel `*_spec.md` / `context_*.md`. Use the WBS backlog table for multi-step work; mirror rows to `agictl task --project` via **`task_scheduling`**.
+2. Load **`production_statefold`**, resolve the doc home, then open (or create) the feature’s living `state_*.md` — do not start a parallel `*_spec.md` / `context_*.md`. Use the WBS backlog table for multi-step work; mirror rows to `agictl task --project` via **`task_scheduling`**.
 
 Host stack / apt / systemd setup → **`solution_architect`** instead. Ambiguous “what to build” → **`requirements_elicitation`** first (*what*, not collaboration pattern).
 

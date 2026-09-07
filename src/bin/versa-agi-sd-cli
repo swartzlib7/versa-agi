@@ -7,7 +7,7 @@ if [ -f /etc/versa-agi/sdcpp.env ]; then
   # shellcheck source=/dev/null
   . /etc/versa-agi/sdcpp.env
 fi
-IMAGE="${VERSA_SDCPP_IMAGE:-versa-agi-sdcpp:master-820-de298c2}"
+IMAGE="${VERSA_SDCPP_IMAGE:-versa-agi-sdcpp:master-841-6b3edaa}"
 MEDIA_STORE="${VERSA_MEDIA_STORE:-/opt/versa-agi/media-models}"
 OUT_DIR="${VERSA_MEDIA_OUT:-/tmp/versa-agi-media-out}"
 

@@ -1042,7 +1042,8 @@ def agictl_view_image(path: str) -> str:
 def agictl_view_video(path: str) -> str:
     """View a local video file — injects it into your context when the execution model supports video.
 
-    Use for mp4/mkv/mov attachments or recordings (200 MB max).
+    Use for mp4/mkv/mov attachments or recordings (200 MB max; native Google
+    inline is ~20 MB). Only when the PU or a Connection explicitly asked.
     The execution model must have an exact video-input ModelDriver (◆).
     Examples:
       - agictl_view_video(path="/tmp/clip.mp4")
@@ -1063,7 +1064,7 @@ def agictl_view_video(path: str) -> str:
         return _view_no_driver_refusal(execution_model, "video")
 
     try:
-        result = inspect_video_for_view(path, agent_name)
+        result = inspect_video_for_view(path, agent_name, execution_model=execution_model)
     except ViewPathError as e:
         return json.dumps({"success": False, "code": e.code, "error": e.message})
     except OSError as e:
@@ -1145,11 +1146,11 @@ def _build_view_image_message(
 
 
 def _trim_view_inject_payloads(agent, config, pending: list[dict] | None = None) -> int:
-    """Strip image payloads from view-inject HumanMessages in the checkpoint.
+    """Strip image/video payloads from view-inject HumanMessages in the checkpoint.
 
     When *pending* is set, trims those message ids after the model turn that
     consumed the inject. Always scans for any remaining ``view-inject-*`` ids
-    with image blocks (stale payloads from cycles where trim never ran).
+    with image/video blocks (stale payloads from cycles where trim never ran).
     """
     from model_drivers.message_adapters import content_has_image_parts, trim_image_parts_from_message
 
@@ -1612,6 +1613,17 @@ def main():
         "communication_basic.md",
         "communication.md",
     }
+    # Lifeline injects remote_sentinel.md into {FIRST_CONTACT} for this cycle.
+    if os.environ.get("VERSA_FIRST_CONTACT", "").strip().lower() == "sentinel":
+        always_injected.add("remote_sentinel.md")
+        if triage_result.skills_to_inject:
+            before = list(triage_result.skills_to_inject)
+            triage_result.skills_to_inject = [
+                s for s in triage_result.skills_to_inject if s != "self_introduction.md"
+            ]
+            if before != triage_result.skills_to_inject:
+                tlog("FIRST_CONTACT: dropped self_introduction.md (VERSA_FIRST_CONTACT=sentinel)")
+        tlog("FIRST_CONTACT: remote_sentinel.md treated as already in system prompt")
     skill_mode = getattr(args, 'skill_mode', 'hybrid')
     tlog(f"SKILL MODE: {skill_mode}")
     if skills_dir and triage_result.skills_to_inject:

@@ -198,6 +198,132 @@ _install_acceptance_upsert_agent_key() {
   fi
 }
 
+# Write first_name to deployed + source setup.ini (Sentinel name prompt).
+_install_acceptance_persist_first_name() {
+  local name="${INI_AGENT_FIRST_NAME:-}"
+  local f
+  [ -n "${name}" ] || return 0
+  for f in /etc/versa-agi/setup.ini "${SCRIPT_DIR:-}/setup.ini" "${INSTALL_ACCEPTANCE_SOURCE_INI:-}"; do
+    [ -n "${f}" ] && [ -f "${f}" ] || continue
+    _install_acceptance_upsert_agent_key "${f}" "first_name" "${name}"
+  done
+}
+
+# True if name is the reserved home-COA name (exact, case-insensitive).
+_install_acceptance_is_reserved_versa() {
+  local n
+  n="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [ "${n}" = "versa" ]
+}
+
+# Letters, digits, spaces, . _ - ; 1–64 chars. Empty on failure.
+_install_acceptance_sanitize_first_name() {
+  python3 -c '
+import re, sys
+s = re.sub(r"\s+", " ", (sys.argv[1] or "").strip())
+if not s or len(s) > 64:
+    sys.exit(1)
+if not re.fullmatch(r"[A-Za-z0-9._ -]+", s):
+    sys.exit(1)
+print(s)
+' "${1:-}" 2>/dev/null
+}
+
+# COA name → [agent] first_name. Fresh client only (called from setup flavor).
+#   normal   — default Versa (or current INI); Enter accepts
+#   sentinel — required; typically this server; no default
+install_acceptance_coa_name_prompt() {
+  local flavor="${1:-normal}"
+  local reply="" done=false shown=false name="" default=""
+  local box_title box_l1 box_l2 box_l3 label
+
+  if [ "${flavor}" = "sentinel" ]; then
+    box_title="SENTINEL NAME"
+    box_l1="This COA takes the name you assign — typically this server's name."
+    box_l2="It is saved as first_name (same identity field as a normal install)."
+    box_l3="Type the name, then Enter. Required — Versa is reserved for a normal install."
+    label="Sentinel name"
+  else
+    default="${INI_AGENT_FIRST_NAME:-Versa}"
+    [ -n "${default}" ] || default="Versa"
+    box_title="COA NAME"
+    box_l1="Your Chief Orchestrator appears as this first name."
+    box_l2="Press Enter to accept the default (Versa unless already set), or type a different name."
+    box_l3="Saved as first_name."
+    label="COA name"
+  fi
+
+  case "$(printf '%s' "${VERSA_INSTALL_ACCEPT:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y)
+      name="${INSTALL_ACCEPTANCE_FIRST_NAME:-}"
+      name="$(_install_acceptance_sanitize_first_name "${name}" || true)"
+      if [ -z "${name}" ]; then
+        if [ "${flavor}" = "sentinel" ]; then
+          echo "ERROR: Sentinel name is required. Set INSTALL_ACCEPTANCE_FIRST_NAME for non-interactive setup." >&2
+          exit 1
+        fi
+        name="$(_install_acceptance_sanitize_first_name "${default}" || echo "Versa")"
+      fi
+      if [ "${flavor}" = "sentinel" ] && _install_acceptance_is_reserved_versa "${name}"; then
+        echo "ERROR: Sentinel name cannot be Versa. Set INSTALL_ACCEPTANCE_FIRST_NAME to this server's name." >&2
+        exit 1
+      fi
+      INI_AGENT_FIRST_NAME="${name}"
+      export INI_AGENT_FIRST_NAME
+      _install_acceptance_persist_first_name
+      return
+      ;;
+  esac
+
+  while [ "${done}" = false ]; do
+    if [ "${shown}" = false ]; then
+      if declare -F text_box >/dev/null 2>&1; then
+        text_box "${box_title}" \
+          "${box_l1}" \
+          "${box_l2}" \
+          "" \
+          "${box_l3}"
+      else
+        echo ""
+        echo "${box_l1}"
+        echo "${box_l3}"
+      fi
+      shown=true
+    fi
+    _install_acceptance_input_line "${label}" "${default}"
+    _install_acceptance_read_line "" reply
+    case "${reply}" in
+      "")
+        if [ -n "${default}" ]; then
+          name="$(_install_acceptance_sanitize_first_name "${default}" || true)"
+        else
+          name=""
+        fi
+        ;;
+      *)
+        name="$(_install_acceptance_sanitize_first_name "${reply}" || true)"
+        ;;
+    esac
+    if [ -z "${name}" ]; then
+      warn "Name is required: letters, digits, spaces, . _ - (max 64)."
+    elif [ "${flavor}" = "sentinel" ] && _install_acceptance_is_reserved_versa "${name}"; then
+      warn "Versa is reserved for a normal install. Use this server's name."
+    else
+      done=true
+    fi
+  done
+
+  INI_AGENT_FIRST_NAME="${name}"
+  export INI_AGENT_FIRST_NAME
+  _install_acceptance_persist_first_name
+  echo ""
+}
+
+# Back-compat alias for the Sentinel branch.
+install_acceptance_sentinel_name_prompt() {
+  install_acceptance_coa_name_prompt sentinel
+}
+
 # Write call_sign + last_name to deployed + source setup.ini immediately so
 # --update reconcile-config carries them forward (Step 13 also persists on update).
 _install_acceptance_persist_call_sign() {
@@ -340,13 +466,13 @@ install_acceptance_call_sign_prompt() {
     if [ "${shown}" = false ]; then
       if declare -F text_box >/dev/null 2>&1; then
         text_box "COA CALL SIGN" \
-          "Your Chief Orchestrator appears externally as: Versa (${default_bare})" \
+          "Your Chief Orchestrator appears externally as: ${INI_AGENT_FIRST_NAME:-Versa} (${default_bare})" \
           "The call sign is always shown in parentheses (replaces the old (COA) last name)." \
           "" \
           "Press Enter to accept the default, or type a custom 2–12 character call sign."
       else
         echo ""
-        echo "COA call sign — external name will be: Versa (${default_bare})"
+        echo "COA call sign — external name will be: ${INI_AGENT_FIRST_NAME:-Versa} (${default_bare})"
         echo "(press Enter to accept, or type a custom 2–12 character call sign)"
       fi
       shown=true

@@ -2,6 +2,7 @@
 
 > **Role:** Sole go-to for this feature — behavior/contract, current state, plan, results.
 > **Product:** <product or project name>
+> **Doc home:** docs/production/state/
 
 | Field | Value |
 |-------|-------|

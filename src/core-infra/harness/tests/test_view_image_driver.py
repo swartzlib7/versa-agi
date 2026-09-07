@@ -23,9 +23,16 @@ from model_drivers.libraries.chat_video_in_content_parts import (  # noqa: E402
 from model_drivers.libraries.chat_video_in_google_media import (  # noqa: E402
     to_content_parts as video_to_google_media,
 )
+from model_drivers.message_adapters import (  # noqa: E402
+    content_has_image_parts,
+    trim_image_parts_from_message,
+)
 from model_drivers.view_paths import (  # noqa: E402
+    ViewPathError,
+    inspect_video_for_view,
     resolve_view_image_path,
     resolve_view_video_path,
+    video_byte_limit_for_model,
 )
 
 
@@ -237,6 +244,57 @@ class TestViewVideoDriverDispatch(unittest.TestCase):
         self.assertTrue(
             message.content[1]["video_url"]["url"].startswith("data:video/")
         )
+
+    def test_byte_limit_follows_bound_adapter(self) -> None:
+        with _src_catalog_patches()[0], _src_catalog_patches()[1]:
+            self.assertEqual(
+                video_byte_limit_for_model("gemini-3.7-flash"),
+                20 * 1024 * 1024,
+            )
+            self.assertEqual(
+                video_byte_limit_for_model("z-ai/glm-5.3-flash"),
+                200 * 1024 * 1024,
+            )
+            self.assertEqual(
+                video_byte_limit_for_model("google/gemini-3.7-flash"),
+                200 * 1024 * 1024,
+            )
+            self.assertEqual(video_byte_limit_for_model(None), 200 * 1024 * 1024)
+
+    def test_inspect_refuses_over_native_google_limit(self) -> None:
+        with self._video() as video:
+            os.truncate(video.name, 21 * 1024 * 1024)
+            with _src_catalog_patches()[0], _src_catalog_patches()[1]:
+                with self.assertRaises(ViewPathError) as raised:
+                    inspect_video_for_view(
+                        video.name,
+                        "",
+                        execution_model="gemini-3.7-flash",
+                    )
+                self.assertEqual(raised.exception.code, "too_large")
+                inspect_video_for_view(
+                    video.name,
+                    "",
+                    execution_model="z-ai/glm-5.3-flash",
+                )
+
+    def test_trim_replaces_video_url_and_google_media(self) -> None:
+        video_url = [
+            {"type": "text", "text": "clip"},
+            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}},
+        ]
+        google_media = [
+            {"type": "text", "text": "clip"},
+            {"type": "media", "mime_type": "video/mp4", "data": b"xx"},
+        ]
+        self.assertTrue(content_has_image_parts(video_url))
+        self.assertTrue(content_has_image_parts(google_media))
+        trimmed_url = trim_image_parts_from_message(video_url, "/tmp/clip.mp4")
+        trimmed_media = trim_image_parts_from_message(google_media, "/tmp/clip.mp4")
+        self.assertEqual(trimmed_url, [{"type": "text", "text": "clip"}])
+        self.assertEqual(trimmed_media, [{"type": "text", "text": "clip"}])
+        placeholder = trim_image_parts_from_message([], "/tmp/clip.mp4")
+        self.assertIn("Viewed media", placeholder[0]["text"])
 
 
 if __name__ == "__main__":

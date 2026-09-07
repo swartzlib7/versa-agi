@@ -276,6 +276,20 @@ VALUES (
   '{"width":768,"height":768,"steps":20,"cfg_scale":1}',
   1
 );
+INSERT OR IGNORE INTO utility_models
+  (id, label, catalog_model, system_prompt, output_modality, output_path,
+   run_as_agent, config_json, enabled)
+VALUES (
+  'ltx-2.5-distilled',
+  'LTX-2.5 Distilled Q4 (local)',
+  'ltx-2.5-distilled',
+  'Generate a short cinematic video clip. Prefer a clear subject, readable motion, and coherent lighting.',
+  'video',
+  '',
+  'coa',
+  '{"width":1280,"height":736,"steps":8,"cfg_scale":3,"video_frames":121,"fps":24,"offload":true}',
+  1
+);
 UTIL
 
 # Seed per-catalog modality maps (idempotent)

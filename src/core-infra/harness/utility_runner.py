@@ -378,7 +378,7 @@ def run_utility_model(
     try:
         system_prompt = _substitute_vars(um.get("system_prompt") or "", vars_map)
 
-        from model_drivers.output import get_output_driver, has_real_driver
+        from model_drivers.output import get_output_driver
 
         if output_modality in ("image", "audio", "video"):
             outs = {x.strip() for x in (entry.get("output_modalities") or "").split(",") if x.strip()}
@@ -399,13 +399,11 @@ def run_utility_model(
                     f"No exact executable ModelDriver for {catalog_model} "
                     f"output {output_modality}",
                 )
-            if not has_real_driver(output_modality):
-                # Registry dispatch — the stub driver raises 'driver_pending' (video has
-                # no output model and uses a separate async API).
-                get_output_driver(output_modality)()
+            # Exact ModelDriver is the generation path. The old output-writer
+            # map still stubs video; do not call it when a binding exists.
 
-            # Real media generation (image/audio over chat-completions). This branch
-            # MUST early-return — it must not fall through to the text path below.
+            # Real media generation. This branch MUST early-return — it must
+            # not fall through to the text path below.
             from harness.generation import generate_media
 
             data, ext, mime, transcript = generate_media(

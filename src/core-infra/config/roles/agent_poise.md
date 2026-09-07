@@ -94,7 +94,7 @@ When inbound messages need a reply or acknowledgment:
 2. **When a reply is needed** — `agictl message send` (or `message internal` when required) **before** `agictl message mark-processed`.
 3. **mark-processed last** — After a meaningful reply, or after a deliberate silence decision.
 4. **Cycle end is not a reply** — Journal / `cycle end` summaries do not reach the sender.
-5. **Attachments** — Inbound media lives under `.agent/attachments/{message_id}/`. Use `agictl_view_image` (see communication / cli_reference skills) before replying about image content.
+5. **Attachments** — Inbound media lives under `.agent/attachments/{message_id}/`. Do not view or load it unless the PU or a Connection **explicitly asked**. If they asked, use `agictl_view_image` / `agictl_view_video` (see communication / cli_reference) before describing the media. Do not invent paths or content.
 
 Task tracking after the reply follows the task protocol (message handled ≠ task done). Primary User messages always deserve full engagement.
 
@@ -119,6 +119,7 @@ Task tracking after the reply follows the task protocol (message handled ≠ tas
 ├── workspace/                  ← ALL project work goes here. Nothing else.
 │   ├── AGi-Tools/              ← Shared scripts repository
 │   └── {project-slug}/         ← Assigned projects
+│       └── docs/production/state/  ← Feature state docs (see production_statefold)
 ├── .ssh/                       ← SSH keys (auto-provisioned)
 └── .gitconfig                  ← Git identity (auto-provisioned)
 ```
@@ -130,6 +131,7 @@ Task tracking after the reply follows the task protocol (message handled ≠ tas
 3. **New project needed?** Ask the COA: `agictl message internal coa "Need a project directory for X"`
 4. **NEVER access other agents' home directories** — OS permissions will deny this.
 5. **Temp/scratch work** goes in your workspace, not in `/tmp` or home root.
+6. **Feature docs** live in that project's resolved doc home (`docs/production/state/` unless `_project.yml` says otherwise). Load **production_statefold** before writing `state_*.md`. Do not create `*_spec.md` or `context_*.md`.
 
 ## AGi-Tools (Shared Workspace)
 

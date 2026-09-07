@@ -8,9 +8,8 @@ without an exact executable output binding fail cleanly with ``no_driver``.
 - **audio** — streamed pcm16 plus optional transcript, packaged locally.
 - **native Google image** — ``generateContent`` response ``parts[].inlineData``.
 
-**Video** generation is intentionally not wired — there is no video-*output* model in
-the catalog (video-capable rows are video *input* → text), and video generation uses a
-separate async/polling API rather than chat completions.
+**Video** cloud chat generation is still not wired. Local Utility video
+(``local_media`` / sd-cli ``-M vid_gen``) uses ``local_media_video_out_sdcpp``.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ from model_drivers.libraries import (
     chat_mm_image_out_google_generate_content,
     chat_mm_image_out_openai_compat,
     local_media_image_out_sdcpp,
+    local_media_video_out_sdcpp,
 )
 from model_drivers.libraries.chat_mm_common import (
     AUDIO_FORMAT_MIME as _AUDIO_FORMAT_MIME,
@@ -55,13 +55,13 @@ def generate_media(
     input_files: list[dict] | None = None,
     config: dict | None = None,
 ) -> tuple[bytes, str, str, str | None]:
-    """Generate an image/audio artifact.
+    """Generate an image/audio/video artifact.
 
     Returns ``(data, ext, mime, transcript_or_None)``. ``config`` (UM ``config_json``)
     may carry ``image_config`` (aspect_ratio/image_size), ``voice``, and ``audio_format``.
     """
     normalized_modality = (output_modality or "").strip().lower()
-    if normalized_modality not in ("image", "audio"):
+    if normalized_modality not in ("image", "audio", "video"):
         raise UtilityRunError(
             "driver_pending",
             f"No generation path for modality '{output_modality}'",
@@ -86,7 +86,10 @@ def generate_media(
             **dict(config or {}),
         }
 
-        if adapter_id == local_media_image_out_sdcpp.ADAPTER_ID:
+        if adapter_id in (
+            local_media_image_out_sdcpp.ADAPTER_ID,
+            local_media_video_out_sdcpp.ADAPTER_ID,
+        ):
             from model_media_ingest import MEDIA_STORE, resolve_bundle_dir
             from model_media_remote import (
                 MediaRemoteError,
@@ -107,9 +110,12 @@ def generate_media(
             if is_client_topology() and not local_bundle_ready(
                 str(effective_config.get("bundle_dir") or "")
             ):
+                dest_ext = (
+                    "webm" if normalized_modality == "video" else "png"
+                )
                 dest = os.path.join(
                     tempfile.mkdtemp(prefix="versa-media-client-"),
-                    "out.png",
+                    f"out.{dest_ext}",
                 )
                 cfg_scale = (
                     effective_config["cfg_scale"]
@@ -132,12 +138,17 @@ def generate_media(
                         cfg_scale=cfg_scale,
                         seed=seed,
                         offload=bool(effective_config.get("offload")),
+                        frames=effective_config.get("video_frames"),
+                        fps=effective_config.get("fps"),
+                        image=effective_config.get("init_img") or "",
                         topology="client",
                     )
                 except MediaRemoteError as error:
                     raise UtilityRunError(error.code, error.message) from error
                 with open(dest, "rb") as fh:
                     data = fh.read()
+                if dest_ext == "webm":
+                    return data, "webm", "video/webm", None
                 return data, "png", "image/png", None
         else:
             route = resolve_provider_route(catalog_model)
