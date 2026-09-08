@@ -11295,7 +11295,8 @@ def identity():
 )
 @click.option(
     "--agent-key", default="",
-    help="Stable agents.db name for agiAgentKey (default: resolve from DB; COA=coa)",
+    help="VersaVoice agiAgentKey. Normal COA: coa (same-email reuse). "
+         "Sentinel: host-stable coa-s-<12 hex>. Default: resolve from agents.db.",
 )
 def provision(agent_user, token, first_name, last_name, language, country, voice,
               install_email, agent_key):

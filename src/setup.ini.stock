@@ -34,6 +34,10 @@ model=
 #              (setup prompts for first_name — typically this server's name)
 # Fresh client setup asks "Normal install? [Y/n]". --update never re-asks.
 install_role=normal
+# VersaVoice agiAgentKey. Empty on a Normal COA (provision uses coa — same
+# install email reuses the home identity). Sentinel: setup writes a host-stable
+# coa-s-<12 hex> from /etc/machine-id; --update carries it. Do not copy between machines.
+vv_agent_key=
 
 [local_ai]
 # Enable local AI backend (Inference Endpoint + backend).

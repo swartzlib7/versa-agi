@@ -66,8 +66,12 @@ class TestStockSetupDefaults(unittest.TestCase):
         self.assertFalse(_is_stock_setup_key("model_routing", "local"))
         self.assertFalse(_is_stock_setup_key("system", "model"))
         self.assertFalse(_is_stock_setup_key("system", "mode"))
+        self.assertFalse(_is_stock_setup_key("system", "vv_agent_key"))
         self.assertFalse(_is_stock_setup_key("third_party", "google_api_key"))
         self.assertFalse(_is_stock_setup_key("gcp", "auth_method"))
+
+    def test_stock_vv_agent_key_starts_empty(self) -> None:
+        self.assertEqual(_ini_get(STOCK_SETUP, "system", "vv_agent_key"), "")
 
 
 class TestReconcilePreservesSiteDefaults(unittest.TestCase):
@@ -92,6 +96,23 @@ class TestReconcilePreservesSiteDefaults(unittest.TestCase):
             self.assertEqual(_ini_get(deployed, "local_ai", "sycl_active_model"), "qwen3.6:35b")
             self.assertEqual(_ini_get(deployed, "local_ai", "local_models"), "qwen3.6:35b,qwen3.8:27b")
             self.assertEqual(_ini_get(deployed, "model_routing", "local"), "qwen3.6:35b")
+
+    def test_update_keeps_sentinel_vv_agent_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            deployed = os.path.join(tmp, "setup.ini")
+            with open(STOCK_SETUP, encoding="utf-8") as fh:
+                body = fh.read()
+            body = body.replace("install_role=normal", "install_role=sentinel")
+            body = body.replace("vv_agent_key=", "vv_agent_key=coa-s-abcdef012345")
+            with open(deployed, "w", encoding="utf-8") as fh:
+                fh.write(body)
+
+            carried = _reconcile_setup_ini(STOCK_SETUP, deployed)
+            self.assertGreater(carried, 0)
+            self.assertEqual(_ini_get(deployed, "system", "install_role"), "sentinel")
+            self.assertEqual(
+                _ini_get(deployed, "system", "vv_agent_key"), "coa-s-abcdef012345"
+            )
 
 
 class TestStockChatPickParse(unittest.TestCase):

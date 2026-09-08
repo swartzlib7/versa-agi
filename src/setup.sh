@@ -2179,6 +2179,45 @@ fi
 # ─── Step 8b: VersaVoice Identity Resolution (Moved) ─
 section "Step 8b — Identity Resolution"
 
+# Normal COA: agiAgentKey=coa (same-email reuse is intended).
+# Sentinel: host-stable coa-s-<12 hex> so a second box does not bind the home identity.
+# Keep the hashlib line in lockstep with identity.derive_sentinel_agent_key.
+resolve_vv_agent_key() {
+  VV_AGENT_KEY="coa"
+  if [ "${INI_INSTALL_ROLE:-normal}" != "sentinel" ]; then
+    return 0
+  fi
+  local existing
+  existing="$(ini_get system vv_agent_key '')"
+  if echo "${existing}" | grep -Eq '^coa-s-[0-9a-f]{12}$'; then
+    VV_AGENT_KEY="${existing}"
+    return 0
+  fi
+  VV_AGENT_KEY="$(python3 -c '
+import hashlib, os, pathlib
+p = pathlib.Path("/etc/machine-id")
+try:
+    raw = p.read_text(encoding="utf-8").strip()
+except OSError:
+    raw = ""
+if not raw:
+    raw = os.urandom(16).hex()
+print("coa-s-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12])
+')"
+  local f
+  for f in "${INI_FILE:-}" "/etc/versa-agi/setup.ini"; do
+    [ -n "${f}" ] && [ -f "${f}" ] || continue
+    if grep -q "^vv_agent_key=" "${f}" 2>/dev/null; then
+      sed -i '/^\[system\]/,/^\[/{s/^vv_agent_key=.*/vv_agent_key='"${VV_AGENT_KEY}"'/}' "${f}"
+    else
+      sed -i '/^\[system\]/a vv_agent_key='"${VV_AGENT_KEY}" "${f}"
+    fi
+  done
+}
+
+resolve_vv_agent_key
+info "VersaVoice agent key: ${VV_AGENT_KEY} (install_role=${INI_INSTALL_ROLE:-normal})"
+
 if [ -n "${VV_TOKEN:-}" ]; then
   info "Agent identity: ${INI_AGENT_FIRST_NAME} ${INI_AGENT_LAST_NAME} (${INI_AGENT_LANGUAGE})"
   
@@ -2193,7 +2232,7 @@ if [ -n "${VV_TOKEN:-}" ]; then
     --country "${INI_AGENT_COUNTRY:-}" \
     --voice "${INI_AGENT_VOICE:-}" \
     --install-email "${INSTALL_ACCEPTANCE_EMAIL:-}" \
-    --agent-key coa; then
+    --agent-key "${VV_AGENT_KEY}"; then
     ok "VersaVoice identity registered natively via agictl"
   else
     warn "VersaVoice REST registration failed check VersaVoice logs"
@@ -4267,6 +4306,9 @@ MINSEED
   _ini_set_in "system" "mode" "${SELECTED_EXEC_MODE:-cloud}"
   _ini_set_in "system" "model" "${INI_SYSTEM_MODEL:-}"
   _ini_set_in "system" "install_role" "${INI_INSTALL_ROLE:-normal}"
+  if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ] && [ -n "${VV_AGENT_KEY:-}" ]; then
+    _ini_set_in "system" "vv_agent_key" "${VV_AGENT_KEY}"
+  fi
   if [ "${GEMINI_PROVIDER_ENABLED:-false}" = "true" ]; then
     enable_site_provider "google" "/etc/versa-agi/models.ini"
     enable_site_provider "google" "${SCRIPT_DIR}/models.ini"

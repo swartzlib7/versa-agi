@@ -1,7 +1,9 @@
 
 import db_connect
+import hashlib
 import os
 import json
+import pathlib
 import re
 import urllib.request
 import urllib.error
@@ -11,6 +13,36 @@ from rich.console import Console
 console = Console()
 
 VV_API_BASE = "https://us-central1-versavoice-s777.cloudfunctions.net/api/v1"
+
+# Normal COA: shared key so the same PU email reuses one VersaVoice identity.
+# Sentinel: host-stable coa-s-<12 hex> from /etc/machine-id (persisted in setup.ini).
+SHARED_COA_AGENT_KEY = "coa"
+SENTINEL_AGENT_KEY_PREFIX = "coa-s-"
+SENTINEL_AGENT_KEY_RE = re.compile(r"^coa-s-[0-9a-f]{12}$")
+
+
+def _is_shared_coa_agent_key(agent_key: str) -> bool:
+    return (agent_key or "").strip() == SHARED_COA_AGENT_KEY
+
+
+def derive_sentinel_agent_key(host_material: str) -> str:
+    """Host-stable VersaVoice agiAgentKey for a Sentinel install."""
+    material = (host_material or "").strip()
+    if not material:
+        raise ValueError("host_material is required")
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+    return f"{SENTINEL_AGENT_KEY_PREFIX}{digest}"
+
+
+def read_host_material(machine_id_path: str = "/etc/machine-id") -> str:
+    """Prefer systemd machine-id; otherwise a one-shot random hex (caller must persist)."""
+    try:
+        text = pathlib.Path(machine_id_path).read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    except OSError:
+        pass
+    return os.urandom(16).hex()
 
 
 def api_request(endpoint, token, method="GET", body=None):
@@ -58,7 +90,7 @@ def _resolve_agent_key(agent_user: str, agents_db: str) -> str:
 
 def _find_sub_account(account_data: dict, first_name: str, last_name: str,
                       install_email: str, agent_key: str) -> str | None:
-    """Prefer email+key match for COA; else exact first+last on subAccounts."""
+    """Match by (agiInstallEmail + agiAgentKey). Name fallback is Normal COA only."""
     subs = account_data.get("subAccounts") or account_data.get("connections") or []
     norm_email = _normalize_install_email(install_email)
 
@@ -70,6 +102,9 @@ def _find_sub_account(account_data: dict, first_name: str, last_name: str,
             sub_key = (sub.get("agiAgentKey") or sub.get("agi_agent_key") or "").strip()
             if sub_email == norm_email and sub_key == agent_key:
                 return sub.get("subAccountId") or sub.get("uid")
+
+    if not _is_shared_coa_agent_key(agent_key):
+        return None
 
     for sub in subs:
         fn = sub.get("firstName") or ""
@@ -116,7 +151,9 @@ def provision_identity(
     Provisions a VersaVoice sub-account for the given agent and synchronizes the registry.
 
     COA reuse: when install_email is set, match existing API sub-accounts by
-    (agiInstallEmail + agiAgentKey) before creating a duplicate.
+    (agiInstallEmail + agiAgentKey) before creating a duplicate. Normal COA
+    uses agiAgentKey=coa (email reuse is intended). Sentinel uses a host-stable
+    key so a second box does not bind the home identity.
     """
     # ── Username Format Guard ────────────────────────────
     if not re.match(r'^[a-z][a-z0-9_-]{0,31}$', agent_user):
