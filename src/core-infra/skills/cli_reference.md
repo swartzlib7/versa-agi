@@ -230,7 +230,7 @@ agictl task add "Nightly export sync" --assignee coa --due-date "2026-06-22 02:0
 - Script journal rows are kept for a **7-day rolling window** (older rows deleted on each script append) and are **excluded from agent system-prompt injection** — check rc/tail in the Task modal Progress Journal or `agictl task progress <id>` (lists whatever remains in the DB; default `--last 20`, no date filter) instead.
 - Lifeline runs due Script Tasks via `agictl task run-due-scripts` each tick (hidden command — not for manual use).
 - **agitop:** Task modal → **Utility / Script** tab → **Script** mode (gated by `SCRIPT_TASKS_UI_VISIBLE`).
-- Feature toggle: `setup.ini [script_tasks] enabled`. Reserved projects `AGi-Tools` / `AGi-Knowledgebase` cannot be archived or deleted.
+- Feature toggle: `setup.ini [script_tasks] enabled`. Reserved projects `AGi-Tools` / `AGi-Knowledgebase` / `Versa-BusinessAdmin` cannot be archived or deleted.
 
 See skill **`script_tasks.md`** for authoring rules, scheduling behavior, and containment.
 

@@ -20,7 +20,7 @@ try:
     )
 except ImportError:
     # TD-SCRIPT-001: Reserved-name protection for shared system projects.
-    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase", "Versa-BusinessAdmin"}
 
     def is_reserved_system_project(name: str) -> bool:
         return name in RESERVED_SYSTEM_PROJECTS

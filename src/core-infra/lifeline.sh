@@ -492,21 +492,27 @@ agictl agent list for full details — you and your agentic team:
 ${AGENT_REGISTRY_FOR_SYSTEM}"
     fi
 
-    # Feature availability (setup.ini [features] / [versavoice], D34 + TEAM-2/D27):
-    # - OFF → warn so agents do not reach for that feature's agictl group / do not troubleshoot
-    # - ON  → positive enablement for COA + Accountant (ops); other agents via duties
-    # Only features that gate an agent-facing command group are listed here.
+    # Feature availability (setup.ini [features] / [versavoice], D34 + TEAM-2/D27 + TD-MC-001):
+    # - OFF → warn so agents do not reach for that feature / do not treat OFF as a failure
+    # - ON  → positive enablement for COA (+ Accountant for Organization)
     FEATURE_AVAILABILITY_CONTENT=""
     if [ -f "${SETUP_INI}" ]; then
       _org_ui=$(sed -n '/^\[features\]/,/^\[/{s/^organization_ui=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+      _as_ui=$(sed -n '/^\[features\]/,/^\[/{s/^business_admin=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ')
       # Same truth as inbox sync (~688): not exactly "true" ⇒ VersaVoice cloud OFF
       _vv_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
       _features_off=""
       _org_enabled=0
+      _as_enabled=0
       case "${_org_ui}" in
         1|true|yes|on) _org_enabled=1 ;;
         *) _features_off="${_features_off}
 - Organization (accounting/business) is OFF — do not use \`agictl organization …\` or email access skills (**email_admin** / **email_technical**)." ;;
+      esac
+      case "${_as_ui}" in
+        1|true|yes|on) _as_enabled=1 ;;
+        *) _features_off="${_features_off}
+- Versa - Business Admin is OFF — do not install, configure, or deploy \`Versa-BusinessAdmin\` / versa-business-admin. Do not use skill **business_admin**." ;;
       esac
       if [ "${_vv_enabled}" != "true" ]; then
         _features_off="${_features_off}
@@ -555,6 +561,20 @@ ${_org_on_block}"
             FEATURE_AVAILABILITY_CONTENT="${FEATURE_AVAILABILITY_CONTENT}
 ${_org_on_block}"
           fi
+        fi
+      fi
+      if [ "${_as_enabled}" = "1" ] && [ "${AGENT_NAME}" = "${COA_USER}" ]; then
+        _as_on_block="
+**Versa - Business Admin is ON** — shipped project \`Versa-BusinessAdmin\` (GitHub \`versa-business-admin\`) is assigned to you.
+
+- Ask the Primary User whether they would like it **installed and configured**. Do not deploy until they agree.
+- Procedure / skill: load **business_admin** (\`cat .agent/skills/business_admin.md\`) before any install/configure work. The project README is for humans; the shipped skill is the agent procedure."
+        if [ -z "${FEATURE_AVAILABILITY_CONTENT}" ]; then
+          FEATURE_AVAILABILITY_CONTENT="## ── FEATURE AVAILABILITY ──
+${_as_on_block}"
+        else
+          FEATURE_AVAILABILITY_CONTENT="${FEATURE_AVAILABILITY_CONTENT}
+${_as_on_block}"
         fi
       fi
     fi

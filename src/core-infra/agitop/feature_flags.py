@@ -9,9 +9,11 @@ changes. When the file/section/key is absent (pre-D34 systems, tests, dev
 checkouts), the hard-coded fallback below applies — so behaviour is unchanged
 until the operator's choice exists.
 
-TD-UTIL-001 / TD-SCRIPT-001 / TD-ORG-001 + output routing: each maps to one
-``[features]`` key. lifeline.sh reads the same section to tell agents which
-``agictl`` command groups are unavailable when a feature is off.
+TD-UTIL-001 / TD-SCRIPT-001 / TD-ORG-001 / TD-MC-001 + output routing: each maps
+to one ``[features]`` key. lifeline.sh reads the same section to tell agents
+which ``agictl`` command groups (or shipped projects) are unavailable when a
+feature is off. ``business_admin`` has no agitop panel — it gates COA seed +
+FEATURE AVAILABILITY only.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ _FLAGS = (
     ("SCRIPT_TASKS_UI_VISIBLE", "script_tasks_ui", False),
     ("OUTPUT_ROUTING_UI_VISIBLE", "output_routing_ui", False),
     ("ORGANIZATION_UI_VISIBLE", "organization_ui", False),
+    ("BUSINESS_ADMIN_ENABLED", "business_admin", False),
 )
 
 
@@ -55,3 +58,4 @@ UTILITY_MODELS_UI_VISIBLE = _features.get("utility_models_ui", False)
 SCRIPT_TASKS_UI_VISIBLE = _features.get("script_tasks_ui", False)
 OUTPUT_ROUTING_UI_VISIBLE = _features.get("output_routing_ui", False)
 ORGANIZATION_UI_VISIBLE = _features.get("organization_ui", False)
+BUSINESS_ADMIN_ENABLED = _features.get("business_admin", False)

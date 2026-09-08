@@ -34,7 +34,7 @@ try:
     )
 except ImportError:
     COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
-    RESERVED = {"AGi-Tools", "AGi-Knowledgebase"}
+    RESERVED = {"AGi-Tools", "AGi-Knowledgebase", "Versa-BusinessAdmin"}
 
     def is_reserved_system_project(name: str) -> bool:
         return name in RESERVED
@@ -373,10 +373,10 @@ class ProjectMembersModal(ModalScreen):
                                     id="project-directory-hint",
                                 )
                             yield Static("[b]Description[/b]", classes="modal-form-label modal-form-label-spaced")
-                            yield Input(
-                                value=desc,
-                                placeholder="Project description",
+                            yield TextArea(
+                                desc,
                                 id="project-edit-desc",
+                                show_line_numbers=False,
                             )
                             with Horizontal(classes="project-field-row"):
                                 with Vertical(classes="project-field-col"):
@@ -768,7 +768,7 @@ class ProjectMembersModal(ModalScreen):
         new_name = self.query_one("#project-edit-name", Input).value.strip()
         new_remote = self.query_one("#project-edit-remote", Input).value.strip()
         new_branch = self.query_one("#project-edit-branch", Input).value.strip()
-        new_desc = self.query_one("#project-edit-desc", Input).value.strip()
+        new_desc = self.query_one("#project-edit-desc", TextArea).text.strip()
         new_type = self.query_one("#project-edit-type", Select).value
         new_platform = (
             self.query_one("#project-edit-platform", Select).value

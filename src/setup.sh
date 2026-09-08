@@ -1162,7 +1162,7 @@ if [ "${UPDATE_MODE}" = false ]; then
 fi
 
 # ─── Feature Flags Prompt (D34) — after topology selection ─
-# Prompts the optional dashboard surfaces (Organization, Utility Models, etc.).
+# Prompts the optional feature surfaces (Organization, Versa - Business Admin, Utility Models, etc.).
 # Placed after topology selection so:
 #   - Fresh install → Server: exits before reaching here
 #   - Update → Server: exits at early-exit block before reaching here
@@ -2450,6 +2450,82 @@ if [ -f "${AGICTL_PATH}" ]; then
     sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${AGI_KB_ID}" --agent "${COA_USER}" >/dev/null 2>&1 || true
   fi
   ok "AGi-Knowledgebase shared repository seeded"
+
+  # Versa-BusinessAdmin — shipped GitHub project (versa-business-admin), COA-only.
+  # Formal name: Versa - Business Admin. Ignore internal versa-admin-system.
+  # Opt-in like Organization: seed when [features] business_admin is ON.
+  # Procedure: shipped skill business_admin (coa_only). Prefer the just-captured
+  # prompt answer; fall back to deployed setup.ini.
+  VAS_ENABLED="${VERSA_FEATURE_BUSINESS_ADMIN:-}"
+  if [ -z "${VAS_ENABLED}" ] && [ -f "${INI_FILE:-/etc/versa-agi/setup.ini}" ]; then
+    VAS_ENABLED=$(awk -F= '
+      /^\[/ { gsub(/[][]/, "", $0); sec=$0 }
+      sec=="features" && $1=="business_admin" {
+        v=substr($0, index($0, "=")+1); gsub(/[ \t]/,"",v); print v; exit
+      }
+    ' "${INI_FILE:-/etc/versa-agi/setup.ini}" 2>/dev/null || true)
+  fi
+  case "$(printf '%s' "${VAS_ENABLED}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    1|true|yes|on)
+      VAS_NAME="Versa-BusinessAdmin"
+      VAS_REMOTE="https://github.com/swartzlib7/versa-business-admin.git"
+      VAS_DESC="Versa - Business Admin (GitHub versa-business-admin) — COA deploys when the Primary User agrees"
+      VAS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='${VAS_NAME}' LIMIT 1;" 2>/dev/null || true)
+      if [ -z "${VAS_ID}" ]; then
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "${VAS_NAME}" \
+          --dir "${VAS_NAME}" --desc "${VAS_DESC}" --remote "${VAS_REMOTE}" >/dev/null 2>&1 || true
+        VAS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='${VAS_NAME}' LIMIT 1;" 2>/dev/null || true)
+      fi
+      if [ -z "${VAS_ID}" ]; then
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "${VAS_NAME}" \
+          --dir "${VAS_NAME}" --desc "${VAS_DESC}" >/dev/null 2>&1 || true
+        VAS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='${VAS_NAME}' LIMIT 1;" 2>/dev/null || true)
+      fi
+      if [ -n "${VAS_ID}" ]; then
+        VAS_HAVE_REMOTE=$(sqlite3 "${TASKS_DB}" \
+          "SELECT COALESCE(remote_url,'') FROM projects WHERE id=${VAS_ID};" 2>/dev/null || true)
+        VAS_REWRITE_REMOTE=0
+        case "${VAS_HAVE_REMOTE}" in
+          ""|\
+          https://github.com/swartzlib7/versa-agi-mc.git|\
+          git@github.com:swartzlib7/versa-agi-mc.git|\
+          https://github.com/swartzlib7/versa-agi-mission.git|\
+          git@github.com:swartzlib7/versa-agi-mission.git)
+            VAS_REWRITE_REMOTE=1 ;;
+        esac
+        if [ "${VAS_REWRITE_REMOTE}" = "1" ]; then
+          sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project update "${VAS_ID}" \
+            --remote "${VAS_REMOTE}" --type git --platform github >/dev/null 2>&1 || true
+        fi
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${VAS_ID}" \
+          --agent "${COA_USER}" >/dev/null 2>&1 || true
+        ok "Versa-BusinessAdmin project seeded (COA)"
+        if [ -f "${TASKS_DB}" ]; then
+          VAS_OFFER_DESC="Ask the Primary User whether they would like Versa - Business Admin (project Versa-BusinessAdmin) installed and configured. The shipped GitHub project is assigned to you. Do not clone extra copies or deploy until they agree. Procedure is shipped skill business_admin — load .agent/skills/business_admin.md before any install/configure work."
+          VAS_TASK_ID=$(sqlite3 "${TASKS_DB}" \
+            "SELECT id FROM tasks WHERE title='Versa - Business Admin offer' LIMIT 1;" 2>/dev/null || true)
+          if [ -z "${VAS_TASK_ID}" ]; then
+            sqlite3 "${TASKS_DB}" \
+              "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
+                'Versa - Business Admin offer',
+                '${VAS_OFFER_DESC}',
+                'planned',
+                'high',
+                'coa',
+                'system',
+                datetime('now')
+              );"
+            ok "Versa - Business Admin offer task seeded for COA"
+          else
+            sqlite3 "${TASKS_DB}" \
+              "UPDATE tasks SET description='${VAS_OFFER_DESC}' WHERE id=${VAS_TASK_ID};" 2>/dev/null || true
+          fi
+        fi
+      else
+        warn "Versa-BusinessAdmin project could not be created (non-fatal; re-run setup --update)"
+      fi
+      ;;
+  esac
 
   # Backfill: assign shared system projects to all existing sub-agents.
   # New agents get these automatically at `agictl agent add` — this covers

@@ -354,14 +354,19 @@ max_concurrent_runs=1
 output_tail_lines=20
 
 [features]
-# Optional dashboard feature surfaces (TD-ORG-001 et al). Prompted at install /
-# --update; persist here (PU-owned; reconcile carries the operator's choice).
-# Three readers: setup.sh (prompts), feature_flags.py (agitop), lifeline.sh
-# (tells agents which agictl groups are unavailable when a feature is off).
+# Optional dashboard / product feature surfaces (TD-ORG-001 / TD-MC-001 et al).
+# Prompted at install / --update; persist here (PU-owned; reconcile carries the
+# operator's choice). Readers: setup.sh (prompts), feature_flags.py (agitop),
+# lifeline.sh (FEATURE AVAILABILITY for agents).
 #   organization_ui — EXPERIMENTAL; stock OFF; disclaimer + confirm to enable.
+#   business_admin — stock OFF; shipped GitHub project Versa-BusinessAdmin
+#     (formal: Versa - Business Admin; remote versa-business-admin) assigned to COA;
+#     COA asks PU before install/configure; procedure is shipped skill
+#     business_admin (coa_only).
 #   utility_models_ui / script_tasks_ui / output_routing_ui — stock ON (product
 #   defaults). Fresh install prompts [Y/n]; --update carries the site's value.
 organization_ui=false
+business_admin=false
 utility_models_ui=true
 script_tasks_ui=true
 output_routing_ui=true

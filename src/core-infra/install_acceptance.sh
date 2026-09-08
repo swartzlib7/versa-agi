@@ -689,23 +689,28 @@ install_acceptance_feature_prompts() {
   if declare -F text_box >/dev/null 2>&1; then
     text_box "OPTIONAL FEATURES" \
       "Organization is experimental and defaults to OFF." \
+      "Versa - Business Admin defaults to OFF." \
       "Utility Models, Script Tasks, and Output Routing default to ON." \
       "You can change these any time by re-running setup."
   else
     echo ""
-    echo "Optional features (Organization defaults OFF; Utility / Script / Routing default ON):"
+    echo "Optional features (Organization and Versa - Business Admin default OFF;"
+    echo "Utility / Script / Routing default ON):"
     echo ""
   fi
 
-  # Fresh: Organization OFF; the three product surfaces ON. --update carries.
-  local org_current util_current script_current output_current
+  # Fresh: Organization + Business Admin OFF; the three product surfaces ON.
+  # --update carries.
+  local org_current as_current util_current script_current output_current
   if [ "${UPDATE_MODE:-false}" = true ]; then
     org_current="$(_install_acceptance_features_get organization_ui false)"
+    as_current="$(_install_acceptance_features_get business_admin false)"
     util_current="$(_install_acceptance_features_get utility_models_ui true)"
     script_current="$(_install_acceptance_features_get script_tasks_ui true)"
     output_current="$(_install_acceptance_features_get output_routing_ui true)"
   else
     org_current="false"
+    as_current="false"
     util_current="true"
     script_current="true"
     output_current="true"
@@ -715,6 +720,14 @@ install_acceptance_feature_prompts() {
   _install_acceptance_org_disclaimer
   export VERSA_FEATURE_ORGANIZATION_UI="$(_install_acceptance_feature_ask \
     "Would you like to enable the Organization surface?" "${org_current}")"
+
+  echo ""
+  _install_acceptance_feature_note \
+    "Versa - Business Admin — a shipped GitHub project (versa-business-admin) assigned to COA."
+  _install_acceptance_feature_cont \
+    "COA will ask whether you want it installed and configured. Change anytime via setup."
+  export VERSA_FEATURE_BUSINESS_ADMIN="$(_install_acceptance_feature_ask \
+    "Enable Versa - Business Admin?" "${as_current}")"
 
   # Plain features — a short note explaining each, then the prompt.
   echo ""
@@ -785,6 +798,8 @@ install_acceptance_persist_features() {
 
   _install_acceptance_features_set organization_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_ORGANIZATION_UI:-false}")" \
     || { warn "Failed to set organization_ui (non-fatal)"; return 0; }
+  _install_acceptance_features_set business_admin   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_BUSINESS_ADMIN:-false}")" \
+    || warn "Failed to set business_admin (non-fatal)"
   _install_acceptance_features_set utility_models_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_UTILITY_MODELS_UI:-false}")" \
     || warn "Failed to set utility_models_ui (non-fatal)"
   _install_acceptance_features_set script_tasks_ui   "$(_install_acceptance_norm_bool "${VERSA_FEATURE_SCRIPT_TASKS_UI:-false}")" \
@@ -1069,19 +1084,20 @@ _install_acceptance_write_json() {
   # Feature set — the operator's enabled/disabled choices ride along with the
   # registration data (D34). Prefer the just-captured VERSA_FEATURE_* answers;
   # fall back to the persisted setup.ini [features] values.
-  local feat_org feat_util feat_script feat_output
+  local feat_org feat_as feat_util feat_script feat_output
   feat_org="$(_install_acceptance_norm_bool "${VERSA_FEATURE_ORGANIZATION_UI:-$(_install_acceptance_features_get organization_ui false)}")"
+  feat_as="$(_install_acceptance_norm_bool "${VERSA_FEATURE_BUSINESS_ADMIN:-$(_install_acceptance_features_get business_admin false)}")"
   feat_util="$(_install_acceptance_norm_bool "${VERSA_FEATURE_UTILITY_MODELS_UI:-$(_install_acceptance_features_get utility_models_ui false)}")"
   feat_script="$(_install_acceptance_norm_bool "${VERSA_FEATURE_SCRIPT_TASKS_UI:-$(_install_acceptance_features_get script_tasks_ui false)}")"
   feat_output="$(_install_acceptance_norm_bool "${VERSA_FEATURE_OUTPUT_ROUTING_UI:-$(_install_acceptance_features_get output_routing_ui false)}")"
 
   mkdir -p /etc/versa-agi
   local call_sign="${INSTALL_ACCEPTANCE_CALL_SIGN:-}"
-  python3 - "${INSTALL_ACCEPTANCE_JSON}" <<'PY' "${event}" "${install_mode}" "${accepted_at}" "${email}" "${versavoice_enabled}" "${version}" "${platform}" "${hostname_hash}" "${ip_value}" "${feat_org}" "${feat_util}" "${feat_script}" "${feat_output}" "${call_sign}"
+  python3 - "${INSTALL_ACCEPTANCE_JSON}" <<'PY' "${event}" "${install_mode}" "${accepted_at}" "${email}" "${versavoice_enabled}" "${version}" "${platform}" "${hostname_hash}" "${ip_value}" "${feat_org}" "${feat_as}" "${feat_util}" "${feat_script}" "${feat_output}" "${call_sign}"
 import json, sys
 (out, event, install_mode, accepted_at, email, vv, version, platform,
- hostname_hash, ip_value, feat_org, feat_util, feat_script, feat_output,
- call_sign) = sys.argv[1:16]
+ hostname_hash, ip_value, feat_org, feat_as, feat_util, feat_script, feat_output,
+ call_sign) = sys.argv[1:17]
 payload = {
     "event": event,
     "product": "versa-agi",
@@ -1099,6 +1115,7 @@ payload = {
     "versavoice_enabled": vv == "true",
     "features": {
         "organization_ui": feat_org == "true",
+        "business_admin": feat_as == "true",
         "utility_models_ui": feat_util == "true",
         "script_tasks_ui": feat_script == "true",
         "output_routing_ui": feat_output == "true",

@@ -2555,6 +2555,14 @@ ProjectMembersModal {
     padding-bottom: 1;
 }
 
+#project-edit-desc {
+    height: 5;
+    min-height: 5;
+    margin-bottom: 1;
+    border: solid $accent;
+    overflow-y: auto;
+}
+
 #project-tabs {
     height: 1fr;
     min-height: 0;
@@ -3664,6 +3672,14 @@ ProjectMembersModal {
     margin-bottom: 1;
     border-bottom: solid $primary;
     padding-bottom: 1;
+}
+
+#project-edit-desc {
+    height: 5;
+    min-height: 5;
+    margin-bottom: 1;
+    border: solid $accent;
+    overflow-y: auto;
 }
 
 #project-tabs {

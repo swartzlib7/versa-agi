@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Idempotent skills table reconcile from shipped skill files."""
+"""Idempotent skills table reconcile from shipped skill files.
+
+When a file appears under core-infra/skills/ whose name already exists as
+agent_created, the row is promoted to origin=shipped (UNIQUE name) and
+skills_scope.ini supplies scope — so a COA-authored skill can be folded into
+the product without INSERT failing or remaining fleet-shared.
+"""
 from __future__ import annotations
 
 import configparser
@@ -94,7 +100,18 @@ def reconcile(db_path: str = DEFAULT_DB) -> tuple[int, int, int]:
             has_assets = 1 if asset_dir.is_dir() else 0
             scope = scopes.get(skill_name, "all")
 
-            if skill_name in db_names:
+            existing = conn.execute(
+                "SELECT origin FROM skills WHERE name=?", (skill_name,)
+            ).fetchone()
+
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO skills (name, type, origin, has_assets, description, status, scope) "
+                    "VALUES (?, 'system', 'shipped', ?, ?, 'ready', ?)",
+                    (skill_name, has_assets, description, scope),
+                )
+                inserted += 1
+            elif existing[0] == "shipped":
                 conn.execute(
                     "UPDATE skills SET description=?, scope=?, has_assets=?, "
                     "updated_at=datetime('now') WHERE name=? AND origin='shipped'",
@@ -102,12 +119,16 @@ def reconcile(db_path: str = DEFAULT_DB) -> tuple[int, int, int]:
                 )
                 updated += 1
             else:
+                # Agent-created (or other) row with the same name — promote so
+                # UNIQUE(name) does not fail and scope/origin match the shipped
+                # file (e.g. business_admin: coa_only, not fleet share-skill).
                 conn.execute(
-                    "INSERT INTO skills (name, type, origin, has_assets, description, status, scope) "
-                    "VALUES (?, 'system', 'shipped', ?, ?, 'ready', ?)",
-                    (skill_name, has_assets, description, scope),
+                    "UPDATE skills SET type='system', origin='shipped', "
+                    "has_assets=?, description=?, status='ready', scope=?, "
+                    "updated_at=datetime('now') WHERE name=?",
+                    (has_assets, description, scope, skill_name),
                 )
-                inserted += 1
+                updated += 1
 
     orphans = db_names - fs_names
     for orphan in orphans:

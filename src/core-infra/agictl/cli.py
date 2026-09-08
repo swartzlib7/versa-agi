@@ -7007,6 +7007,7 @@ def agent_approve(name, force):
         # symlinked into every agent's workspace/ at creation time:
         #   AGi-Tools          — shared scripts and tooling
         #   AGi-Knowledgebase  — collaborative PU/agent documentation (Grav CMS source)
+        # Versa-BusinessAdmin is reserved + COA-only — do not add it here.
         SHARED_SYSTEM_PROJECTS = ["AGi-Tools", "AGi-Knowledgebase"]
         try:
             conn_tasks = db_connect.connect_compat(tasks_db, timeout=5)
@@ -7312,6 +7313,18 @@ def _rsync_skills_to_agent(name, os_user):
     result = subprocess.run(rsync_cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"rsync failed: {result.stderr.strip()}")
+
+    # rsync --exclude protects dest files from --delete. A skill promoted from
+    # agent_created (scope=all, previously share-skill'd) to shipped coa_only
+    # must still be retracted from sub-agents.
+    for coa_row in coa_only_rows:
+        skill_name = coa_row["name"]
+        leftover_md = os.path.join(skills_dest, f"{skill_name}.md")
+        leftover_dir = os.path.join(skills_dest, skill_name)
+        if os.path.isfile(leftover_md):
+            os.remove(leftover_md)
+        if os.path.isdir(leftover_dir):
+            shutil.rmtree(leftover_dir)
 
     # rsync -a preserves source ownership (watchdog) — restore dir per §IX.4
     subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
@@ -9677,12 +9690,12 @@ def _get_project(conn, project_id):
     return proj
 
 
-# TD-SCRIPT-001: Reserved-name protection for shared system projects.
-# AGi-Tools (the Script Task source) and AGi-Knowledgebase are physically shared
-# and symlinked into every agent workspace (see SHARED_SYSTEM_PROJECTS in
-# agent_add). A reserved-name set is the simplest durable guard — no `protected`
-# column or migration needed — and it must reject BOTH archive and hard-delete so
-# a Script Task's scripts can never be pulled out from under it.
+# TD-SCRIPT-001 / TD-MC-001: Reserved-name protection for system projects.
+# AGi-Tools and AGi-Knowledgebase are physically shared and symlinked into every
+# agent workspace (see SHARED_SYSTEM_PROJECTS in agent_add). Versa-BusinessAdmin
+# is reserved and COA-only (not fleet-shared). A reserved-name set is the
+# simplest durable guard — no `protected` column or migration needed — and it
+# must reject BOTH archive and hard-delete.
 # Display name may be renamed later; directory slug (basename of workspace_path)
 # is immutable. See project_workspace.py.
 try:
@@ -9696,7 +9709,7 @@ try:
     )
 except ImportError:
     COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
-    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase"}
+    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase", "Versa-BusinessAdmin"}
 
     def is_reserved_system_project(name):
         return name in RESERVED_SYSTEM_PROJECTS
