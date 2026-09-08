@@ -118,6 +118,31 @@ def _find_sub_account(account_data: dict, first_name: str, last_name: str,
     return None
 
 
+def _bound_agent_key(account_data: dict | None, sub_id: str) -> str | None:
+    """agiAgentKey on the sponsor sub-account with this id, if listed."""
+    if not account_data or not sub_id:
+        return None
+    subs = account_data.get("subAccounts") or account_data.get("connections") or []
+    for sub in subs:
+        sid = sub.get("subAccountId") or sub.get("uid")
+        if sid == sub_id:
+            key = (sub.get("agiAgentKey") or sub.get("agi_agent_key") or "").strip()
+            return key or None
+    return None
+
+
+def _should_reuse_config_id(resolved_key: str, bound_key: str | None) -> bool:
+    """Reuse local ``sub_account_id`` only when it belongs to this host's key.
+
+    Normal COA (``coa``): a live config id is always reused (home reinstall).
+    Sentinel host-stable key: reuse only if the bound account's ``agiAgentKey``
+    matches. A leftover home-COA id (key ``coa``) must not skip registration.
+    """
+    if _is_shared_coa_agent_key(resolved_key):
+        return True
+    return (bound_key or "").strip() == (resolved_key or "").strip()
+
+
 def _sync_display_name(token: str, sub_id: str, first_name: str, last_name: str) -> None:
     """PATCH first/last when reusing an account under a new call sign."""
     result = api_request(
@@ -203,16 +228,29 @@ def provision_identity(
         console.print(f"Found existing sub_account_id in config: {existing_id}")
         verify = api_request(f"/accounts/{existing_id}", token)
         if verify:
-            console.print(f"Identity resolved: {existing_id} (from config)")
-            cur_fn = (verify.get("firstName") or "").strip()
-            cur_ln = (verify.get("lastName") or "").strip()
-            if cur_fn != first_name or cur_ln != last_name:
-                _sync_display_name(token, existing_id, first_name, last_name)
-            _write_identity(
-                existing_id, "active", config_data, config_file, agents_db,
-                first_name, last_name, language, country, voice, agent_user,
-            )
-            return True
+            bound_key = None
+            if not _is_shared_coa_agent_key(resolved_key):
+                bound_key = _bound_agent_key(api_request("/account", token), existing_id)
+            if not _should_reuse_config_id(resolved_key, bound_key):
+                console.print(
+                    f"Config sub_account_id {existing_id} is not this host's "
+                    f"VersaVoice key ({resolved_key}); not reusing — will register "
+                    f"a new identity."
+                )
+                if "versavoice" in config_data:
+                    config_data["versavoice"]["sub_account_id"] = None
+                    config_data["versavoice"]["status"] = None
+            else:
+                console.print(f"Identity resolved: {existing_id} (from config)")
+                cur_fn = (verify.get("firstName") or "").strip()
+                cur_ln = (verify.get("lastName") or "").strip()
+                if cur_fn != first_name or cur_ln != last_name:
+                    _sync_display_name(token, existing_id, first_name, last_name)
+                _write_identity(
+                    existing_id, "active", config_data, config_file, agents_db,
+                    first_name, last_name, language, country, voice, agent_user,
+                )
+                return True
         else:
             console.print(f"Sub-account {existing_id} no longer exists on VersaVoice — clearing stale config")
             if "versavoice" in config_data:

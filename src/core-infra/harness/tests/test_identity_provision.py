@@ -21,7 +21,9 @@ sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
 from identity import (  # noqa: E402
     SENTINEL_AGENT_KEY_RE,
     SHARED_COA_AGENT_KEY,
+    _bound_agent_key,
     _find_sub_account,
+    _should_reuse_config_id,
     derive_sentinel_agent_key,
     read_host_material,
 )
@@ -123,6 +125,29 @@ class TestFindSubAccount(unittest.TestCase):
             host_key,
         )
         self.assertEqual(found, "sent-uid")
+
+
+class TestConfigIdReuse(unittest.TestCase):
+    def test_normal_coa_always_reuses_live_config_id(self) -> None:
+        self.assertTrue(_should_reuse_config_id(SHARED_COA_AGENT_KEY, "coa"))
+        self.assertTrue(_should_reuse_config_id(SHARED_COA_AGENT_KEY, None))
+        self.assertTrue(_should_reuse_config_id(SHARED_COA_AGENT_KEY, "other"))
+
+    def test_sentinel_rejects_home_coa_config_id(self) -> None:
+        host_key = derive_sentinel_agent_key("sentinel-box")
+        self.assertFalse(_should_reuse_config_id(host_key, SHARED_COA_AGENT_KEY))
+        self.assertFalse(_should_reuse_config_id(host_key, None))
+
+    def test_sentinel_reuses_own_config_id(self) -> None:
+        host_key = derive_sentinel_agent_key("sentinel-box")
+        self.assertTrue(_should_reuse_config_id(host_key, host_key))
+
+    def test_bound_agent_key_reads_listed_sub(self) -> None:
+        host_key = derive_sentinel_agent_key("sentinel-box")
+        account = {"subAccounts": [HOME, {"subAccountId": "sent-uid", "agiAgentKey": host_key}]}
+        self.assertEqual(_bound_agent_key(account, "home-uid"), "coa")
+        self.assertEqual(_bound_agent_key(account, "sent-uid"), host_key)
+        self.assertIsNone(_bound_agent_key(account, "missing"))
 
 
 if __name__ == "__main__":
