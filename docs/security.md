@@ -22,7 +22,7 @@ Strict separation between the **agent**, the **monitoring layer** (Watchdog), an
 
 | Area | Why |
 |------|-----|
-| `sudo` anything except `agictl` | Sudoers scoped to the gateway |
+| `sudo` anything except `agictl` | Sudoers scoped to the gateway. **Exception:** when the Primary User enables **COA Autonomous Mode**, COA gets `NOPASSWD: ALL` and the work-cycle sudo block is lifted for that COA only. |
 | Install system packages | No package-manager sudo |
 | Modify the monitoring layer | POSIX ownership |
 | Modify Poise templates | Read-only `/etc/versa-agi/poise/` — behavior is composed at spawn from DB + role + system vars |
@@ -35,6 +35,8 @@ If the agent needs a system package (`imagemagick`, `ffmpeg`), it **requests** i
 ## Escalation you grant
 
 OS boundaries only protect what you have not given.
+
+**COA Autonomous Mode** (`[coa] autonomous=true` plus `/etc/sudoers.d/versa_agi_coa_autonomous`) is root-equivalent for the `coa` OS user. Enable only on hardware you have dedicated to this system. Sub-agents never receive the grant.
 
 **Docker is root-equivalent.** Adding an agent to the `docker` group lets that agent mount the host (`docker run -v /:/host`) and reach other workspaces, the monitoring layer, and credentials. Docker documents this as equivalent to root.
 

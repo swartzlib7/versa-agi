@@ -1,6 +1,7 @@
 """agictl agent ide — COA IDE mode (hold + seed + Remote-SSH).
 
-on/off are Primary User only (empty AGICTL_AGENT_USER AND euid 0).
+on is Primary User only (empty AGICTL_AGENT_USER AND euid 0).
+off is PU or COA (wrapper stamp AGICTL_AGENT_USER=coa). Other agents refused.
 status stays COA-readable — the per-turn self-check depends on it.
 Do not "harden" status to PU-only later; that kills containment silently.
 """
@@ -77,7 +78,7 @@ def register(agent_group, json_response):
     @ide.command("on")
     @click.argument("name", default="coa")
     def ide_on(name):
-        _require_ide_operator(json_response)
+        _require_ide_on(json_response)
         name = _require_coa(name, json_response)
         row = _agent_row(name)
         if not row:
@@ -161,7 +162,7 @@ def register(agent_group, json_response):
     @ide.command("off")
     @click.argument("name", default="coa")
     def ide_off(name):
-        _require_ide_operator(json_response)
+        _require_ide_off(json_response)
         name = _require_coa(name, json_response)
         row = _agent_row(name)
         if not row:
@@ -209,22 +210,44 @@ def register(agent_group, json_response):
         json_response(True, **_status_payload(name, host, gap, row=row))
 
 
-def _require_ide_operator(json_response):
-    """PU-only: wrapper stamp empty AND real root.
+def _require_ide_on(json_response):
+    """PU-only enable: wrapper stamp empty AND real root.
 
     COA can sudo the inner binary as watchdog (AGICTL_AGENT_USER unset).
-    euid 0 is the OS boundary. Do not use this helper on `status`.
+    euid 0 is the OS boundary. Do not use this helper on `status` or `off`.
     """
     caller = os.environ.get("AGICTL_AGENT_USER", "")
     if caller or os.geteuid() != 0:
         json_response(
             False,
             error=(
-                "IDE mode on/off is Primary User only "
+                "IDE mode on is Primary User only "
                 f"(caller={caller or 'none'}, euid={os.geteuid()})."
             ),
         )
         sys.exit(1)
+
+
+def _require_ide_off(json_response):
+    """PU or COA may disable. Other agents may not.
+
+    COA reaches this via the wrapper stamp (AGICTL_AGENT_USER=coa, euid
+    watchdog). Empty stamp still requires euid 0 — otherwise COA could
+    invoke the inner binary as watchdog and skip the stamp.
+    """
+    caller = (os.environ.get("AGICTL_AGENT_USER", "") or "").strip()
+    if caller == "coa":
+        return
+    if not caller and os.geteuid() == 0:
+        return
+    json_response(
+        False,
+        error=(
+            "IDE mode off is Primary User or COA only "
+            f"(caller={caller or 'none'}, euid={os.geteuid()})."
+        ),
+    )
+    sys.exit(1)
 
 
 def _require_coa(name, json_response):

@@ -321,9 +321,9 @@ agictl execute bash "<script>"                        # Run a bash script
 agictl execute python "<script>"                      # Run a Python script
 ```
 
-Scripts execute as **your agent user** (not root/watchdog) with a 120-second timeout.
+Scripts execute as **your agent user** (not root/watchdog). Timeout is 120 seconds (600 seconds for COA when Autonomous Mode is granted).
 
-> **BLOCKED**: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod` — these are infrastructure-level blocked. If you need elevated access, set the task to `blocked` and report to COA.
+> **BLOCKED** for sub-agents and for COA in standard mode: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod`. If you need elevated access, set the task to `blocked` and report to COA (or the Primary User). **COA exception:** when HARD CONSTRAINTS say **AUTONOMOUS MODE** (grant landed), COA may `bash "sudo …"`.
 
 **Returns JSON**: `{success: true/false, output: "...", exit_code: N}`
 

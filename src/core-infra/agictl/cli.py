@@ -30,6 +30,11 @@ try:
 except ImportError:
     AgentReader = MessageReader = TasksReader = None
 
+from privilege_guard import (  # noqa: E402
+    coa_autonomous_allowed,
+    privilege_escalation_hit,
+    sudoers_line,
+)
 from identity import provision_identity
 from comms import fetch_inbox, send_message, mark_message_processed, build_attachments
 from model_hf_ingest import (
@@ -322,7 +327,22 @@ def system_config_set_ini(section, key, value):
     key_l = (key or "").strip().lower()
     value_s = str(value).strip()
 
-    if section_l == "agent" and key_l == "model_routing_mode":
+    if section_l == "coa" and key_l == "autonomous":
+        if value_s.lower() not in ("true", "false"):
+            json_response(False, error="coa.autonomous must be 'true' or 'false'")
+            sys.exit(1)
+        if os.getenv("AGICTL_AGENT_USER"):
+            json_response(
+                False,
+                error="COA cannot enable its own autonomous sudo. "
+                "The Primary User enables it in System Settings.",
+            )
+            sys.exit(1)
+        ok, err = _ensure_coa_autonomous_sudoers(value_s.lower() == "true")
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
+    elif section_l == "agent" and key_l == "model_routing_mode":
         if value_s.lower() not in ("pool", "preferred"):
             json_response(False, error="model_routing_mode must be 'pool' or 'preferred'")
             sys.exit(1)
@@ -344,6 +364,103 @@ def system_config_set_ini(section, key, value):
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
+
+
+SUDOERS_COA_AUTONOMOUS = "/etc/sudoers.d/versa_agi_coa_autonomous"
+
+
+def _coa_os_user() -> str:
+    """OS user that owns the COA grant (not the agents.db name)."""
+    user = _read_paths_env_key("VERSA_COA_USER")
+    if user:
+        return user.strip()
+    return "coa"
+
+
+def _agictl_root_bin() -> str:
+    for candidate in ("/usr/local/bin/agictl", "/usr/local/lib/versa-agi/agictl"):
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.abspath(sys.argv[0])
+
+
+def _write_coa_autonomous_sudoers(enabled: bool) -> tuple[bool, str]:
+    """Write or remove the COA autonomous sudoers file. Caller must be root."""
+    if enabled:
+        try:
+            body = sudoers_line(_coa_os_user())
+        except ValueError as exc:
+            return False, str(exc)
+        fd, tmp = tempfile.mkstemp(prefix="versa_agi_coa_autonomous_")
+        try:
+            os.write(fd, body.encode())
+            os.close(fd)
+            fd = -1
+            os.chmod(tmp, 0o440)
+            chk = subprocess.run(
+                ["visudo", "-c", "-f", tmp],
+                capture_output=True, text=True, timeout=10,
+            )
+            if chk.returncode != 0:
+                err = (chk.stderr or chk.stdout or "visudo rejected sudoers").strip()
+                return False, err
+            shutil.move(tmp, SUDOERS_COA_AUTONOMOUS)
+            os.chmod(SUDOERS_COA_AUTONOMOUS, 0o440)
+            tmp = ""
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+    elif os.path.isfile(SUDOERS_COA_AUTONOMOUS):
+        try:
+            os.remove(SUDOERS_COA_AUTONOMOUS)
+        except OSError as exc:
+            return False, str(exc)
+    return True, ""
+
+
+def _ensure_coa_autonomous_sudoers(enabled: bool) -> tuple[bool, str]:
+    """Apply the grant as root, escalating via watchdog's agictl sudoers if needed."""
+    if os.geteuid() == 0:
+        return _write_coa_autonomous_sudoers(enabled)
+    result = subprocess.run(
+        [
+            "sudo", "-n", _agictl_root_bin(),
+            "system", "config", "apply-coa-sudoers",
+            "--enabled", "true" if enabled else "false",
+        ],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        return False, (
+            f"Could not write {SUDOERS_COA_AUTONOMOUS} ({err}). "
+            "Re-save System Settings from a session that can passwordless-sudo agictl, "
+            "or run setup.sh --update."
+        )
+    return True, ""
+
+
+@config.command("apply-coa-sudoers")
+@click.option("--enabled", type=click.Choice(["true", "false"]), required=True)
+def system_config_apply_coa_sudoers(enabled):
+    """Write or remove COA autonomous sudoers. Root only. Called by set-ini."""
+    if os.geteuid() != 0:
+        json_response(False, error="apply-coa-sudoers requires root")
+        sys.exit(1)
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="Agents cannot apply the autonomous sudoers grant")
+        sys.exit(1)
+    ok, err = _write_coa_autonomous_sudoers(enabled == "true")
+    if not ok:
+        json_response(False, error=err)
+        sys.exit(1)
+    json_response(True, enabled=enabled, sudoers=SUDOERS_COA_AUTONOMOUS)
+
 
 def _validate_versavoice_api_token(token: str) -> tuple[bool, str]:
     """Live-check sponsor token via GET /account. Fail closed on auth/network errors."""
@@ -7987,8 +8104,8 @@ def agent_status_set(state, summary):
             json_response(
                 False,
                 error=(
-                    "IDE mode is cleared only by the Primary User "
-                    "(agitop IDE Integration, or `agictl agent ide off`)."
+                    "IDE mode is cleared only by `agictl agent ide off` "
+                    "(Primary User or COA)."
                 ),
             )
             sys.exit(1)
@@ -7998,8 +8115,8 @@ def agent_status_set(state, summary):
                 False,
                 error=(
                     f"Refusing to overwrite hold status '{current}'. "
-                    "IDE mode is cleared only by the Primary User "
-                    "(agitop IDE Integration, or `agictl agent ide off`)."
+                    "IDE mode is cleared only by `agictl agent ide off` "
+                    "(Primary User or COA)."
                 ),
             )
             sys.exit(1)
@@ -11675,6 +11792,7 @@ _EXEC_FORWARD_ENV = (
     "AGICTL_DB",
     "VERSA_AGENT_NAME",
     "VERSA_CYCLE_ID",
+    "VERSA_COA_AUTONOMOUS",
 )
 
 
@@ -11721,8 +11839,32 @@ def execute():
     pass
 
 
+def _execute_timeout_seconds() -> int:
+    """Autonomous COA needs apt-scale time; everyone else stays at 120s."""
+    return 600 if coa_autonomous_allowed() else 120
+
+
+def _refuse_privilege_escalation(script: str) -> bool:
+    """Block sudo/su in execute scripts unless the COA grant landed."""
+    if coa_autonomous_allowed():
+        return False
+    hit = privilege_escalation_hit(script or "")
+    if not hit:
+        return False
+    json_response(
+        False,
+        error=(
+            f"BLOCKED: Privilege escalation command detected ('{hit}'). "
+            "You do NOT have sudo/su access. This command will NEVER succeed."
+        ),
+    )
+    return True
+
+
 def _execute_bash_script(script: str) -> None:
     """Run a bash script as the calling agent user."""
+    if _refuse_privilege_escalation(script):
+        return
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
         f.write(script)
@@ -11731,14 +11873,15 @@ def _execute_bash_script(script: str) -> None:
     try:
         cmd = _get_exec_cmd("bash", temp_name)
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, cwd=_exec_env_root(),
+            cmd, capture_output=True, text=True,
+            timeout=_execute_timeout_seconds(), cwd=_exec_env_root(),
         )
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
         json_response(result.returncode == 0, output=output, exit_code=result.returncode)
     except subprocess.TimeoutExpired:
-        json_response(False, error="Execution timed out after 120 seconds")
+        json_response(False, error=f"Execution timed out after {_execute_timeout_seconds()} seconds")
     except Exception as e:
         json_response(False, error=str(e))
     finally:
@@ -11763,6 +11906,8 @@ def execute_bash(script):
 @click.argument("script", type=str)
 def execute_python(script):
     """Execute a python script as the calling agent user."""
+    if _refuse_privilege_escalation(script):
+        return
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(script)
@@ -11772,14 +11917,15 @@ def execute_python(script):
     try:
         cmd = _get_exec_cmd("python3", temp_name)
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, cwd=_exec_env_root(),
+            cmd, capture_output=True, text=True,
+            timeout=_execute_timeout_seconds(), cwd=_exec_env_root(),
         )
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
         json_response(result.returncode == 0, output=output, exit_code=result.returncode)
     except subprocess.TimeoutExpired:
-        json_response(False, error="Execution timed out after 120 seconds")
+        json_response(False, error=f"Execution timed out after {_execute_timeout_seconds()} seconds")
     except Exception as e:
         json_response(False, error=str(e))
     finally:

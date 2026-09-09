@@ -24,13 +24,15 @@ You do **not** open COA's home directory as yourself. Opening `/home/coa/coa-env
 2. `Ctrl+Shift+P` → **Remote-SSH: Connect to Host** → pick `versa-coa`.
    On native Linux, `sudo versa-agi-ide` already added that `Host` entry to your `~/.ssh/config`. On WSL / OrbStack, paste the printed block into the **desktop** SSH config first (Windows `%USERPROFILE%\.ssh\config`, macOS `~/.ssh/config`) — the IDE reads that file, not the Linux one.
 3. In the new remote window: **File → Open Folder** → `/home/coa/coa-env`.
-4. Open a chat and attach `.agent/versa-agi_ide.md` as context. Say hello.
+4. Start a chat. Say hello.
 
 Confirm you landed in the right place — `whoami` in the IDE terminal must print `coa`.
 
-Step 4 is the part that actually makes it COA. The seed carries COA's poise, live situation, always-on skills, and the session rules. Without it you are talking to a stock assistant that happens to be logged in as `coa`.
+`AGENTS.md` at the workspace root is picked up automatically (Cursor, VS Code Copilot, Antigravity). That is the door. COA reads `.agent/versa-agi_ide.md` itself — you do not have to attach it. Attaching the seed is optional.
 
 Both the workspace and the seed live on the remote side, so the IDE's agent shares COA's `agictl` access, databases, and filesystem view. `agictl` is on the `PATH` in that terminal.
+
+On **Cursor** only, COA may offer a same-chat `/loop` after the first cycle. That is optional. VS Code and Antigravity run one cycle and wait. Do not treat a loop as how the mode works.
 
 ## Every turn
 
@@ -38,22 +40,27 @@ COA must run `agictl agent ide status coa` first. If the mode is off, it stops. 
 
 ## Disable
 
-Close the IDE chat, then:
+Close the IDE chat, then either you or COA can turn the mode off:
 
 ```bash
 sudo versa-agi-ide --off
 # or
 sudo agictl agent ide off coa
+# or, as coa after close-out:
+agictl agent ide off coa
 ```
 
-COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] autonomous=true` (full sudo) — IDE mode never touches that setting. An open IDE chat is **not** a harness process — Lifeline will not see it. The per-turn status check is what stops COA in that chat.
+COA can run `off`. It cannot run `on`. Other agents cannot flip either.
+
+COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] autonomous=true` (full sudo) — IDE mode never touches that setting. An open IDE chat is **not** a harness process — Lifeline will not see it. The per-turn status check is what stops COA in that chat. `AGENTS.md` stays; only the seed is deleted.
 
 ## What this is not
 
-- Not a second system prompt. The seed is a one-shot file, deleted on `off`.
+- Not a second system prompt. The seed is a one-shot file, deleted on `off`. `AGENTS.md` stays for the life of the install.
 - Not token-accounted. IDE turns do not write cycles.
-- Not a privilege grant beyond being `coa`. `on`/`off` are Primary User only (`sudo`). `status` is readable by COA on purpose.
+- Not a privilege grant beyond being `coa`. `on` is Primary User only (`sudo`). `off` is Primary User or COA. `status` is readable by COA on purpose.
 - Not a LAN-reachable login. The sshd rule accepts `coa` only from `127.0.0.1` / `::1`, by public key, never by password.
+- Not a required loop. Same-chat wake is Cursor-only and optional.
 
 ## Troubleshooting
 
@@ -63,7 +70,7 @@ COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] au
 | `Permission denied (publickey)` | Confirm the Host block's `IdentityFile` exists and is `600` and owned by you. Re-run `sudo versa-agi-ide` — it reprints the block and re-probes. |
 | `versa-coa` not offered as a host | The block went to the wrong SSH config. On WSL / OrbStack it must be in the **desktop** OS config, not the Linux home. |
 | Connected, but `whoami` is not `coa` | You opened a local folder instead of a Remote-SSH window. |
-| COA acts like it has no history | The seed was not attached to the chat, or the mode is off. Run `agictl agent ide status coa` in the terminal. |
+| COA acts like it has no history | Confirm the folder is `/home/coa/coa-env` (so `AGENTS.md` loads), IDE mode is on, and `.agent/versa-agi_ide.md` exists. Run `agictl agent ide status coa`. |
 | COA answered, then went quiet about tasks | The mode was turned off mid-chat. That is the per-turn check doing its job. |
 
 ## Related

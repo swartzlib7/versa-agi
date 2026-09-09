@@ -24,15 +24,19 @@ CONTEXT_HEADING = "## CONTEXT MAP — how to read this prompt"
 
 def apply(poise_text: str, role: str) -> str:
     role = (role or "normal").strip().lower()
+    if "{FIRST_CONTACT}" not in poise_text:
+        raise SystemExit(
+            "apply_coa_install_role: {FIRST_CONTACT} placeholder not found in poise"
+        )
+    if "{COA_PRIVILEGE}" not in poise_text:
+        raise SystemExit(
+            "apply_coa_install_role: {COA_PRIVILEGE} placeholder not found in poise"
+        )
     if role != "sentinel":
         return poise_text
     if CONTEXT_HEADING not in poise_text:
         raise SystemExit(
             "apply_coa_install_role: CONTEXT MAP heading not found in poise"
-        )
-    if "{FIRST_CONTACT}" not in poise_text:
-        raise SystemExit(
-            "apply_coa_install_role: {FIRST_CONTACT} placeholder not found in poise"
         )
     return poise_text.replace(CONTEXT_HEADING, BANNER + CONTEXT_HEADING, 1)
 

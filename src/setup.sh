@@ -65,7 +65,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.0"
+PRODUCT_VERSION="3.4.1"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -2125,9 +2125,17 @@ ok "Sudoers: ${WATCHDOG_USER} can run apt-get install as root (NOPASSWD)"
 COA_AUTONOMOUS=$(grep -Po '^\s*autonomous\s*=\s*\K\S+' "${INI_FILE}" 2>/dev/null | head -1 || true)
 SUDOERS_COA_AUTONOMOUS="/etc/sudoers.d/versa_agi_coa_autonomous"
 if [ "${COA_AUTONOMOUS}" = "true" ]; then
-  echo "${COA_USER} ALL=(ALL) NOPASSWD: ALL" > "${SUDOERS_COA_AUTONOMOUS}"
-  chmod 440 "${SUDOERS_COA_AUTONOMOUS}"
-  warn "COA AUTONOMOUS MODE: ${COA_USER} has full sudo access (gifted hardware mode)"
+  _coa_sudoers_tmp="$(mktemp)"
+  echo "${COA_USER} ALL=(ALL) NOPASSWD: ALL" > "${_coa_sudoers_tmp}"
+  chmod 440 "${_coa_sudoers_tmp}"
+  if visudo -c -f "${_coa_sudoers_tmp}" >/dev/null; then
+    mv "${_coa_sudoers_tmp}" "${SUDOERS_COA_AUTONOMOUS}"
+    chmod 440 "${SUDOERS_COA_AUTONOMOUS}"
+    warn "COA AUTONOMOUS MODE: ${COA_USER} has full sudo access (gifted hardware mode)"
+  else
+    rm -f "${_coa_sudoers_tmp}"
+    warn "COA autonomous sudoers failed visudo — left ${SUDOERS_COA_AUTONOMOUS} unchanged"
+  fi
 else
   # Remove autonomous sudoers if it exists and mode is disabled
   if [ -f "${SUDOERS_COA_AUTONOMOUS}" ]; then

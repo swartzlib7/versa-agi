@@ -440,16 +440,20 @@ class AgentPromptMenu(ModalScreen):
                                         "to Host[/] → [cyan]versa-coa[/]\n"
                                         "[dim] 3.[/] Open folder [cyan]/home/coa/coa-env[/] "
                                         "in that remote window.\n"
-                                        "[dim] 4.[/] Start a chat and attach "
-                                        "[cyan].agent/versa-agi_ide.md[/] as context.\n"
-                                        "[dim] 5.[/] Untick when done — COA resumes "
-                                        "normal Lifeline spawning on the next pulse."
+                                        "[dim] 4.[/] Start a chat. [cyan]AGENTS.md[/] is "
+                                        "picked up automatically — you do not have to "
+                                        "attach the seed.\n"
+                                        "[dim] 5.[/] Untick when done, or let COA run "
+                                        "[cyan]agictl agent ide off coa[/] after close-out. "
+                                        "COA cannot turn the mode on. Lifeline resumes "
+                                        "on the next pulse."
                                     )
                                     yield Static(
-                                        "\n[dim]Step 4 is what makes it COA — the seed carries "
-                                        "its poise, live situation, and skills. Step 3 must be "
-                                        "a Remote-SSH window; opening that folder locally runs "
-                                        "as [/][cyan]you[/][dim], not COA.[/]"
+                                        "\n[dim]Step 3 must be a Remote-SSH window; opening "
+                                        "that folder locally runs as [/][cyan]you[/][dim], "
+                                        "not COA. The seed is still generated; COA reads it. "
+                                        "On Cursor, a same-chat loop is optional — not how "
+                                        "the mode works.[/]"
                                     )
                                 with Vertical(classes="settings-section-box"):
                                     yield Static(

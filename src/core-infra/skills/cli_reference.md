@@ -92,6 +92,9 @@ sudo agictl agent set-model <name> <model>            # Assign catalog model to 
 sudo agictl agent set-model <name> --clear            # Clear assignment → inherit system default
 agictl agent status show                              # Read your current status from DB
 agictl agent status set <state> ["summary"]           # Write status + message to DB
+agictl agent ide status [coa]                         # IDE mode on/off + gap digest (COA-readable)
+agictl agent ide off [coa]                            # End IDE mode (COA or Primary User). Does not turn it on.
+sudo agictl agent ide on [coa]                        # Enable IDE mode (Primary User only)
 agictl agent count [--active]                         # Count agents (default: all)
 agictl agent summary                                  # Markdown table for context injection (includes Status column)
 agictl agent ensure-protected                         # Self-heal: prevent coa/watchdog deactivation
@@ -428,9 +431,9 @@ agictl execute bash "<script>"                        # Run a bash script as the
 agictl execute python "<script>"                      # Run a Python script as the agent user
 ```
 
-Scripts execute as the **calling agent's OS user** (dropped from watchdog via `sudo -u`). 120-second timeout.
+Scripts execute as the **calling agent's OS user** (dropped from watchdog via `sudo -u`). Timeout is 120 seconds (600 seconds when COA Autonomous Mode is granted).
 
-> **Privilege Escalation Guard**: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod` are **infrastructure-level blocked** — both at the harness tool layer and the CLI layer. These commands will NEVER succeed.
+> **Privilege Escalation Guard**: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod` are blocked at the harness and execute CLI — **except** COA when the Primary User enabled Autonomous Mode **and** `/etc/sudoers.d/versa_agi_coa_autonomous` exists. Sub-agents never get that lift. If the INI flag is on but the sudoers file is missing, the block stays and you must ask the Primary User to re-save System Settings or run `setup.sh --update`.
 
 **Returns JSON**: `{success: true/false, output: "...", exit_code: N}`
 

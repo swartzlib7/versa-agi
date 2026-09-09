@@ -1649,6 +1649,32 @@ $(cat "${_fc_skill}")
   FIRST_CONTACT_CONTENT="${FIRST_CONTACT_CONTENT//&/\\&}"
   MERGED_CONTENT="${MERGED_CONTENT//\{FIRST_CONTACT\}/${FIRST_CONTACT_CONTENT}}"
 
+  # ─── COA Autonomous privilege (COA only) ──
+  # Grant is real only when INI is true AND sudoers file exists.
+  COA_PRIVILEGE_CONTENT="1. **NO PRIVILEGE ESCALATION.** Never use \`sudo\`, \`su\`, \`newgrp\`, \`pkexec\`. They will always fail."
+  VERSA_COA_AUTONOMOUS=""
+  _is_coa=false
+  if [ "${AGENT_NAME}" = "coa" ] || [ "${AGENT_NAME}" = "${COA_USER}" ]; then
+    _is_coa=true
+  fi
+  if [ "${_is_coa}" = true ]; then
+    _auto=$(sed -n '/^\[coa\]/,/^\[/{s/^autonomous=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | tr -d ' ' || true)
+    if [ "${_auto}" = "true" ]; then
+      if [ -f /etc/sudoers.d/versa_agi_coa_autonomous ]; then
+        VERSA_COA_AUTONOMOUS="1"
+        COA_PRIVILEGE_CONTENT="1. **AUTONOMOUS MODE.** The Primary User granted you passwordless sudo (\`NOPASSWD: ALL\`) on this host. You may administer the OS with \`sudo\` via \`agictl_execute\` (\`bash \"sudo …\"\`). Prefer \`agictl\` for Versa AGi data. Confirm destructive or irreversible changes with the Primary User. Sub-agents still have no sudo."
+        CYCLE_PARAMS_CONTENT="${CYCLE_PARAMS_CONTENT//NEVER create or modify files outside this path./Autonomous mode is on: you may write system paths with sudo when the work requires it. Prefer your workspace for project files.}"
+        CYCLE_PARAMS_CONTENT="${CYCLE_PARAMS_CONTENT//host package installs can be done by the agent without the Primary User./you may install host packages and repair services with sudo. Confirm destructive or irreversible changes with the Primary User first.}"
+        log "COA_PRIVILEGE: ${AGENT_NAME} — autonomous grant landed"
+      else
+        COA_PRIVILEGE_CONTENT="1. **AUTONOMOUS MODE FLAG IS ON, GRANT DID NOT LAND.** \`[coa] autonomous=true\` but \`/etc/sudoers.d/versa_agi_coa_autonomous\` is missing. You do **not** have sudo. Ask the Primary User to re-save System Settings or run \`setup.sh --update\`. Until then, never use \`sudo\` — it will fail."
+        log "COA_PRIVILEGE: WARN ${AGENT_NAME} — autonomous=true but sudoers file missing"
+      fi
+    fi
+  fi
+  COA_PRIVILEGE_CONTENT="${COA_PRIVILEGE_CONTENT//&/\\&}"
+  MERGED_CONTENT="${MERGED_CONTENT//\{COA_PRIVILEGE\}/${COA_PRIVILEGE_CONTENT}}"
+
   # ─── System Prompt Assembly ──
   # Template mode: replace {PLACEHOLDER} markers in the poise template with real data.
   # Legacy mode: concatenate blocks in the original WHO→WHY→WHAT→OPERATIONAL order.
@@ -2009,6 +2035,7 @@ ${IDE_RESUME_CONTEXT}"
     echo "export AGICTL_AGENT_DIR='${AGENT_PATH}/.agent'"
     echo "export VERSA_AGENT_NAME='${AGENT_NAME}'"
     [ -n "${VERSA_FIRST_CONTACT:-}" ] && echo "export VERSA_FIRST_CONTACT='${VERSA_FIRST_CONTACT}'"
+    [ -n "${VERSA_COA_AUTONOMOUS:-}" ] && echo "export VERSA_COA_AUTONOMOUS='${VERSA_COA_AUTONOMOUS}'"
     echo "export NODE_OPTIONS='--no-deprecation'"
     [ -n "${CURRENT_CYCLE_ID}" ] && echo "export VERSA_CYCLE_ID='${CURRENT_CYCLE_ID}'"
 

@@ -1160,7 +1160,9 @@ class SystemSettingsModal(ModalScreen):
                                             "[bold yellow]⚠ Only enable on dedicated hardware[/]"
                                         )
                                         yield Static(
-                                            "[dim]Grants COA unrestricted sudo access (NOPASSWD: ALL).[/]"
+                                            "[dim]Grants COA passwordless sudo (NOPASSWD: ALL). "
+                                            "Save writes the sudoers file — it must succeed. "
+                                            "Takes effect on the next COA cycle.[/]"
                                         )
                                         yield ClearCheckbox(
                                             "Enable sudo access",
@@ -1777,6 +1779,7 @@ class SystemSettingsModal(ModalScreen):
             "btn-save-settings-image",
         ):
             try:
+                auto_err = ""
                 # ── Task Management + Circuit Breaker + Flood Guard ──
                 task_max_spawn = int(self.query_one("#input-task-max-spawn", Input).value)
                 cb_consecutive = int(self.query_one("#input-cb-consecutive", Input).value)
@@ -1804,28 +1807,11 @@ class SystemSettingsModal(ModalScreen):
                 vv_enabled = True
                 ok_vv = _write_ini_value("versavoice", "enabled", "true")
 
-                # ── COA Autonomous ──
+                # ── COA Autonomous (set-ini applies sudoers; do not sidecar sudo bash) ──
                 coa_autonomous = self.query_one("#chk-coa-autonomous", Checkbox).value
-                ok6 = _write_ini_value("coa", "autonomous", "true" if coa_autonomous else "false")
-
-                # Apply sudoers immediately (no setup.sh re-run needed)
-                sudoers_file = "/etc/sudoers.d/versa_agi_coa_autonomous"
-                try:
-                    if coa_autonomous:
-                        # Grant full sudo to COA user
-                        subprocess.run(
-                            ["sudo", "bash", "-c",
-                             f'echo "coa ALL=(ALL) NOPASSWD: ALL" > {sudoers_file} && chmod 440 {sudoers_file}'],
-                            capture_output=True, timeout=10
-                        )
-                    else:
-                        # Remove autonomous sudoers if it exists
-                        subprocess.run(
-                            ["sudo", "rm", "-f", sudoers_file],
-                            capture_output=True, timeout=10
-                        )
-                except Exception:
-                    pass  # Non-fatal — sudoers change is best-effort from dashboard
+                ok6, auto_err = _write_ini_value_err(
+                    "coa", "autonomous", "true" if coa_autonomous else "false"
+                )
 
                 # ── Browser Timeout (browser toggle handled by modal, not Save) ──
                 browser_timeout = int(self.query_one("#input-browser-timeout", Input).value)
@@ -1886,7 +1872,17 @@ class SystemSettingsModal(ModalScreen):
                     except Exception:
                         pass
                 else:
-                    self.app.notify("Some settings failed to save — check permissions", severity="warning")
+                    if auto_err:
+                        self.app.notify(
+                            auto_err,
+                            severity="error",
+                            title="Autonomous Mode",
+                        )
+                    else:
+                        self.app.notify(
+                            "Some settings failed to save — check permissions",
+                            severity="warning",
+                        )
             except ValueError:
                 self.app.notify("Invalid input — thresholds must be whole numbers", severity="error")
             self.app.pop_screen()

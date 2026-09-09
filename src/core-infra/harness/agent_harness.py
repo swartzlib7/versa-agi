@@ -783,18 +783,21 @@ class ExecuteInput(BaseModel):
         "The agictl execute subcommand (or shorthand 'bash \"...\"' / 'python \"...\"'). "
         "Examples: 'bash \"ls -la\"', 'execute bash \"ls -la /home\"', "
         "'execute python \"print(1+1)\"'. "
-        "You CANNOT use sudo, su, or any privilege escalation commands."
+        "Privilege escalation (sudo/su) is blocked unless the Primary User enabled "
+        "COA Autonomous Mode and the sudoers grant landed."
     ))
 
 @tool("agictl_execute", args_schema=ExecuteInput)
 def agictl_execute(command: str) -> str:
     """Execute bash or python scripts in your workspace.
-    You do NOT have sudo/su access. Privilege escalation commands are blocked.
+    Privilege escalation is blocked unless COA Autonomous Mode is granted.
     Examples:
       - 'bash "ls -la"'
       - 'execute bash "docker compose up -d"'
       - 'execute python "import os; print(os.getcwd())"'
     """
+    from privilege_guard import coa_autonomous_allowed, privilege_escalation_hit
+
     if not command:
         return "ERROR: You must provide a command string!"
 
@@ -804,20 +807,18 @@ def agictl_execute(command: str) -> str:
     elif stripped.startswith("python ") and not stripped.startswith("execute "):
         command = f"execute {stripped}"
 
-    # ── Privilege Escalation Guard ──
-    # Enforced at infrastructure level — the model cannot bypass this.
-    BLOCKED_PATTERNS = ["sudo ", "sudo\t", " sudo ", "su ", "su\t", " su ", "newgrp ", "pkexec ", "gpasswd ", "usermod "]
-    cmd_lower = command.lower()
-    for pattern in BLOCKED_PATTERNS:
-        if pattern in cmd_lower or cmd_lower.startswith(pattern.strip()):
+    if not coa_autonomous_allowed():
+        hit = privilege_escalation_hit(command)
+        if hit:
             return (
-                f"BLOCKED: Privilege escalation command detected ('{pattern.strip()}'). "
+                f"BLOCKED: Privilege escalation command detected ('{hit}'). "
                 "You do NOT have sudo/su access. This command will NEVER succeed. "
                 "Set the task to blocked: agictl task update <id> --status blocked. "
                 "Report this blocker to the COA or Primary User and move to your next task."
             )
 
-    return _run_agictl(command)
+    timeout = 600 if coa_autonomous_allowed() else AGICTL_TOOL_TIMEOUT_SECONDS
+    return _run_agictl(command, timeout=timeout)
 
 
 class SearchInput(BaseModel):

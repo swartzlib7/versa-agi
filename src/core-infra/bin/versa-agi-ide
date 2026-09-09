@@ -94,8 +94,8 @@ if probe.startswith("failed"):
     print("Remote-SSH will not connect until this is fixed.")
     print("Check: sudo sshd -t && sudo systemctl status ssh")
 print()
-print("In the IDE: Remote-SSH to versa-coa, open the workspace,")
-print("start a chat with versa-agi_ide.md.")
+print("In the IDE: Remote-SSH to versa-coa, open /home/coa/coa-env,")
+print("start a chat. AGENTS.md is picked up automatically.")
 warn = data.get("warn")
 if warn:
     print()

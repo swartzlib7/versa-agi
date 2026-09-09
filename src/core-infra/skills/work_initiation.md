@@ -31,7 +31,7 @@ Before beginning execution:
 *   If using an existing project: `agictl agent status set active "Working on project: [project_name]"`
 *   If registering a new project: Follow onboarding and then update status.
 *   If disposable: `agictl agent status set active "Processing temporary request"`
-*   **IDE session:** skip `status set`. IDE mode stays on until the Primary User turns it off.
+*   **IDE session:** skip `status set`. To leave the mode after close-out: `agictl agent ide off coa`. You cannot turn it on.
 
 ### Step 3: Load craft skills (when applicable)
 
