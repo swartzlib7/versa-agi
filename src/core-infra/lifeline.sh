@@ -812,6 +812,27 @@ ${AGENT_REGISTRY_CONTENT}
     flock -u 200
     continue
   fi
+  # invalid_config self-heals: it is stamped by §4.5 model resolution (unknown key,
+  # backend disabled) and must lift once paths.env resolves the assigned model
+  # again — `agictl model sync` promises "takes effect on the next Lifeline tick",
+  # and an interrupted setup that blanked paths.env must not hold COA forever
+  # (versa-agi-01, 2026-09-09). Only the model-empty first-login hold and the
+  # manual holds (circuit_breaker / halted) stay sticky.
+  if [ "${IDE_GENERATE}" != "true" ] && [ "${HOLD_STATUS}" = "invalid_config" ] && [ -n "${HOLD_ASSIGNED}" ]; then
+    _RESOLVES=false
+    if echo ",${VERSA_CLOUD_MODELS:-}," | grep -q ",${HOLD_ASSIGNED},"; then
+      _RESOLVES=true
+    elif echo ",${VERSA_THIRD_PARTY_MODELS:-}," | grep -q ",${HOLD_ASSIGNED}," && [ "${VERSA_THIRD_PARTY_ENABLED:-false}" = "true" ]; then
+      _RESOLVES=true
+    elif echo ",${VERSA_LOCAL_MODELS:-}," | grep -q ",${HOLD_ASSIGNED}," && [ "${VERSA_LOCAL_AI_ENABLED:-false}" = "true" ]; then
+      _RESOLVES=true
+    fi
+    if [ "${_RESOLVES}" = true ]; then
+      log "RECOVERED: ${AGENT_NAME} — model '${HOLD_ASSIGNED}' resolves again; clearing invalid_config."
+      sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='idle', status_message=NULL, updated_at=datetime('now') WHERE name='${AGENT_NAME}' AND status='invalid_config';" 2>/dev/null || true
+      HOLD_STATUS="idle"
+    fi
+  fi
   if [ "${IDE_GENERATE}" != "true" ] && { [ "${HOLD_STATUS}" = "invalid_config" ] || [ "${HOLD_STATUS}" = "circuit_breaker" ] || [ "${HOLD_STATUS}" = "halted" ]; }; then
     log "BLOCKED: ${AGENT_NAME} — status '${HOLD_STATUS}', skipping spawn (assign a model or run 'agictl agent activate ${AGENT_NAME}')"
     flock -u 200
