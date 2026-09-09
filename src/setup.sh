@@ -766,6 +766,7 @@ _VERSA_LIB_SHARED_PY=(
   provider_registry.py
   shipped_models.py
   catalog_compat.py
+  privilege_guard.py
 )
 
 _deploy_server_agictl_shared_py() {
@@ -1813,7 +1814,7 @@ find "${LIB_DIR}/harness" -type f -exec chmod 644 {} +
 
 # Shared modules the harness imports as top-level (one level above harness/).
 # These live in the core-infra root and must sit next to harness/ so
-# `import model_catalog` / `import provider_registry` resolve under
+# `import model_catalog` / `import provider_registry` / `import privilege_guard` resolve under
 # PYTHONPATH=${LIB_DIR} (the harness runtime layout).
 for _shared_py in "${_VERSA_LIB_SHARED_PY[@]}"; do
   if [ -f "${DEPLOYED_CORE_INFRA}/${_shared_py}" ]; then
