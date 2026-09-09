@@ -122,6 +122,10 @@ def _ensure_section_lines(
         if in_sec and "=" in stripped and not stripped.startswith("#"):
             key = stripped.split("=", 1)[0].strip()
             if key in pairs:
+                if key in present:
+                    # Duplicate key line (interrupted setup runs appended
+                    # several `enabled=` rows). Keep only the first.
+                    continue
                 present.add(key)
                 out.append(_fmt(key, pairs[key]))
                 continue

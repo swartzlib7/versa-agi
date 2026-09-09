@@ -35,6 +35,11 @@ set -euo pipefail
 # if/while/||/&&), so it never changes control flow — it just adds a message.
 set -E
 trap '_setup_rc=$?; printf "\n\033[0;31m  ✗ Setup aborted (exit %s)\033[0m at line %s: %s\n" "${_setup_rc}" "${LINENO}" "${BASH_COMMAND}" >&2' ERR
+# Ctrl+C mid-run leaves a half-applied tree: paths.env model lists are blanked
+# early (Model Registry Sync) and refilled only by `agictl model sync` near the
+# end, so an interrupted run shows an empty COA model picker and Lifeline flags
+# the assigned key as unknown. Say so, and say how to finish.
+trap 'printf "\n\033[1;33m  ⚠ Setup interrupted at line %s — the install is incomplete.\033[0m\n  Re-run the same command (setup.sh or setup.sh --update) to completion.\n  Every step is idempotent; the model catalog sync that fills the COA picker runs near the end.\n" "${LINENO}" >&2; exit 130' INT TERM
 
 # ─── UI Library ──────────────────────────────────────
 SCRIPT_DIR_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -253,32 +258,46 @@ gemini_credentials_present() {
 }
 
 # Enable a provider in models.ini [providers_site] (site activation set).
+#
+# Idempotent and self-healing: every `enabled` line in the section (spaced
+# `enabled = a,b` from the Python writer or bare `enabled=a` from older runs,
+# including duplicates left by interrupted setups) is collapsed into ONE line
+# whose CSV is the union of all values plus ${slug}. Other lines are kept.
 enable_site_provider() {
   local slug="$1"
   local models_ini="${2:-/etc/versa-agi/models.ini}"
-  local current
+  local csv tmp
   [ -n "${slug}" ] && [ -f "${models_ini}" ] || return 0
   if ! grep -q '^\[providers_site\]' "${models_ini}" 2>/dev/null; then
-    printf '\n[providers_site]\nenabled=%s\n' "${slug}" >> "${models_ini}"
+    printf '\n[providers_site]\nenabled = %s\n' "${slug}" >> "${models_ini}"
     return 0
   fi
-  current="$(awk '
-    /^\[providers_site\]/{s=1;next}
-    /^\[/{s=0}
-    s && /^enabled=/{print substr($0,index($0,"=")+1); exit}
-  ' "${models_ini}" | tr -d '[:space:]')"
-  case ",${current}," in
-    *",${slug},"*) return 0 ;;
-  esac
-  if awk '/^\[providers_site\]/{s=1;next} /^\[/{s=0} s && /^enabled=/{f=1} END{exit !f}' "${models_ini}"; then
-    if [ -z "${current}" ]; then
-      sed -i "/^\[providers_site\]/,/^\[/{s/^enabled=.*/enabled=${slug}/}" "${models_ini}" 2>/dev/null || true
-    else
-      sed -i "/^\[providers_site\]/,/^\[/{s/^enabled=.*/enabled=${current},${slug}/}" "${models_ini}" 2>/dev/null || true
-    fi
-  else
-    sed -i "/^\[providers_site\]/a enabled=${slug}" "${models_ini}" 2>/dev/null || true
+  # Pass 1: union of every enabled= value in the section, order preserved, + slug.
+  csv="$(awk -v slug="${slug}" '
+    /^\[providers_site\]/ { s=1; next }
+    /^\[/ { s=0 }
+    s && /^[[:space:]]*enabled[[:space:]]*=/ {
+      v=$0; sub(/^[^=]*=/, "", v)
+      m=split(v, parts, ",")
+      for (i=1; i<=m; i++) { p=parts[i]; gsub(/[[:space:]]/, "", p); if (p!="" && !(p in seen)) { seen[p]=1; out=out (n++ ? "," : "") p } }
+    }
+    END { if (!(slug in seen)) out=out (n ? "," : "") slug; print out }
+  ' "${models_ini}")"
+  [ -n "${csv}" ] || return 0
+  local has
+  has="$(awk '/^\[providers_site\]/{s=1;next} /^\[/{s=0} s && /^[[:space:]]*enabled[[:space:]]*=/{n++} END{print n+0}' "${models_ini}")"
+  # Pass 2: rewrite — first enabled line becomes the union, later ones are dropped;
+  # if the section had none, insert right after the header.
+  tmp="$(mktemp)" || return 0
+  if awk -v csv="${csv}" -v has="${has}" '
+    /^\[providers_site\]/ { print; s=1; if (!has) print "enabled = " csv; next }
+    /^\[/ { s=0; print; next }
+    s && /^[[:space:]]*enabled[[:space:]]*=/ { if (!done) { print "enabled = " csv; done=1 } next }
+    { print }
+  ' "${models_ini}" > "${tmp}"; then
+    cat "${tmp}" > "${models_ini}"   # keep owner/mode of the live file
   fi
+  rm -f "${tmp}"
 }
 
 # VersaVoice API — used for token validation + sponsor identity.
