@@ -301,6 +301,9 @@ def heal_coa_assignment(
 
     - Fresh install + model missing from catalog → clear model (bootstrap assigns).
     - Empty or cleared COA model → hold spawn until first-login assign.
+    - Assigned model back in the live catalog + leftover ``invalid_config``
+      (Lifeline "Unknown model" after a blanked ``paths.env``) → ``idle``.
+      ``circuit_breaker`` / ``halted`` / ``ide`` are not this hold.
     - Cloud catalog row (recommended 0) stuck on the 4K local default → num_ctx=0.
     Does not rewrite a deliberate non-4096 window on ``--update``.
     """
@@ -313,7 +316,7 @@ def heal_coa_assignment(
         con = sqlite3.connect(str(db), timeout=5)
         try:
             row = con.execute(
-                "SELECT model, num_ctx FROM agents WHERE name='coa' LIMIT 1"
+                "SELECT model, num_ctx, status FROM agents WHERE name='coa' LIMIT 1"
             ).fetchone()
             if not row:
                 result["actions"].append("no_coa_row")
@@ -323,6 +326,7 @@ def heal_coa_assignment(
                 num_ctx = int(row[1] or 0)
             except (TypeError, ValueError):
                 num_ctx = 0
+            status = (row[2] or "").strip()
             result["model"] = model
             if not model:
                 result["actions"].append("coa_model_empty")
@@ -347,21 +351,33 @@ def heal_coa_assignment(
                 else:
                     result["actions"].append("missing_catalog_model")
                 return result
+            if status == COA_HOLD_STATUS:
+                con.execute(
+                    "UPDATE agents SET status='idle', status_message=NULL, "
+                    "updated_at=datetime('now') WHERE name='coa' AND status=?",
+                    (COA_HOLD_STATUS,),
+                )
+                result["changed"] = True
+                result["actions"].append("cleared_stale_invalid_config")
+                status = "idle"
             try:
                 from harness.model_context import get_model_context
                 recommended, _ = get_model_context(model)
             except Exception:
+                if result["changed"]:
+                    con.commit()
                 return result
             if recommended == 0 and num_ctx == 4096:
                 con.execute(
                     "UPDATE agents SET num_ctx=0, updated_at=datetime('now') "
                     "WHERE name='coa'"
                 )
-                con.commit()
                 result["changed"] = True
                 result["actions"].append("reset_cloud_num_ctx_auto")
-            else:
+            elif "cleared_stale_invalid_config" not in result["actions"]:
                 result["actions"].append("ok")
+            if result["changed"]:
+                con.commit()
         finally:
             con.close()
     except sqlite3.Error as exc:

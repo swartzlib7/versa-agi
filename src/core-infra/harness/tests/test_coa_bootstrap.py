@@ -298,6 +298,56 @@ class HealCoaAssignment(unittest.TestCase):
         self.assertFalse(result["changed"])
         self.assertIn("missing_catalog_model", result["actions"])
 
+    def test_update_clears_stale_invalid_config_when_model_in_catalog(self):
+        """--update must lift Lifeline's leftover Unknown-model stamp."""
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "UPDATE agents SET status='invalid_config', "
+            "status_message='Unknown model: x-ai/grok-4.5. Use a key from the live catalog.'"
+        )
+        con.commit()
+        con.close()
+        orig = cb._model_in_live_catalog
+        cb._model_in_live_catalog = lambda m: True  # type: ignore
+        try:
+            with patch(
+                "harness.model_context.get_model_context", return_value=(0, 131072)
+            ):
+                result = cb.heal_coa_assignment(agents_db=self.db, fresh_install=False)
+        finally:
+            cb._model_in_live_catalog = orig
+        self.assertTrue(result["changed"])
+        self.assertIn("cleared_stale_invalid_config", result["actions"])
+        self.assertIn("reset_cloud_num_ctx_auto", result["actions"])
+        con = sqlite3.connect(self.db)
+        row = con.execute(
+            "SELECT status, status_message, num_ctx FROM agents WHERE name='coa'"
+        ).fetchone()
+        con.close()
+        self.assertEqual(row[0], "idle")
+        self.assertIsNone(row[1])
+        self.assertEqual(row[2], 0)
+
+    def test_update_keeps_invalid_config_when_model_not_in_catalog(self):
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "UPDATE agents SET status='invalid_config', status_message='Unknown model'"
+        )
+        con.commit()
+        con.close()
+        orig = cb._model_in_live_catalog
+        cb._model_in_live_catalog = lambda m: False  # type: ignore
+        try:
+            result = cb.heal_coa_assignment(agents_db=self.db, fresh_install=False)
+        finally:
+            cb._model_in_live_catalog = orig
+        self.assertFalse(result["changed"])
+        self.assertIn("missing_catalog_model", result["actions"])
+        con = sqlite3.connect(self.db)
+        status = con.execute("SELECT status FROM agents WHERE name='coa'").fetchone()[0]
+        con.close()
+        self.assertEqual(status, "invalid_config")
+
     def test_resets_leaked_4k_on_cloud(self):
         orig = cb._model_in_live_catalog
         cb._model_in_live_catalog = lambda m: True  # type: ignore

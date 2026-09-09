@@ -3353,8 +3353,11 @@ if [ "${UPDATE_MODE}" = true ]; then
     section "Update — Model Registry Sync"
 
     # ── Cloud Models ──
-    # `agictl model sync` re-derives VERSA_CLOUD_MODELS from the live catalog.
-    CURRENT_CLOUD_MODELS=""
+    # Owned by `agictl model sync` (convergence point below). Do not write
+    # VERSA_CLOUD_MODELS here — CURRENT_CLOUD_MODELS used to be copied from
+    # retired setup.ini CSVs and is now always empty. Writing that blank
+    # mid-update is what left versa-agi-01 with an empty COA picker after
+    # interrupted --update (2026-09-09). Leave the live list until sync.
 
     # ── Local AI settings ──
     PATHS_ENV="/etc/versa-agi/paths.env"
@@ -3443,7 +3446,6 @@ if [ "${UPDATE_MODE}" = true ]; then
 
       for kv in \
         "VERSA_EXECUTION_MODE=\"${EXEC_MODE}\"" \
-        "VERSA_CLOUD_MODELS=\"${CURRENT_CLOUD_MODELS}\"" \
         "VERSA_LOCAL_AI_ENABLED=\"${LOCAL_ENABLED}\"" \
         "VERSA_GPU_BACKEND=\"${GPU_BACKEND}\"" \
         "VERSA_LOCAL_MODELS=\"${LOCAL_MODELS}\"" \
@@ -3811,6 +3813,8 @@ print(','.join(r.get('actions') or ['ok']))
 " 2>/dev/null || true)"
     if echo "${_COA_HEAL}" | grep -q 'held_pending_model'; then
       info "COA held until a catalog model is assigned (first-login API Keys / COA)"
+    elif echo "${_COA_HEAL}" | grep -q 'cleared_stale_invalid_config'; then
+      ok "COA invalid_config cleared — assigned model is in the live catalog"
     elif echo "${_COA_HEAL}" | grep -q 'cleared_missing_catalog_model'; then
       warn "COA model was not in the live catalog — cleared so first-login bootstrap can assign a catalog key"
     elif echo "${_COA_HEAL}" | grep -q 'reset_cloud_num_ctx_auto'; then
