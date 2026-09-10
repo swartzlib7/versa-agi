@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from privilege_guard import (  # noqa: E402
     coa_autonomous_allowed,
+    grant_landed_on_disk,
     privilege_escalation_hit,
     sudoers_line,
 )
@@ -50,6 +53,23 @@ class TestPrivilegeGuard(unittest.TestCase):
         self.assertEqual(sudoers_line("agi-box"), "agi-box ALL=(ALL) NOPASSWD: ALL\n")
         with self.assertRaises(ValueError):
             sudoers_line("coa; rm -rf /")
+
+    def test_grant_landed_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = Path(tmp) / "setup.ini"
+            sudoers = Path(tmp) / "versa_agi_coa_autonomous"
+            ini.write_text("[coa]\nautonomous=true\n", encoding="utf-8")
+            self.assertFalse(grant_landed_on_disk(str(ini), str(sudoers)))
+            sudoers.write_text("coa ALL=(ALL) NOPASSWD: ALL\n", encoding="utf-8")
+            self.assertTrue(grant_landed_on_disk(str(ini), str(sudoers)))
+            ini.write_text("[coa]\nautonomous=false\n", encoding="utf-8")
+            self.assertFalse(grant_landed_on_disk(str(ini), str(sudoers)))
+
+    def test_coa_user_stamp_without_env_flag_is_not_enough_in_tests(self):
+        """Passed env dict must not consult live disk (wrapper-strip tests)."""
+        self.assertFalse(
+            coa_autonomous_allowed({"AGICTL_AGENT_USER": "coa"})
+        )
 
 
 _MIN_POISE = """## CONTEXT MAP — how to read this prompt

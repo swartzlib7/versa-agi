@@ -113,7 +113,7 @@ fi
 _fwd=()
 for _var in AGICTL_DB AGICTL_AGENT_DIR AGICTL_CONFIG \
             AGICTL_AGENTS_DB AGICTL_MESSAGES_DB AGICTL_TASKS_DB AGICTL_CYCLES_DB \
-            VERSA_AGENT_NAME VERSA_CYCLE_ID; do
+            VERSA_AGENT_NAME VERSA_CYCLE_ID VERSA_COA_AUTONOMOUS; do
   if [ -n "${!_var:-}" ]; then
     _fwd+=("${_var}=${!_var}")
   fi
