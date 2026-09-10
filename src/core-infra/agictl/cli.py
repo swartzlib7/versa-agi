@@ -378,7 +378,8 @@ def _coa_os_user() -> str:
 
 
 def _agictl_root_bin() -> str:
-    for candidate in ("/usr/local/bin/agictl", "/usr/local/lib/versa-agi/agictl"):
+    """Inner binary first — the PATH wrapper is not needed and can confuse sudoers."""
+    for candidate in ("/usr/local/lib/versa-agi/agictl", "/usr/local/bin/agictl"):
         if os.path.isfile(candidate):
             return candidate
     return os.path.abspath(sys.argv[0])

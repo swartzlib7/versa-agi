@@ -2152,10 +2152,19 @@ chmod 440 "${SUDOERS_PKG_INSTALLER}"
 ok "Sudoers: ${WATCHDOG_USER} can run apt-get install as root (NOPASSWD)"
 
 # COA Autonomous Mode — full sudo access for gifted/dedicated hardware
-# `|| true`: a `grep | head` pipeline can return non-zero under `set -o pipefail`
-# (no match → grep exits 1; or head closing the pipe early → grep SIGPIPE 141),
-# which would abort the script. The empty/absent result is handled below.
-COA_AUTONOMOUS=$(grep -Po '^\s*autonomous\s*=\s*\K\S+' "${INI_FILE}" 2>/dev/null | head -1 || true)
+# Read the *deployed* setup.ini. INI_FILE is the installer tree and stays
+# stock `autonomous=false`. Using that on --update deleted a landed
+# /etc/sudoers.d/versa_agi_coa_autonomous while reconcile kept
+# [coa] autonomous=true — COA then reports "grant did not land" (Sentinel 2026-09-09).
+_COA_AUTONOMOUS_INI="/etc/versa-agi/setup.ini"
+[ -f "${_COA_AUTONOMOUS_INI}" ] || _COA_AUTONOMOUS_INI="${INI_FILE}"
+COA_AUTONOMOUS="$(awk -F= '
+  /^\[coa\]/ { s=1; next }
+  /^\[/ { s=0 }
+  s && $1 ~ /^[[:space:]]*autonomous[[:space:]]*$/ {
+    v=$2; gsub(/[[:space:]]/, "", v); print v; exit
+  }
+' "${_COA_AUTONOMOUS_INI}" 2>/dev/null || true)"
 SUDOERS_COA_AUTONOMOUS="/etc/sudoers.d/versa_agi_coa_autonomous"
 if [ "${COA_AUTONOMOUS}" = "true" ]; then
   _coa_sudoers_tmp="$(mktemp)"

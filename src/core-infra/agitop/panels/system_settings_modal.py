@@ -77,7 +77,7 @@ def _write_ini_value_err(section: str, key: str, value: str) -> tuple[bool, str]
     try:
         result = subprocess.run(
             ["sudo", "-u", "watchdog", "/usr/local/lib/versa-agi/agictl", "system", "config", "set-ini", section, key, str(value)],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=30
         )
         out = (result.stdout or "").strip()
         data = {}
