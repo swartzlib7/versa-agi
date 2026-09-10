@@ -603,10 +603,18 @@ if [ "${UPDATE_MODE}" = true ]; then
       )
     fi
     ok "Repository updated"
-    # Re-exec with updated script
+    # Re-exec with updated script.
+    # Do not use ${DRY_RUN:+--dry-run}: DRY_RUN=false is still non-empty, so
+    # persist-repo updates were re-exec'd as --dry-run (no U5 ask; Lifeline
+    # stayed paused). Same trap for SKIP_VERIFY=false.
     export SKIP_PULL=true
     export CRON_WAS_ACTIVE
-    exec "$0" --update ${DRY_RUN:+--dry-run} ${SKIP_VERIFY:+--skip-verify} ${REPO_BRANCH:+--branch "${REPO_BRANCH}"} ${GRACE_PERIOD:+--grace "${GRACE_PERIOD}"}
+    _reexec_args=(--update)
+    [ "${DRY_RUN}" = true ] && _reexec_args+=(--dry-run)
+    [ "${SKIP_VERIFY}" = true ] && _reexec_args+=(--skip-verify)
+    [ -n "${REPO_BRANCH}" ] && _reexec_args+=(--branch "${REPO_BRANCH}")
+    _reexec_args+=(--grace "${GRACE_PERIOD}")
+    exec "$0" "${_reexec_args[@]}"
   fi
 
 
