@@ -1159,9 +1159,9 @@ def _collect_instance_payload():
 
 
 def _apply_remote_package_decision(name, status):
-    """Same SQL as pkg approve/deny so PKG_NOTICE still fires. Idempotent."""
+    """Same SQL as pkg approve/deny (or revert to requested). Idempotent."""
     name = (name or "").strip().lower()
-    if not name or status not in ("approved", "denied"):
+    if not name or status not in ("approved", "denied", "requested"):
         return "skipped"
     db_path = _get_agents_db_path()
     conn = db_connect.connect_compat(db_path, timeout=5)
@@ -1178,9 +1178,15 @@ def _apply_remote_package_decision(name, status):
             "notified_at=NULL WHERE name=?",
             (name,),
         )
-    else:
+    elif status == "denied":
         conn.execute(
             "UPDATE system_packages SET status='denied', resolved_at=datetime('now') WHERE name=?",
+            (name,),
+        )
+    else:
+        conn.execute(
+            "UPDATE system_packages SET status='requested', resolved_at=NULL, "
+            "notified_at=NULL WHERE name=?",
             (name,),
         )
     conn.commit()
@@ -1227,7 +1233,7 @@ def system_sync_instance():
         dec_path += f"?since={quote(str(since), safe='')}"
     decisions_resp = api_request(dec_path, token) or {}
     decisions = decisions_resp.get("decisions") or []
-    applied = {"approved": 0, "denied": 0, "unchanged": 0, "missing": 0}
+    applied = {"approved": 0, "denied": 0, "requested": 0, "unchanged": 0, "missing": 0}
     latest = since
     for d in decisions:
         if not isinstance(d, dict):

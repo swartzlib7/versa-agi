@@ -9,6 +9,7 @@
 # agents alive and environments intact.
 #
 # Usage:  ./lifeline.sh
+#         ./lifeline.sh --force                 # agitop Retrieve / RUN NOW
 #         ./lifeline.sh --ide-prompt <agent>   # generate IDE seed, no harness
 # CRON:   */5 * * * * /path/to/core-infra/lifeline.sh
 # ─────────────────────────────────────────────────────
@@ -19,6 +20,7 @@ set -euo pipefail
 IDE_GENERATE=false
 IDE_TARGET=""
 IDE_TARGET_SEEN=false
+FORCE_RUN=false
 if [ "${1:-}" = "--ide-prompt" ]; then
   IDE_TARGET="${2:-}"
   if [ -z "${IDE_TARGET}" ]; then
@@ -26,8 +28,10 @@ if [ "${1:-}" = "--ide-prompt" ]; then
     exit 1
   fi
   IDE_GENERATE=true
+elif [ "${1:-}" = "--force" ]; then
+  FORCE_RUN=true
 elif [ -n "${1:-}" ]; then
-  echo "usage: lifeline.sh [--ide-prompt <agent>]" >&2
+  echo "usage: lifeline.sh [--force|--ide-prompt <agent>]" >&2
   exit 1
 fi
 
@@ -334,47 +338,60 @@ if [ -f "${SETUP_INI}" ]; then
 fi
 
 # ─── VV instance sync (Task 202) ─────────────────────
-# Once per tick, if Settings → Sync to VV is not Off and the stamp is stale.
-# Interval floor is this Lifeline CRON period.
+# Interval tick: Settings → Sync to VV is not Off and the stamp is stale.
+# --force (agitop Retrieve / RUN NOW): run now, even if interval is Off.
 _vv_sync_interval=$(sed -n '/^\[versavoice\]/,/^\[/{s/^sync_interval=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
 _vv_en_sync=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-if [ "${_vv_en_sync:-true}" = "true" ] && [ -n "${_vv_sync_interval}" ] && [ "${_vv_sync_interval}" != "off" ]; then
-  _vv_sync_secs=0
-  case "${_vv_sync_interval}" in
-    1min) _vv_sync_secs=300 ;;
-    5min) _vv_sync_secs=300 ;;
-    15min) _vv_sync_secs=900 ;;
-    30min) _vv_sync_secs=1800 ;;
-    1hr) _vv_sync_secs=3600 ;;
-    3hr) _vv_sync_secs=10800 ;;
-    6hr) _vv_sync_secs=21600 ;;
-    12hr) _vv_sync_secs=43200 ;;
-    1d) _vv_sync_secs=86400 ;;
-    2d) _vv_sync_secs=172800 ;;
-    1w) _vv_sync_secs=604800 ;;
-  esac
-  if [ "${_vv_sync_secs}" -gt 0 ]; then
-    _VV_SYNC_STAMP="/var/lib/versa-agi/coa/.vv_instance_sync_at"
-    _now_epoch=$(date +%s)
-    _last_sync=0
-    if [ -f "${_VV_SYNC_STAMP}" ]; then
-      _last_sync=$(tr -d '[:space:]' < "${_VV_SYNC_STAMP}" 2>/dev/null || echo 0)
-    fi
-    if [ $((_now_epoch - _last_sync)) -ge "${_vv_sync_secs}" ]; then
-      _COA_CFG="/etc/versa-agi/coa_config.json"
-      if [ -f "${_COA_CFG}" ]; then
-        log "VV instance sync (${_vv_sync_interval}) — agictl system sync-instance"
-        if AGICTL_CONFIG="${_COA_CFG}" AGICTL_TASKS_DB="/var/lib/versa-agi/coa/tasks.db" \
-          AGICTL_AGENTS_DB="${AGENTS_DB}" \
-          /usr/local/bin/agictl system sync-instance; then
-          echo "${_now_epoch}" > "${_VV_SYNC_STAMP}"
-        else
-          log "WARN: agictl system sync-instance failed"
-        fi
-      else
-        log "WARN: VV instance sync skipped — ${_COA_CFG} missing"
+_vv_do_sync=false
+_vv_sync_reason=""
+if [ "${_vv_en_sync:-true}" = "true" ]; then
+  if [ "${FORCE_RUN}" = "true" ]; then
+    _vv_do_sync=true
+    _vv_sync_reason="force"
+  elif [ -n "${_vv_sync_interval}" ] && [ "${_vv_sync_interval}" != "off" ]; then
+    _vv_sync_secs=0
+    case "${_vv_sync_interval}" in
+      1min) _vv_sync_secs=300 ;;
+      5min) _vv_sync_secs=300 ;;
+      15min) _vv_sync_secs=900 ;;
+      30min) _vv_sync_secs=1800 ;;
+      1hr) _vv_sync_secs=3600 ;;
+      3hr) _vv_sync_secs=10800 ;;
+      6hr) _vv_sync_secs=21600 ;;
+      12hr) _vv_sync_secs=43200 ;;
+      1d) _vv_sync_secs=86400 ;;
+      2d) _vv_sync_secs=172800 ;;
+      1w) _vv_sync_secs=604800 ;;
+    esac
+    if [ "${_vv_sync_secs}" -gt 0 ]; then
+      _VV_SYNC_STAMP="/var/lib/versa-agi/coa/.vv_instance_sync_at"
+      _now_epoch=$(date +%s)
+      _last_sync=0
+      if [ -f "${_VV_SYNC_STAMP}" ]; then
+        _last_sync=$(tr -d '[:space:]' < "${_VV_SYNC_STAMP}" 2>/dev/null || echo 0)
+      fi
+      if [ $((_now_epoch - _last_sync)) -ge "${_vv_sync_secs}" ]; then
+        _vv_do_sync=true
+        _vv_sync_reason="${_vv_sync_interval}"
       fi
     fi
+  fi
+fi
+if [ "${_vv_do_sync}" = "true" ]; then
+  _VV_SYNC_STAMP="/var/lib/versa-agi/coa/.vv_instance_sync_at"
+  _now_epoch=$(date +%s)
+  _COA_CFG="/etc/versa-agi/coa_config.json"
+  if [ -f "${_COA_CFG}" ]; then
+    log "VV instance sync (${_vv_sync_reason}) — agictl system sync-instance"
+    if AGICTL_CONFIG="${_COA_CFG}" AGICTL_TASKS_DB="/var/lib/versa-agi/coa/tasks.db" \
+      AGICTL_AGENTS_DB="${AGENTS_DB}" \
+      /usr/local/bin/agictl system sync-instance; then
+      echo "${_now_epoch}" > "${_VV_SYNC_STAMP}"
+    else
+      log "WARN: agictl system sync-instance failed"
+    fi
+  else
+    log "WARN: VV instance sync skipped — ${_COA_CFG} missing"
   fi
 fi
 

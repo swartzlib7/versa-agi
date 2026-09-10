@@ -762,7 +762,7 @@ class MessagesPanel(Widget):
 
             yield self.table
             with Horizontal(classes="work-tab-actions"):
-                yield Button("Retrieve Messages Now", variant="warning", id="btn-messages-fetch")
+                yield Button("Retrieve Messages & Sync", variant="warning", id="btn-messages-fetch")
                 yield Button("New", variant="success", id="btn-messages-new")
                 yield Button("Edit", variant="primary", id="btn-messages-edit", disabled=True)
                 yield Button("Delete", variant="error", id="btn-messages-delete", disabled=True)
@@ -1067,7 +1067,7 @@ class MessagesPanel(Widget):
         ok, msg = self.app.system.try_force_lifeline()
         if ok:
             self.app.notify(
-                "Cloud Firehose Activated! Polling Data Gateway...",
+                "Retrieving messages and syncing projects, tasks, and packages...",
                 title="Versa AGi",
             )
         else:
