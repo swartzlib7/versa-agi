@@ -301,7 +301,16 @@ else
   fi
 
   chmod +x "${SETUP_SCRIPT}"
-  info "Launching setup..."
+  # Re-running the installer on an existing box is a patch — same --update path
+  # as versa-agi-update / a regular client. Fresh setup.sh never asks to resume
+  # Lifeline (U5 is --update only).
+  SETUP_ARGS=()
+  if [ -f /etc/versa-agi/setup.ini ]; then
+    SETUP_ARGS+=(--update)
+    info "Existing install found — launching setup --update"
+  else
+    info "Launching setup..."
+  fi
   echo ""
   # Install acceptance (welcome, optional email, registration telemetry) runs inside setup.sh
   # via core-infra/install_acceptance.sh — shared for install and --update paths.
@@ -314,11 +323,11 @@ else
   # setup exits non-zero — leaving ~/.versa-agi/ with only the setup.ini symlink.
   set +e
   if [ -t 0 ]; then
-    bash "${SETUP_SCRIPT}"
+    bash "${SETUP_SCRIPT}" "${SETUP_ARGS[@]}"
   elif [ -r /dev/tty ]; then
-    bash "${SETUP_SCRIPT}" < /dev/tty
+    bash "${SETUP_SCRIPT}" "${SETUP_ARGS[@]}" < /dev/tty
   else
-    bash "${SETUP_SCRIPT}"
+    bash "${SETUP_SCRIPT}" "${SETUP_ARGS[@]}"
   fi
   SETUP_RC=$?
   set -e

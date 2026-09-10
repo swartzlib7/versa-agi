@@ -4285,8 +4285,9 @@ fi
 
 # ═══════════════════════════════════════════════════════
 # U5: Resume CRON (--update only, with prompt)
-# Always ask on client --update (normal and Sentinel). Skipping when crontab
-# had no lifeline line left Sentinel boxes with lifeline.disabled and no ask.
+# Always ask on client --update (normal and Sentinel). Same position as a
+# regular client. install.sh on an existing box must pass --update or this
+# block never runs.
 # ═══════════════════════════════════════════════════════
 if [ "${UPDATE_MODE}" = true ]; then
   section "Update — Resume CRON"
