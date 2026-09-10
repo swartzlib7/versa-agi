@@ -87,6 +87,35 @@ def _message_has_real_attachments(msg: dict) -> bool:
     return isinstance(attachments, list) and bool(attachments)
 
 
+def _parse_agi_tag_ids(msg: dict) -> tuple[list[str], list[str]]:
+    """Project and task IDs from VV inbox raw_payload."""
+    raw_payload = msg.get("raw_payload") or ""
+    if not raw_payload:
+        return [], []
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return [], []
+    if not isinstance(payload, dict):
+        return [], []
+    project_ids = []
+    for t in payload.get("agiProjects") or []:
+        if isinstance(t, dict):
+            pid = str(t.get("id") or "").strip()
+            if pid and pid not in project_ids:
+                project_ids.append(pid)
+    task_ids = []
+    for t in payload.get("agiTasks") or []:
+        if isinstance(t, dict):
+            tid = str(t.get("id") or "").strip()
+            if tid and tid not in task_ids:
+                task_ids.append(tid)
+            pp = str(t.get("projectId") or "").strip()
+            if pp and pp not in project_ids:
+                project_ids.append(pp)
+    return project_ids, task_ids
+
+
 def _parse_message_attachments(msg: dict) -> tuple[list[str], list[dict]]:
     """Return (label lines, markdown attachment dicts) from raw_payload."""
     labels: list[str] = []
@@ -341,6 +370,7 @@ class MessageViewModal(ModalScreen):
         self._raw_text = raw_text
 
         attach_labels, self._md_attachments = _parse_message_attachments(msg)
+        project_ids, task_ids = _parse_agi_tag_ids(msg)
         if has_attach and not attach_labels and not self._md_attachments:
             attach_path = (msg.get("attachment_path") or "").strip()
             if attach_path and not attach_path.startswith("http"):
@@ -385,6 +415,16 @@ class MessageViewModal(ModalScreen):
             with VerticalScroll(id="msg-dialog-scroll"):
                 with Vertical(id="msg-body-pane"):
                     yield TextArea(raw_text, id="msg-dialog-body", read_only=True)
+                    if project_ids:
+                        yield Static(
+                            "[cyan]Tagged project IDs:[/] " + ", ".join(project_ids),
+                            id="msg-project-tags",
+                        )
+                    if task_ids:
+                        yield Static(
+                            "[cyan]Tagged task IDs:[/] " + ", ".join(task_ids),
+                            id="msg-task-tags",
+                        )
                     if attach_labels or self._md_attachments:
                         with Vertical(id="msg-attachments"):
                             if attach_labels:

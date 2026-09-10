@@ -70,7 +70,7 @@ def api_request(endpoint, token, method="GET", body=None):
     }
     data = json.dumps(body).encode("utf-8") if body else None
     # TTS generation (speak mode) can take 15-30s for longer messages
-    timeout = 60 if method == "POST" else 10
+    timeout = 60 if method in ("POST", "PUT") else 10
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:

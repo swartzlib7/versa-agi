@@ -120,6 +120,19 @@ for _var in AGICTL_DB AGICTL_AGENT_DIR AGICTL_CONFIG \
 done
 
 # AGICTL_AGENT_USER is the identity stamp — always forwarded.
+#
+# IDE door lives at the workspace root (755 coa:coa). Watchdog cannot unlink
+# it. COA still can — do that before the sudo hop. Seed delete stays in
+# Python (.agent/ is group-writable).
+_prev=""
+for _a in "$@"; do
+  if [ "${_prev}" = "ide" ] && [ "${_a}" = "off" ] && [ "${CALLER}" = "coa" ]; then
+    rm -f /home/coa/coa-env/AGENTS.md /home/coa/AGENTS.md
+    break
+  fi
+  _prev="${_a}"
+done
+
 exec sudo -u watchdog \
   AGICTL_AGENT_USER="${CALLER}" \
   ${_fwd[@]+"${_fwd[@]}"} \

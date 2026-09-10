@@ -83,7 +83,7 @@ class RegistrationModal(ModalScreen):
             lines.extend([
                 "",
                 "[yellow]A newer version is available.[/yellow]",
-                "[b]sudo ./setup.sh --update[/b]",
+                "[b]sudo versa-agi-update[/b]",
                 "Production: auto-pulls from ~/.versa-agi/repo/src",
                 "Dev clones: update from local source only",
             ])

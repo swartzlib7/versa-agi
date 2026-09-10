@@ -13,6 +13,9 @@
 # api_token must verify via GET /account before install/update/set-key accepts it.
 enabled=true
 api_token=
+# Settings → General → Sync to VV. User value is carried on --update.
+# off | 5min | 15min | 30min | 1hr | 3hr | 6hr | 12hr | 1d | 2d | 1w
+sync_interval=off
 
 [system]
 # Execution mode: "cloud", "local", or "hybrid"

@@ -356,6 +356,13 @@ def system_config_set_ini(section, key, value):
         if not ok:
             json_response(False, error=err)
             sys.exit(1)
+    elif section_l == "versavoice" and key_l == "sync_interval":
+        if value_s not in _VV_SYNC_INTERVALS:
+            json_response(
+                False,
+                error="sync_interval must be one of: " + ", ".join(_VV_SYNC_INTERVALS),
+            )
+            sys.exit(1)
 
     try:
         _update_ini_key(ini_path, section, key, value)
@@ -961,6 +968,302 @@ def system_sync_profiles():
             synced["contacts_error"] = str(e)
 
     json_response(True, **synced)
+
+
+_VV_SYNC_INTERVALS = (
+    "off", "5min", "15min", "30min",
+    "1hr", "3hr", "6hr", "12hr", "1d", "2d", "1w",
+)
+
+
+def _agi_tag_ids(raw_payload):
+    """Project and task IDs from inbox particle fields (Task 202)."""
+    if not raw_payload:
+        return [], []
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return [], []
+    if not isinstance(payload, dict):
+        return [], []
+    project_ids = []
+    for t in payload.get("agiProjects") or []:
+        if isinstance(t, dict):
+            pid = str(t.get("id") or "").strip()
+            if pid and pid not in project_ids:
+                project_ids.append(pid)
+    task_ids = []
+    for t in payload.get("agiTasks") or []:
+        if isinstance(t, dict):
+            tid = str(t.get("id") or "").strip()
+            if tid and tid not in task_ids:
+                task_ids.append(tid)
+            pp = str(t.get("projectId") or "").strip()
+            if pp and pp not in project_ids:
+                project_ids.append(pp)
+    return project_ids, task_ids
+
+
+def _vv_instance_id():
+    from install_acceptance import _hostname_hash
+    return _hostname_hash()
+
+
+def _vv_instance_label():
+    ini = SETUP_INI_CANONICAL if os.path.isfile(SETUP_INI_CANONICAL) else ""
+    if ini:
+        try:
+            import configparser
+            cp = configparser.ConfigParser()
+            cp.read(ini)
+            label = (cp.get("agent", "call_sign", fallback="") or "").strip()
+            if label:
+                return label
+        except Exception:
+            pass
+    return socket_hostname_fallback()
+
+
+def socket_hostname_fallback():
+    import socket
+    return socket.gethostname() or "versa-agi"
+
+
+def _agent_vv_uid_map():
+    """Local agent name → VersaVoice sub-account UID from per-agent config."""
+    mapping = {}
+    names = []
+    try:
+        conn = db_connect.connect_compat(_get_agents_db_path(), timeout=5)
+        names = [r[0] for r in conn.execute("SELECT name FROM agents").fetchall()]
+        conn.close()
+    except Exception:
+        pass
+    for name in names:
+        path = f"/etc/versa-agi/{name}_config.json"
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                uid = (json.load(f).get("versavoice") or {}).get("sub_account_id")
+            if uid:
+                mapping[str(name)] = str(uid)
+        except Exception:
+            continue
+    return mapping
+
+
+def _coa_agent_name():
+    return (_read_paths_env_key("VERSA_COA_USER") or "coa").strip() or "coa"
+
+
+def _collect_instance_payload():
+    """Scoped projects / tasks / package requests for PUT /agi/instances."""
+    name_to_uid = _agent_vv_uid_map()
+    coa_name = _coa_agent_name()
+    coa_uid = name_to_uid.get(coa_name, "")
+    projects = []
+    tasks = []
+    packages = []
+    members_by_project = {}
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT project_id, member_id FROM project_members WHERE member_type='agent'"
+        ).fetchall():
+            pid = str(row["project_id"])
+            mid = row["member_id"]
+            uid = name_to_uid.get(mid)
+            if uid:
+                members_by_project.setdefault(pid, []).append(uid)
+        for row in conn.execute(
+            """SELECT p.id, p.name, p.description, p.status, p.type, p.platform,
+                      p.game_id, g.name AS game_name
+               FROM projects p
+               LEFT JOIN games g ON g.id = p.game_id
+               WHERE COALESCE(p.status, '') != 'archived'"""
+        ).fetchall():
+            pid = str(row["id"])
+            member_uids = list(dict.fromkeys(members_by_project.get(pid, [])))
+            projects.append({
+                "id": pid,
+                "name": row["name"] or "",
+                "description": row["description"] or "",
+                "status": row["status"] or "",
+                "type": row["type"] or "",
+                "platform": row["platform"] or "",
+                "gameName": row["game_name"] or "",
+                "gameId": str(row["game_id"]) if row["game_id"] is not None else None,
+                "memberUids": member_uids,
+                "unassigned": len(member_uids) == 0,
+            })
+        for row in conn.execute(
+            """SELECT id, project_id, task_kind, title, description, status,
+                      priority, assigned_to, due_date
+               FROM tasks
+               WHERE status NOT IN ('done', 'cancelled')
+                  OR (status = 'done' AND COALESCE(completed_at, updated_at)
+                        >= datetime('now', '-14 days'))"""
+        ).fetchall():
+            assignee = (row["assigned_to"] or "").strip()
+            assignee_uid = name_to_uid.get(assignee, "") if assignee else ""
+            unassigned = not assignee_uid
+            tasks.append({
+                "id": str(row["id"]),
+                "projectId": str(row["project_id"]) if row["project_id"] is not None else "",
+                "task_kind": row["task_kind"] or "standard",
+                "title": row["title"] or "",
+                "description": row["description"] or "",
+                "status": row["status"] or "",
+                "priority": row["priority"],
+                "assigned_to": assignee,
+                "assignedToUid": assignee_uid,
+                "unassigned": unassigned,
+                "due_date": row["due_date"],
+            })
+        conn.close()
+    except Exception as e:
+        return None, f"tasks.db: {e}"
+
+    try:
+        pkg_db = _get_agents_db_path()
+        conn = db_connect.connect_compat(pkg_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT name, status, reason, requested_by, requested_at FROM system_packages"
+        ).fetchall():
+            requester = (row["requested_by"] or "").strip()
+            requester_uid = name_to_uid.get(requester, "") if requester else ""
+            unknown = not requester_uid
+            packages.append({
+                "packageName": row["name"],
+                "status": row["status"] or "requested",
+                "reason": row["reason"] or "",
+                "requestedBy": requester,
+                "requestedByUid": requester_uid,
+                "requestedByUnknown": unknown,
+                "requestedAt": row["requested_at"],
+            })
+        conn.close()
+    except Exception as e:
+        return None, f"agents.db: {e}"
+
+    return {
+        "coaUid": coa_uid,
+        "agentUids": list(dict.fromkeys(name_to_uid.values())),
+        "projects": projects,
+        "tasks": tasks,
+        "packageRequests": packages,
+    }, None
+
+
+def _apply_remote_package_decision(name, status):
+    """Same SQL as pkg approve/deny so PKG_NOTICE still fires. Idempotent."""
+    name = (name or "").strip().lower()
+    if not name or status not in ("approved", "denied"):
+        return "skipped"
+    db_path = _get_agents_db_path()
+    conn = db_connect.connect_compat(db_path, timeout=5)
+    row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+    if not row:
+        conn.close()
+        return "missing"
+    if row[0] == status:
+        conn.close()
+        return "unchanged"
+    if status == "approved":
+        conn.execute(
+            "UPDATE system_packages SET status='approved', resolved_at=datetime('now'), "
+            "notified_at=NULL WHERE name=?",
+            (name,),
+        )
+    else:
+        conn.execute(
+            "UPDATE system_packages SET status='denied', resolved_at=datetime('now') WHERE name=?",
+            (name,),
+        )
+    conn.commit()
+    conn.close()
+    return status
+
+
+@system.command("sync-instance")
+def system_sync_instance():
+    """Push projects/tasks/packages to VersaVoice and pull package decisions.
+
+    PUT /agi/instances/{hostname_hash} then GET …/package-decisions.
+    Lifeline calls this when [versavoice] sync_interval is not off.
+    """
+    from datetime import datetime, timezone
+    from urllib.parse import quote
+
+    from comms import api_request
+
+    config = get_config()
+    vv = config.get("versavoice", {})
+    token = vv.get("api_token")
+    if not token:
+        json_response(False, error="VersaVoice API token not configured")
+        sys.exit(1)
+
+    instance_id = _vv_instance_id()
+    label = _vv_instance_label()
+    payload, err = _collect_instance_payload()
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
+
+    body = {"label": label, **payload}
+    encoded = quote(instance_id, safe="")
+    put = api_request(f"/agi/instances/{encoded}", token, method="PUT", body=body)
+    if not put or not put.get("success"):
+        json_response(False, error="instance upsert failed", response=put)
+        sys.exit(1)
+
+    since = vv.get("package_decisions_since") or ""
+    dec_path = f"/agi/instances/{encoded}/package-decisions"
+    if since:
+        dec_path += f"?since={quote(str(since), safe='')}"
+    decisions_resp = api_request(dec_path, token) or {}
+    decisions = decisions_resp.get("decisions") or []
+    applied = {"approved": 0, "denied": 0, "unchanged": 0, "missing": 0}
+    latest = since
+    for d in decisions:
+        if not isinstance(d, dict):
+            continue
+        result = _apply_remote_package_decision(d.get("packageName") or d.get("name"), d.get("status"))
+        if result in applied:
+            applied[result] += 1
+        resolved = d.get("resolved_at")
+        if resolved and (not latest or str(resolved) > str(latest)):
+            latest = str(resolved)
+
+    if latest and latest != since:
+        vv["package_decisions_since"] = latest
+        config["versavoice"] = vv
+        config_path = os.environ.get("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
+        try:
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            json_response(
+                True,
+                instanceId=instance_id,
+                counts=put.get("counts"),
+                applied=applied,
+                since_write_error=str(e),
+            )
+            return
+
+    json_response(
+        True,
+        instanceId=instance_id,
+        label=label,
+        counts=put.get("counts"),
+        applied=applied,
+        syncedAt=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 @system.command("vacuum")
@@ -9417,7 +9720,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
     # so the agent grounds in context first and the unread mail gets maximum
     # recency weight. CONTEXT MAP still lists messages as work-priority #1.
     new_messages = message_reader._query(
-        f"SELECT message_id, from_user_id, display_name, text, original_text, created_at "
+        f"SELECT message_id, from_user_id, display_name, text, original_text, created_at, raw_payload "
         f"FROM messages WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({id_placeholders}) "
         f"ORDER BY created_at ASC",
         tuple(my_ids)
@@ -9578,6 +9881,15 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
             dt = msg.get("created_at", "")
             mid = msg.get("message_id", "")
             output += f"  [!] [{dt}] FROM {sender_name} ({msg['from_user_id']}): {text}\n"
+            project_ids, task_ids = _agi_tag_ids(msg.get("raw_payload"))
+            if project_ids:
+                output += (
+                    f"     → TAGGED PROJECT IDS: {', '.join(project_ids)}\n"
+                )
+            if task_ids:
+                output += (
+                    f"     → TAGGED TASK IDS: {', '.join(task_ids)}\n"
+                )
             output += f"     → mark-processed: agictl message mark-processed {mid}\n"
         output += "\n[!] Reply to ALL items above before proceeding to other work. The most recent message is the most relevant one to start with and then looking at the rest.\n"
         output += "--- END NEW MESSAGES ---\n"

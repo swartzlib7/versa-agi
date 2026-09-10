@@ -1049,6 +1049,25 @@ class SystemSettingsModal(ModalScreen):
         um_write_manifest = _read_ini_value("utility_models", "write_manifest", "true").lower() == "true"
         # Parked (VV required): vv_enabled = _read_ini_value("versavoice", "enabled", "true").lower() == "true"
         vv_enabled = True  # checkbox locked on; local-only path parked
+        vv_sync_interval = _read_ini_value("versavoice", "sync_interval", "off")
+        _vv_sync_options = [
+            ("Off", "off"),
+            ("5min", "5min"),
+            ("15min", "15min"),
+            ("30min", "30min"),
+            ("1hr", "1hr"),
+            ("3hr", "3hr"),
+            ("6hr", "6hr"),
+            ("12hr", "12hr"),
+            ("1d", "1d"),
+            ("2d", "2d"),
+            ("1w", "1w"),
+        ]
+        _vv_sync_values = {v for _, v in _vv_sync_options}
+        if vv_sync_interval == "1min":
+            vv_sync_interval = "5min"
+        if vv_sync_interval not in _vv_sync_values:
+            vv_sync_interval = "off"
 
         _browser_label = "Disable" if browser_enabled else "Enable"
         _browser_variant = "error" if browser_enabled else "success"
@@ -1113,22 +1132,23 @@ class SystemSettingsModal(ModalScreen):
                                     yield Static("")
                                     with Vertical(classes="settings-section-box"):
                                         yield Static("[bold cyan]VersaVoice API[/]")
-                                        yield Static(
-                                            "[dim]VersaVoice is required. Local-only (disable) path is parked "
-                                            "until downstream gaps are fixed.[/]"
-                                        )
-                                        # Parked: allow turning VV off from dashboard
-                                        # yield ClearCheckbox(
-                                        #     "Use VersaVoice API",
-                                        #     id="chk-vv-enabled",
-                                        #     value=vv_enabled,
-                                        # )
-                                        yield ClearCheckbox(
-                                            "Use VersaVoice API (required)",
-                                            id="chk-vv-enabled",
-                                            value=True,
-                                            disabled=True,
-                                        )
+                                        with Horizontal(classes="settings-web-search-row"):
+                                            with Vertical(classes="settings-web-search-col"):
+                                                yield Static("")
+                                                yield ClearCheckbox(
+                                                    "Enabled",
+                                                    id="chk-vv-enabled",
+                                                    value=True,
+                                                    disabled=True,
+                                                )
+                                            with Vertical(classes="settings-web-search-col"):
+                                                yield Static("[cyan]Sync to VersaVoice[/]")
+                                                yield Select(
+                                                    _vv_sync_options,
+                                                    value=vv_sync_interval,
+                                                    id="select-vv-sync-interval",
+                                                    allow_blank=False,
+                                                )
 
                                 with Vertical(classes="settings-general-col"):
                                     if self._show_strategy:
@@ -1806,6 +1826,10 @@ class SystemSettingsModal(ModalScreen):
                 # Parked: ok_vv = _write_ini_value("versavoice", "enabled", "true" if vv_enabled else "false")
                 vv_enabled = True
                 ok_vv = _write_ini_value("versavoice", "enabled", "true")
+                vv_sync_interval = (
+                    self.query_one("#select-vv-sync-interval", Select).value or "off"
+                )
+                ok_vv_sync = _write_ini_value("versavoice", "sync_interval", str(vv_sync_interval))
 
                 # ── COA Autonomous (set-ini applies sudoers; do not sidecar sudo bash) ──
                 coa_autonomous = self.query_one("#chk-coa-autonomous", Checkbox).value
@@ -1848,13 +1872,14 @@ class SystemSettingsModal(ModalScreen):
                     ok12 = _write_ini_value("image_processing", "max_width", str(max_width))
                     ok13 = _write_ini_value("image_processing", "max_height", str(max_height))
 
-                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok_vv, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
+                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok_vv, ok_vv_sync, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
                     summary_parts = [
                         f"Task max spawn: {task_max_spawn}",
                         f"Circuit breaker: {cb_consecutive}/{cb_hourly}",
                         f"Flood guard: {flood_guard_hours}h",
                         f"Search: {'on' if search_enabled else 'off'}",
                         f"VersaVoice: {'on' if vv_enabled else 'off'}",
+                        f"Sync to VV: {vv_sync_interval}",
                         f"Browser timeout: {browser_timeout}s",
                         f"Autonomous: {'on' if coa_autonomous else 'off'}",
                     ]

@@ -445,6 +445,7 @@ class AgentPromptMenu(ModalScreen):
                                         "attach the seed.\n"
                                         "[dim] 5.[/] Untick when done, or let COA run "
                                         "[cyan]agictl agent ide off coa[/] after close-out. "
+                                        "That deletes [cyan]AGENTS.md[/] and the seed. "
                                         "COA cannot turn the mode on. Lifeline resumes "
                                         "on the next pulse."
                                     )

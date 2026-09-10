@@ -41,6 +41,9 @@ SSH_PORT = 22
 LIFELINE = Path("/home/watchdog/core-infra/lifeline.sh")
 COA_ENV = Path("/home/coa/coa-env")
 IDE_FILE = COA_ENV / ".agent" / IDE_FILE_NAME
+AGENTS_DOOR = COA_ENV / "AGENTS.md"
+AGENTS_STRAY = Path("/home/coa/AGENTS.md")
+AGENTS_TEMPLATE = Path("/etc/versa-agi/poise/AGENTS.md")
 
 SSH_CONFIG_BLOCK = """Host {alias}
     HostName {host}
@@ -125,6 +128,10 @@ def register(agent_group, json_response):
         if not IDE_FILE.is_file() or IDE_FILE.stat().st_size < 200:
             json_response(False, error="Seed file missing or too small after generate")
             sys.exit(1)
+        door_err = _install_agents_door()
+        if door_err:
+            json_response(False, error=door_err)
+            sys.exit(1)
 
         identity = _pu_identity_path()
         _maybe_install_pu_key(host, identity)
@@ -151,6 +158,7 @@ def register(agent_group, json_response):
                 "ssh_config_written": wrote_config,
                 "ssh_probe": _ssh_probe(),
                 "already_on": already,
+                "agents_md": str(AGENTS_DOOR),
                 "warn": (
                     "Close the IDE chat before 'ide off' or a Lifeline spawn "
                     "can run beside this session."
@@ -169,12 +177,10 @@ def register(agent_group, json_response):
             json_response(False, error=f"Agent '{name}' not found")
             sys.exit(1)
         was_ide = (row["status"] or "").strip() == IDE_STATUS
-        if IDE_FILE.is_file():
-            try:
-                IDE_FILE.unlink()
-            except OSError as e:
-                json_response(False, error=f"Could not delete seed: {e}")
-                sys.exit(1)
+        clean_err = _remove_ide_session_files()
+        if clean_err:
+            json_response(False, error=clean_err)
+            sys.exit(1)
         if was_ide:
             _set_status(name, "idle", None)
             state = _read_state()
@@ -188,6 +194,7 @@ def register(agent_group, json_response):
             True,
             status="idle" if was_ide else (row["status"] or ""),
             cleaned=True,
+            agents_md=False,
             was_ide=was_ide,
             warn=(
                 "COA resumes normal Lifeline spawning on the next pulse. "
@@ -256,6 +263,46 @@ def _require_coa(name, json_response):
         json_response(False, error="IDE mode is COA-only in this release.")
         sys.exit(1)
     return name
+
+
+def _agents_template_path() -> Path | None:
+    """Shipped door text. Live workspace copy exists only while the mode is on."""
+    for candidate in (
+        AGENTS_TEMPLATE,
+        Path("/home/watchdog/core-infra/config/AGENTS.md"),
+    ):
+        if candidate.is_file() and candidate.stat().st_size > 80:
+            return candidate
+    return None
+
+
+def _install_agents_door() -> str | None:
+    src = _agents_template_path()
+    if src is None:
+        return (
+            f"IDE door template missing ({AGENTS_TEMPLATE}). "
+            "Re-run setup.sh --update."
+        )
+    try:
+        AGENTS_DOOR.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, AGENTS_DOOR)
+        os.chmod(AGENTS_DOOR, 0o644)
+        os.chown(AGENTS_DOOR, _uid("coa"), _gid("coa"))
+    except OSError as exc:
+        return f"Could not install AGENTS.md: {exc}"
+    return None
+
+
+def _remove_ide_session_files() -> str | None:
+    """Seed + door (workspace and a stray copy in ~coa). Missing files are fine."""
+    for path in (IDE_FILE, AGENTS_DOOR, AGENTS_STRAY):
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            return f"Could not delete {path}: {exc}"
+    return None
 
 
 def _db_path(env_name, default):

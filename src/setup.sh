@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.1"
+PRODUCT_VERSION="3.4.2"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -1379,6 +1379,11 @@ fi
 # COA environment — only deploy if the COA user exists (server-only topology skips this)
 if id "${COA_USER}" &>/dev/null; then
   deploy_repo "${SRC_COA_ENV}" "${DEPLOYED_COA_ENV}" "${COA_USER}" "COA Environment"
+  # AGENTS.md is session-scoped (ide on/off). Strip the shipped copy so git
+  # init and a leftover from a prior always-present contract do not keep it.
+  if [ "${DRY_RUN}" = false ]; then
+    rm -f "${DEPLOYED_COA_ENV}/AGENTS.md"
+  fi
 else
   info "COA user '${COA_USER}' does not exist — skipping COA environment deployment (server topology)"
 fi
@@ -1944,6 +1949,41 @@ if [ -f "${IDE_SESSION_SOURCE}" ]; then
   chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${IDE_SESSION_DEST}"
   chmod 640 "${IDE_SESSION_DEST}"
   ok "IDE session template deployed → ${IDE_SESSION_DEST} (watchdog:watchdog 640)"
+fi
+
+# IDE door template — live /home/coa/coa-env/AGENTS.md exists only while mode is on.
+# deploy_repo rsyncs src/coa-env (includes AGENTS.md); strip or restore from status.
+IDE_AGENTS_SRC="${SCRIPT_DIR}/coa-env/AGENTS.md"
+IDE_AGENTS_TEMPLATE="${POISE_DIR}/AGENTS.md"
+if [ -f "${IDE_AGENTS_SRC}" ]; then
+  cp "${IDE_AGENTS_SRC}" "${IDE_AGENTS_TEMPLATE}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${IDE_AGENTS_TEMPLATE}"
+  chmod 640 "${IDE_AGENTS_TEMPLATE}"
+  mkdir -p "${DEPLOYED_CORE_INFRA}/config"
+  cp "${IDE_AGENTS_SRC}" "${DEPLOYED_CORE_INFRA}/config/AGENTS.md"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}/config/AGENTS.md"
+  chmod 644 "${DEPLOYED_CORE_INFRA}/config/AGENTS.md"
+  ok "IDE door template deployed → ${IDE_AGENTS_TEMPLATE}"
+fi
+_IDE_LIVE_DOOR="${DEPLOYED_COA_ENV}/AGENTS.md"
+_IDE_ON=false
+if [ -f "${AGENTS_DB}" ]; then
+  [ "$(sqlite3 "${AGENTS_DB}" "SELECT COALESCE(status,'') FROM agents WHERE name='coa';" 2>/dev/null || true)" = "ide" ] && _IDE_ON=true
+fi
+if [ "${DRY_RUN}" = true ]; then
+  if [ "${_IDE_ON}" = true ]; then
+    info "[DRY-RUN] Would keep IDE door (status=ide)"
+  else
+    info "[DRY-RUN] Would remove IDE door (status not ide)"
+  fi
+elif [ "${_IDE_ON}" = true ] && [ -f "${IDE_AGENTS_TEMPLATE}" ]; then
+  cp -f "${IDE_AGENTS_TEMPLATE}" "${_IDE_LIVE_DOOR}"
+  chown "${COA_USER}:${COA_USER}" "${_IDE_LIVE_DOOR}" 2>/dev/null || true
+  chmod 644 "${_IDE_LIVE_DOOR}"
+  ok "IDE door present (mode is on)"
+else
+  rm -f "${_IDE_LIVE_DOOR}" /home/coa/AGENTS.md
+  ok "IDE door removed (mode is off)"
 fi
 
 # Deploy philosophical anchor template to /etc/versa-agi/poise/anchor_full.md

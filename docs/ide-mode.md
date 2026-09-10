@@ -28,7 +28,7 @@ You do **not** open COA's home directory as yourself. Opening `/home/coa/coa-env
 
 Confirm you landed in the right place — `whoami` in the IDE terminal must print `coa`.
 
-`AGENTS.md` at the workspace root is picked up automatically (Cursor, VS Code Copilot, Antigravity). That is the door. COA reads `.agent/versa-agi_ide.md` itself — you do not have to attach it. Attaching the seed is optional.
+While the mode is on, `AGENTS.md` at the workspace root is picked up automatically (Cursor, VS Code Copilot, Antigravity). That is the door. `ide off` deletes it (and the seed). COA reads `.agent/versa-agi_ide.md` itself — you do not have to attach it. Attaching the seed is optional.
 
 Both the workspace and the seed live on the remote side, so the IDE's agent shares COA's `agictl` access, databases, and filesystem view. `agictl` is on the `PATH` in that terminal.
 
@@ -52,11 +52,11 @@ agictl agent ide off coa
 
 COA can run `off`. It cannot run `on`. Other agents cannot flip either.
 
-COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] autonomous=true` (full sudo) — IDE mode never touches that setting. An open IDE chat is **not** a harness process — Lifeline will not see it. The per-turn status check is what stops COA in that chat. `AGENTS.md` stays; only the seed is deleted.
+COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] autonomous=true` (full sudo) — IDE mode never touches that setting. An open IDE chat is **not** a harness process — Lifeline will not see it. The per-turn status check is what stops COA in that chat. `off` deletes `AGENTS.md` and `.agent/versa-agi_ide.md`. A leftover `AGENTS.md` in `/home/coa/` is removed too.
 
 ## What this is not
 
-- Not a second system prompt. The seed is a one-shot file, deleted on `off`. `AGENTS.md` stays for the life of the install.
+- Not a second system prompt. The seed and `AGENTS.md` exist only while the mode is on; both are deleted on `off`.
 - Not token-accounted. IDE turns do not write cycles.
 - Not a privilege grant beyond being `coa`. `on` is Primary User only (`sudo`). `off` is Primary User or COA. `status` is readable by COA on purpose.
 - Not a LAN-reachable login. The sshd rule accepts `coa` only from `127.0.0.1` / `::1`, by public key, never by password.
