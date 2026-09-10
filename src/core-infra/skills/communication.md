@@ -27,6 +27,8 @@ Results are **oldest to newest** (same as injected NEW MESSAGES). `--last-n-coun
 
 **Inbound handling:** `message send` (reply/ack) **before** `mark-processed`. Never mark-processed first. Cycle-end journals are not a reply to the sender. Attachments stay on disk under `.agent/attachments/{message_id}/`. Do not view or load unless the PU or a Connection **explicitly asked**; if they asked, `agictl_view_image` / `agictl_view_video` before describing.
 
+Spawn **NEW MESSAGES** may include **`→ TAGGED PROJECT IDS`** / **`→ TAGGED TASK IDS`**. Those are VersaVoice picker IDs — resolve with `agictl project list` / `agictl task get`. Do not invent names.
+
 ### Recipient IDs
 
 **ALWAYS use the UID** (the `contact_id` column from `agictl message get`), **NEVER the display name**. UIDs look like `2yLBOuDkgBaq8rIXVZb6HBuTY5c4`. Display names like "John Smith" will be rejected by the API.
@@ -144,7 +146,7 @@ When an inbound message is **ambiguous** — unclear reference, continuation of 
 agictl message get YOUR_SUB_ACCOUNT_ID --contact <uid> --last-n-count 10
 ```
 
-This provides the full conversational thread to properly interpret the message.
+This provides the full conversational thread to properly interpret the message. Tagged project/task IDs in the injected context are the steering signal when the PU tagged the chat — prefer those IDs over guessing which project they meant.
 
 ---
 

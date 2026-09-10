@@ -11,8 +11,9 @@ Trust spawn **host_class** (`native_linux` / `wsl2` / `wsl1`) before requesting 
 ## How It Works
 
 1. **You request** a package via `agictl pkg request <name> --reason "..."`.
-2. **Lifeline notifies you** — on your next spawn after approval, a one-shot `PKG_NOTICE` block is injected into your system prompt listing the approved packages.
-3. **You install** the approved package via `agictl pkg install <name>`.
+2. **The Primary User approves, denies, or re-requests** in **VersaVoice → Settings → Personal → Versa AGi & API → Packages** or in agitop Settings → System Packages. Instance sync (automatic with inbox / Sync to VV) applies that decision. Do not run `sync-instance` yourself.
+3. **Lifeline notifies you** — on your next spawn after the decision lands, a one-shot `PKG_NOTICE` block is injected into your system prompt.
+4. **You install** the approved package via `agictl pkg install <name>`.
 
 You will never be notified twice — the notification is one-shot per approval.
 
@@ -36,7 +37,7 @@ agictl pkg install <name>                             # Install an approved pack
 | `pkg deny` | Primary User only |
 | `pkg remove` | Primary User only |
 
-> **You cannot approve, deny, add, or remove packages.** These are PU-only operations. If your request is denied, you'll receive a notification with the denial reason on your next spawn.
+> **You cannot approve, deny, add, or remove packages.** These are PU-only operations (VersaVoice or agitop). If your request is denied, you'll receive a notification with the denial reason on your next spawn.
 
 ## Package Naming
 
@@ -89,10 +90,11 @@ agictl pkg list
 ```
 Agent: agictl pkg request <name>
   → DB: status = 'requested'
-  → PU sees request in agitop ⚙ Settings → System Packages
+  → PU sees request in VersaVoice Packages and/or agitop ⚙ Settings → System Packages
 
-PU: agictl pkg approve <name>  (or via agitop)
-  → DB: status = 'approved', notified_at = NULL
+PU: approve / deny / re-request in VersaVoice or agitop
+  → Instance sync applies the decision (inbox pulse or Sync to VV)
+  → DB: status updated, notified_at = NULL
 
 Lifeline (next agent spawn):
   → Detects approved + notified_at IS NULL

@@ -55,6 +55,8 @@ agictl system config set <key> <value>                # Write a config value
 agictl system whoami                                  # Your identity (name, role, language, sub_account_id, sponsor)
 ```
 
+Instance sync (`system sync-instance`) is Lifeline + the PU **Sync to VV** schedule. Agents wait for `PKG_NOTICE` and tagged IDs. Do not run the full command. COA may inspect `system sync-instance --status` and, only if last-fired is still before a just-made PU approval, run it **once**.
+
 ## 2. agent
 
 ```bash
@@ -131,6 +133,8 @@ agictl message internal <agent_name> "<text>"                # Direct message to
 agictl message mark-processed <message_id>                   # Mark message as handled
 agictl message conversation-context <sub_account_uid> [sponsor_uid]  # Build context blob
 ```
+
+Spawn context may include **`TAGGED PROJECT IDS`** / **`TAGGED TASK IDS`** (IDs only). Resolve via `project list` / `task get`. Do not invent names.
 
 **Modes**: `typed` (text as-is), `translate` (AI translation), `speak` (TTS same-language), `speak_translated` (TTS + translation)
 
@@ -347,7 +351,7 @@ agictl pkg request <name> --reason "..."              # Request a system package
 agictl pkg install <name>                             # Install an approved package
 ```
 
-> **Approval workflow**: You request → PU approves → Lifeline notifies you (one-shot prompt injection) → you install. You **cannot** approve, deny, or remove packages — those are PU-only.
+> **Approval workflow**: You request → PU approves in VersaVoice (Packages) or agitop → instance sync applies the decision → Lifeline notifies you (one-shot `PKG_NOTICE`) → you install. You **cannot** approve, deny, or remove packages — those are PU-only.
 
 > **Security**: Package names must be valid apt names (lowercase, digits, dots, hyphens, plus). Installation uses watchdog→root escalation via sudoers. Only packages with `status='approved'` can be installed.
 

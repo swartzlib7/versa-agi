@@ -435,7 +435,8 @@ class SystemInput(BaseModel):
     command: str = Field(description=(
         "The full agictl system subcommand to run. "
         "Examples: 'system whoami', 'system config get', 'system config get primary_user', "
-        "'system config set key value', 'system workspace-link /path', 'system sync-profiles'."
+        "'system config set key value', 'system workspace-link /path', "
+        "'system sync-instance --status', 'system sync-profiles'."
     ))
 
 @tool("agictl_system", args_schema=SystemInput)
@@ -447,6 +448,7 @@ def agictl_system(command: str) -> str:
       - 'system config get'
       - 'system config set key value'
       - 'system workspace-link /path/to/project'
+      - 'system sync-instance --status'
     """
     return _run_agictl(command)
 

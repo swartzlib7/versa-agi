@@ -46,7 +46,7 @@ Typical PU responsibilities:
 
 | Area | What the PU does |
 |------|------------------|
-| Approvals | Approve new agents, system packages, and sensitive changes |
+| Approvals | Approve new agents, system packages, and sensitive changes — packages and projects also from **VersaVoice → Settings → Personal → Versa AGi & API** (per agent), not only agitop |
 | Models | Prefer models via dashboard / routing prefs; respect COA model allowlist |
 | Budgets | Token budgets and spend awareness in agitop |
 | Connections | VersaVoice contacts / API exposure for agents that need them |
@@ -73,6 +73,16 @@ Agents **cannot** `sudo` arbitrary commands (only approved `agictl` paths). They
 
 Registration / update modals may appear when the install needs PU attention — follow on-screen prompts.
 
+### VersaVoice app (PU control)
+
+On the phone or https://versavoice.app: **Settings → Personal → Versa AGi & API**.
+
+- **Agents** — voice, Inbox (that agent’s copy). Projects and Packages nest under each agent.
+- **Packages** — Status is Requested / Approved / Denied. A change there is the PU decision; the next Lifeline pulse that retrieves mail applies it before the agent wakes. Agitop **Retrieve Messages & Sync** forces that path. **Sync to VV** (Settings → General) is the PU’s schedule when inbox does not run.
+- **Chat tags** — on an **agent channel**, the PU can tag projects/tasks. The agent sees **IDs** in conversation context, not display names.
+
+Do **not** run `agictl system sync-instance` on a timer. Check `--status` first (last-fired + interval). One full run only if the PU just approved and last-fired is still before that approval.
+
 ---
 
 ## 4. Agent lifecycle (PU level)
@@ -82,7 +92,7 @@ Registration / update modals may appear when the install needs PU attention — 
 | **Watchdog** | Monitoring layer — CRON, DBs, security ownership |
 | **COA (Versa)** | Chief Orchestrator — PU’s chief assistant |
 | **Sub-agents** | Specialists (dev, research, marketing, …) with their own OS users |
-| **Lifeline** | Periodic pulse that syncs inbox and spawns agents when work exists |
+| **Lifeline** | Periodic pulse that syncs inbox, applies VV instance/package decisions, and spawns agents when work exists |
 | **Cycle** | One agent work session (then ends; may resume later per settings) |
 | **Circuit breaker** | Stops repeated failed spawns until PU/COA activates again |
 | **Halt** | Manual stop / prevent respawn (`agictl agent kill` / dashboard) |
@@ -99,6 +109,8 @@ Spawn reasons PU may hear about: unread messages, due tasks, orchestration needs
 - Modes: `typed` (default), `translate`, `speak`, `speak_translated` — voice modes cost Neural Time; don’t use for routine status.
 - If VersaVoice is **disabled**, outbound sends still work as **internal** SQLite messages — that is normal, not an error.
 - PU can message agents from agitop without VersaVoice.
+- On an agent channel the PU may tag projects/tasks. Spawn context shows **TAGGED PROJECT IDS** / **TAGGED TASK IDS** — resolve with `project list` / `task get`; do not invent names.
+- A package approval in VersaVoice lands on the same pulse as new mail (or Retrieve Messages & Sync). Wait for `PKG_NOTICE` before `pkg install`.
 
 ### Tasks
 
@@ -167,7 +179,7 @@ Do **not** walk the PU through undocumented low-level Docker privilege grants. I
 | Token budget | Monthly budget gate can block spawns — raise budget or wait for month rollover |
 | Local AI OOM / stuck | Concurrency / slots; reduce parallel local agents; check server health on distributed setups |
 | Registration / update modal | Follow agitop prompt; may need network for registration |
-| Need system package | Agent requests → PU approves in agitop / `agictl pkg …` |
+| Need system package | Agent requests → PU approves in VersaVoice **Versa AGi & API** (Packages) or agitop. If still `requested` after approval: `system sync-instance --status`. Last-fired after the approval → wait for the next pulse (`PKG_NOTICE`). Last-fired before (or missing) → **one** `system sync-instance`, then stop. Never run it on a timer. PU: Settings → General **Sync to VV** / Retrieve Messages & Sync |
 | Stuck overdue tasks | May be frozen — review in Tasks, unfreeze after fix |
 
 Safe operator checks (PU with sudo, as documented): `agictl` status-style commands from **cli_reference** / README — load full CLI on demand if needed. Prefer guiding the PU to agitop first.
@@ -180,7 +192,7 @@ Safe operator checks (PU with sudo, as documented): `agictl` status-style comman
 |-----------|--------|
 | Product “how do I…?” / day-to-day ops | **COA** answers from this skill |
 | Install broken / OS / permissions / GPU | **PU** (or support) with README install sections |
-| VersaVoice account / billing / app | **PU** via VersaVoice channels |
+| VersaVoice account / billing / app | **PU** via VersaVoice channels. COA explains Agents / Packages / chat tags from this skill |
 | Engineering defect / schema / lifeline bug | **PU + eng** — COA files a clear task; do not invent patches to monitoring layer |
 | Feature flags (e.g. Organizations) | PU enables in setup / settings; COA explains behavior once on |
 

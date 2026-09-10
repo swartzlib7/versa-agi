@@ -212,7 +212,7 @@ When the Primary User asks to change a project description or other registered m
    Other flags: `--remote`, `--branch`, `--platform`, `--access-token`, `--type`.
 3. Confirm the JSON response includes the updated `description` (and other fields changed).
 
-> **Name changes** are not available via CLI — use the agitop Projects panel (General tab).
+> **Name changes** are not available via CLI — use the agitop Projects panel (General tab). The VersaVoice **Versa AGi & API** page shows a mirror of this ledger (name, status, type, platform) via instance sync. Agents still update by numeric ID.
 
 ## Project Lifecycle Commands
 
@@ -229,7 +229,7 @@ Reference for managing projects after onboarding:
 | `agictl project members <id>` | List project members |
 | `agictl project pause <id>` | Pause — sentinel/lifeline skip this project |
 | `agictl project resume <id>` | Resume a paused project |
-| `agictl project archive <id>` | Archive — soft-delete, excluded everywhere |
+| `agictl project archive <id>` | Archive — soft-delete, excluded everywhere (also dropped from the next VV instance sync) |
 
 ## Important Notes
 

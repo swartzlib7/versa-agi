@@ -1004,6 +1004,46 @@ def _agi_tag_ids(raw_payload):
     return project_ids, task_ids
 
 
+_VV_INSTANCE_SYNC_STAMP = "/var/lib/versa-agi/coa/.vv_instance_sync_at"
+
+
+def _vv_instance_sync_stamp_path():
+    return os.environ.get("AGICTL_VV_SYNC_STAMP", _VV_INSTANCE_SYNC_STAMP)
+
+
+def _vv_read_sync_interval():
+    raw = (_read_ini_value("versavoice", "sync_interval", "off") or "off").strip()
+    if raw == "1min":
+        raw = "5min"
+    if raw not in _VV_SYNC_INTERVALS:
+        return "off"
+    return raw
+
+
+def _vv_read_last_sync():
+    """Return (epoch_or_none, iso_or_none) from the shared last-fired stamp."""
+    path = _vv_instance_sync_stamp_path()
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        epoch = int(open(path, encoding="utf-8").read().strip())
+    except (OSError, ValueError):
+        return None, None
+    from datetime import datetime, timezone
+    return epoch, datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
+def _vv_write_last_sync():
+    """Stamp last-fired so Lifeline and a rare COA run share one clock."""
+    path = _vv_instance_sync_stamp_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(str(int(time.time())))
+    except OSError:
+        pass
+
+
 def _vv_instance_id():
     from install_acceptance import _hostname_hash
     return _hostname_hash()
@@ -1195,16 +1235,33 @@ def _apply_remote_package_decision(name, status):
 
 
 @system.command("sync-instance")
-def system_sync_instance():
+@click.option(
+    "--status",
+    "status_only",
+    is_flag=True,
+    help="Print last-fired and sync_interval; no API calls.",
+)
+def system_sync_instance(status_only):
     """Push projects/tasks/packages to VersaVoice and pull package decisions.
 
     PUT /agi/instances/{hostname_hash} then GET …/package-decisions.
-    Lifeline calls this when [versavoice] sync_interval is not off.
+    Lifeline runs this after inbox retrieval and on the PU Sync to VV schedule.
+    --status reports last-fired; do not loop the full command.
     """
     from datetime import datetime, timezone
     from urllib.parse import quote
 
     from comms import api_request
+
+    if status_only:
+        epoch, iso = _vv_read_last_sync()
+        json_response(
+            True,
+            lastSyncedAt=iso,
+            lastSyncedEpoch=epoch,
+            syncInterval=_vv_read_sync_interval(),
+        )
+        return
 
     config = get_config()
     vv = config.get("versavoice", {})
@@ -1253,6 +1310,7 @@ def system_sync_instance():
             with open(config_path, "w") as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
+            _vv_write_last_sync()
             json_response(
                 True,
                 instanceId=instance_id,
@@ -1262,6 +1320,7 @@ def system_sync_instance():
             )
             return
 
+    _vv_write_last_sync()
     json_response(
         True,
         instanceId=instance_id,

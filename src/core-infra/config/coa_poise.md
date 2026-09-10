@@ -216,7 +216,7 @@ These are the active games you are running. Assess freedom vs barriers each cycl
 {OVERDUE_CONTEXT}
 
 ### Messages (live)
-Apply **Inbound message order** under COMMUNICATION above: reply/`message send` before `mark-processed`; cycle-end text is not a reply to the sender.
+Apply **Inbound message order** under COMMUNICATION above: reply/`message send` before `mark-processed`; cycle-end text is not a reply to the sender. PU messages may include tagged project/task **IDs** in conversation context — resolve with `project` / `task` tools; do not invent names.
 
 {CONVERSATION_CONTEXT}
 

@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.2"
+PRODUCT_VERSION="3.4.3"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -407,6 +407,31 @@ WATCHDOG_USER="${VERSA_WATCHDOG_USER:-$(ini_get users watchdog watchdog)}"
 COA_USER="${VERSA_COA_USER:-$(ini_get users coa coa)}"
 CRON_INTERVAL="${VERSA_CRON_INTERVAL:-$(ini_get agent cron_interval 1)}"  # minutes
 
+# Install or refresh watchdog Lifeline crontab (heartbeat + weekly log rotate).
+# Fresh Step 10 always installs. --update calls this when the PU re-enables CRON
+# so a box with no lifeline line (typical after a Sentinel patch) still gets one.
+ensure_watchdog_lifeline_cron() {
+  local lifeline_path="${DEPLOYED_CORE_INFRA}/lifeline.sh"
+  local system_tz
+  system_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+  local cron_tz_line="TZ=${system_tz}"
+  local cron_schedule="*/${CRON_INTERVAL} * * * * ${lifeline_path} > /dev/null 2>&1"
+  local log_file="/var/log/versa-agi-lifeline.log"
+  local log_archive_dir="/var/log/versa-agi-archive"
+  local log_rotation="0 0 * * 0 mkdir -p ${log_archive_dir} && [ -f ${log_file} ] && mv ${log_file} ${log_archive_dir}/lifeline-\$(date +\%Y\%m\%d-\%H\%M\%S).log && touch ${log_file} && chown ${WATCHDOG_USER}:${WATCHDOG_USER} ${log_file}"
+
+  (crontab -u "${WATCHDOG_USER}" -l 2>/dev/null | grep -v "lifeline.sh" | grep -v "^TZ=" | grep -v "versa-agi-archive" || true
+   echo "${cron_tz_line}"
+   echo "${cron_schedule}"
+   echo "${log_rotation}") | crontab -u "${WATCHDOG_USER}" -
+
+  mkdir -p /var/lib/versa-agi
+  rm -f /var/lib/versa-agi/lifeline.disabled
+  mkdir -p "${log_archive_dir}"
+  touch "${log_file}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${log_file}" "${log_archive_dir}" 2>/dev/null || true
+}
+
 # Pre-loaded values from INI (used by prompts later)
 INI_VV_ENABLED="$(ini_get versavoice enabled true)"
 INI_VV_TOKEN="$(ini_get versavoice api_token)"
@@ -492,7 +517,7 @@ fi
 # Disable lifeline CRON before deploy. Runs after setup.ini check and the
 # update prompt so a missing install aborts without pausing CRON.
 if [ "${UPDATE_MODE}" = true ]; then
-  _EARLY_CRON=$(crontab -u watchdog -l 2>/dev/null || true)
+  _EARLY_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
   CRON_WAS_ACTIVE="${CRON_WAS_ACTIVE:-false}"
 
   if echo "${_EARLY_CRON}" | grep -qi "^[^#].*lifeline"; then
@@ -501,7 +526,7 @@ if [ "${UPDATE_MODE}" = true ]; then
       dry "Would comment out lifeline CRON entries and set lifeline.disabled"
     else
       echo "${_EARLY_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
-        crontab -u watchdog -
+        crontab -u "${WATCHDOG_USER}" -
       # Hard OFF flag — blocks Fetch / stray lifeline.sh during update
       mkdir -p /var/lib/versa-agi
       touch /var/lib/versa-agi/lifeline.disabled
@@ -3265,9 +3290,7 @@ echo "  (weekly) ${LOG_ROTATION}"
 echo ""
 
 # Lifeline is the product heartbeat — always install on fresh setup (do not ask).
-(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null | grep -v "lifeline.sh" | grep -v "^TZ=" | grep -v "versa-agi-archive" || true; echo "${CRON_TZ_LINE}"; echo "${CRON_SCHEDULE}"; echo "${LOG_ROTATION}") | \
-  crontab -u "${WATCHDOG_USER}" -
-rm -f /var/lib/versa-agi/lifeline.disabled
+ensure_watchdog_lifeline_cron
 ok "CRON entries installed for ${WATCHDOG_USER} (lifeline heartbeat)"
 
 touch /var/log/versa-agi-lifeline.log
@@ -4262,29 +4285,29 @@ fi
 
 # ═══════════════════════════════════════════════════════
 # U5: Resume CRON (--update only, with prompt)
+# Always ask on client --update (normal and Sentinel). Skipping when crontab
+# had no lifeline line left Sentinel boxes with lifeline.disabled and no ask.
 # ═══════════════════════════════════════════════════════
 if [ "${UPDATE_MODE}" = true ]; then
   section "Update — Resume CRON"
   if [ "${DRY_RUN}" = true ]; then
     dry "Would prompt to resume CRON"
-  elif [ "${CRON_WAS_ACTIVE:-false}" = true ]; then
-    if confirm_accent "Resume CRON (lifeline scheduler)?"; then
-      CURRENT_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
-      echo "${CURRENT_CRON}" | sed '/[Ll]ifeline/s|^#||' | \
-        crontab -u "${WATCHDOG_USER}" -
-      rm -f /var/lib/versa-agi/lifeline.disabled
-      ok "CRON resumed (lifeline.disabled cleared)"
-    else
-      # Keep hard OFF so Fetch / stray lifeline.sh cannot spawn during pause
-      mkdir -p /var/lib/versa-agi
-      touch /var/lib/versa-agi/lifeline.disabled
-      chown "${WATCHDOG_USER}:${WATCHDOG_USER}" \
-        /var/lib/versa-agi/lifeline.disabled 2>/dev/null || true
-      warn "CRON NOT resumed — agents will not spawn until you re-enable it"
-      echo -e "  ${DIM:-}To resume: sudo agitop → Controls → LIFELINE ON${RESET:-}"
-    fi
+  elif confirm_accent "Resume CRON (lifeline scheduler)?"; then
+    ensure_watchdog_lifeline_cron
+    ok "CRON resumed (lifeline.disabled cleared)"
   else
-    warn "CRON was not active before update — skipping resume"
+    # Keep hard OFF so Fetch / stray lifeline.sh cannot spawn during pause
+    CURRENT_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
+    if [ -n "${CURRENT_CRON}" ]; then
+      echo "${CURRENT_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
+        crontab -u "${WATCHDOG_USER}" -
+    fi
+    mkdir -p /var/lib/versa-agi
+    touch /var/lib/versa-agi/lifeline.disabled
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" \
+      /var/lib/versa-agi/lifeline.disabled 2>/dev/null || true
+    warn "CRON NOT resumed — agents will not spawn until you re-enable it"
+    echo -e "  ${DIM:-}To resume: sudo agitop → Controls → LIFELINE ON${RESET:-}"
   fi
   echo ""
 fi

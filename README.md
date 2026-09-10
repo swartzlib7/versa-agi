@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.4.2-FF9800" alt="Versa AGi version 3.4.2">
+    <img src="https://img.shields.io/badge/version-3.4.3-FF9800" alt="Versa AGi version 3.4.3">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -105,6 +105,8 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 ## Architecture
 
 A **Watchdog** layer (CRON + reactive triggers), a **Data Gateway** (`agictl`), and **OS-isolated agent workspaces**, coordinated through VersaVoice.
+
+The Primary User steers agents from VersaVoice (projects, package requests, chat project tags). Lifeline keeps the instance mirror in sync.
 
 Agents invoke `agictl` through typed LangGraph tools (`agictl_task`, `agictl_cycle`, …). Operator docs show the shell form (`agictl task list`). See `src/core-infra/skills/cli_reference_agent.md`.
 

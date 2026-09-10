@@ -19,6 +19,8 @@ agictl message mark-processed <id>                    # Mark as handled
 
 **Message vs task:** `mark-processed` means *this inbox item is handled* (you replied or acknowledged). It does **not** complete related work — keep the tracking task `in_progress` or `waiting` until the work is actually done. See task protocol for the full decision guide.
 
+Spawn context may list **TAGGED PROJECT IDS** / **TAGGED TASK IDS**. Use those IDs (`project list` / `task get`); do not invent names.
+
 ### Inbound message order (mandatory)
 
 1. **Decide reply vs silence first** — if the inbound is a terminal inter-agent ack/FYI (below), **do not reply**; `mark-processed` and end.

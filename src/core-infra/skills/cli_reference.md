@@ -58,8 +58,12 @@ agictl system workspace-link <path>                   # Symlink workspace to use
 agictl system workspace-unlink                        # Remove workspace symlink (STUB)
 agictl system security blacklist add|remove|list [uid] # Manage security blacklist (STUB)
 agictl system sync-profiles                           # Refresh PU + connection profiles from VersaVoice (Lifeline runs weekly)
+agictl system sync-instance --status                  # Last-fired + Sync to VV interval (no API). Check before any full run.
+agictl system sync-instance                           # Push instance mirror; pull PU package decisions. Automatic — do not loop.
 agictl system vacuum                                  # Compact all system databases (VACUUM) — safe anytime
 ```
+
+**Instance sync** is automatic: Lifeline runs it after inbox retrieval and on the PU **Sync to VV** schedule (agitop **Retrieve Messages & Sync** / `--force` also). COA-only for a **rare** full run: if the PU just approved a package in VersaVoice and `--status` `lastSyncedAt` is still before that approval — run once, then stop. Sub-agents do not run it. Do not use `system config get` with no key (dumps the API token).
 
 ### Credential Management (Root Only)
 
@@ -251,6 +255,8 @@ agictl message delete <message_id> --channel <id>     # Delete from VV cloud (PU
 agictl message sync-inbox <agent_user> --agent-path P --sub-account SA --token T  # Pull from API
 agictl message conversation-context <sub_account_uid> [sponsor_uid]  # Build context blob
 ```
+
+`conversation-context` may include **`TAGGED PROJECT IDS`** / **`TAGGED TASK IDS`** (IDs only, from the PU’s VersaVoice chat picker). Resolve via `project list` / `task get`. Do not invent display names.
 
 **Internal messaging**: Sub-agents use `agictl message internal coa "<text>"` to report to you. You use `agictl message internal <agent_name> "<text>"` to send instructions to sub-agents. Messages go directly to SQLite (`channel='internal'`) — no VV API involved.
 

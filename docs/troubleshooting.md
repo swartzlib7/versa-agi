@@ -23,7 +23,7 @@ sudo agictl pkg deny <name>
 sudo agictl pkg remove <name>
 ```
 
-Or agitop → Settings → System Packages.
+Or agitop → Settings → System Packages. Or VersaVoice → Settings → Personal → Versa AGi & API → the agent → Packages (Requested / Approved / Denied). Decisions land on the next inbox pulse or **Retrieve Messages & Sync**; **Sync to VV** is the PU schedule when inbox does not run. If a just-made VV approval has not landed, COA may check `agictl system sync-instance --status` and run the full command **once** — not on a timer.
 
 ## Agent not spawning
 
