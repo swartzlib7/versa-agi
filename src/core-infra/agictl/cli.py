@@ -335,7 +335,7 @@ def system_config_set_ini(section, key, value):
             json_response(
                 False,
                 error="COA cannot enable its own autonomous sudo. "
-                "The Primary User enables it in System Settings.",
+                "The Primary User enables it in System Settings or VersaVoice.",
             )
             sys.exit(1)
         ok, err = _ensure_coa_autonomous_sudoers(value_s.lower() == "true")
@@ -1192,10 +1192,55 @@ def _collect_instance_payload():
     return {
         "coaUid": coa_uid,
         "agentUids": list(dict.fromkeys(name_to_uid.values())),
+        "coaAutonomous": _local_coa_autonomous(),
+        "hostname": socket_hostname_fallback(),
         "projects": projects,
         "tasks": tasks,
         "packageRequests": packages,
     }, None
+
+
+def _local_coa_autonomous():
+    """Checkbox value from setup.ini [coa] autonomous (not sudoers-file-only)."""
+    raw = (_read_ini_value("coa", "autonomous", "false") or "false").strip().lower()
+    return raw in ("true", "1", "yes", "on")
+
+
+def _apply_remote_coa_autonomous(desired):
+    """Apply PU Enable sudo access via existing set-ini. Idempotent."""
+    if desired is None:
+        return "skipped"
+    if isinstance(desired, str):
+        desired = desired.strip().lower() in ("true", "1", "yes", "on")
+    want = bool(desired)
+    if os.getenv("AGICTL_AGENT_USER"):
+        return "refused"
+    if _local_coa_autonomous() == want:
+        return "unchanged"
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+    result = subprocess.run(
+        [
+            "sudo", "-n", _agictl_root_bin(),
+            "system", "config", "set-ini",
+            "coa", "autonomous", "true" if want else "false",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    if result.returncode != 0 or not data.get("success"):
+        err = (
+            data.get("error")
+            or (result.stderr or result.stdout or "").strip()
+            or f"exit {result.returncode}"
+        )
+        return f"failed:{err}"
+    return "applied"
 
 
 def _apply_remote_package_decision(name, status):
@@ -1242,9 +1287,10 @@ def _apply_remote_package_decision(name, status):
     help="Print last-fired and sync_interval; no API calls.",
 )
 def system_sync_instance(status_only):
-    """Push projects/tasks/packages to VersaVoice and pull package decisions.
+    """Push projects/tasks/packages/coaAutonomous to VersaVoice and pull decisions.
 
     PUT /agi/instances/{hostname_hash} then GET …/package-decisions.
+    GET also returns PU Enable sudo access; apply via set-ini coa autonomous.
     Lifeline runs this after inbox retrieval and on the PU Sync to VV schedule.
     --status reports last-fired; do not loop the full command.
     """
@@ -1291,6 +1337,11 @@ def system_sync_instance(status_only):
     decisions_resp = api_request(dec_path, token) or {}
     decisions = decisions_resp.get("decisions") or []
     applied = {"approved": 0, "denied": 0, "requested": 0, "unchanged": 0, "missing": 0}
+    applied_auto = None
+    if decisions_resp.get("coaAutonomousResolvedBy") == "vv":
+        applied_auto = _apply_remote_coa_autonomous(
+            decisions_resp.get("coaAutonomous")
+        )
     latest = since
     for d in decisions:
         if not isinstance(d, dict):
@@ -1316,6 +1367,7 @@ def system_sync_instance(status_only):
                 instanceId=instance_id,
                 counts=put.get("counts"),
                 applied=applied,
+                coaAutonomousApplied=applied_auto,
                 since_write_error=str(e),
             )
             return
@@ -1327,6 +1379,7 @@ def system_sync_instance(status_only):
         label=label,
         counts=put.get("counts"),
         applied=applied,
+        coaAutonomousApplied=applied_auto,
         syncedAt=datetime.now(timezone.utc).isoformat(),
     )
 

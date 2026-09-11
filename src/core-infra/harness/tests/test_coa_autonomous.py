@@ -71,6 +71,27 @@ class TestPrivilegeGuard(unittest.TestCase):
             coa_autonomous_allowed({"AGICTL_AGENT_USER": "coa"})
         )
 
+    def test_live_sudoers_file_lifts_without_env_flag(self):
+        """Live process: sudoers file + COA stamp lifts the text scanner."""
+        from unittest.mock import patch
+
+        with patch.dict(
+            os.environ,
+            {"VERSA_AGENT_NAME": "coa", "VERSA_COA_AUTONOMOUS": ""},
+            clear=False,
+        ), patch("privilege_guard.os.path.isfile", return_value=True):
+            self.assertTrue(coa_autonomous_allowed())
+
+    def test_live_no_sudoers_keeps_scanner(self):
+        from unittest.mock import patch
+
+        with patch.dict(
+            os.environ,
+            {"VERSA_AGENT_NAME": "coa", "VERSA_COA_AUTONOMOUS": ""},
+            clear=False,
+        ), patch("privilege_guard.os.path.isfile", return_value=False):
+            self.assertFalse(coa_autonomous_allowed())
+
 
 _MIN_POISE = """## CONTEXT MAP — how to read this prompt
 

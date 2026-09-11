@@ -1131,9 +1131,9 @@ class SystemSettingsModal(ModalScreen):
 
                                     yield Static("")
                                     with Vertical(classes="settings-section-box"):
-                                        yield Static("[bold cyan]VersaVoice API[/]")
                                         with Horizontal(classes="settings-web-search-row"):
                                             with Vertical(classes="settings-web-search-col"):
+                                                yield Static("[bold cyan]Use VersaVoice API[/]")
                                                 yield Static("")
                                                 yield ClearCheckbox(
                                                     "Enabled",
@@ -1142,7 +1142,7 @@ class SystemSettingsModal(ModalScreen):
                                                     disabled=True,
                                                 )
                                             with Vertical(classes="settings-web-search-col"):
-                                                yield Static("[cyan]Sync to VersaVoice[/]")
+                                                yield Static("[bold cyan]Instance Sync to VersaVoice[/]")
                                                 yield Select(
                                                     _vv_sync_options,
                                                     value=vv_sync_interval,

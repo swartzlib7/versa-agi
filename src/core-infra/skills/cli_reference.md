@@ -59,7 +59,7 @@ agictl system workspace-unlink                        # Remove workspace symlink
 agictl system security blacklist add|remove|list [uid] # Manage security blacklist (STUB)
 agictl system sync-profiles                           # Refresh PU + connection profiles from VersaVoice (Lifeline runs weekly)
 agictl system sync-instance --status                  # Last-fired + Sync to VV interval (no API). Check before any full run.
-agictl system sync-instance                           # Push instance mirror; pull PU package decisions. Automatic — do not loop.
+agictl system sync-instance                           # Push instance mirror; pull PU package + sudo decisions. Automatic — do not loop.
 agictl system vacuum                                  # Compact all system databases (VACUUM) — safe anytime
 ```
 

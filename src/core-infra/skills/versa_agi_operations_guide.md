@@ -77,7 +77,7 @@ Registration / update modals may appear when the install needs PU attention — 
 
 On the phone or https://versavoice.app: **Settings → Personal → Versa AGi & API**.
 
-- **Agents** — voice, Inbox (that agent’s copy). Projects and Packages nest under each agent.
+- **Agents** — voice, Inbox (that agent’s copy). COA cards show **Enable sudo access** (same as agitop). Projects and Packages nest under each agent.
 - **Packages** — Status is Requested / Approved / Denied. A change there is the PU decision; the next Lifeline pulse that retrieves mail applies it before the agent wakes. Agitop **Retrieve Messages & Sync** forces that path. **Sync to VV** (Settings → General) is the PU’s schedule when inbox does not run.
 - **Chat tags** — on an **agent channel**, the PU can tag projects/tasks. The agent sees **IDs** in conversation context, not display names.
 
