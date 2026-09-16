@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.3"
+PRODUCT_VERSION="3.4.5"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -2638,6 +2638,10 @@ if [ -f "${AGICTL_PATH}" ]; then
           sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project update "${VAS_ID}" \
             --remote "${VAS_REMOTE}" --type git --platform github >/dev/null 2>&1 || true
         fi
+        # Reserved leftover repair: leftover slug (e.g. versa-admin-system) →
+        # shipped Versa-BusinessAdmin; platform github. Slug is otherwise immutable.
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project update "${VAS_ID}" \
+          --dir "${VAS_NAME}" --platform github --type git >/dev/null 2>&1 || true
         sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${VAS_ID}" \
           --agent "${COA_USER}" >/dev/null 2>&1 || true
         ok "Versa-BusinessAdmin project seeded (COA)"

@@ -23,15 +23,17 @@ draft → ready → synced → updated → synced (re-sync loop)
 
 ## Creating Skills
 
-Use `agictl skill new` to scaffold a new skill. Agent-facing skills must include the **Harness tools** blockquote (see `skills/README.md`). Command examples stay in shell form (`agictl task list`); agents translate to harness tools at runtime.
+COA/PU only. Sub-agents request a skill via a message or task to COA; they do not run `skill new`. Use `agictl skill new` to scaffold. Agent-facing skills must include the **Harness tools** blockquote (see `skills/README.md`). Command examples stay in shell form (`agictl task list`); agents translate to harness tools at runtime.
 
 ```bash
 agictl skill new my_skill --description "What this skill does" --scope all
+agictl skill new my_skill --description "What this skill does" --scope all --created-by web-dev
 ```
 
 Options:
-- `--scope all` (default) — Deployed to all agents (COA + sub-agents).
+- `--scope all` (default) — Deployed to all agents (COA + sub-agents) when status is `ready`.
 - `--scope coa_only` — COA-exclusive. Never deployed to sub-agents.
+- `--created-by NAME` (default `coa`) — Sets `origin` so `skill list` shows who asked. The file still lives on COA.
 
 This creates:
 1. `.agent/skills/my_skill.md` — The skill template (draft status).
@@ -61,16 +63,19 @@ agictl skill status communication_override ready
 
 **How overrides work:**
 - The harness checks for `{name}_override.md` before injecting `{name}.md`.
-- If the override exists, it replaces the shipped version for ALL agents.
-- Overrides propagate to sub-agents via rsync on the next deploy cycle.
+- The override applies only on a disk that has `{name}_override.md`.
+- Overrides are not in the watchdog shipped source; they do not rsync from `core-infra/skills/`.
 
-## Withdrawing Overrides
+## Withdrawing Skills and Overrides
 
-To revert to the shipped skill:
+```bash
+agictl skill remove my_skill
+agictl skill remove communication_override
+```
 
-1. Delete the override file from your skills directory.
-2. The DB row is cleaned up automatically.
-3. Sub-agents revert to the shipped version on the next rsync cycle (`--delete` flag).
+`skill remove` deletes the registry row. For `agent_created` or `override` on COA, it also deletes the file and asset directory. Next `deploy-skills` retracts fleet copies of retracted shares (`rsync --delete`).
+
+`skill register` and `--update` reconcile also prune non-shipped rows whose COA `.md` is already gone.
 
 ## Updating Existing Skills
 
@@ -95,7 +100,7 @@ agictl skill list -s draft     # Filter by status
 | Scope | Who gets it | Use case |
 |-------|-------------|----------|
 | `all` | COA + all sub-agents | General skills (communication, git, tasks) |
-| `coa_only` | COA only (on disk) | Administrative skills — **`cli_reference.md`** (load on demand), **`skill_authoring.md`** (always injected for COA), **`versa_agi_operations_guide.md`** (triage-selected for COA), **`business_admin.md`** (triage-selected for COA when Versa - Business Admin is ON) |
+| `coa_only` | COA only (on disk) | Administrative skills — **`cli_reference.md`** (load on demand), **`skill_authoring.md`** (always injected for COA), **`versa_agi_operations_guide.md`** (triage-selected for COA), **`business_admin.md`** (triage-selected for COA when Versa - Business Admin is ON; install/enable only — fleet API work is **`business_admin_operate`**) |
 
 Sub-agents never see COA-only skills — they are excluded from:
 1. The triage catalog (sub-agents can't even request them).
@@ -106,12 +111,13 @@ Sub-agents never see COA-only skills — they are excluded from:
 
 | Command | Purpose |
 |---------|---------|
-| `agictl skill new NAME` | Create a new skill |
-| `agictl skill override NAME` | Create override of shipped skill |
+| `agictl skill new NAME [--created-by AGENT]` | Create a new skill (COA/PU; file on COA) |
+| `agictl skill override NAME` | Create override of shipped skill (COA/PU) |
+| `agictl skill remove NAME` | Delete registry row; retract agent_created/override files |
 | `agictl skill status NAME ready` | Mark for distribution |
 | `agictl skill status NAME updated` | Mark for re-sync |
 | `agictl skill list` | View all skills |
-| `agictl skill register` | Bootstrap DB from filesystem |
+| `agictl skill register` | Bootstrap DB from filesystem; prune missing non-shipped rows |
 | `sudo agictl agent deploy-skills AGENT` | Force deploy to specific agent |
 
 ## Notes

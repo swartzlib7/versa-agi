@@ -1381,14 +1381,9 @@ VersaVoice cloud messaging is OFF on this system — messaging uses internal rou
   # ─── Conversation History Injection ─────────────────
   CONVERSATION_CONTEXT=""
   if [ -f "${MESSAGES_DB}" ] && [ -n "${SUB_ACCOUNT_ID}" ]; then
-    CONVERSATION_CONTEXT=$(/usr/local/bin/agictl message conversation-context "${SUB_ACCOUNT_ID}" "${sponsor_uid}" --injection-mode "${AGENT_INJECTION_MODE:-relevant}" --depth "${AGENT_CONVO_DEPTH:-10}" --agent-name "${AGENT_NAME}" || true)
-    
-    # Failsafe truncation
-    if [ ${#CONVERSATION_CONTEXT} -gt 20000 ]; then
-      CONVERSATION_CONTEXT="${CONVERSATION_CONTEXT:0:19900}
-... (truncated — use agictl message get for full context) ---
-"
-    fi
+    CONVERSATION_CONTEXT=$(/usr/local/bin/agictl message conversation-context "${SUB_ACCOUNT_ID}" "${sponsor_uid}" --injection-mode "${AGENT_INJECTION_MODE:-relevant}" --depth "${AGENT_CONVO_DEPTH:-10}" --agent-name "${AGENT_NAME}" --max-chars 40000 || true)
+    # Char failsafe lives in conversation-context (--max-chars 40000): older
+    # history shrinks first; NEW MESSAGES are never head-cut. Not an agitop setting.
   fi
 
 

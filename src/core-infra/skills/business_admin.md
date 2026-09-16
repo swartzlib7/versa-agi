@@ -1,6 +1,6 @@
 # Skill: Versa - Business Admin
 
-> **Trigger:** Load when the Primary User (or setup / FEATURE AVAILABILITY) asks you to **install, operate, style, or implement against the HTTP API** of Versa - Business Admin (VBA).
+> **Trigger:** Load when the Primary User (or setup / FEATURE AVAILABILITY) asks you to **install, enable, clone, or configure** Versa - Business Admin (VBA). For API / operate work (no install), load sibling **`business_admin_operate`**.
 > **Scope:** COA only (`coa_only`) — never deployed to sub-agents.
 > **Feature gate:** Only when FEATURE AVAILABILITY does **not** say Versa - Business Admin is OFF. Ask the PU before install/configure. Do not deploy until they agree.
 
@@ -14,9 +14,11 @@ This is **not** agitop. agitop is **Versa AGi - Mission Control** (host operator
 
 ## What this skill is for
 
-Load this skill when the Primary User (or setup) asks you to **install, operate, style, or implement against the HTTP API** of Versa - Business Admin (VBA).
+Load this skill when the Primary User (or setup) asks you to **install, enable, clone, or configure** Versa - Business Admin (VBA). For **API / operate** work after the project exists, load **`business_admin_operate`** (`scope=all`) instead of repeating those steps here.
 
-Humans read the User Manual in the product repo. This skill is the COA procedure: **detect whether VBA is already installed on this host** → then install or continue from the existing instance.
+Operators read the Ops Manual in the product repo. Staff will read the User Manual (planned — do not author it from this skill). This skill is the COA procedure: **detect whether VBA is already installed on this host** → then install or continue from the existing instance.
+
+Product UI and form rules live in the **clone**, not in this file. After Orient finds `Versa-BusinessAdmin`, load `AGENTS.md` and the matching feature `docs/production/state/state_*.md` from that workspace.
 
 **Ask the Primary User before install or configure. Do not deploy until they agree.**
 
@@ -24,16 +26,19 @@ Humans read the User Manual in the product repo. This skill is the COA procedure
 
 | Need | Source |
 |---|---|
-| User / operator manual (setup, roles, maintenance, upgrades) | `docs/ops/BUSINESS_ADMIN_OPS_MANUAL.md` in the repo |
+| Agent door (clone) | `AGENTS.md` in the workspace |
+| Product UI / forms / listings | Clone `AGENTS.md` + the matching `docs/production/state/state_*.md` |
+| Ops manual (install, configure, maintain, enhance) | `docs/ops/MISSION_CONTROL_OPS_MANUAL.md` in the repo (until retitled) |
+| Staff User Manual | Planned — do not author it from this skill |
 | Product README (name, roles, skill+manual usage) | `README.md` |
 | HTTP API catalog (this version) | `GET /api` (open) and Settings → API (`/settings?tab=api`) |
 | Living API contract | `docs/production/state/state_api_contract.md` |
+| Records editor UX | `docs/production/state/state_records_editor_ux.md` |
 | Locked upgrade design D1–D6 | `docs/production/state/state_upgradability.md` |
-| Feature map | `docs/production/state/shape_business_admin.md` |
+| Feature map | `docs/production/state/shape_mission_control.md` |
 | Public production repo (HTTPS) | `https://github.com/swartzlib7/versa-business-admin` |
 | SSH remote (when keys already work) | `git@github.com:swartzlib7/versa-business-admin.git` |
-| Integration line | `beta` |
-| Production line | `master` |
+| Production / stable line | `main` |
 
 Never contradict the manual or D1–D6. Amend the manual rather than creating parallel ops guides.
 
@@ -42,9 +47,8 @@ Never contradict the manual or D1–D6. Amend the manual rather than creating pa
 1. **Orient — already installed?** Decide install vs continue (mandatory first step).
 2. **Enablement** — setup seeds the reserved Project when the feature is ON. COA does not register a second name.
 3. **Clone / Install** — only if Orient said not installed **and** the Primary User agreed.
-4. **Read** — User Manual §2 (setup) and §1.5 (Admin vs member).
-5. **Implement the API** — discover via `GET /api`; do not share the host AGi database.
-6. **Operate** — restart recipe, backups, seed-only upgrades (D1–D6), migrate when tasked.
+4. **Read** — clone `AGENTS.md`, matching feature `state_*.md`, Ops Manual §2 (setup) and §1 (identity / Admin vs member).
+5. **Implement the API / operate** — after Orient, load **`business_admin_operate`** for `GET /api`, D1–D6, restart, and health. Do not share the host AGi database.
 
 ## Orient (do this first, every time)
 
@@ -71,7 +75,7 @@ Review `localhost:<port>` is not production. Production is whatever host the Pri
 
 ## Enablement
 
-Versa AGi **setup** seeds the reserved Project **`Versa-BusinessAdmin`** when `[features] business_admin` is ON. That Project’s description carries the public GitHub URL and the install instructions (clone `beta`, read the User Manual, run §2, implement against `GET /api`).
+Versa AGi **setup** seeds the reserved Project **`Versa-BusinessAdmin`** when `[features] business_admin` is ON. That Project’s description carries the public GitHub URL. Install from **`main`**: read the Ops Manual, run §2, implement against `GET /api`.
 
 COA does **not** run `agictl project add versa-business-admin` (or any other name). If Orient found no project, stop and report — do not create a duplicate.
 
@@ -85,11 +89,11 @@ Ask the Primary User first. Do not clone, configure, or deploy until they agree.
    # or, if SSH keys already work:
    # git clone git@github.com:swartzlib7/versa-business-admin.git Versa-BusinessAdmin
    cd Versa-BusinessAdmin
-   git checkout beta
+   git checkout main
    npm ci
    cp .env.example .env.local   # edit locally — never commit secrets
    ```
-2. Read `docs/ops/BUSINESS_ADMIN_OPS_MANUAL.md` §2 (and §3.5 before any restart).
+2. Read `AGENTS.md`, the matching feature `docs/production/state/state_*.md`, and `docs/ops/MISSION_CONTROL_OPS_MANUAL.md` §2 (and §3.5 before any restart).
 3. Postgres is required (`DATA_SOURCE=postgres` + `DATABASE_URL` in `.env.local`, manual §2.4); `DATA_SOURCE=fixture` is opt-in.
 4. Boot (review often port **3200** — use the port the PU named):
    ```bash
@@ -112,7 +116,7 @@ VBA is a standalone product. Talk to it over HTTP (or Script Tasks), never by sh
 1. `GET /api` — version, `docs` links, full `resources[]` (method, path, auth, summary). Name: **Versa - Business Admin API**.
 2. Operator view of the same catalog: Settings → **API**.
 3. Conventions: JSON; list envelope `{ data, count }`; errors `{ error: { code, message } }`.
-4. Public routes are open. Mutations need a session cookie; writes are admin unless noted (`admin-or-self`, `admin-or-assignee`). Same login form for Admin and member — difference is `role` after login (manual §1.5).
+4. Public routes are open. Mutations need a session cookie; writes are admin unless noted (`admin-or-self`, `admin-or-assignee`). Same login form for Admin and member — difference is `role` after login (Ops Manual §1 / README).
 5. Catalog custom fields use the `c_` namespace. Sample rows use `ba_sample:` via Settings → Modes — Demo never swaps the live backend.
 6. Public System Landscape path: `GET /api/public/system-landscape`. List agents with `GET /api/users?type=agent`. Do not add compatibility aliases before v1.0.0.
 7. Do not invent `/api/roles*`, page-builder, or host-fleet endpoints.
@@ -137,8 +141,8 @@ VBA is a standalone product. Talk to it over HTTP (or Script Tasks), never by sh
 
 ## Boundaries
 
-- No `master` promotion, no version or dependency bumps without the PU's explicit ask.
-- Commit-before-task on `beta`; scoped eslint + `tsc --noEmit` + build before claiming done (manual §4).
+- No `main` promotion, no version or dependency bumps without the PU's explicit ask.
+- Commit-before-task on `main`; scoped eslint + `tsc --noEmit` + build before claiming done (manual §4).
 - If a PU decision is missing, hold and ask — VBA work is tight-deliverable-control by standing instruction.
 - Compatibility aliases / deprecation fallbacks: not until **v1.0.0** when the PU asks.
 - Ignore the internal development tree `versa-admin-system` — that is not this shipped project.

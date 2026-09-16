@@ -152,6 +152,18 @@ agictl memory connection list
 agictl memory system list
 ```
 
+## COA fleet maintenance
+
+COA (and the PU) may maintain another agent's factual memory the same way as awareness `--agent`:
+
+```bash
+agictl memory connection list --agent <name>
+agictl memory project list --agent <name>
+agictl memory system list --agent <name>
+```
+
+Sub-agents cannot pass `--agent` for someone else. Without `--agent`, system list stays global.
+
 ## Important Notes
 
 - **Awareness before Profile** — Steps 1-3 MUST complete before Step 4. The agent must synthesize understanding before updating factual records.

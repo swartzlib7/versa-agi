@@ -1,7 +1,8 @@
 """Project display name vs directory slug helpers.
 
 Display ``name`` is unique and mutable (except reserved system projects).
-Directory slug is the basename of ``workspace_path`` and is immutable after create.
+Directory slug is the basename of ``workspace_path`` and is immutable after
+create, except the reserved leftover repair for ``Versa-BusinessAdmin``.
 """
 
 from __future__ import annotations
@@ -122,3 +123,22 @@ def resolve_project_dir(
         return allocate_project_dir(str(dir_override).strip(), taken, allow_increment=False)
     base = slugify_project_dir(display_name)
     return allocate_project_dir(base, taken, allow_increment=True)
+
+
+def reserved_workspace_repair_path(
+    current_path: Optional[str],
+    project_name: str,
+    workspace_base: str = COA_WORKSPACE_BASE,
+) -> Optional[str]:
+    """Shipped workspace_path when a reserved leftover slug must move.
+
+    Only ``Versa-BusinessAdmin`` may change directory after create. Returns
+    the shipped path, or None when the row is already correct.
+    """
+    if project_name != BUSINESS_ADMIN_PROJECT_NAME:
+        return None
+    want = os.path.join(workspace_base, BUSINESS_ADMIN_PROJECT_NAME).rstrip(os.sep)
+    cur = (current_path or "").rstrip(os.sep)
+    if cur == want:
+        return None
+    return want

@@ -137,6 +137,30 @@ def reconcile(db_path: str = DEFAULT_DB) -> tuple[int, int, int]:
         )
         deleted += 1
 
+    # Non-shipped rows whose COA .md is gone (agent_created / override leftovers)
+    try:
+        coa_row = conn.execute(
+            "SELECT workspace FROM agents WHERE name='coa'"
+        ).fetchone()
+    except sqlite3.Error:
+        coa_row = None
+    coa_dir = None
+    if coa_row and coa_row[0]:
+        candidate = Path(coa_row[0]) / ".agent" / "skills"
+        if candidate.is_dir():
+            coa_dir = candidate
+    if coa_dir is not None:
+        non_shipped = conn.execute(
+            "SELECT name FROM skills WHERE origin!='shipped'"
+        ).fetchall()
+        for (skill_name,) in non_shipped:
+            if not (coa_dir / f"{skill_name}.md").is_file():
+                conn.execute(
+                    "DELETE FROM skills WHERE name=? AND origin!='shipped'",
+                    (skill_name,),
+                )
+                deleted += 1
+
     conn.commit()
     conn.close()
     return inserted, updated, deleted

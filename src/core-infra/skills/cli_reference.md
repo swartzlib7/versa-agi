@@ -342,28 +342,30 @@ agictl connection request <uid>                       # Send connection invitati
 
 ### Connection Memory
 ```bash
-agictl memory connection get <contact_uid>            # Read memory for a contact
-agictl memory connection set <contact_uid> [OPTIONS]  # Write/update contact memory (UPSERT)
-agictl memory connection list                         # All contact memories for this agent
+agictl memory connection get <contact_uid> [--agent NAME]            # Read memory for a contact
+agictl memory connection set <contact_uid> [OPTIONS] [--agent NAME]  # Write/update contact memory (UPSERT)
+agictl memory connection list [--agent NAME]                         # All contact memories for this agent
 ```
 
 **connection set options**: `--preferences JSON`, `--personal-notes TEXT`, `--comm-style TEXT`, `--rapport new|building|established|strong`, `--emotional-notes TEXT`
 
 ### Project Memory
 ```bash
-agictl memory project get <project_id>                # Read project memory
-agictl memory project set <project_id> [OPTIONS]      # Write/update project memory (UPSERT)
-agictl memory project list                            # All project memories for this agent
+agictl memory project get <project_id> [--agent NAME]                # Read project memory
+agictl memory project set <project_id> [OPTIONS] [--agent NAME]      # Write/update project memory (UPSERT)
+agictl memory project list [--agent NAME]                            # All project memories for this agent
 ```
 
 **project set options**: `--phase TEXT`, `--decisions TEXT`, `--blockers TEXT`, `--next-steps TEXT`
 
 ### System Memory
 ```bash
-agictl memory system get [key]                        # Read all or one system memory entry
-agictl memory system set <key> <value>                # Write/update (UPSERT)
-agictl memory system list                             # All system memory entries
+agictl memory system get [key] [--agent NAME]                        # Read all or one system memory entry
+agictl memory system set <key> <value> [--agent NAME]                # Write/update (UPSERT)
+agictl memory system list [--agent NAME]                             # All system memory entries
 ```
+
+**`--agent NAME`** (COA / PU only): operate on another agent's connection/project rows, or scope system get/list/set/delete/rename to that agent. Default is the caller. Sub-agents may only target themselves. Without `--agent`, system get/list stay global-by-key.
 
 > **MANDATORY**: Use the **`memory_management.md`** skill (always-injected) at the end of every cycle to execute the 5-step Awareness-First procedure: Reflect → Conclude → Act → Profile → Verify.
 
@@ -446,17 +448,20 @@ Scripts execute as the **calling agent's OS user** (dropped from watchdog via `s
 ## 13. skill — Skill Management (COA Only)
 
 ```bash
-agictl skill new <name> [--description TEXT] [--scope all|coa_only]  # Create skill template + asset dir
+agictl skill new <name> [--description TEXT] [--scope all|coa_only] [--created-by NAME]
 agictl skill status <name> ready                      # Mark draft → ready for distribution
 agictl skill status <name> updated                    # Mark synced → updated for re-sync
 agictl skill list [--status STATUS] [--json-output]   # List all registered skills
-agictl skill register                                 # Bootstrap skills DB from filesystem
-agictl skill override <name>                          # Create override for a shipped skill
+agictl skill register                                 # Bootstrap skills DB; prune missing non-shipped rows
+agictl skill override <name>                          # Create override for a shipped skill (COA/PU)
+agictl skill remove <name>                            # Delete registry row; retract agent_created/override files
 ```
 
 **Skill lifecycle**: `draft` → `ready` → `synced` (by Lifeline) → `updated` → `synced`
 
-**Override workflow**: `agictl skill override <name>` creates `{name}_override.md` pre-populated with the shipped content. The harness resolves overrides at injection time.
+`skill new` / `override` / `remove` / `status` are COA/PU only. Sub-agents request a skill via COA. `--created-by` sets `origin` (file still lives on COA).
+
+**Override workflow**: `agictl skill override <name>` creates `{name}_override.md` pre-populated with the shipped content. The harness resolves overrides at injection time only on a disk that has that file. Overrides are not in the watchdog source. Withdraw with `agictl skill remove {name}_override`.
 
 > Agent skill distribution is handled by Lifeline via `rsync` — skills marked `ready` or `updated` are deployed to all active sub-agents on the next tick.
 

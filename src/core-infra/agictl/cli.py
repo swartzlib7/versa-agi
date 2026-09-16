@@ -7636,7 +7636,7 @@ def agent_approve(name, force):
 
         # ── Deploy system skills ──
         # Same rsync mirror as 'agent deploy-skills' — excludes coa_only and
-        # agent-created skills (the old inline copy leaked COA-only skills).
+        # still-valid agent_created shares (stale shares are --deleted).
         try:
             _skills_deployed, _ = _rsync_skills_to_agent(name, os_user)
             click.echo(f"  ✓ Skills deployed: {_skills_deployed} shipped skills")
@@ -7792,12 +7792,64 @@ def agent_activate(name):
         json_response(False, error=str(e))
         sys.exit(1)
 
+def _coa_skills_dir(conn=None):
+    """COA .agent/skills directory from agents.db workspace."""
+    close = False
+    if conn is None:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        close = True
+    try:
+        row = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+    finally:
+        if close:
+            conn.close()
+    if not row:
+        return None
+    ws = row["workspace"] if isinstance(row, sqlite3.Row) else row[0]
+    if not ws:
+        return None
+    return os.path.join(ws, ".agent", "skills")
+
+
+def _valid_shared_agent_created_names(conn):
+    """agent_created shares that still exist on COA and should survive fleet --delete."""
+    skills_dir = _coa_skills_dir(conn)
+    rows = conn.execute(
+        "SELECT name FROM skills WHERE type='agent_created' AND scope='all' "
+        "AND status IN ('ready', 'synced', 'updated')"
+    ).fetchall()
+    valid = []
+    for row in rows:
+        name = row["name"] if isinstance(row, sqlite3.Row) else row[0]
+        if skills_dir and os.path.isfile(os.path.join(skills_dir, f"{name}.md")):
+            valid.append(name)
+    return valid
+
+
+def _remove_skill_dest(path, os_user):
+    """Remove a dest skill file or asset dir; fall back to the agent user."""
+    if not path or not os.path.lexists(path):
+        return
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        return
+    except OSError:
+        pass
+    if os_user:
+        subprocess.run(["sudo", "-u", os_user, "rm", "-rf", path], check=False)
+
+
 def _rsync_skills_to_agent(name, os_user):
     """Mirror shipped system skills to a sub-agent's .agent/skills/ via rsync --delete.
 
     Single implementation shared by 'agent deploy-skills' (refresh) and
     'agent approve' (initial provision). COA-only skills (scope='coa_only')
-    and agent-created skills (distributed via share-skill) are excluded.
+    are excluded. Only still-valid agent_created shares (file on COA,
+    scope=all, ready/synced/updated) are excluded from --delete.
     Returns (deployed_count, asset_dirs_count); raises RuntimeError on failure.
     """
     agent_root = f"/home/{os_user}"
@@ -7810,16 +7862,11 @@ def _rsync_skills_to_agent(name, os_user):
         coa_only_rows = conn.execute(
             "SELECT name FROM skills WHERE scope='coa_only'"
         ).fetchall()
-        # Agent-created skills live in COA's skills dir, not the shipped source.
-        # They are distributed via 'agent share-skill' — exclude them here so
-        # rsync --delete does not wipe previously-shared copies from sub-agents.
-        agent_created_rows = conn.execute(
-            "SELECT name FROM skills WHERE type='agent_created'"
-        ).fetchall()
+        keep_share_names = _valid_shared_agent_created_names(conn)
         conn.close()
     except Exception:
         coa_only_rows = []
-        agent_created_rows = []
+        keep_share_names = []
 
     if not os.path.isdir(agent_root):
         raise RuntimeError(f"Agent workspace not found: {agent_root}")
@@ -7841,9 +7888,8 @@ def _rsync_skills_to_agent(name, os_user):
         skill_name = coa_row["name"]
         rsync_cmd.extend(["--exclude", f"{skill_name}.md"])
         rsync_cmd.extend(["--exclude", f"{skill_name}/"])  # co-located assets
-    # Exclude agent-created skills (managed via share-skill, not this mirror)
-    for ac_row in agent_created_rows:
-        skill_name = ac_row["name"]
+    # Keep only still-valid shares. Stale share-skill copies are --deleted.
+    for skill_name in keep_share_names:
         rsync_cmd.extend(["--exclude", f"{skill_name}.md"])
         rsync_cmd.extend(["--exclude", f"{skill_name}/"])
 
@@ -7860,10 +7906,33 @@ def _rsync_skills_to_agent(name, os_user):
         skill_name = coa_row["name"]
         leftover_md = os.path.join(skills_dest, f"{skill_name}.md")
         leftover_dir = os.path.join(skills_dest, skill_name)
-        if os.path.isfile(leftover_md):
-            os.remove(leftover_md)
-        if os.path.isdir(leftover_dir):
-            shutil.rmtree(leftover_dir)
+        _remove_skill_dest(leftover_md, os_user)
+        _remove_skill_dest(leftover_dir, os_user)
+
+    # Retract dest copies that are not shipped and not a still-valid share.
+    # Prior --exclude left user-owned asset dirs that rsync --delete cannot
+    # remove when this process is watchdog (dir is 2755 agent-owned).
+    shipped_names = set()
+    src_root = skills_source.rstrip("/")
+    if os.path.isdir(src_root):
+        for fn in os.listdir(src_root):
+            if fn == "README.md":
+                continue
+            if fn.endswith(".md"):
+                shipped_names.add(fn[:-3])
+            elif os.path.isdir(os.path.join(src_root, fn)):
+                shipped_names.add(fn)
+    keep_names = set(keep_share_names)
+    for coa_row in coa_only_rows:
+        keep_names.add(coa_row["name"] if isinstance(coa_row, sqlite3.Row) else coa_row[0])
+    if os.path.isdir(skills_dest):
+        for item in os.listdir(skills_dest):
+            if item == "README.md":
+                continue
+            base = item[:-3] if item.endswith(".md") else item
+            if base in keep_names or base in shipped_names:
+                continue
+            _remove_skill_dest(os.path.join(skills_dest, item), os_user)
 
     # rsync -a preserves source ownership (watchdog) — restore dir per §IX.4
     subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
@@ -8647,6 +8716,25 @@ def agent_get_active():
 def _caller_agent_name() -> str:
     """Resolved logical agent name for the current caller."""
     return os.environ.get("VERSA_AGENT_NAME") or get_agent_name()
+
+
+def _resolve_memory_target(requested: str | None) -> tuple[str, bool]:
+    """Own memory by default. Targeting another agent is COA/PU only."""
+    mine = _caller_agent_name()
+    explicit = bool((requested or "").strip())
+    name = (requested or "").strip() or mine
+    if explicit and name != mine:
+        _require_pu_or_coa()
+    return name, explicit
+
+
+def _memory_agent_option(f):
+    return click.option(
+        "--agent",
+        "target_agent",
+        default=None,
+        help="Target agent (COA/PU only; default: caller)",
+    )(f)
 
 
 def _is_privileged_task_caller() -> bool:
@@ -9591,7 +9679,13 @@ def message_outbound_streak(sub_account, contact_uid, agent_name, limit):
               help="'all' = inject ALL connection memories (COA). 'relevant' = only active sender memories (sub-agents).")
 @click.option("--agent-name", default="", help="Agent name for matching internal messages (to_user_id=agent_name).")
 @click.option("--depth", default=10, type=int, help="Number of historical messages per contact (default: 10).")
-def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent_name, depth):
+@click.option(
+    "--max-chars",
+    default=40000,
+    type=int,
+    help="Failsafe char budget. Shrinks older history first; never head-cuts NEW MESSAGES. 0 = no limit.",
+)
+def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent_name, depth, max_chars):
     """Build conversation context blob for prompt injection (includes memory)."""
     import sqlite3 as _sqlite3
 
@@ -9843,6 +9937,14 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         f"ORDER BY created_at ASC",
         tuple(my_ids)
     )
+    if not new_messages:
+        # Older / test schemas may lack raw_payload — still inject unread bodies.
+        new_messages = message_reader._query(
+            f"SELECT message_id, from_user_id, display_name, text, original_text, created_at "
+            f"FROM messages WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({id_placeholders}) "
+            f"ORDER BY created_at ASC",
+            tuple(my_ids)
+        )
 
     # ── Cold start nudge ──
     # Note: system_memories (operational) is now injected by lifeline directly into the prompt
@@ -10011,6 +10113,10 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
             output += f"     → mark-processed: agictl message mark-processed {mid}\n"
         output += "\n[!] Reply to ALL items above before proceeding to other work. The most recent message is the most relevant one to start with and then looking at the rest.\n"
         output += "--- END NEW MESSAGES ---\n"
+
+    if max_chars and max_chars > 0:
+        from harness.conversation_trim import trim_conversation_preserving_unread
+        output = trim_conversation_preserving_unread(output, max_chars)
 
     print(output)
 
@@ -10245,19 +10351,22 @@ def _get_project(conn, project_id):
 # simplest durable guard — no `protected` column or migration needed — and it
 # must reject BOTH archive and hard-delete.
 # Display name may be renamed later; directory slug (basename of workspace_path)
-# is immutable. See project_workspace.py.
+# is immutable except reserved leftover repair for Versa-BusinessAdmin.
 try:
     from project_workspace import (
+        BUSINESS_ADMIN_PROJECT_NAME,
         COA_WORKSPACE_BASE,
         RESERVED_SYSTEM_PROJECTS,
         collect_taken_project_dirs,
         is_reserved_system_project,
         project_dir_from_workspace_path,
+        reserved_workspace_repair_path,
         resolve_project_dir,
     )
 except ImportError:
     COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
     RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase", "Versa-BusinessAdmin"}
+    BUSINESS_ADMIN_PROJECT_NAME = "Versa-BusinessAdmin"
 
     def is_reserved_system_project(name):
         return name in RESERVED_SYSTEM_PROJECTS
@@ -10270,6 +10379,13 @@ except ImportError:
 
     def resolve_project_dir(display_name, dir_override, taken):
         raise RuntimeError("project_workspace module required")
+
+    def reserved_workspace_repair_path(current_path, project_name, workspace_base=COA_WORKSPACE_BASE):
+        if project_name != BUSINESS_ADMIN_PROJECT_NAME:
+            return None
+        want = os.path.join(workspace_base, BUSINESS_ADMIN_PROJECT_NAME).rstrip(os.sep)
+        cur = (current_path or "").rstrip(os.sep)
+        return None if cur == want else want
 
 
 def _scaffold_production_statefold(project_path):
@@ -10560,10 +10676,17 @@ def project_archive(project_id, do_zip):
 @click.option("--platform", default=None, type=click.Choice(["github", "gitlab"]), help="Git platform")
 @click.option("--access-token", "access_token", default=None, help="Git platform access token")
 @click.option("--type", "proj_type", default=None, type=click.Choice(["git", "local"]), help="Project type")
-def project_update(project_id, new_name, remote_url, branch, desc, platform, access_token, proj_type):
+@click.option(
+    "--dir",
+    "new_dir",
+    default=None,
+    help="Repair leftover workspace slug (Versa-BusinessAdmin only)",
+)
+def project_update(project_id, new_name, remote_url, branch, desc, platform, access_token, proj_type, new_dir):
     """Update mutable fields on an existing project (by ID from project list).
 
-    Display --name may change; workspace directory / --dir is intentionally unsupported.
+    Display --name may change. --dir is reserved leftover repair only
+    (Versa-BusinessAdmin → shipped directory).
     """
     try:
         conn = db_connect.connect_compat(tasks_db, timeout=5)
@@ -10627,11 +10750,47 @@ def project_update(project_id, new_name, remote_url, branch, desc, platform, acc
         if proj_type is not None:
             updates.append("type = ?")
             params.append(proj_type)
+        repaired_path = None
+        if new_dir is not None:
+            want_dir = new_dir.strip()
+            if proj["name"] != BUSINESS_ADMIN_PROJECT_NAME:
+                conn.close()
+                json_response(
+                    False,
+                    error="Directory slug is immutable after create "
+                    f"(reserved leftover repair is {BUSINESS_ADMIN_PROJECT_NAME} only)",
+                )
+                sys.exit(1)
+            if want_dir != BUSINESS_ADMIN_PROJECT_NAME:
+                conn.close()
+                json_response(
+                    False,
+                    error=f"--dir must be '{BUSINESS_ADMIN_PROJECT_NAME}' for reserved leftover repair",
+                )
+                sys.exit(1)
+            repaired_path = reserved_workspace_repair_path(
+                proj["workspace_path"], proj["name"]
+            )
+            if repaired_path:
+                updates.append("workspace_path = ?")
+                params.append(repaired_path)
+        if not updates and new_dir is not None and not repaired_path:
+            conn.close()
+            json_response(
+                True,
+                project_id=project_id,
+                project=proj["name"],
+                directory=project_dir_from_workspace_path(proj["workspace_path"]),
+                workspace_path=proj["workspace_path"],
+                message="Reserved workspace already at shipped path",
+            )
+            return
         if not updates:
             conn.close()
             json_response(
                 False,
-                error="No fields to update. Use --name, --remote, --branch, --desc, --platform, --access-token, or --type.",
+                error="No fields to update. Use --name, --remote, --branch, --desc, "
+                "--platform, --access-token, --type, or --dir.",
             )
             sys.exit(1)
         updates.append("updated_at = datetime('now')")
@@ -10640,6 +10799,19 @@ def project_update(project_id, new_name, remote_url, branch, desc, platform, acc
             f"UPDATE projects SET {', '.join(updates)} WHERE id=?",
             params
         )
+        if repaired_path:
+            old_path = proj["workspace_path"]
+            if old_path:
+                conn.execute(
+                    "UPDATE project_members SET workspace_path=? "
+                    "WHERE project_id=? AND workspace_path=?",
+                    (repaired_path, project_id, old_path),
+                )
+            else:
+                conn.execute(
+                    "UPDATE project_members SET workspace_path=? WHERE project_id=?",
+                    (repaired_path, project_id),
+                )
         conn.commit()
         updated = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         conn.close()
@@ -11892,10 +12064,11 @@ def memory_connection():
 
 @memory_connection.command("get")
 @click.argument("contact_uid")
-def memory_connection_get(contact_uid):
+@_memory_agent_option
+def memory_connection_get(contact_uid, target_agent):
     """Get memory for a specific contact."""
     try:
-        agent_name = get_agent_name()
+        agent_name, _scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -11917,10 +12090,11 @@ def memory_connection_get(contact_uid):
 @click.option("--comm-style", default=None, help="How this person communicates")
 @click.option("--rapport", default=None, type=click.Choice(["new", "building", "established", "strong"]))
 @click.option("--emotional-notes", default=None, help="Trust, vibe, encouragement needs")
-def memory_connection_set(contact_uid, preferences, personal_notes, comm_style, rapport, emotional_notes):
+@_memory_agent_option
+def memory_connection_set(contact_uid, preferences, personal_notes, comm_style, rapport, emotional_notes, target_agent):
     """Set or update memory for a contact. Uses UPSERT — only provided fields are updated."""
     try:
-        agent_name = get_agent_name()
+        agent_name, _scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         # Check if record exists
         existing = conn.execute(
@@ -11968,10 +12142,11 @@ def memory_connection_set(contact_uid, preferences, personal_notes, comm_style, 
         json_response(False, error=str(e))
 
 @memory_connection.command("list")
-def memory_connection_list():
+@_memory_agent_option
+def memory_connection_list(target_agent):
     """List all contact memories for this agent."""
     try:
-        agent_name = get_agent_name()
+        agent_name, _scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -11992,10 +12167,11 @@ def memory_project():
 
 @memory_project.command("get")
 @click.argument("project_id", type=int)
-def memory_project_get(project_id):
+@_memory_agent_option
+def memory_project_get(project_id, target_agent):
     """Get memory for a specific project."""
     try:
-        agent_name = get_agent_name()
+        agent_name, _scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -12016,10 +12192,11 @@ def memory_project_get(project_id):
 @click.option("--decisions", default=None, help="Key decisions and WHY")
 @click.option("--blockers", default=None, help="Known impediments")
 @click.option("--next-steps", default=None, help="What is planned next")
-def memory_project_set(project_id, phase, decisions, blockers, next_steps):
+@_memory_agent_option
+def memory_project_set(project_id, phase, decisions, blockers, next_steps, target_agent):
     """Set or update memory for a project. Uses UPSERT — only provided fields are updated."""
     try:
-        agent_name = get_agent_name()
+        agent_name, _scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         existing = conn.execute(
             "SELECT id FROM agent_memory_project WHERE agent_name=? AND project_id=?",
@@ -12060,10 +12237,11 @@ def memory_project_set(project_id, phase, decisions, blockers, next_steps):
         json_response(False, error=str(e))
 
 @memory_project.command("list")
-def memory_project_list():
+@_memory_agent_option
+def memory_project_list(target_agent):
     """List all project memories for this agent."""
     try:
-        agent_name = get_agent_name()
+        agent_name, _scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -12084,10 +12262,11 @@ def memory_system():
 
 @memory_system.command("get")
 @click.argument("key", required=False, default=None)
-def memory_system_get(key):
+@_memory_agent_option
+def memory_system_get(key, target_agent):
     """Get system memory. If key is provided, returns single entry; otherwise returns all."""
     try:
-        agent_name = get_agent_name()
+        agent_name, scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
         if key:
@@ -12095,15 +12274,23 @@ def memory_system_get(key):
                 "SELECT * FROM agent_memory_system WHERE key=?",
                 (key,)
             ).fetchone()
+            if row and scoped and dict(row).get("agent_name") != agent_name:
+                row = None
             conn.close()
             if row:
                 print(json.dumps(dict(row), indent=2, default=str))
             else:
                 print(json.dumps({"key": key, "exists": False}))
         else:
-            rows = conn.execute(
-                "SELECT * FROM agent_memory_system ORDER BY key ASC"
-            ).fetchall()
+            if scoped:
+                rows = conn.execute(
+                    "SELECT * FROM agent_memory_system WHERE agent_name=? ORDER BY key ASC",
+                    (agent_name,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM agent_memory_system ORDER BY key ASC"
+                ).fetchall()
             conn.close()
             print(json.dumps([dict(r) for r in rows], indent=2, default=str))
     except Exception as e:
@@ -12112,10 +12299,11 @@ def memory_system_get(key):
 @memory_system.command("set")
 @click.argument("key")
 @click.argument("value")
-def memory_system_set(key, value):
+@_memory_agent_option
+def memory_system_set(key, value, target_agent):
     """Set a system memory entry. Uses UPSERT — replaces value if key exists."""
     try:
-        agent_name = get_agent_name()
+        agent_name, _scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.execute(
             """INSERT INTO agent_memory_system (agent_name, key, value)
@@ -12130,15 +12318,22 @@ def memory_system_set(key, value):
         json_response(False, error=str(e))
 
 @memory_system.command("list")
-def memory_system_list():
+@_memory_agent_option
+def memory_system_list(target_agent):
     """List all system memory entries for this agent."""
     try:
-        agent_name = get_agent_name()
+        agent_name, scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM agent_memory_system ORDER BY key ASC"
-        ).fetchall()
+        if scoped:
+            rows = conn.execute(
+                "SELECT * FROM agent_memory_system WHERE agent_name=? ORDER BY key ASC",
+                (agent_name,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM agent_memory_system ORDER BY key ASC"
+            ).fetchall()
         conn.close()
         print(json.dumps([dict(r) for r in rows], indent=2, default=str))
     except Exception as e:
@@ -12146,13 +12341,21 @@ def memory_system_list():
 
 @memory_system.command("delete")
 @click.argument("key")
-def memory_system_delete(key):
+@_memory_agent_option
+def memory_system_delete(key, target_agent):
     """Delete a system memory entry by key."""
     try:
+        agent_name, scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
-        cursor = conn.execute(
-            "DELETE FROM agent_memory_system WHERE key=?", (key,)
-        )
+        if scoped:
+            cursor = conn.execute(
+                "DELETE FROM agent_memory_system WHERE key=? AND agent_name=?",
+                (key, agent_name),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM agent_memory_system WHERE key=?", (key,)
+            )
         deleted = cursor.rowcount
         conn.commit()
         conn.close()
@@ -12166,14 +12369,22 @@ def memory_system_delete(key):
 @memory_system.command("rename")
 @click.argument("old_key")
 @click.argument("new_key")
-def memory_system_rename(old_key, new_key):
+@_memory_agent_option
+def memory_system_rename(old_key, new_key, target_agent):
     """Rename a system memory key (preserves value and metadata)."""
     try:
+        agent_name, scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
         # Check old key exists
-        existing = conn.execute(
-            "SELECT id FROM agent_memory_system WHERE key=?", (old_key,)
-        ).fetchone()
+        if scoped:
+            existing = conn.execute(
+                "SELECT id FROM agent_memory_system WHERE key=? AND agent_name=?",
+                (old_key, agent_name),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT id FROM agent_memory_system WHERE key=?", (old_key,)
+            ).fetchone()
         if not existing:
             conn.close()
             json_response(False, error=f"Key '{old_key}' not found")
@@ -13004,18 +13215,49 @@ def skill():
     pass
 
 
+def _normalize_created_by(name):
+    """Sanitize --created-by (origin attribution). Default coa."""
+    raw = (name or "coa").strip().lower()
+    if not re.match(r"^[a-z0-9][a-z0-9_-]*$", raw):
+        json_response(False, error="Invalid --created-by (use an agent name)")
+        sys.exit(1)
+    return raw
+
+
+def _prune_missing_nonshipped_skill_rows(conn, skills_dir):
+    """Delete non-shipped skill rows whose COA .md is gone. Returns pruned count."""
+    pruned = 0
+    if not skills_dir or not os.path.isdir(skills_dir):
+        return 0
+    rows = conn.execute(
+        "SELECT name FROM skills WHERE origin != 'shipped'"
+    ).fetchall()
+    for row in rows:
+        skill_name = row["name"] if isinstance(row, sqlite3.Row) else row[0]
+        if not os.path.isfile(os.path.join(skills_dir, f"{skill_name}.md")):
+            conn.execute(
+                "DELETE FROM skills WHERE name=? AND origin != 'shipped'",
+                (skill_name,),
+            )
+            pruned += 1
+    return pruned
+
+
 @skill.command("new")
 @click.argument("name")
 @click.option("--description", "-d", default=None, help="Skill description")
 @click.option("--scope", "-s", type=click.Choice(["all", "coa_only"]), default="all", help="Skill scope: 'all' (default) or 'coa_only'")
-def skill_new(name, description, scope):
-    """Create a new skill template and asset directory.
+@click.option("--created-by", "created_by", default="coa", help="Origin agent (who asked). File still lives on COA.")
+def skill_new(name, description, scope, created_by):
+    """Create a new skill template and asset directory (COA/PU only).
 
-    Creates the .md template and co-located asset directory in COA's
-    skills folder. Sets status to 'draft' in the skills DB. COA must
-    complete the template and mark it 'ready' for distribution.
+    Writes the .md template and asset directory in COA's skills folder.
+    --created-by sets origin so skill list shows who asked. Sub-agents
+    request a skill via COA; they do not run this command.
     """
+    _require_pu_or_coa()
     name = name.lower().replace(" ", "_").replace("-", "_")
+    created_by = _normalize_created_by(created_by)
 
     # Resolve COA skills directory
     conn = db_connect.connect_compat(agents_db, timeout=5)
@@ -13025,6 +13267,14 @@ def skill_new(name, description, scope):
         conn.close()
         json_response(False, error="COA agent not found in registry")
         sys.exit(1)
+    if created_by != "coa":
+        exists = conn.execute(
+            "SELECT name FROM agents WHERE name=?", (created_by,)
+        ).fetchone()
+        if not exists:
+            conn.close()
+            json_response(False, error=f"Unknown agent for --created-by: {created_by}")
+            sys.exit(1)
     skills_dir = os.path.join(coa["workspace"], ".agent", "skills")
     conn.close()
 
@@ -13096,31 +13346,40 @@ Reference them using relative paths from the agent's workspace.
     subprocess.run(["chmod", "2775", asset_dir], check=False)  # setgid: new files inherit agi_agents
     subprocess.run(["chmod", "664", asset_readme], check=False)
 
-    # Register in DB
+    # Register in DB — origin is who asked; file still lives on COA
     conn = db_connect.connect_compat(agents_db, timeout=5)
     try:
         conn.execute(
             "INSERT OR IGNORE INTO skills (name, type, origin, has_assets, description, status, scope) "
-            "VALUES (?, 'agent_created', 'coa', 1, ?, 'draft', ?)",
-            (name, description or "", scope)
+            "VALUES (?, 'agent_created', ?, 1, ?, 'draft', ?)",
+            (name, created_by, description or "", scope)
         )
         conn.commit()
     finally:
         conn.close()
 
-    json_response(True, skill=name, skill_file=skill_file, asset_dir=asset_dir, status="draft", scope=scope)
+    json_response(
+        True,
+        skill=name,
+        skill_file=skill_file,
+        asset_dir=asset_dir,
+        status="draft",
+        scope=scope,
+        origin=created_by,
+    )
 
 
 @skill.command("status")
 @click.argument("name")
 @click.argument("new_status", type=click.Choice(["ready", "updated"]))
 def skill_status(name, new_status):
-    """Update a skill's status (draft→ready, synced→updated).
+    """Update a skill's status (draft→ready, synced→updated). COA/PU only.
 
     When set to 'ready', Lifeline will distribute the skill to all
     active sub-agents on its next tick and set status to 'synced'.
     When set to 'updated', Lifeline will re-sync the skill.
     """
+    _require_pu_or_coa()
     name = name.lower()
 
     conn = db_connect.connect_compat(agents_db, timeout=5)
@@ -13285,16 +13544,23 @@ def skill_register():
         )
         registered += 1
 
+    pruned = _prune_missing_nonshipped_skill_rows(conn, skills_dir)
     conn.commit()
     conn.close()
 
-    json_response(True, registered=registered, skipped=skipped, skills_dir=skills_dir)
+    json_response(
+        True,
+        registered=registered,
+        skipped=skipped,
+        pruned=pruned,
+        skills_dir=skills_dir,
+    )
 
 
 @skill.command("override")
 @click.argument("name")
 def skill_override(name):
-    """Create an override for a shipped skill.
+    """Create an override for a shipped skill (COA/PU only).
 
     Creates {name}_override.md in COA's skills directory, pre-populated
     with the shipped skill content as a starting template. Registers the
@@ -13302,12 +13568,14 @@ def skill_override(name):
     COA edits the override, then marks it 'ready' for distribution.
 
     The harness resolves overrides at injection time: if {name}_override.md
-    exists in the agent's skills directory, it is injected instead of the
-    shipped {name}.md. Overrides propagate to all agents via rsync.
+    exists on that agent's disk, it is injected instead of the shipped
+    {name}.md. Overrides are not in the watchdog source; they only apply
+    on a disk that has the override file. They do not rsync from shipped
+    skills.
 
-    To withdraw an override, delete the _override.md file and remove the
-    DB row. Agents revert to the shipped version on the next rsync cycle.
+    Withdraw with: `agictl skill remove {name}_override`
     """
+    _require_pu_or_coa()
     name = name.lower().replace(" ", "_").replace("-", "_")
     override_name = f"{name}_override"
 
@@ -13379,6 +13647,53 @@ def skill_override(name):
         conn.close()
 
     json_response(True, skill=override_name, override_of=name, file=override_file, status="draft")
+
+
+@skill.command("remove")
+@click.argument("name")
+def skill_remove(name):
+    """Remove a skill registry row (COA/PU only).
+
+    Deletes the DB row. If the COA file is agent_created or an override,
+    also deletes that file and its asset directory. Next deploy-skills
+    retracts fleet copies of retracted shares.
+    """
+    _require_pu_or_coa()
+    name = name.lower().replace(" ", "_").replace("-", "_")
+
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT name, type, origin FROM skills WHERE name=?", (name,)).fetchone()
+    if not row:
+        conn.close()
+        json_response(False, error=f"Skill '{name}' not found in registry")
+        sys.exit(1)
+
+    skill_type = row["type"]
+    skills_dir = _coa_skills_dir(conn)
+    deleted_file = False
+    deleted_assets = False
+    if skill_type in ("agent_created", "override") and skills_dir:
+        skill_file = os.path.join(skills_dir, f"{name}.md")
+        asset_dir = os.path.join(skills_dir, name)
+        if os.path.isfile(skill_file):
+            os.remove(skill_file)
+            deleted_file = True
+        if os.path.isdir(asset_dir):
+            shutil.rmtree(asset_dir, ignore_errors=True)
+            deleted_assets = True
+
+    conn.execute("DELETE FROM skills WHERE name=?", (name,))
+    conn.commit()
+    conn.close()
+
+    json_response(
+        True,
+        skill=name,
+        type=skill_type,
+        deleted_file=deleted_file,
+        deleted_assets=deleted_assets,
+    )
 
 
 # ═══════════════════════════════════════════════════════

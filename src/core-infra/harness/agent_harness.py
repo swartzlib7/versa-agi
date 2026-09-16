@@ -678,7 +678,8 @@ class MemoryInput(BaseModel):
         "'memory connection set UID --preferences \"prefers text\" --rapport building', "
         "'memory connection list', 'memory project get 7', "
         "'memory project set 7 --phase \"development\" --blockers \"none\"', "
-        "'memory system get key', 'memory system set key value', 'memory system list'."
+        "'memory system get key', 'memory system set key value', 'memory system list'. "
+        "COA/PU only: append '--agent NAME' to maintain another agent's memory."
     ))
 
 @tool("agictl_memory", args_schema=MemoryInput)
@@ -690,6 +691,7 @@ def agictl_memory(command: str) -> str:
       - 'memory project set 7 --phase "testing" --next-steps "deploy to staging"'
       - 'memory system set docker_available "true"'
       - 'memory system list' — view all system knowledge
+      - COA/PU only: 'memory connection list --agent sylvie'
     """
     return _run_agictl(command)
 
@@ -1362,9 +1364,11 @@ def main():
     parser.add_argument("--reasoning-effort", default=None, help="Per-agent reasoning effort override (omit = inherit)")
     parser.add_argument("--reasoning-max-tokens", type=int, default=None, help="Per-agent reasoning token budget (omit = inherit)")
     parser.add_argument("--model-params-extra", default=None, help="Per-agent extra params JSON passthrough (omit = inherit)")
-    parser.add_argument("--tasks-file", default=None, help="Path to pre-computed active tasks context for triage")
-    parser.add_argument("--convo-file", default=None, help="Path to pre-computed conversation history for triage")
-    parser.add_argument("--games-file", default=None, help="Path to compact active-games digest for triage")
+    parser.add_argument("--tasks-file", default=None, help="Unused (kept for lifeline compat)")
+    parser.add_argument("--convo-file", default=None, help="Unused (kept for lifeline compat)")
+    parser.add_argument("--games-file", default=None, help="Unused — Games are not a triage input")
+    parser.add_argument("--inbox-file", default=None, help="Unread inbound digest for triage (optional; else built from DB)")
+    parser.add_argument("--registry-file", default=None, help="Project/task registry for triage (optional; else built from DB)")
     parser.add_argument("--routing-file", default=None, help="Path to ephemeral model routing JSON from lifeline")
     parser.add_argument("--resume-max-messages", type=int, default=0, help="Trim checkpoint to last N messages on resume (0 = unlimited)")
     parser.add_argument("--skill-mode", default="hybrid", choices=["full", "lazy", "hybrid"], help="Skill injection mode: full (inject all), lazy (manifest only), hybrid (core injected + lazy manifest)")
@@ -1456,6 +1460,12 @@ def main():
             except Exception as e:
                 tlog(f"COMMUNICATION BASIC: Failed to read — {e}")
 
+    from harness.triage import format_loadable_skills_block
+    catalog_block = format_loadable_skills_block(args.agent)
+    if catalog_block.strip():
+        static_skill_blocks.append(catalog_block)
+        tlog(f"LOADABLE CATALOG: Injected ({len(catalog_block)} chars)")
+
     # ── Insert static skill blocks at the cache boundary ──
     if static_skill_blocks:
         skills_payload = "".join(static_skill_blocks)
@@ -1487,10 +1497,15 @@ def main():
         with open(args.convo_file, "r") as f:
             convo_context = f.read().strip()
 
-    games_context = ""
-    if getattr(args, "games_file", None) and os.path.isfile(args.games_file):
-        with open(args.games_file, "r") as f:
-            games_context = f.read().strip()
+    inbox_context = ""
+    if getattr(args, "inbox_file", None) and os.path.isfile(args.inbox_file):
+        with open(args.inbox_file, "r") as f:
+            inbox_context = f.read().strip()
+
+    registry_context = ""
+    if getattr(args, "registry_file", None) and os.path.isfile(args.registry_file):
+        with open(args.registry_file, "r") as f:
+            registry_context = f.read().strip()
 
     # ── Session Type ──
     # Determined later by actual checkpoint state inspection, not just --resume flag.
@@ -1541,7 +1556,7 @@ def main():
     # ── Triage Node ──
     # Runs a lightweight classification before the main agent loop.
     # Uses a separate model if --triage-model is set, otherwise falls back to --model.
-    from harness.triage import run_triage, inject_skills, build_triage_context, enrich_triage_from_inbox
+    from harness.triage import run_triage, inject_skills, build_triage_context, enrich_triage_from_inbox, build_inbox_context, build_registry_context
 
     triage_model_name = getattr(args, 'triage_model', None) or args.model
     triage_llm = get_llm(triage_model_name, agent_overrides=agent_param_overrides)
@@ -1551,15 +1566,19 @@ def main():
         tlog(f"SKILLS DIR: {skills_dir}")
 
     # Run triage classification (before main LLM — ephemeral routing decision)
+    if not inbox_context:
+        inbox_context = build_inbox_context(args.agent)
+    if not registry_context:
+        registry_context = build_registry_context(args.agent)
+
     triage_result = run_triage(
         llm=triage_llm,
         wake_prompt=wake_prompt,
-        tasks_context=tasks_context,
-        conversation_context=convo_context,
+        inbox_context=inbox_context,
+        registry_context=registry_context,
         skills_dir=skills_dir,
         agent_name=args.agent,
         routing_context=routing_context,
-        games_context=games_context,
     )
     triage_result = enrich_triage_from_inbox(triage_result, args.agent)
 
@@ -1646,39 +1665,15 @@ def main():
         triage_result.skills_to_inject = resolved_skills
         if triage_result.skills_to_inject:
             if skill_mode == "full":
-                # Full mode: inject entire skill content (legacy behavior)
+                # Full mode: paste recommended skill bodies (not the whole catalog).
                 skill_content = inject_skills(triage_result, skills_dir)
-            elif skill_mode in ("hybrid", "lazy"):
-                # Hybrid/Lazy mode: generate a compact manifest instead of full content.
-                # Agents load full skill files on-demand via agictl execute bash "cat <path>".
-                manifest_lines = []
-                for skill_name in triage_result.skills_to_inject:
-                    skill_path = os.path.join(skills_dir, skill_name)
-                    # Extract first non-empty, non-heading line as description
-                    desc = skill_name
-                    if os.path.isfile(skill_path):
-                        try:
-                            with open(skill_path, "r") as sf:
-                                for line in sf:
-                                    line = line.strip()
-                                    if line and not line.startswith("#") and not line.startswith(">"):
-                                        desc = line[:120]
-                                        break
-                        except Exception:
-                            pass
-                    manifest_lines.append(f"- **{skill_name}** → `.agent/skills/{skill_name}` — {desc}")
-                    tlog(f"SKILL MANIFEST: {skill_name} (lazy)")
-
-                if manifest_lines:
-                    skill_content = (
-                        "\n\n---\n## ── SKILLS AVAILABLE ──\n\n"
-                        "**Load these skills BEFORE performing related work.** "
-                        "Command: `agictl execute bash \"cat .agent/skills/<name>\"` "
-                        "(or `cat \"$AGICTL_AGENT_DIR/skills/<name>\"` — env root–absolute).\n\n"
-                        + "\n".join(manifest_lines)
-                    )
             else:
-                skill_content = inject_skills(triage_result, skills_dir)
+                # hybrid/lazy: full loadable catalog is already on the system prompt.
+                # Triage only names recommendations in the wake preamble.
+                tlog(
+                    "SKILLS: catalog already on system prompt; "
+                    f"triage recommended {', '.join(triage_result.skills_to_inject)}"
+                )
 
     # Build enhanced system prompt with injected skills
     enhanced_prompt = system_prompt

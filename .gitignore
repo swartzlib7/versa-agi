@@ -34,7 +34,6 @@ Thumbs.db
 .idea/
 
 # Local config dirs
-.vscrof
 .versavoiceai
 
 Sensitive configuration (may contain API keys)

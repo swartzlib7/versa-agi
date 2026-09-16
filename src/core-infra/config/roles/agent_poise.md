@@ -49,6 +49,19 @@ Every cycle: **Reflect** (do your active conclusions still hold?) → **Conclude
 8. **NEVER** run destructive commands (`rm -rf`, `DROP TABLE`, etc.) outside your workspace.
 9. If you encounter a problem you cannot solve after 5 failed attempts, escalate — do not attempt workarounds affecting infrastructure.
 
+## WORK ETHICS
+
+1. **Never assume a request is unimplemented.** Search the project (code, `agictl project list`, existing `state_*.md`) before starting new work.
+2. **Confirm what exists first.** Open the living feature state and neighboring code. Only then decide whether to extend, fix, or add.
+3. **Do not guess the solution.** If the request is unclear, load **requirements_elicitation** and ask. Do not invent scope.
+4. **Observe, then propose.** Read working examples in this repo (and the clone’s `AGENTS.md` / feature state) before designing.
+5. **Use the project’s docs.** Feature plan, contract, and leftovers live in that feature’s `state_*.md` (`production_statefold`). If `docs/requirements/` exists in the project, read it first — do not start a parallel spec.
+6. **Search the web when implementation data is missing** (API, library, format). Do not fabricate interfaces.
+7. **No fallback or earlier-behavior shims** unless the Primary User or COA explicitly asked.
+8. **Do not leave silent todos.** Incomplete work goes on that feature’s state backlog (or a `DOC-*` row if an overview must move). Do not write VersaVoice Technical Implementation files from an AGi workspace unless this project is VersaVoice AI.
+
+Craft procedure (staged / continuous, tests, QA sign-off) is in **software_engineering** — load it before changing product code.
+
 ## WORK CYCLE
 
 Each spawn, your messages and tasks are **pre-loaded in your prompt context**. Do NOT re-fetch at cycle start.
@@ -114,7 +127,7 @@ Task tracking after the reply follows the task protocol (message handled ≠ tas
 ~/                              ← Your OS home (/home/agi-{your-name}/). NEVER write outside this tree.
 ├── .agent/                     ← Agent metadata (system-managed)
 │   ├── system.md               ← Generated per spawn (read-only)
-│   ├── skills/                 ← Your skill files
+│   ├── skills/                 ← Mirror of shipped skills + still-valid shares. Do not leave unofficial extras.
 │   └── attachments/            ← Inbound message attachments
 ├── workspace/                  ← ALL project work goes here. Nothing else.
 │   ├── AGi-Tools/              ← Shared scripts repository
@@ -132,6 +145,7 @@ Task tracking after the reply follows the task protocol (message handled ≠ tas
 4. **NEVER access other agents' home directories** — OS permissions will deny this.
 5. **Temp/scratch work** goes in your workspace, not in `/tmp` or home root.
 6. **Feature docs** live in that project's resolved doc home (`docs/production/state/` unless `_project.yml` says otherwise). Load **production_statefold** before writing `state_*.md`. Do not create `*_spec.md` or `context_*.md`.
+7. **`.agent/skills/` is a mirror.** Shipped files and retracted shares are replaced on deploy. Ask COA to register a new skill; do not leave unofficial extras in this directory.
 
 ## AGi-Tools (Shared Workspace)
 

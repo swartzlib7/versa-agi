@@ -1,4 +1,4 @@
-"""Unit tests for triage slim-down (altitude + provenance preamble).
+"""Unit tests for purpose-shaped triage (inbox + registry + catalog + preamble).
 
 Run from core-infra:
   python -m unittest harness.tests.test_triage_slim
@@ -12,11 +12,20 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from harness.conversation_trim import (  # noqa: E402
+    CONVERSATION_CONTEXT_MAX_CHARS,
+    NEW_MESSAGES_MARK,
+    trim_conversation_preserving_unread,
+)
 from harness.triage import (  # noqa: E402
+    TRIAGE_PROMPT,
     TriageResult,
+    _ALWAYS_IN_PROMPT,
+    _record_inputs_used,
+    already_loaded_skill_names,
     adverse_signals,
     build_triage_context,
-    _record_inputs_used,
+    format_loadable_skills_block,
 )
 
 
@@ -25,23 +34,29 @@ class TestBuildTriageContext(unittest.TestCase):
         result = TriageResult(
             classification="work_request",
             confidence=0.9,
-            strategy_notes="Implement feature X; inject git + SE skills.",
+            strategy_notes="Inbound asks for feature X; recommend git + SE.",
             task_actions=["acknowledge-sender", "implement-feature-x"],
-            skills_to_inject=["communication.md", "git_operations.md"],
+            skills_to_inject=["git_operations.md"],
             signal_results={"direction_clarity": True, "purpose_clarity": False},
-            inputs_used=["wake", "active-tasks", "skills-catalog", "games-digest"],
+            inputs_used=["wake", "inbox", "registry", "skills-catalog"],
+            correlations=[{"project_id": 26, "task_id": 273, "note": "page builder", "certainty": 0.9}],
+            ack_advice={"posture": "reply", "note": "human assigned work", "certainty": 0.95},
         )
         text = build_triage_context(result)
         self.assertIn("TRIAGE RESULT (advisory)", text)
         self.assertIn("Triage node", text)
-        self.assertIn("Inputs used: wake | active-tasks | skills-catalog | games-digest", text)
+        self.assertIn("Inputs used: wake | inbox | registry | skills-catalog", text)
         self.assertIn("Not used by triage:", text)
-        self.assertIn("Strategic brief:", text)
-        self.assertIn("Implement feature X", text)
+        self.assertIn("Advisory:", text)
+        self.assertIn("Inbound asks for feature X", text)
         self.assertIn("Classification: **work_request**", text)
+        self.assertIn("Skills recommended", text)
+        self.assertIn("Ack advice:", text)
+        self.assertIn("Correlations:", text)
         self.assertNotIn("Execution Order", text)
         self.assertNotIn("COMMUNICATE FIRST", text)
         self.assertNotIn("mark-processed", text.lower())
+        self.assertNotIn("games-digest", text)
 
     def test_clarification_note_is_one_line(self):
         result = TriageResult(
@@ -60,7 +75,7 @@ class TestBuildTriageContext(unittest.TestCase):
             classification="follow_up",
             confidence=0.8,
             has_attachments=True,
-            inputs_used=["wake", "skills-catalog", "attachment-enrich"],
+            inputs_used=["wake", "skills-catalog", "inbox", "attachment-enrich"],
         )
         text = build_triage_context(result)
         self.assertIn("attachment", text.lower())
@@ -74,7 +89,8 @@ class TestBuildTriageContext(unittest.TestCase):
             classification="informational",
             confidence=0.95,
             strategy_notes="Likely peer-agent standing-by; consider silence.",
-            inputs_used=["wake", "conversation(last-N)", "skills-catalog"],
+            inputs_used=["wake", "inbox", "skills-catalog"],
+            ack_advice={"posture": "silent", "note": "ack-loop risk", "certainty": 0.8},
         )
         text = build_triage_context(result)
         self.assertIn("advisory", text.lower())
@@ -89,26 +105,81 @@ class TestBuildTriageContext(unittest.TestCase):
             classification="follow_up",
             confidence=0.9,
             strategy_notes="Suggest brief warm ack to human sender.",
-            inputs_used=["wake", "skills-catalog"],
+            inputs_used=["wake", "inbox", "skills-catalog"],
         )
         text = build_triage_context(result)
         self.assertIn("not orders", text.lower())
 
 
 class TestRecordInputsUsed(unittest.TestCase):
-    def test_games_and_routing_flags(self):
+    def test_inbox_and_registry_not_games(self):
         used = _record_inputs_used(
             wake_prompt="hi",
-            tasks_context="task 1",
-            conversation_context="(none)",
-            games_context="Game #1: Launch",
+            inbox_context="1 unread inbound",
+            registry_context="#26 | Builder",
             routing_context={"mode": "pool"},
         )
         self.assertIn("wake", used)
-        self.assertIn("active-tasks", used)
-        self.assertIn("games-digest", used)
+        self.assertIn("inbox", used)
+        self.assertIn("registry", used)
         self.assertIn("routing", used)
+        self.assertNotIn("games-digest", used)
         self.assertNotIn("conversation(last-N)", used)
+        self.assertNotIn("active-tasks", used)
+
+
+class TestPromptContract(unittest.TestCase):
+    def test_prompt_has_inbox_not_games(self):
+        self.assertIn("{inbox_context}", TRIAGE_PROMPT)
+        self.assertIn("{registry_context}", TRIAGE_PROMPT)
+        self.assertNotIn("{games_context}", TRIAGE_PROMPT)
+        self.assertNotIn("last 5 messages", TRIAGE_PROMPT)
+        self.assertIn("no new human substance", TRIAGE_PROMPT)
+
+
+class TestLoadableCatalog(unittest.TestCase):
+    def test_always_loaded_not_reoffered_names(self):
+        names = already_loaded_skill_names("coa")
+        self.assertTrue(_ALWAYS_IN_PROMPT <= names)
+        self.assertIn("memory_management.md", names)
+        self.assertIn("communication_basic.md", names)
+
+    def test_catalog_block_header(self):
+        block = format_loadable_skills_block("coa")
+        self.assertIn("SKILLS AVAILABLE TO LOAD", block)
+        self.assertIn("cat .agent/skills/", block)
+
+
+class TestConversationTrim(unittest.TestCase):
+    def test_default_limit_is_40k(self):
+        self.assertEqual(CONVERSATION_CONTEXT_MAX_CHARS, 40000)
+
+    def test_preserves_unread_when_over_limit(self):
+        unread = (
+            f"{NEW_MESSAGES_MARK}\n"
+            "[!] KEEP THIS UNREAD BODY FROM THE PRIMARY USER — IDE hold and snapshot.\n"
+            "--- END NEW MESSAGES ---\n"
+        )
+        old = "OLD HISTORY " * 2000
+        blob = old + unread
+        out = trim_conversation_preserving_unread(blob, max_chars=800)
+        self.assertIn("KEEP THIS UNREAD BODY", out)
+        self.assertIn(NEW_MESSAGES_MARK, out)
+        self.assertLess(len(out), len(blob))
+        self.assertTrue(out.endswith(unread) or unread in out)
+
+    def test_head_cut_would_have_dropped_unread(self):
+        unread = f"{NEW_MESSAGES_MARK}\nUNREAD TAIL UNIQUE TOKEN xyzzy\n"
+        blob = ("HEAD " * 500) + unread
+        naive = blob[:200]
+        self.assertNotIn("xyzzy", naive)
+        preserved = trim_conversation_preserving_unread(blob, max_chars=400)
+        self.assertIn("xyzzy", preserved)
+
+    def test_unread_alone_over_limit_is_kept(self):
+        unread = NEW_MESSAGES_MARK + "\n" + ("BIG UNREAD " * 200)
+        out = trim_conversation_preserving_unread(unread, max_chars=100)
+        self.assertEqual(out, unread)
 
 
 class TestAdverseSignals(unittest.TestCase):
@@ -117,10 +188,8 @@ class TestAdverseSignals(unittest.TestCase):
             "direction_clarity": True,
             "purpose_clarity": True,
             "contradiction_check": False,
-            "historical_context": True,
             "task_correlation": True,
             "project_correlation": True,
-            "memory_conflict": False,
             "pending_question": False,
             "parallel_work_viable": True,
             "risk_assessment": False,
@@ -148,15 +217,13 @@ class TestAdverseSignals(unittest.TestCase):
                 "direction_clarity": True,
                 "purpose_clarity": True,
                 "contradiction_check": False,
-                "historical_context": True,
                 "task_correlation": True,
                 "project_correlation": True,
-                "memory_conflict": False,
                 "pending_question": False,
                 "parallel_work_viable": True,
                 "risk_assessment": False,
             },
-            inputs_used=["wake", "skills-catalog"],
+            inputs_used=["wake", "inbox", "skills-catalog"],
         )
         text = build_triage_context(result)
         self.assertNotIn("pending_question", text)

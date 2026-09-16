@@ -1,10 +1,12 @@
 """
-Versa AGi — Task Triage Node
-10-signal confidence-scored decision matrix for message classification,
-project routing, and skill injection.
+Versa AGi — Task Triage (pre-graph)
 
-Altitude: flagship triage produces checks + strategic brief + skill picks.
-Low-altitude protocol (CLI, mark-processed, snooze) lives in poise/skills.
+Purpose: analyse new inbound messages and VV project/task tags against the
+project/task registry and loadable skills; advise ack/ack-loop posture and
+inbound-media presence; attach a certainty to each finding.
+
+Does not re-assess Games, awareness, or other poise-already-given data.
+Low-altitude protocol (CLI, mark-processed) lives in poise/skills.
 """
 
 import db_connect
@@ -31,6 +33,9 @@ class TriageResult:
     attachment_paths: list = field(default_factory=list)
     required_work_modality: Optional[str] = None
     recommended_model: Optional[str] = None
+    correlations: list = field(default_factory=list)
+    ack_advice: dict = field(default_factory=dict)
+    media_certainty: Optional[float] = None
     # Provenance: which triage inputs were non-empty this cycle
     inputs_used: list = field(default_factory=list)
 
@@ -39,81 +44,70 @@ class TriageResult:
 # Triage Prompt — Injected as a structured analysis request
 # ═══════════════════════════════════════════════════════
 
-TRIAGE_PROMPT = """You are a message triage system. Analyze the wake prompt and context, then output a JSON classification.
+TRIAGE_PROMPT = """You are a spawn triage system. Analyse **new inbound only**, then output JSON.
 
-The execution agent that receives your output may be a **weaker / cheaper model**. Use this pass for high-altitude judgment: classification, risks, skill selection, and a clear strategic brief. Do **not** teach low-altitude protocol (CLI, mark-processed order, snooze recipes, messaging etiquette, attachment paths) — poise and skills already own those with fuller context.
+The execution agent already has poise, Games, awareness, and the full conversation on its system prompt. Do **not** re-assess those. Do **not** invent work from old history. Do **not** teach CLI / mark-processed / snooze protocol.
 
-## WAKE PROMPT (the message/task to analyze):
-{wake_prompt}
+## NEW INBOUND (unread messages + VV App tags + media flags — this is what you analyse):
+{inbox_context}
 
-## ACTIVE TASKS:
-{tasks_context}
+## PROJECT / TASK REGISTRY (ID, name, description — match tags and inbound text against these):
+{registry_context}
 
-## CONVERSATION HISTORY (last 5 messages):
-{conversation_context}
-
-## ACTIVE GAMES (digest — strategic frame; may be empty):
-{games_context}
-
-## INSTRUCTIONS:
-Evaluate the wake prompt against these 10 signals and produce a JSON response:
-
-1. **direction_clarity**: Was clear direction given? (true/false)
-2. **purpose_clarity**: Is the purpose of the request clear? (true/false)
-3. **contradiction_check**: Are there contradictions in the request? (true/false = contradiction found)
-4. **historical_context**: Is there relevant history for this? (true/false)
-5. **task_correlation**: Are there related existing tasks? (true/false)
-6. **project_correlation**: Does this map to a known project? (true/false)
-7. **memory_conflict**: Are there conflicting memory entries? (true/false = conflict found)
-8. **pending_question**: Was a question asked that needs answering first? (true/false)
-9. **parallel_work_viable**: Can work continue while seeking clarification? (true/false)
-10. **risk_assessment**: Is there risk in proceeding without full clarity? (true/false = high risk)
-
-Then classify the message:
-- **work_request**: New work that needs task creation and execution
-- **follow_up**: Continuation of existing work/conversation (new substance — not a pure ack)
-- **informational**: Status update, acknowledgment, standing-by, social/FYI, or other low-urgency notice — may or may not need a light touch; no heavy new work implied
-- **clarification_needed**: Cannot proceed without more information
-
-## Reply posture (advisory — required in strategy_notes)
-Suggest a reply posture; the execution agent and poise/skills own the final call. Use advisory wording only ("consider", "likely", "suggest") — never imperatives ("Do NOT", "You MUST", "Never reply").
-- **Likely silent**: inbound looks like a **peer-agent** terminal acknowledgment ("Got it", "Acknowledged", "Ack", "Standing by") or pure inter-agent status with no question — ack-of-ack loops waste cycles.
-- **Likely reply**: inbound is from a **human** (Primary User or connection), assigns work, asks a question, needs a Gate verdict / next slice, or is a social check-in / intro / warmth that would feel cold if ignored.
-- Human social/FYI (e.g. a short voice intro) is **not** an inter-agent terminal ack — prefer a brief warm acknowledgment over silence.
-- Classify peer-agent terminal acks as `informational` with likely-silent posture; do not force silence on human engagement.
-
-Determine which skills should be injected (filenames only, select ALL the weaker agent will need):
+## SKILLS AVAILABLE TO LOAD (already on the agent's system prompt; recommend from this list only):
 {skills_catalog}
 
-## OUTPUT RULES (altitude)
-- **strategy_notes**: Short **advisory** strategic brief (goal, suggested reply posture, risks, clarify-vs-proceed, why these skills, game posture if relevant). Structured bullets OK. Assume a weaker model will read this — advise, do not command.
-- **Forbid** in strategy_notes and task_actions: CLI commands, `agictl` invocations, mark-processed ordering, snooze recipes, attachment filesystem paths, and imperative protocol ("Do NOT reply", "You MUST end").
-- **Allow** suggested reply posture (likely reply vs likely silent) as high-altitude advice.
-- **task_actions**: High-level work labels only (e.g. "reply-to-sender-with-analysis", "update-game-barriers", "brief-warm-ack"). Prefer labels that describe outcomes, not orders.
-- Set `has_attachments: true` when wake/conversation indicates media/files attached — do not instruct how to view them, and do not add view/watch/listen to `task_actions`. Viewing is only when the PU or a Connection explicitly asked in the inbound text.
+## WAKE (clock / reason only — not the analysis object):
+{wake_prompt}
 
-Output ONLY valid JSON in this exact format:
+## What to produce
+1. **Correlations** — each new message and each VV `agiProjects` / `agiTasks` tag vs the registry. Include project_id and/or task_id when matched. **certainty** 0–1 on every row.
+2. **Ack advice** — natural acknowledgement vs detected ack-loop (peer-agent terminal ack / standing-by with no new question). Human social/FYI/intros prefer a brief warm ack. Advisory wording only ("consider", "likely"). **certainty** 0–1.
+3. **Recommended skills** — filenames from the loadable list the agent should `cat` this cycle (not skills already in the system prompt). **certainty** 0–1 each.
+4. **Media** — `has_attachments` from inbound flags only. Do not tell the agent to view. **media_certainty** 0–1.
+5. **Classification** of the **new inbound** (or of the wake if inbound is empty):
+   - work_request: new work in the inbound
+   - follow_up: continuation with new substance
+   - informational: ack / FYI / standing-by / social — may still need a light human ack
+   - clarification_needed: cannot proceed without more information
+6. Signals (only from inbound + registry — do not score memory or Games):
+   - direction_clarity, purpose_clarity (true = clear)
+   - contradiction_check (true = contradiction found)
+   - task_correlation, project_correlation (true = matched a registry row)
+   - pending_question (true = inbound asks something that should be answered)
+   - parallel_work_viable, risk_assessment (true = high risk)
+
+If NEW INBOUND is empty or "(none)", say so. Do **not** claim "no new human substance" when inbound messages from a human are present.
+
+## OUTPUT RULES
+- strategy_notes: short advisory (correlations, ack posture, why these skills). No CLI, no agictl, no mark-processed, no Games posture essays, no "continue task X" unless the **inbound** assigned that work.
+- task_actions: outcome labels only.
+- Never instruct viewing attachments.
+
+Output ONLY valid JSON:
 ```json
 {{
   "classification": "work_request|follow_up|informational|clarification_needed",
-  "confidence": 0.0-1.0,
-  "project_id": null or integer,
+  "confidence": 0.0,
+  "project_id": null,
   "task_actions": [],
+  "skills_recommended": [{{"name": "example.md", "certainty": 0.0}}],
   "skills_to_inject": [],
-  "strategy_notes": "Short strategic brief (not protocol)",
-  "parallel_work_viable": true/false,
-  "has_attachments": true/false,
+  "strategy_notes": "Short advisory",
+  "parallel_work_viable": true,
+  "has_attachments": false,
+  "media_certainty": 1.0,
+  "correlations": [{{"project_id": null, "task_id": null, "note": "", "certainty": 0.0}}],
+  "ack_advice": {{"posture": "reply|silent|ack-loop", "note": "", "certainty": 0.0}},
   "signal_results": {{
-    "direction_clarity": true/false,
-    "purpose_clarity": true/false,
-    "contradiction_check": true/false,
-    "historical_context": true/false,
-    "task_correlation": true/false,
-    "project_correlation": true/false,
-    "memory_conflict": true/false,
-    "pending_question": true/false,
-    "parallel_work_viable": true/false,
-    "risk_assessment": true/false
+    "direction_clarity": true,
+    "purpose_clarity": true,
+    "contradiction_check": false,
+    "task_correlation": false,
+    "project_correlation": false,
+    "pending_question": false,
+    "parallel_work_viable": true,
+    "risk_assessment": false
   }}
 }}
 ```"""
@@ -203,9 +197,27 @@ _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and resp
 _SKILLS_CATALOG_PATH = "/var/lib/versa-agi/skills_catalog.md"
 
 _NOT_USED_BY_TRIAGE = (
-    "full poise, full Games/awareness board in system prompt, workspace files, "
-    "WBS/collaboration docs, operational memory dumps"
+    "full poise, Games, awareness board, conversation history except unread inbox, "
+    "workspace files, WBS/collaboration docs, operational memory dumps"
 )
+
+# Skills the harness already pastes into the system prompt (hybrid/full). lazy
+# still pastes these today — catalog builder must match harness, not System Design.
+_ALWAYS_IN_PROMPT = frozenset({
+    "cli_reference_agent.md",
+    "cli_reference.md",
+    "skill_authoring.md",
+    "memory_management.md",
+    "communication_basic.md",
+    "communication.md",
+})
+_FEATURE_GATED_SKILLS = {
+    "business_admin": (
+        "business_admin.md",
+        "business_admin_override.md",
+        "business_admin_operate.md",
+    ),
+}
 
 # Signals where True means a problem (others: True = healthy / present).
 _ADVERSE_WHEN_TRUE = frozenset({
@@ -234,15 +246,49 @@ def adverse_signals(signals: Optional[dict]) -> List[str]:
     return out
 
 
-def load_skills_catalog(agent_name: str = "coa") -> str:
-    """Load the dynamic skills catalog from the cached file.
+def _feature_enabled(slug: str) -> bool:
+    """Read [features] <slug> from setup.ini. Missing key = on (shipped default)."""
+    ini = os.environ.get("AGICTL_SETUP_INI", "/etc/versa-agi/setup.ini")
+    if not os.path.isfile(ini):
+        return True
+    try:
+        in_section = False
+        with open(ini, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    in_section = line[1:-1].strip().lower() == "features"
+                    continue
+                if in_section and "=" in line and not line.startswith("#"):
+                    key, _, val = line.partition("=")
+                    if key.strip().lower() == slug.lower():
+                        return val.strip().lower() in ("1", "true", "on", "yes")
+    except Exception:
+        return True
+    return True
 
-    Falls back to the hardcoded catalog if the file doesn't exist
-    (pre-migration or catalog not yet generated by Lifeline).
 
-    For sub-agents (agent_name != 'coa'), skills with scope='coa_only'
-    are filtered out so triage never considers COA-exclusive skills.
-    """
+def already_loaded_skill_names(agent_name: str = "coa") -> set:
+    """Filenames already in this spawn's system prompt (do not re-offer)."""
+    names = set(_ALWAYS_IN_PROMPT)
+    if (os.environ.get("VERSA_FIRST_CONTACT") or "").strip().lower() == "sentinel":
+        names.add("remote_sentinel.md")
+    if agent_name != "coa":
+        names.discard("skill_authoring.md")
+        names.discard("cli_reference.md")
+    return names
+
+
+def _gated_skill_filenames() -> set:
+    blocked = set()
+    for slug, files in _FEATURE_GATED_SKILLS.items():
+        if not _feature_enabled(slug):
+            blocked.update(files)
+    return blocked
+
+
+def loadable_skills_catalog(agent_name: str = "coa") -> str:
+    """Extras the agent can still load: DB rows minus already-loaded / gated / scope."""
     catalog_lines = []
     if os.path.isfile(_SKILLS_CATALOG_PATH):
         try:
@@ -250,37 +296,63 @@ def load_skills_catalog(agent_name: str = "coa") -> str:
                 catalog_lines = [l for l in f.read().strip().splitlines() if l.strip()]
         except Exception:
             pass
-
     if not catalog_lines:
         catalog_lines = _FALLBACK_SKILLS_CATALOG.strip().splitlines()
 
-    # Filter out coa_only skills for sub-agents
-    if agent_name and agent_name != "coa":
-        try:
-            import sqlite3
-            agents_db = os.environ.get("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
-            if os.path.isfile(agents_db):
-                conn = db_connect.connect_compat(f"file:{agents_db}?mode=ro", uri=True, timeout=3)
+    exclude_names = already_loaded_skill_names(agent_name) | _gated_skill_filenames()
+    coa_only = set()
+    try:
+        agents_db = os.environ.get("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+        if os.path.isfile(agents_db):
+            conn = db_connect.connect_compat(f"file:{agents_db}?mode=ro", uri=True, timeout=3)
+            if agent_name and agent_name != "coa":
                 coa_only = {row[0] for row in conn.execute(
                     "SELECT name FROM skills WHERE scope='coa_only'"
                 ).fetchall()}
-                conn.close()
-                if coa_only:
-                    # Exclude lines containing coa_only skill filenames
-                    filtered = []
-                    for line in catalog_lines:
-                        skip = False
-                        for skill_name in coa_only:
-                            if f'"{skill_name}.md"' in line:
-                                skip = True
-                                break
-                        if not skip:
-                            filtered.append(line)
-                    catalog_lines = filtered
-        except Exception:
-            pass  # Non-fatal — include all skills if DB unavailable
+            overrides = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM skills WHERE type='override' AND status != 'draft'"
+                ).fetchall()
+            }
+            conn.close()
+            for ov in overrides:
+                base = ov.replace("_override", "")
+                exclude_names.add(f"{base}.md")
+    except Exception:
+        overrides = set()
 
-    return "\n".join(catalog_lines)
+    filtered = []
+    for line in catalog_lines:
+        skip = False
+        for skill_name in list(exclude_names) + [f"{n}.md" for n in coa_only]:
+            key = skill_name if skill_name.endswith(".md") else f"{skill_name}.md"
+            if f'"{key}"' in line or f'"{key[:-3]}"' in line:
+                skip = True
+                break
+            bare = key[:-3] if key.endswith(".md") else key
+            if f'"{bare}.md"' in line:
+                skip = True
+                break
+        if not skip:
+            filtered.append(line)
+    return "\n".join(filtered) if filtered else "(none)"
+
+
+def load_skills_catalog(agent_name: str = "coa") -> str:
+    """Loadable-extras catalog (alias used by tests / triage prompt)."""
+    return loadable_skills_catalog(agent_name)
+
+
+def format_loadable_skills_block(agent_name: str = "coa") -> str:
+    """System-prompt block: full loadable extras menu (Lifeline/harness inject)."""
+    body = loadable_skills_catalog(agent_name)
+    return (
+        "\n\n---\n## ── SKILLS AVAILABLE TO LOAD ──\n\n"
+        "These skills are **not** already in this prompt. Load one before related work:\n"
+        "`agictl execute bash \"cat .agent/skills/<name>\"` "
+        "(or `cat \"$AGICTL_AGENT_DIR/skills/<name>\"`).\n\n"
+        f"{body}\n"
+    )
 
 
 def _extract_json(text: str) -> dict:
@@ -315,58 +387,196 @@ def _extract_json(text: str) -> dict:
 
 def _record_inputs_used(
     wake_prompt: str,
-    tasks_context: str,
-    conversation_context: str,
-    games_context: str,
+    inbox_context: str,
+    registry_context: str,
     routing_context: Optional[dict],
 ) -> List[str]:
     used = ["wake", "skills-catalog"]
-    if tasks_context and tasks_context.strip() and tasks_context.strip() != "(none)":
-        used.append("active-tasks")
-    if conversation_context and conversation_context.strip() and conversation_context.strip() != "(none)":
-        used.append("conversation(last-N)")
-    if games_context and games_context.strip() and games_context.strip() != "(none)":
-        used.append("games-digest")
+    if inbox_context and inbox_context.strip() and inbox_context.strip() != "(none)":
+        used.append("inbox")
+    if registry_context and registry_context.strip() and registry_context.strip() != "(none)":
+        used.append("registry")
     if routing_context:
         used.append("routing")
     return used
 
 
+def _agi_tag_ids(raw_payload):
+    """Project and task IDs from VV App inbox particle fields (same as agictl)."""
+    if not raw_payload:
+        return [], []
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return [], []
+    if not isinstance(payload, dict):
+        return [], []
+    project_ids = []
+    for t in payload.get("agiProjects") or []:
+        if isinstance(t, dict):
+            pid = str(t.get("id") or "").strip()
+            if pid and pid not in project_ids:
+                project_ids.append(pid)
+    task_ids = []
+    for t in payload.get("agiTasks") or []:
+        if isinstance(t, dict):
+            tid = str(t.get("id") or "").strip()
+            if tid and tid not in task_ids:
+                task_ids.append(tid)
+            pp = str(t.get("projectId") or "").strip()
+            if pp and pp not in project_ids:
+                project_ids.append(pp)
+    return project_ids, task_ids
+
+
+def _message_identity_ids(agent_name: str) -> list:
+    ids = []
+    config_path = os.environ.get("AGICTL_CONFIG", "")
+    if config_path and os.path.isfile(config_path):
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                sub = (json.load(f).get("versavoice") or {}).get("sub_account_id") or ""
+            if sub:
+                ids.append(sub)
+        except Exception:
+            pass
+    if agent_name and agent_name not in ids:
+        ids.append(agent_name)
+    return ids
+
+
+def build_inbox_context(agent_name: str) -> str:
+    """Unread inbound bodies + VV tags + media flag. No char cap."""
+    db_path = os.environ.get("AGICTL_MESSAGES_DB", "")
+    if not db_path or not os.path.isfile(db_path):
+        return "(none)"
+    ids = _message_identity_ids(agent_name)
+    if not ids:
+        return "(none)"
+    placeholders = ",".join("?" * len(ids))
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        rows = conn.execute(
+            f"SELECT message_id, created_at, from_user_id, display_name, "
+            f"COALESCE(original_text, text, '') AS body, "
+            f"has_attachments, attachment_path, raw_payload "
+            f"FROM messages WHERE status='unprocessed' AND direction='received' "
+            f"AND to_user_id IN ({placeholders}) ORDER BY created_at ASC",
+            tuple(ids),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return "(none)"
+    if not rows:
+        return "(none)"
+
+    lines = [f"{len(rows)} unread inbound message(s):", ""]
+    for row in rows:
+        mid, created, from_uid, dname, body, has_att, att_path, raw = row
+        who = dname or from_uid or "?"
+        lines.append(f"[{created}] FROM {who} ({from_uid}): {body}")
+        try:
+            project_ids, task_ids = _agi_tag_ids(raw)
+        except Exception:
+            project_ids, task_ids = [], []
+        if project_ids:
+            lines.append(f"  TAGGED PROJECT IDS: {', '.join(project_ids)}")
+        if task_ids:
+            lines.append(f"  TAGGED TASK IDS: {', '.join(task_ids)}")
+        media = bool(has_att) or bool((att_path or "").strip() and not str(att_path).startswith("http"))
+        if raw:
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+                atts = payload.get("attachments") if isinstance(payload, dict) else None
+                if isinstance(atts, list) and atts:
+                    media = True
+            except (json.JSONDecodeError, TypeError):
+                pass
+        lines.append(f"  media: {'yes' if media else 'no'}")
+        lines.append(f"  message_id: {mid}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def build_registry_context(agent_name: str) -> str:
+    """Projects and tasks: id, name/title, description. COA = all; else assigned."""
+    db_path = os.environ.get("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
+    if not os.path.isfile(db_path):
+        return "(none)"
+    is_coa = (agent_name or "").lower() == "coa"
+    try:
+        conn = db_connect.connect_compat(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        if is_coa:
+            projects = conn.execute(
+                "SELECT id, name, COALESCE(description, '') FROM projects "
+                "WHERE status NOT IN ('archived') ORDER BY id"
+            ).fetchall()
+            tasks = conn.execute(
+                "SELECT id, title, COALESCE(description, ''), project_id, status, assigned_to "
+                "FROM tasks WHERE status NOT IN ('done', 'cancelled', 'frozen') ORDER BY id"
+            ).fetchall()
+        else:
+            projects = conn.execute(
+                "SELECT DISTINCT p.id, p.name, COALESCE(p.description, '') "
+                "FROM projects p "
+                "LEFT JOIN project_members pm ON pm.project_id = p.id "
+                "  AND pm.member_type='agent' AND pm.member_id=? "
+                "LEFT JOIN tasks t ON t.project_id = p.id AND t.assigned_to=? "
+                "  AND t.status NOT IN ('done', 'cancelled', 'frozen') "
+                "WHERE p.status NOT IN ('archived') AND (pm.member_id IS NOT NULL OR t.id IS NOT NULL) "
+                "ORDER BY p.id",
+                (agent_name, agent_name),
+            ).fetchall()
+            tasks = conn.execute(
+                "SELECT id, title, COALESCE(description, ''), project_id, status, assigned_to "
+                "FROM tasks WHERE assigned_to=? AND status NOT IN ('done', 'cancelled', 'frozen') "
+                "ORDER BY id",
+                (agent_name,),
+            ).fetchall()
+        conn.close()
+    except Exception:
+        return "(none)"
+
+    lines = ["PROJECTS (id | name | description):"]
+    if projects:
+        for pid, name, desc in projects:
+            lines.append(f"  #{pid} | {name} | {desc}")
+    else:
+        lines.append("  (none)")
+    lines.append("")
+    lines.append("TASKS (id | title | project_id | status | assignee | description):")
+    if tasks:
+        for tid, title, desc, proj, status, assignee in tasks:
+            lines.append(f"  #{tid} | {title} | project={proj} | {status} | {assignee} | {desc}")
+    else:
+        lines.append("  (none)")
+    return "\n".join(lines)
+
+
 def run_triage(llm, wake_prompt: str, tasks_context: str = "",
                conversation_context: str = "", skills_dir: str = None,
                agent_name: str = "coa", routing_context: dict = None,
-               games_context: str = "") -> TriageResult:
-    """Execute the triage node: classify the wake prompt and determine routing.
-
-    Args:
-        llm: The triage LLM instance (from get_llm)
-        wake_prompt: The wake reason prompt content
-        tasks_context: Active tasks summary (pre-fetched by lifeline)
-        conversation_context: Recent conversation history
-        skills_dir: Path to agent's skills directory for injection
-        agent_name: Agent name for scope filtering (default: coa)
-        routing_context: Optional ephemeral model routing JSON
-        games_context: Compact active-games digest for strategic frame
-
-    Returns:
-        TriageResult with classification, confidence, skills, and routing info
-    """
+               games_context: str = "", inbox_context: str = "",
+               registry_context: str = "") -> TriageResult:
+    """Analyse new inbound + VV tags against the registry; recommend loadable skills."""
     from langchain_core.messages import HumanMessage as HMsg
 
-    games_ctx = (games_context or "").strip() or "(none)"
-    tasks_ctx = (tasks_context or "").strip() or "(none)"
-    convo_ctx = (conversation_context or "").strip() or "(none)"
+    inbox_ctx = (inbox_context or "").strip() or "(none)"
+    registry_ctx = (registry_context or "").strip() or "(none)"
+    if inbox_ctx == "(none)":
+        inbox_ctx = build_inbox_context(agent_name)
+    if registry_ctx == "(none)":
+        registry_ctx = build_registry_context(agent_name)
+
     inputs_used = _record_inputs_used(
-        wake_prompt, tasks_ctx, convo_ctx, games_ctx, routing_context,
+        wake_prompt, inbox_ctx, registry_ctx, routing_context,
     )
 
-    # Build the triage prompt with dynamic skills catalog
-    skills_catalog = load_skills_catalog(agent_name=agent_name)
+    skills_catalog = loadable_skills_catalog(agent_name=agent_name)
     prompt = TRIAGE_PROMPT.format(
-        wake_prompt=wake_prompt[:4000],  # Cap to prevent context overflow
-        tasks_context=tasks_ctx[:2000],
-        conversation_context=convo_ctx[:2000],
-        games_context=games_ctx[:1500],
+        wake_prompt=wake_prompt or "(none)",
+        inbox_context=inbox_ctx,
+        registry_context=registry_ctx,
         skills_catalog=skills_catalog,
     )
     if routing_context:
@@ -400,19 +610,39 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
             inputs_used=inputs_used,
         )
 
-    # Build result from parsed JSON
+    skills = data.get("skills_to_inject") or []
+    for item in data.get("skills_recommended") or []:
+        if isinstance(item, dict) and item.get("name"):
+            name = item["name"]
+            if name not in skills:
+                skills.append(name)
+        elif isinstance(item, str) and item not in skills:
+            skills.append(item)
+    already = already_loaded_skill_names(agent_name) | _gated_skill_filenames()
+    skills = [s if s.endswith(".md") else f"{s}.md" for s in skills if s]
+    skills = [s for s in skills if s not in already]
+
+    media_c = data.get("media_certainty")
+    try:
+        media_c = float(media_c) if media_c is not None else None
+    except (TypeError, ValueError):
+        media_c = None
+
     result = TriageResult(
         classification=data.get("classification", "follow_up"),
         confidence=float(data.get("confidence", 0.5)),
         project_id=data.get("project_id"),
         task_actions=data.get("task_actions", []),
-        skills_to_inject=data.get("skills_to_inject", []),
+        skills_to_inject=skills,
         strategy_notes=data.get("strategy_notes", ""),
         parallel_work_viable=data.get("parallel_work_viable", False),
         has_attachments=data.get("has_attachments", False),
         signal_results=data.get("signal_results", {}),
         required_work_modality=data.get("required_work_modality"),
         recommended_model=data.get("recommended_model"),
+        correlations=data.get("correlations") or [],
+        ack_advice=data.get("ack_advice") or {},
+        media_certainty=media_c,
         inputs_used=inputs_used,
     )
 
@@ -594,19 +824,29 @@ def build_triage_context(result: TriageResult) -> str:
         "Source: **Triage node** (separate model from this cycle’s execution agent).",
         f"Inputs used: {inputs_line}",
         f"Not used by triage: {_NOT_USED_BY_TRIAGE}.",
-        "Treat the strategic brief as **advisory** high-altitude guidance — not orders. "
-        "For protocol (messaging, tasks CLI, git), follow poise and injected skills — they have fuller context.",
+        "Treat findings as **advisory** — not orders. "
+        "The loadable skill catalog is already on your system prompt; load recommended skills from there. "
+        "For protocol (messaging, tasks CLI, git), follow poise and skills — they have fuller context.",
         "",
         f"Classification: **{result.classification}** (confidence: {result.confidence:.2f})",
     ]
     if result.strategy_notes:
-        lines.append(f"Strategic brief: {result.strategy_notes}")
+        lines.append(f"Advisory: {result.strategy_notes}")
+    if result.correlations:
+        lines.append(f"Correlations: {json.dumps(result.correlations)}")
+    ack = result.ack_advice or {}
+    if ack:
+        posture = ack.get("posture") or ""
+        note = ack.get("note") or ""
+        cert = ack.get("certainty")
+        cert_s = f" (certainty {cert})" if cert is not None else ""
+        lines.append(f"Ack advice: {posture}{cert_s}" + (f" — {note}" if note else ""))
     if result.required_work_modality:
         lines.append(f"Work modality: **{result.required_work_modality}**")
     if result.recommended_model:
         lines.append(f"Routed model (ephemeral): **{result.recommended_model}**")
     if result.skills_to_inject:
-        lines.append(f"Skills selected: {', '.join(result.skills_to_inject)}")
+        lines.append(f"Skills recommended (load from catalog): {', '.join(result.skills_to_inject)}")
     if result.has_attachments:
         lines.append(
             "⚠ Inbound attachment(s) are on disk under `.agent/attachments/` (see poise). "
