@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.6"
+PRODUCT_VERSION="3.4.7"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -1463,13 +1463,15 @@ deploy_repo() {
 
 deploy_repo "${SRC_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}" "${WATCHDOG_USER}" "Core Infrastructure"
 
-# Retired shipped skill rename: deploy_repo rsync is not --delete, so leftover
+# Retired shipped skills: deploy_repo rsync is not --delete, so leftover
 # files would stay in the deployed tree and reconcile_skills_db.py would keep
 # the old DB row. Remove only names that are no longer in source.
-if [ ! -f "${SRC_CORE_INFRA}/skills/feature_statefold.md" ]; then
-  rm -f "${DEPLOYED_CORE_INFRA}/skills/feature_statefold.md"
-  rm -rf "${DEPLOYED_CORE_INFRA}/skills/feature_statefold"
-fi
+for _retired in feature_statefold local_media_krea2_turbo task_completion_acknowledgment; do
+  if [ ! -f "${SRC_CORE_INFRA}/skills/${_retired}.md" ]; then
+    rm -f "${DEPLOYED_CORE_INFRA}/skills/${_retired}.md"
+    rm -rf "${DEPLOYED_CORE_INFRA}/skills/${_retired}"
+  fi
+done
 
 # COA environment — only deploy if the COA user exists (server-only topology skips this)
 if id "${COA_USER}" &>/dev/null; then
@@ -1946,8 +1948,8 @@ echo ""
 
 
 
-# Always fix ownership on agent workspace (setup runs as root)
-chown -R "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/"
+# .agent/ ownership is per-path in apply_system_permissions (System Design §IX).
+# Do not chown -R coa:coa here — that strips agi_agents until the final pass.
 
 echo ""
 
@@ -4023,9 +4025,44 @@ migrate_legacy_infra_files() {
   rm -f "/etc/versa-agi/litellm.env" 2>/dev/null || true
 }
 
+# System Design §IX / 9.4 — lock shipped skills only; normalize the rest.
+normalize_agent_skills() {
+  local skills_dir="$1"
+  local owner="$2"
+  [ -d "${skills_dir}" ] || return 0
+  chown "${owner}:agi_agents" "${skills_dir}" && chmod 775 "${skills_dir}"
+  local skill_file skill_base item item_base
+  for skill_file in "${skills_dir}"/*.md; do
+    [ -f "${skill_file}" ] || continue
+    skill_base="$(basename "${skill_file}")"
+    if [ -f "${DEPLOYED_CORE_INFRA}/skills/${skill_base}" ]; then
+      chown "${WATCHDOG_USER}:agi_agents" "${skill_file}"
+      chmod 440 "${skill_file}"
+    else
+      chown "${owner}:agi_agents" "${skill_file}"
+      chmod 664 "${skill_file}"
+    fi
+  done
+  for item in "${skills_dir}"/*; do
+    [ -d "${item}" ] || continue
+    item_base="$(basename "${item}")"
+    if [ -d "${DEPLOYED_CORE_INFRA}/skills/${item_base}" ]; then
+      chown -R "${owner}:agi_agents" "${item}"
+      find "${item}" -type d -exec chmod 755 {} + 2>/dev/null || true
+      find "${item}" -type f -exec chmod 644 {} + 2>/dev/null || true
+    else
+      chown -R "${owner}:agi_agents" "${item}"
+      find "${item}" -type d -exec chmod 2775 {} + 2>/dev/null || true
+      find "${item}" -type f -exec chmod 664 {} + 2>/dev/null || true
+    fi
+  done
+}
+
 apply_system_permissions() {
   info "Applying System Design §IX permissions (final restabilization)..."
   migrate_legacy_infra_files
+  usermod -aG agi_agents "${COA_USER}" 2>/dev/null || true
+  usermod -aG agi_agents "${WATCHDOG_USER}" 2>/dev/null || true
   
   # ──────────────────────────────────────────────────────
   # §1. /etc/versa-agi/ — Configuration & Security
@@ -4144,43 +4181,27 @@ apply_system_permissions() {
     
     # ── §3. Agent-Writable Areas ──
     
-    # .agent/skills/ directory — coa:agi_agents 775 (agent CAN create new skills)
-    [ -d "${DEPLOYED_COA_ENV}/.agent/skills" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/skills" && chmod 775 "${DEPLOYED_COA_ENV}/.agent/skills"
-    
-    # .agent/skills/*.md (shipped) — watchdog:agi_agents 440 (agent CANNOT modify)
-    # Only lock skills that exist in the shipped source — agent-authored skills
-    # (created via 'agictl skill new' or directly by COA) must stay editable.
-    for skill_file in "${DEPLOYED_COA_ENV}/.agent/skills"/*.md; do
-      [ -f "${skill_file}" ] || continue
-      [ -f "${DEPLOYED_CORE_INFRA}/skills/$(basename "${skill_file}")" ] || continue
-      chown "${WATCHDOG_USER}:agi_agents" "${skill_file}"
-      chmod 440 "${skill_file}"
-    done
-
-    # Agent-authored skill artifacts (anything NOT in the shipped source) —
-    # normalize to coa:agi_agents, group-writable (664 files / 2775 dirs).
-    # Heals watchdog-owned artifacts left by 'agictl skill new' (agictl
-    # elevates to watchdog) and coa:coa group drift from direct authoring.
-    for _skill_item in "${DEPLOYED_COA_ENV}/.agent/skills"/*; do
-      [ -e "${_skill_item}" ] || continue
-      _skill_base="$(basename "${_skill_item}")"
-      if [ -f "${_skill_item}" ]; then
-        case "${_skill_base}" in *.md) ;; *) continue ;; esac
-        [ -f "${DEPLOYED_CORE_INFRA}/skills/${_skill_base}" ] && continue
-        chown "${COA_USER}:agi_agents" "${_skill_item}"
-        chmod 664 "${_skill_item}"
-      elif [ -d "${_skill_item}" ]; then
-        # Asset dirs of shipped skills are managed by the deploy step
-        [ -d "${DEPLOYED_CORE_INFRA}/skills/${_skill_base}" ] && continue
-        chown -R "${COA_USER}:agi_agents" "${_skill_item}"
-        find "${_skill_item}" -type d -exec chmod 2775 {} + 2>/dev/null || true
-        find "${_skill_item}" -type f -exec chmod 664 {} + 2>/dev/null || true
-      fi
-    done
+    # .agent/skills/ — shipped 440; agent-authored 664/2775 (System Design §IX)
+    normalize_agent_skills "${DEPLOYED_COA_ENV}/.agent/skills" "${COA_USER}"
     
     # workspace/ — coa:agi_agents 2770 (setgid ensures new project dirs inherit agi_agents group §3.6)
     [ -d "${DEPLOYED_COA_ENV}/workspace" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/workspace" && chmod 2770 "${DEPLOYED_COA_ENV}/workspace"
     [ -f "${DEPLOYED_COA_ENV}/workspace/.gitignore" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/workspace/.gitignore" && chmod 644 "${DEPLOYED_COA_ENV}/workspace/.gitignore"
+
+    # Reserved shared project roots + housekeeping drop folder (System Design §IX).
+    # Directory only — do not chown -R (per-agent report files keep their owners).
+    for _shared_proj in AGi-Tools AGi-Knowledgebase; do
+      _shared_root="${DEPLOYED_COA_ENV}/workspace/${_shared_proj}"
+      [ -d "${_shared_root}" ] || continue
+      chown "${COA_USER}:agi_agents" "${_shared_root}"
+      chmod 2770 "${_shared_root}"
+    done
+    _hk_reports="${DEPLOYED_COA_ENV}/workspace/AGi-Tools/reports"
+    if [ -d "${DEPLOYED_COA_ENV}/workspace/AGi-Tools" ]; then
+      mkdir -p "${_hk_reports}"
+      chown "${COA_USER}:agi_agents" "${_hk_reports}"
+      chmod 2770 "${_hk_reports}"
+    fi
     
     # attachments/ — coa:agi_agents 2770 (setgid, matches workspace/ permissions)
     if [ -d "${DEPLOYED_COA_ENV}/attachments" ]; then
@@ -4248,15 +4269,11 @@ apply_system_permissions() {
       local os_user="${agent_row##*|}"
       local ahome="/home/${os_user}"
       [ -d "${ahome}" ] || continue
+      usermod -aG agi_agents "${os_user}" 2>/dev/null || true
       chown "${os_user}:agi_agents" "${ahome}" && chmod 770 "${ahome}"
       [ -d "${ahome}/.agent" ]        && chown "${os_user}:agi_agents" "${ahome}/.agent" && chmod 770 "${ahome}/.agent"
-      [ -d "${ahome}/.agent/skills" ] && chown "${os_user}:agi_agents" "${ahome}/.agent/skills" && chmod 775 "${ahome}/.agent/skills"
-      # .agent/skills/*.md (shipped) — watchdog:agi_agents 440 (agent CANNOT modify system skills)
-      for _skill in "${ahome}/.agent/skills"/*.md; do
-        [ -f "${_skill}" ] || continue
-        chown "${WATCHDOG_USER}:agi_agents" "${_skill}"
-        chmod 440 "${_skill}"
-      done
+      # .agent/skills/ — shipped 440; agent-authored 664/2775 (same rule as COA)
+      normalize_agent_skills "${ahome}/.agent/skills" "${os_user}"
       [ -d "${ahome}/workspace" ]     && chown "${os_user}:agi_agents" "${ahome}/workspace" && chmod 2770 "${ahome}/workspace"
       # §IX.2 /var/lib/versa-agi/{name}/ — agent data directory
       # Parent dir: watchdog-traversable. cycles/ + view-cache/: agent-writable.

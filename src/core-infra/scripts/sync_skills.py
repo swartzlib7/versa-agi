@@ -139,18 +139,22 @@ def sync():
                         subprocess.run(["chown", "-R", f"{coa_user}:agi_agents", item_path], check=False)
                         subprocess.run(["chmod", "-R", "755", item_path], check=False)
 
-                # Retired shipped rename: COA merge is never --delete, so drop
-                # the old feature_statefold pair only when it is no longer shipped.
-                retired_md = "feature_statefold.md"
-                retired_dir = "feature_statefold"
-                if retired_md not in shipped_md_names:
-                    retired_path = os.path.join(coa_skills_dest, retired_md)
-                    if os.path.isfile(retired_path):
-                        os.remove(retired_path)
-                if retired_dir not in shipped_dir_names:
-                    retired_dir_path = os.path.join(coa_skills_dest, retired_dir)
-                    if os.path.isdir(retired_dir_path):
-                        shutil.rmtree(retired_dir_path)
+                # Retired shipped names: COA merge is never --delete, so drop
+                # leftovers that are no longer in the shipped source.
+                for retired_stem in (
+                    "feature_statefold",
+                    "local_media_krea2_turbo",
+                    "task_completion_acknowledgment",
+                ):
+                    retired_md = f"{retired_stem}.md"
+                    if retired_md not in shipped_md_names:
+                        retired_path = os.path.join(coa_skills_dest, retired_md)
+                        if os.path.isfile(retired_path):
+                            os.remove(retired_path)
+                    if retired_stem not in shipped_dir_names:
+                        retired_dir_path = os.path.join(coa_skills_dest, retired_stem)
+                        if os.path.isdir(retired_dir_path):
+                            shutil.rmtree(retired_dir_path)
 
                 results["skills_deployed_to"].append(coa_user)
             else:

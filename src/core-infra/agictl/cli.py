@@ -8125,22 +8125,34 @@ def _rsync_skills_to_agent(name, os_user):
     subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
     subprocess.run(["chmod", "775", skills_dest], check=False)
 
-    # Post-rsync permissions: shipped .md files -> watchdog:agi_agents 440
+    # Post-rsync: lock shipped only (System Design §IX). Agent-authored stay writable.
     deployed = 0
     asset_dirs_deployed = 0
     import glob
     for skill_file in glob.glob(os.path.join(skills_dest, "*.md")):
-        subprocess.run(["chown", f"watchdog:agi_agents", skill_file], check=False)
-        subprocess.run(["chmod", "440", skill_file], check=False)
-        deployed += 1
+        base = os.path.basename(skill_file)
+        name = base[:-3] if base.endswith(".md") else base
+        if name in shipped_names:
+            subprocess.run(["chown", "watchdog:agi_agents", skill_file], check=False)
+            subprocess.run(["chmod", "440", skill_file], check=False)
+            deployed += 1
+        else:
+            subprocess.run(["chown", f"{os_user}:agi_agents", skill_file], check=False)
+            subprocess.run(["chmod", "664", skill_file], check=False)
 
-    # Fix asset directory permissions
     for item in os.listdir(skills_dest):
         item_path = os.path.join(skills_dest, item)
-        if os.path.isdir(item_path):
-            subprocess.run(["chown", "-R", f"{os_user}:agi_agents", item_path], check=False)
+        if not os.path.isdir(item_path):
+            continue
+        subprocess.run(["chown", "-R", f"{os_user}:agi_agents", item_path], check=False)
+        if item in shipped_names:
             subprocess.run(["chmod", "-R", "755", item_path], check=False)
-            asset_dirs_deployed += 1
+        else:
+            for dirpath, dirnames, filenames in os.walk(item_path):
+                os.chmod(dirpath, 0o2775)
+                for fn in filenames:
+                    os.chmod(os.path.join(dirpath, fn), 0o664)
+        asset_dirs_deployed += 1
 
     return deployed, asset_dirs_deployed
 
@@ -8234,8 +8246,9 @@ def agent_share_skill(skill_path, target_agent):
         if os.path.exists(dest_file):
             os.remove(dest_file)
         shutil.copy(skill_path, dest_file)
-        subprocess.run(["chown", f"watchdog:agi_agents", dest_file], check=False)
-        subprocess.run(["chmod", "440", dest_file], check=False)
+        # share-skill copies agent_created work — not shipped. Manifest: 664.
+        subprocess.run(["chown", f"{ag_os_user}:agi_agents", dest_file], check=False)
+        subprocess.run(["chmod", "664", dest_file], check=False)
 
         # Copy co-located asset directory if it exists
         if has_assets:
@@ -8244,7 +8257,10 @@ def agent_share_skill(skill_path, target_agent):
                 shutil.rmtree(asset_dest)
             shutil.copytree(asset_src, asset_dest)
             subprocess.run(["chown", "-R", f"{ag_os_user}:agi_agents", asset_dest], check=False)
-            subprocess.run(["chmod", "-R", "755", asset_dest], check=False)
+            for dirpath, _dirnames, filenames in os.walk(asset_dest):
+                os.chmod(dirpath, 0o2775)
+                for fn in filenames:
+                    os.chmod(os.path.join(dirpath, fn), 0o664)
 
         results.append(agent_name)
 
