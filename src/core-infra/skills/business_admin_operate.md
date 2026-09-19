@@ -16,12 +16,12 @@ Do **not** clone, install, or run `agictl project add`. If Orient says the proje
 
 | Need | Source |
 |---|---|
+| Product README | `README.md` in the workspace |
 | Agent door (clone) | `AGENTS.md` in the workspace |
-| Product UI / forms / listings | Clone `AGENTS.md` + the matching `docs/production/state/state_*.md` |
-| Ops manual (restart, health, backups) | `docs/ops/MISSION_CONTROL_OPS_MANUAL.md` in the repo |
+| Ops manual (restart, health, backups) | `docs/ops/BUSINESS_ADMIN_OPS_MANUAL.md` |
+| Forms, listings, Spatial Twin, stale UI | `docs/ops/WORKING_WITH_VBA.md` |
 | HTTP API catalog (this version) | `GET /api` (open) and Settings → API (`/settings?tab=api`) |
-| Living API contract | `docs/production/state/state_api_contract.md` |
-| Locked upgrade design D1–D6 | `docs/production/state/state_upgradability.md` |
+| Upgrade rules D1–D6 | Ops Manual §5 |
 | Public production repo (HTTPS) | `https://github.com/swartzlib7/versa-business-admin` |
 
 Never contradict the manual or D1–D6.
@@ -72,7 +72,7 @@ VBA is a standalone product. Talk to it over HTTP (or Script Tasks), never by sh
 1. Health: `curl -s localhost:<port>/api/health` in its own call.
 2. Restart: manual §3.5 — exact PID from `ss -tlnp`, rebuild when switching SHAs, verify health separately.
 3. Backups: manual §3.7 (`.data/catalog.json` or `catalog_overlay` + zone tables).
-4. Stale UI: rebuild + restart `next start`; hard-reload the browser (`docs/ops/STALE_UI_AND_DEPLOY.md`).
+4. Stale UI / local enhance: `docs/ops/WORKING_WITH_VBA.md` (forms, listings, Spatial Twin, rebuild + restart).
 
 ## Boundaries
 

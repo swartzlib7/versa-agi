@@ -120,3 +120,44 @@ def sudoers_line(coa_user: str) -> str:
     if not _COA_USER_RE.fullmatch(user):
         raise ValueError(f"invalid COA OS user {user!r}")
     return f"{user} ALL=(ALL) NOPASSWD: ALL\n"
+
+
+def refuse_agent_coa_autonomous(
+    want_enabled: bool,
+    agent_user: str | None,
+    coa_user: str,
+) -> str | None:
+    """Error if an agent-stamped caller may not write ``coa.autonomous``.
+
+    PU (no stamp) may enable or disable. COA may only disable. Sub-agents
+    cannot write this key.
+    """
+    stamp = (agent_user or "").strip()
+    if not stamp:
+        return None
+    if want_enabled:
+        return (
+            "COA cannot enable its own autonomous sudo. "
+            "The Primary User enables it in System Settings or VersaVoice."
+        )
+    if stamp != (coa_user or "").strip():
+        return (
+            "Only the COA may disarm autonomous sudo. "
+            "Sub-agents cannot change this grant."
+        )
+    return None
+
+
+def install_role_change_allowed(current: str, desired: str) -> tuple[bool, str]:
+    """Sentinel → normal is a promote. Normal → sentinel is refused."""
+    cur = (current or "normal").strip().lower() or "normal"
+    dest = (desired or "").strip().lower()
+    if dest not in ("normal", "sentinel"):
+        return False, "install_role must be 'normal' or 'sentinel'"
+    if cur == dest:
+        return True, ""
+    if cur == "sentinel" and dest == "normal":
+        return True, ""
+    if cur == "normal" and dest == "sentinel":
+        return False, "Cannot convert a normal install to Sentinel. No downgrade path."
+    return False, f"Cannot change install_role from {cur} to {dest}"

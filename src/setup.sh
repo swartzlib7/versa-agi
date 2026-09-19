@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.5"
+PRODUCT_VERSION="3.4.6"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -101,23 +101,29 @@ DRY_RUN=false
 SKIP_VERIFY=false
 GRACE_PERIOD=60
 REPO_BRANCH=""
+PROMOTE_NORMAL=false
+HOME_COA_KEY=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --update)       UPDATE_MODE=true; shift ;;
+    --promote-normal) PROMOTE_NORMAL=true; UPDATE_MODE=true; shift ;;
+    --home-coa-key) HOME_COA_KEY=true; shift ;;
     --dry-run)      DRY_RUN=true; shift ;;
     --skip-verify)  SKIP_VERIFY=true; shift ;;
     --grace)        GRACE_PERIOD="$2"; shift 2 ;;
     --branch)       REPO_BRANCH="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: sudo ./setup.sh [--update] [--dry-run] [--skip-verify] [--grace <seconds>] [--branch <name>]"
+      echo "Usage: sudo ./setup.sh [--update] [--promote-normal] [--home-coa-key] [--dry-run] [--skip-verify] [--grace <seconds>] [--branch <name>]"
       echo ""
-      echo "  (no flags)    Full install — provisions entire environment"
-      echo "  --update      Update mode — deploy changes to existing system"
-      echo "  --dry-run     Preview changes without applying"
-      echo "  --skip-verify Skip post-deploy health check"
-      echo "  --grace N     Agent drain grace period in seconds (default: 60)"
-      echo "  --branch NAME Deploy from a specific git branch"
+      echo "  (no flags)         Full install — provisions entire environment"
+      echo "  --update           Update mode — deploy changes to existing system"
+      echo "  --promote-normal   Sentinel → normal (implies --update). No downgrade."
+      echo "  --home-coa-key     With --promote-normal, rebind as agiAgentKey=coa after collision check"
+      echo "  --dry-run          Preview changes without applying"
+      echo "  --skip-verify      Skip post-deploy health check"
+      echo "  --grace N          Agent drain grace period in seconds (default: 60)"
+      echo "  --branch NAME      Deploy from a specific git branch"
       exit 0
       ;;
     *)
@@ -125,6 +131,10 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "${HOME_COA_KEY}" = true ] && [ "${PROMOTE_NORMAL}" != true ]; then
+  error "--home-coa-key is only valid with --promote-normal"
+fi
 
 dry() { echo -e "${BOLD:-\033[1m}[DRY-RUN]${NC:-\033[0m} $*"; }
 
@@ -455,6 +465,58 @@ INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
 INI_SYSTEM_MODEL="$(ini_get system model '')"
 INI_EXECUTION_MODE="$(ini_get system mode cloud)"
 INI_INSTALL_ROLE="$(ini_get system install_role normal)"
+
+if [ "${PROMOTE_NORMAL}" = true ]; then
+  if [ "${INI_INSTALL_ROLE}" != "sentinel" ]; then
+    error "--promote-normal requires a Sentinel install (install_role=sentinel). Current: ${INI_INSTALL_ROLE}"
+  fi
+  if [ "${HOME_COA_KEY}" = true ]; then
+    _promote_email="$(python3 -c '
+import json, pathlib
+p = pathlib.Path("/etc/versa-agi/install-acceptance.json")
+try:
+    d = json.loads(p.read_text(encoding="utf-8"))
+except Exception:
+    d = {}
+print((d.get("email") or d.get("installEmail") or d.get("install_email") or "").strip())
+' 2>/dev/null || true)"
+    if [ -z "${INI_VV_TOKEN:-}" ]; then
+      error "--home-coa-key needs a VersaVoice API token in setup.ini"
+    fi
+    if ! VV_CHECK_TOKEN="${INI_VV_TOKEN}" VV_CHECK_EMAIL="${_promote_email}" \
+      PYTHONPATH="${SRC_CORE_INFRA}/agictl:${SRC_CORE_INFRA}" python3 -c '
+import os, sys
+from identity import home_coa_key_in_use
+try:
+    busy = home_coa_key_in_use(os.environ["VV_CHECK_TOKEN"], os.environ.get("VV_CHECK_EMAIL", ""))
+except Exception as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(2)
+sys.exit(1 if busy else 0)
+'; then
+      _hc_rc=$?
+      if [ "${_hc_rc}" = "1" ]; then
+        error "Home COA key (agiAgentKey=coa) is already in use on this sponsor. Keep the host-stable key or use a different email."
+      fi
+      error "Could not check home COA key collision"
+    fi
+    for _ini_file in "${INI_FILE:-}" "/etc/versa-agi/setup.ini"; do
+      [ -n "${_ini_file}" ] && [ -f "${_ini_file}" ] || continue
+      sed -i '/^\[system\]/,/^\[/{s/^vv_agent_key=.*/vv_agent_key=/}' "${_ini_file}"
+    done
+    info "Promote: clearing vv_agent_key — will bind as home COA (agiAgentKey=coa)"
+  fi
+  INI_INSTALL_ROLE="normal"
+  for _ini_file in "${INI_FILE:-}" "/etc/versa-agi/setup.ini"; do
+    [ -n "${_ini_file}" ] && [ -f "${_ini_file}" ] || continue
+    if grep -q "^install_role=" "${_ini_file}" 2>/dev/null; then
+      sed -i '/^\[system\]/,/^\[/{s/^install_role=.*/install_role=normal/}' "${_ini_file}"
+    else
+      sed -i '/^\[system\]/a install_role=normal' "${_ini_file}"
+    fi
+  done
+  info "Promote: install_role sentinel → normal"
+fi
 # Deprecated CSV — COA eligibility is the catalog row `coa` flag; model sync fills paths.env.
 INI_LOCAL_AI_ENABLED="$(ini_get local_ai enabled false)"
 INI_GPU_BACKEND="$(ini_get local_ai gpu_backend standard)"

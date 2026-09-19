@@ -343,6 +343,52 @@ fi
 # trigger a sync when inbox does not run. Separate API from sync-inbox
 # (future: one call).
 _VV_INSTANCE_SYNCED_THIS_TICK=false
+_run_due_utility_and_scripts() {
+  # Deterministic jobs — safe while a harness lock is held (no second spawn).
+  local _sys_cfg="${1}"
+  local _agent_user="${2}"
+  local _agent_name="${3}"
+  local _agent_path="${4}"
+  local _tasks_db="${5:-/var/lib/versa-agi/coa/tasks.db}"
+  UM_ENABLED=$(sed -n '/^\[utility_models\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null | head -1)
+  if [ "${UM_ENABLED:-true}" = "true" ]; then
+    UM_RESULT=$(sudo -u "${_agent_user}" AGICTL_CONFIG="${_sys_cfg}" AGICTL_TASKS_DB="${_tasks_db}" \
+      /usr/local/bin/agictl utility run-due-tasks --agent "${_agent_name}" --agent-workspace "${_agent_path}" 2>&1 || true)
+    if echo "${UM_RESULT}" | grep -qE '"count": *[1-9]'; then
+      log "UTILITY: ${_agent_name} — ran due Utility Task(s): ${UM_RESULT}"
+    elif echo "${UM_RESULT}" | grep -qiE 'traceback|exception|"success": *false'; then
+      log "UTILITY ERROR: ${_agent_name} — ${UM_RESULT}"
+    fi
+  fi
+  ST_ENABLED=$(sed -n '/^\[script_tasks\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null | head -1)
+  if [ "${ST_ENABLED:-true}" = "true" ]; then
+    ST_RESULT=$(sudo -u "${_agent_user}" AGICTL_CONFIG="${_sys_cfg}" AGICTL_TASKS_DB="${_tasks_db}" \
+      /usr/local/bin/agictl task run-due-scripts --agent "${_agent_name}" --agent-workspace "${_agent_path}" 2>&1 || true)
+    if echo "${ST_RESULT}" | grep -qE '"count": *[1-9]'; then
+      log "SCRIPT: ${_agent_name} — ran due Script Task(s): ${ST_RESULT}"
+    elif echo "${ST_RESULT}" | grep -qiE 'traceback|exception|"success": *false'; then
+      log "SCRIPT ERROR: ${_agent_name} — ${ST_RESULT}"
+    fi
+  fi
+}
+
+_vv_inbox_inserted() {
+  # Last JSON object on stdout from sync-inbox ({"success": true, "inserted": N}).
+  printf '%s\n' "${1:-}" | python3 -c '
+import json, sys
+last = {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        last = json.loads(line)
+    except Exception:
+        pass
+print(int(last.get("inserted") or 0))
+' 2>/dev/null || echo 0
+}
+
 _vv_run_instance_sync() {
   local reason="${1:-inbox}"
   if [ "${_VV_INSTANCE_SYNCED_THIS_TICK}" = "true" ]; then
@@ -762,13 +808,15 @@ ${AGENT_REGISTRY_CONTENT}
   fi
   exec 200>"${LOCKFILE}"
   if ! flock -n 200; then
-    log "SKIP: ${AGENT_NAME} (already running — lock held)"
+    log "SKIP spawn: ${AGENT_NAME} (already running — lock held)"
+    _run_due_utility_and_scripts "${SYSTEM_CONFIG}" "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}"
     continue
   fi
 
   # Secondary guard: check if a harness process is already running for this user
   if pgrep -u "${AGENT_USER}" -f "harness.agent_harness" > /dev/null 2>&1; then
-    log "SKIP: ${AGENT_NAME} (harness process already running for user ${AGENT_USER})"
+    log "SKIP spawn: ${AGENT_NAME} (harness process already running for user ${AGENT_USER})"
+    _run_due_utility_and_scripts "${SYSTEM_CONFIG}" "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}"
     flock -u 200
     continue
   fi
@@ -814,49 +862,21 @@ ${AGENT_REGISTRY_CONTENT}
   VV_ENABLED=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null)
   if [ "${VV_ENABLED:-true}" = "true" ] && [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${API_TOKEN}" ]; then
     # Step 1: Fetch inbox — persist unread messages to SQLite
-    AGICTL_MESSAGES_DB="${MESSAGES_DB}" \
-      /usr/local/bin/agictl message sync-inbox "${AGENT_USER}" --agent-path "${AGENT_PATH}" --sub-account "${SUB_ACCOUNT_ID}" --token "${API_TOKEN}" || log "WARN: agictl message sync-inbox failed for ${AGENT_NAME}"
-    # Same tick as inbox so PU package decisions land before spawn.
-    # Separate API from sync-inbox (future: one call).
-    _vv_run_instance_sync inbox
-
-  fi
-
-  # ─── Utility Tasks (TD-UTIL-001) — run due UM jobs without harness spawn ───
-  UM_ENABLED=$(sed -n '/^\[utility_models\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null | head -1)
-  if [ "${UM_ENABLED:-true}" = "true" ]; then
-    # Capture stderr too (2>&1) so a Python traceback is logged, not swallowed.
-    UM_RESULT=$(sudo -u "${AGENT_USER}" AGICTL_CONFIG="${SYSTEM_CONFIG}" AGICTL_TASKS_DB="${TASKS_DB}" \
-      /usr/local/bin/agictl utility run-due-tasks --agent "${AGENT_NAME}" --agent-workspace "${AGENT_PATH}" 2>&1 || true)
-    # Log when a run was attempted (count>=1, success or per-task failure) — note the
-    # optional space after the colon: agictl emits "count": N (json.dumps default).
-    if echo "${UM_RESULT}" | grep -qE '"count": *[1-9]'; then
-      log "UTILITY: ${AGENT_NAME} — ran due Utility Task(s): ${UM_RESULT}"
-    elif echo "${UM_RESULT}" | grep -qiE 'traceback|exception|"success": *false'; then
-      # Abnormal output (crash/error) that produced no run count — surface it.
-      log "UTILITY ERROR: ${AGENT_NAME} — ${UM_RESULT}"
+    INBOX_OUT=$(AGICTL_MESSAGES_DB="${MESSAGES_DB}" \
+      /usr/local/bin/agictl message sync-inbox "${AGENT_USER}" --agent-path "${AGENT_PATH}" --sub-account "${SUB_ACCOUNT_ID}" --token "${API_TOKEN}" 2>&1) || log "WARN: agictl message sync-inbox failed for ${AGENT_NAME}"
+    INBOX_INSERTED=$(_vv_inbox_inserted "${INBOX_OUT}")
+    if [ "${INBOX_INSERTED:-0}" -gt 0 ]; then
+      _vv_run_instance_sync inbox
     fi
+
   fi
 
-  # ─── Script Tasks (TD-SCRIPT-001) — run due .sh jobs without harness spawn ───
-  # Deterministic AGi-Tools scripts on a schedule/once-off. Runs as the owning
-  # agent (Ownership Principle §1.2 #4) so the return code and any files the
-  # script writes stay agent-owned (no chown). No LLM, no agent wake; the runner
-  # captures the rc and sends rc-driven VersaVoice alerts to the PU.
-  ST_ENABLED=$(sed -n '/^\[script_tasks\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null | head -1)
-  if [ "${ST_ENABLED:-true}" = "true" ]; then
-    ST_RESULT=$(sudo -u "${AGENT_USER}" AGICTL_CONFIG="${SYSTEM_CONFIG}" AGICTL_TASKS_DB="${TASKS_DB}" \
-      /usr/local/bin/agictl task run-due-scripts --agent "${AGENT_NAME}" --agent-workspace "${AGENT_PATH}" 2>&1 || true)
-    if echo "${ST_RESULT}" | grep -qE '"count": *[1-9]'; then
-      log "SCRIPT: ${AGENT_NAME} — ran due Script Task(s): ${ST_RESULT}"
-    elif echo "${ST_RESULT}" | grep -qiE 'traceback|exception|"success": *false'; then
-      log "SCRIPT ERROR: ${AGENT_NAME} — ${ST_RESULT}"
-    fi
-  fi
+  # ─── Utility / Script Tasks — due jobs without harness spawn ───
+  _run_due_utility_and_scripts "${SYSTEM_CONFIG}" "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}" "${TASKS_DB}"
 
   # ─── Rate Limit File ─────────────────────────────────
   # Used only for API rate-limit (429) backoff — NOT for general cooldown.
-  # The lockfile + pgrep at L142-159 prevents overlapping runs.
+  # The lockfile + pgrep above prevents overlapping harness spawn.
   # If there is work (messages or tasks), the agent should always wake.
   COOLDOWN_FILE="/tmp/versa_agi_${AGENT_NAME}.cooldown"
 
@@ -1750,7 +1770,7 @@ $(cat "${_fc_skill}")
     if [ "${_auto}" = "true" ]; then
       if [ -f /etc/sudoers.d/versa_agi_coa_autonomous ]; then
         VERSA_COA_AUTONOMOUS="1"
-        COA_PRIVILEGE_CONTENT="1. **AUTONOMOUS MODE.** The Primary User granted you passwordless sudo (\`NOPASSWD: ALL\`) on this host. You may administer the OS with \`sudo\` via \`agictl_execute\` (\`bash \"sudo …\"\`). Prefer \`agictl\` for Versa AGi data. Confirm destructive or irreversible changes with the Primary User. Sub-agents still have no sudo."
+        COA_PRIVILEGE_CONTENT="1. **AUTONOMOUS MODE.** The Primary User granted you passwordless sudo (\`NOPASSWD: ALL\`) on this host. You may administer the OS with \`sudo\` via \`agictl_execute\` (\`bash \"sudo …\"\`). Prefer \`agictl\` for Versa AGi data. Confirm destructive or irreversible changes with the Primary User. Sub-agents still have no sudo. When the granted task is done, disarm with \`agictl system config set-ini coa autonomous false\` — you cannot turn it back on."
         CYCLE_PARAMS_CONTENT="${CYCLE_PARAMS_CONTENT//NEVER create or modify files outside this path./Autonomous mode is on: you may write system paths with sudo when the work requires it. Prefer your workspace for project files.}"
         CYCLE_PARAMS_CONTENT="${CYCLE_PARAMS_CONTENT//host package installs can be done by the agent without the Primary User./you may install host packages and repair services with sudo. Confirm destructive or irreversible changes with the Primary User first.}"
         log "COA_PRIVILEGE: ${AGENT_NAME} — autonomous grant landed"

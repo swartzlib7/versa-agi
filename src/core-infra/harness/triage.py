@@ -429,6 +429,19 @@ def _agi_tag_ids(raw_payload):
     return project_ids, task_ids
 
 
+def _reply_to_message_id(raw_payload):
+    """Inbound reply target (same id as inbox messageId / particle id)."""
+    if not raw_payload:
+        return ""
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("replyToMessageId") or "").strip()
+
+
 def _message_identity_ids(agent_name: str) -> list:
     ids = []
     config_path = os.environ.get("AGICTL_CONFIG", "")
@@ -494,6 +507,9 @@ def build_inbox_context(agent_name: str) -> str:
                 pass
         lines.append(f"  media: {'yes' if media else 'no'}")
         lines.append(f"  message_id: {mid}")
+        reply_to = _reply_to_message_id(raw)
+        if reply_to:
+            lines.append(f"  reply_to_message_id: {reply_to}")
         lines.append("")
     return "\n".join(lines).rstrip()
 

@@ -36,7 +36,7 @@ If the agent needs a system package (`imagemagick`, `ffmpeg`), it **requests** i
 
 OS boundaries only protect what you have not given.
 
-**COA Autonomous Mode** (`[coa] autonomous=true` plus `/etc/sudoers.d/versa_agi_coa_autonomous`) is root-equivalent for the `coa` OS user. Enable only on hardware you have dedicated to this system. Sub-agents never receive the grant.
+**COA Autonomous Mode** (`[coa] autonomous=true` plus `/etc/sudoers.d/versa_agi_coa_autonomous`) is root-equivalent for the `coa` OS user. Enable only on hardware you have dedicated to this system. The Primary User enables the grant; COA may disarm it (`set-ini coa autonomous false`) but cannot enable it. Sub-agents never receive the grant.
 
 **Docker is root-equivalent.** Adding an agent to the `docker` group lets that agent mount the host (`docker run -v /:/host`) and reach other workspaces, the monitoring layer, and credentials. Docker documents this as equivalent to root.
 

@@ -17,7 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from privilege_guard import (  # noqa: E402
     coa_autonomous_allowed,
     grant_landed_on_disk,
+    install_role_change_allowed,
     privilege_escalation_hit,
+    refuse_agent_coa_autonomous,
     sudoers_line,
 )
 
@@ -99,6 +101,46 @@ _MIN_POISE = """## CONTEXT MAP — how to read this prompt
 
 {COA_PRIVILEGE}
 """
+
+
+class TestAgentDisarmPolicy(unittest.TestCase):
+    def test_pu_may_enable_and_disable(self):
+        self.assertIsNone(refuse_agent_coa_autonomous(True, None, "coa"))
+        self.assertIsNone(refuse_agent_coa_autonomous(False, "", "coa"))
+
+    def test_coa_cannot_enable(self):
+        err = refuse_agent_coa_autonomous(True, "coa", "coa")
+        self.assertIsNotNone(err)
+        self.assertIn("cannot enable", err)
+
+    def test_coa_may_disarm(self):
+        self.assertIsNone(refuse_agent_coa_autonomous(False, "coa", "coa"))
+
+    def test_sub_agent_cannot_disarm(self):
+        err = refuse_agent_coa_autonomous(False, "agi-web", "coa")
+        self.assertIsNotNone(err)
+        self.assertIn("Only the COA", err)
+
+
+class TestInstallRolePromote(unittest.TestCase):
+    def test_sentinel_to_normal(self):
+        ok, err = install_role_change_allowed("sentinel", "normal")
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+
+    def test_normal_to_sentinel_refused(self):
+        ok, err = install_role_change_allowed("normal", "sentinel")
+        self.assertFalse(ok)
+        self.assertIn("No downgrade", err)
+
+    def test_same_role_ok(self):
+        ok, _ = install_role_change_allowed("sentinel", "sentinel")
+        self.assertTrue(ok)
+
+    def test_invalid_role(self):
+        ok, err = install_role_change_allowed("normal", "mobile")
+        self.assertFalse(ok)
+        self.assertIn("normal", err)
 
 
 class TestApplyCoaInstallRole(unittest.TestCase):

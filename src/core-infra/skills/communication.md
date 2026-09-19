@@ -29,6 +29,8 @@ Results are **oldest to newest** (same as injected NEW MESSAGES). `--last-n-coun
 
 Spawn **NEW MESSAGES** may include **`→ TAGGED PROJECT IDS`** / **`→ TAGGED TASK IDS`**. Those are VersaVoice picker IDs — resolve with `agictl project list` / `agictl task get`. Do not invent names.
 
+When an inbound is a reply to one of your earlier turns, the same block (and `agictl message get` JSON, and `.versavoiceai/inbox.json`) includes **`replyToMessageId`**. That id is the prior inbox `messageId` / particle id. Address that turn first.
+
 ### Recipient IDs
 
 **ALWAYS use the UID** (the `contact_id` column from `agictl message get`), **NEVER the display name**. UIDs look like `2yLBOuDkgBaq8rIXVZb6HBuTY5c4`. Display names like "John Smith" will be rejected by the API.

@@ -32,7 +32,9 @@ except ImportError:
 
 from privilege_guard import (  # noqa: E402
     coa_autonomous_allowed,
+    install_role_change_allowed,
     privilege_escalation_hit,
+    refuse_agent_coa_autonomous,
     sudoers_line,
 )
 from identity import provision_identity
@@ -331,17 +333,25 @@ def system_config_set_ini(section, key, value):
         if value_s.lower() not in ("true", "false"):
             json_response(False, error="coa.autonomous must be 'true' or 'false'")
             sys.exit(1)
-        if os.getenv("AGICTL_AGENT_USER"):
-            json_response(
-                False,
-                error="COA cannot enable its own autonomous sudo. "
-                "The Primary User enables it in System Settings or VersaVoice.",
-            )
+        want_enabled = value_s.lower() == "true"
+        denied = refuse_agent_coa_autonomous(
+            want_enabled, os.getenv("AGICTL_AGENT_USER"), _coa_os_user()
+        )
+        if denied:
+            json_response(False, error=denied)
             sys.exit(1)
-        ok, err = _ensure_coa_autonomous_sudoers(value_s.lower() == "true")
+        ok, err = _ensure_coa_autonomous_sudoers(want_enabled)
         if not ok:
             json_response(False, error=err)
             sys.exit(1)
+    elif section_l == "system" and key_l == "install_role":
+        current = (_read_ini_value("system", "install_role", "normal") or "normal")
+        ok_role, role_err = install_role_change_allowed(current, value_s)
+        if not ok_role:
+            json_response(False, error=role_err)
+            sys.exit(1)
+        value_s = value_s.strip().lower()
+        value = value_s
     elif section_l == "agent" and key_l == "model_routing_mode":
         if value_s.lower() not in ("pool", "preferred"):
             json_response(False, error="model_routing_mode must be 'pool' or 'preferred'")
@@ -367,7 +377,10 @@ def system_config_set_ini(section, key, value):
     try:
         _update_ini_key(ini_path, section, key, value)
         _sync_ini_to_source(ini_path)
-        json_response(True, section=section, key=key, value=value)
+        extra = {}
+        if section_l == "coa" and key_l == "autonomous" and value_s.lower() == "false":
+            extra["instanceSync"] = _sync_instance_after_disarm()
+        json_response(True, section=section, key=key, value=value, **extra)
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -435,13 +448,14 @@ def _ensure_coa_autonomous_sudoers(enabled: bool) -> tuple[bool, str]:
     """Apply the grant as root, escalating via watchdog's agictl sudoers if needed."""
     if os.geteuid() == 0:
         return _write_coa_autonomous_sudoers(enabled)
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
     result = subprocess.run(
         [
             "sudo", "-n", _agictl_root_bin(),
             "system", "config", "apply-coa-sudoers",
             "--enabled", "true" if enabled else "false",
         ],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True, text=True, timeout=15, env=env,
     )
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
@@ -471,7 +485,10 @@ def system_config_apply_coa_sudoers(enabled):
 
 
 def _validate_versavoice_api_token(token: str) -> tuple[bool, str]:
-    """Live-check sponsor token via GET /account. Fail closed on auth/network errors."""
+    """Live-check sponsor token via GET /account.
+
+    Success: ``(True, uid)``. Failure: ``(False, error)``.
+    """
     import urllib.error
     import urllib.request
 
@@ -500,7 +517,99 @@ def _validate_versavoice_api_token(token: str) -> tuple[bool, str]:
 
     if not isinstance(data, dict) or not (data.get("uid") or "").strip():
         return False, "VersaVoice API returned no account uid for this token"
-    return True, ""
+    return True, (data.get("uid") or "").strip()
+
+
+def _read_install_acceptance_email() -> str:
+    path = "/etc/versa-agi/install-acceptance.json"
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return (data.get("email") or data.get("installEmail") or data.get("install_email") or "").strip()
+
+
+def _reprovision_after_sponsor_change(token: str, new_uid: str) -> list[str]:
+    """Clear stale sub-account binds and register under the new sponsor token."""
+    from comms import api_request as _vv_get
+
+    touched: list[str] = []
+    account = _vv_get("/account", token) or {}
+    display = (
+        account.get("displayName")
+        or account.get("firstName")
+        or ""
+    )
+    first = _read_ini_value("agent", "first_name", "Versa") or "Versa"
+    last = _read_ini_value("agent", "last_name", "(COA)") or "(COA)"
+    language = _read_ini_value("agent", "language", "en") or "en"
+    country = _read_ini_value("agent", "country", "") or ""
+    voice = _read_ini_value("agent", "voice", "female") or "female"
+    install_email = _read_install_acceptance_email()
+    role = (_read_ini_value("system", "install_role", "normal") or "normal").strip().lower()
+    vv_key = (_read_ini_value("system", "vv_agent_key", "") or "").strip()
+    coa_key = vv_key if role == "sentinel" and vv_key else "coa"
+    coa_os = _coa_os_user()
+
+    import glob as _glob
+
+    for config_file in _glob.glob("/etc/versa-agi/*_config.json"):
+        try:
+            with open(config_file, "r") as f:
+                cfg = json.load(f)
+            cfg.setdefault("primary_user", {})
+            cfg["primary_user"]["uid"] = new_uid
+            if display:
+                cfg["primary_user"]["display_name"] = display
+            cfg.setdefault("versavoice", {})
+            cfg["versavoice"]["sub_account_id"] = None
+            cfg["versavoice"]["status"] = None
+            cfg["versavoice"]["api_token"] = token
+            with open(config_file, "w") as f:
+                json.dump(cfg, f, indent=2)
+            touched.append(f"{config_file}:cleared-bind")
+        except Exception:
+            continue
+
+    agents_db_path = _get_agents_db_path()
+    rows = []
+    if os.path.isfile(agents_db_path):
+        conn = db_connect.connect_compat(agents_db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, os_user FROM agents WHERE name != 'watchdog'"
+        ).fetchall()
+        conn.close()
+    if not rows:
+        rows = [{"name": "coa", "os_user": coa_os}]
+
+    for row in rows:
+        name = (row["name"] or "").strip()
+        os_user = (row["os_user"] or name).strip()
+        if not name:
+            continue
+        agent_key = coa_key if name == "coa" or os_user == coa_os else name
+        fn = first if agent_key in (coa_key, "coa") else name.replace("-", " ").title()
+        ln = last if agent_key in (coa_key, "coa") else "(Agent)"
+        provision_identity(
+            os_user,
+            token,
+            first_name=fn,
+            last_name=ln,
+            language=language,
+            country=country,
+            voice=voice,
+            agents_db=agents_db_path,
+            install_email=install_email or None,
+            agent_key=agent_key,
+        )
+        touched.append(f"provision:{name}")
+    return touched
 
 
 @system.command("set-key", hidden=True)
@@ -629,10 +738,22 @@ def system_set_key(key_type, value):
     # ════════════════════════════════════════════════
     elif key_type == "versavoice":
         # Live-validate against GET /account before writing (reject fakes).
-        ok_vv, vv_err = _validate_versavoice_api_token(value.strip())
+        ok_vv, vv_err_or_uid = _validate_versavoice_api_token(value.strip())
         if not ok_vv:
-            json_response(False, error=vv_err or "Invalid VersaVoice API token")
+            json_response(False, error=vv_err_or_uid or "Invalid VersaVoice API token")
             sys.exit(1)
+        new_sponsor_uid = vv_err_or_uid
+
+        old_sponsor_uid = ""
+        coa_cfg_path = "/etc/versa-agi/coa_config.json"
+        if os.path.isfile(coa_cfg_path):
+            try:
+                with open(coa_cfg_path, "r") as f:
+                    old_sponsor_uid = (
+                        (json.load(f).get("primary_user") or {}).get("uid") or ""
+                    ).strip()
+            except Exception:
+                old_sponsor_uid = ""
 
         # 1. Update all *_config.json files
         for config_file in glob.glob("/etc/versa-agi/*_config.json"):
@@ -650,6 +771,16 @@ def system_set_key(key_type, value):
 
         # 2. setup.ini
         _ini_set("versavoice", "api_token", value)
+
+        # 3. New sponsor — re-provision COA and sub-agents (handover)
+        if new_sponsor_uid and new_sponsor_uid != old_sponsor_uid:
+            try:
+                handed = _reprovision_after_sponsor_change(
+                    value.strip(), new_sponsor_uid
+                )
+                updated_files.extend(handed)
+            except Exception as e:
+                errors.append(f"identity reprovision: {e}")
 
     # ════════════════════════════════════════════════
     # XAI API KEY
@@ -1004,6 +1135,20 @@ def _agi_tag_ids(raw_payload):
     return project_ids, task_ids
 
 
+def _reply_to_message_id(raw_payload):
+    """Inbound reply target (same id as inbox messageId / particle id)."""
+    if not raw_payload:
+        return ""
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    rid = str(payload.get("replyToMessageId") or "").strip()
+    return rid
+
+
 _VV_INSTANCE_SYNC_STAMP = "/var/lib/versa-agi/coa/.vv_instance_sync_at"
 
 
@@ -1243,6 +1388,37 @@ def _apply_remote_coa_autonomous(desired):
     return "applied"
 
 
+def _sync_instance_after_disarm() -> str:
+    """PUT local Off to VersaVoice. Skip sudo apply on this hop (PUT/GET gap)."""
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+    try:
+        result = subprocess.run(
+            [
+                "sudo", "-n", _agictl_root_bin(),
+                "system", "sync-instance",
+                "--skip-coa-autonomous-apply",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"failed:{exc}"
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    if result.returncode != 0 or not data.get("success"):
+        err = (
+            data.get("error")
+            or (result.stderr or result.stdout or "").strip()
+            or f"exit {result.returncode}"
+        )
+        return f"failed:{err}"
+    return "applied"
+
+
 def _apply_remote_package_decision(name, status):
     """Same SQL as pkg approve/deny (or revert to requested). Idempotent."""
     name = (name or "").strip().lower()
@@ -1286,12 +1462,18 @@ def _apply_remote_package_decision(name, status):
     is_flag=True,
     help="Print last-fired and sync_interval; no API calls.",
 )
-def system_sync_instance(status_only):
+@click.option(
+    "--skip-coa-autonomous-apply",
+    is_flag=True,
+    help="PUT still sends local coaAutonomous; do not apply GET sudo (disarm hop).",
+)
+def system_sync_instance(status_only, skip_coa_autonomous_apply):
     """Push projects/tasks/packages/coaAutonomous to VersaVoice and pull decisions.
 
     PUT /agi/instances/{hostname_hash} then GET …/package-decisions.
-    GET also returns PU Enable sudo access; apply via set-ini coa autonomous.
-    Lifeline runs this after inbox retrieval and on the PU Sync to VV schedule.
+    GET also returns PU Enable sudo access; apply via set-ini coa autonomous
+    unless --skip-coa-autonomous-apply (disarm-triggered hop).
+    Lifeline runs this on new inbox inserts, the PU Sync to VV schedule, or --force.
     --status reports last-fired; do not loop the full command.
     """
     from datetime import datetime, timezone
@@ -1338,10 +1520,15 @@ def system_sync_instance(status_only):
     decisions = decisions_resp.get("decisions") or []
     applied = {"approved": 0, "denied": 0, "requested": 0, "unchanged": 0, "missing": 0}
     applied_auto = None
-    if decisions_resp.get("coaAutonomousResolvedBy") == "vv":
+    if (
+        not skip_coa_autonomous_apply
+        and decisions_resp.get("coaAutonomousResolvedBy") == "vv"
+    ):
         applied_auto = _apply_remote_coa_autonomous(
             decisions_resp.get("coaAutonomous")
         )
+    elif skip_coa_autonomous_apply:
+        applied_auto = "skipped_disarm_hop"
     latest = since
     for d in decisions:
         if not isinstance(d, dict):
@@ -9420,7 +9607,14 @@ def message_get(agent_uid, unread, last_n_minutes, last_n_count, limit, contact)
         )
         rows = conn.execute(query, params).fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        out = []
+        for r in rows:
+            d = dict(r)
+            rid = _reply_to_message_id(d.get("raw_payload"))
+            if rid:
+                d["replyToMessageId"] = rid
+            out.append(d)
+        print(json.dumps(out, indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -9613,9 +9807,12 @@ def message_delete(message_id, channel):
 @click.option("--full", is_flag=True, help="Re-scan recent history (2h), not just unread")
 def message_sync_inbox(agent_user, agent_path, sub_account, token, full):
     """Pull messages from VersaVoice REST API and persist to SQLite."""
-    success = fetch_inbox(agent_user, agent_path, sub_account, token, messages_db, full_sync=full)
+    success, inserted = fetch_inbox(
+        agent_user, agent_path, sub_account, token, messages_db, full_sync=full
+    )
     if not success:
         sys.exit(1)
+    json_response(True, inserted=inserted)
 
 @message.command("count-unprocessed")
 @click.argument("sub_account")
@@ -10110,6 +10307,9 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
                 output += (
                     f"     → TAGGED TASK IDS: {', '.join(task_ids)}\n"
                 )
+            reply_to = _reply_to_message_id(msg.get("raw_payload"))
+            if reply_to:
+                output += f"     → REPLY TO MESSAGE ID: {reply_to}\n"
             output += f"     → mark-processed: agictl message mark-processed {mid}\n"
         output += "\n[!] Reply to ALL items above before proceeding to other work. The most recent message is the most relevant one to start with and then looking at the rest.\n"
         output += "--- END NEW MESSAGES ---\n"

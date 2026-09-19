@@ -149,6 +149,8 @@ def delete_local_message(message_id, messages_db):
 def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False):
     """Fetches messages from VersaVoice Cloud and persists them cleanly to messages.db.
 
+    Returns ``(success, inserted)`` — ``inserted`` is new SQLite rows this fetch.
+
     Default sync uses unreadOnly=true so lifeline only pulls new unread inbound messages.
     markAsRead=true marks fetched particles viewed on VersaVoice (original lifeline
     mailbox behaviour). Inserts are deduplicated by message_id. Deletes should go
@@ -172,10 +174,10 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
     elif isinstance(response, dict) and "messages" in response:
         messages = response.get("messages", [])
     else:
-        return False
+        return False, 0
         
     if not messages:
-        return True
+        return True, 0
         
     inserted = 0
     try:
@@ -312,10 +314,10 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
         if inserted > 0:
             console.print(f"Persisted {inserted} new message(s) to SQLite.")
             
-        return True
+        return True, inserted
     except Exception as e:
         console.print(f"[bold red]Database Error:[/bold red] {str(e)}")
-        return False
+        return False, 0
 
 def upload_media(token, sub_account_id, recipient_id, file_path):
     """Upload a media file to VersaVoice via /attachments/upload. Returns {downloadUrl, meta} or None."""

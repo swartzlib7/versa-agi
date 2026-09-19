@@ -327,7 +327,7 @@ agictl execute python "<script>"                      # Run a Python script
 
 Scripts execute as **your agent user** (not root/watchdog). Timeout is 120 seconds (600 seconds for COA when Autonomous Mode is granted).
 
-> **BLOCKED** for sub-agents and for COA in standard mode: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod`. If you need elevated access, set the task to `blocked` and report to COA (or the Primary User). **COA exception:** when HARD CONSTRAINTS say **AUTONOMOUS MODE** (grant landed), COA may `bash "sudo …"`.
+> **BLOCKED** for sub-agents and for COA in standard mode: `sudo`, `su`, `pkexec`, `newgrp`, `gpasswd`, `usermod`. If you need elevated access, set the task to `blocked` and report to COA (or the Primary User). **COA exception:** when HARD CONSTRAINTS say **AUTONOMOUS MODE** (grant landed), COA may `bash "sudo …"`. After that work is done, COA must disarm: `agictl system config set-ini coa autonomous false`. COA cannot enable the grant.
 
 **Returns JSON**: `{success: true/false, output: "...", exit_code: N}`
 

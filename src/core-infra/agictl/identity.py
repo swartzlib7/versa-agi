@@ -25,6 +25,17 @@ def _is_shared_coa_agent_key(agent_key: str) -> bool:
     return (agent_key or "").strip() == SHARED_COA_AGENT_KEY
 
 
+def home_coa_key_in_use(token: str, install_email: str) -> bool:
+    """True if the sponsor already has a sub-account on ``agiAgentKey=coa``."""
+    account_data = api_request("/account", token)
+    if not account_data:
+        raise RuntimeError("Could not read VersaVoice account for home-COA collision check")
+    match = _find_sub_account(
+        account_data, "", "", install_email, SHARED_COA_AGENT_KEY
+    )
+    return match is not None
+
+
 def derive_sentinel_agent_key(host_material: str) -> str:
     """Host-stable VersaVoice agiAgentKey for a Sentinel install."""
     material = (host_material or "").strip()

@@ -18,7 +18,7 @@ Load this skill when the Primary User (or setup) asks you to **install, enable, 
 
 Operators read the Ops Manual in the product repo. Staff will read the User Manual (planned — do not author it from this skill). This skill is the COA procedure: **detect whether VBA is already installed on this host** → then install or continue from the existing instance.
 
-Product UI and form rules live in the **clone**, not in this file. After Orient finds `Versa-BusinessAdmin`, load `AGENTS.md` and the matching feature `docs/production/state/state_*.md` from that workspace.
+After Orient finds `Versa-BusinessAdmin`, load clone `README.md`, `AGENTS.md`, and the Ops Manual. Form/listing work after install is sibling **`business_admin_operate`**. Do not name a host skill `product_ui_patterns`.
 
 **Ask the Primary User before install or configure. Do not deploy until they agree.**
 
@@ -26,16 +26,13 @@ Product UI and form rules live in the **clone**, not in this file. After Orient 
 
 | Need | Source |
 |---|---|
+| Product README (name, roles) | `README.md` in the workspace |
 | Agent door (clone) | `AGENTS.md` in the workspace |
-| Product UI / forms / listings | Clone `AGENTS.md` + the matching `docs/production/state/state_*.md` |
-| Ops manual (install, configure, maintain, enhance) | `docs/ops/MISSION_CONTROL_OPS_MANUAL.md` in the repo (until retitled) |
-| Staff User Manual | Planned — do not author it from this skill |
-| Product README (name, roles, skill+manual usage) | `README.md` |
+| Ops manual (install, configure, maintain, enhance) | `docs/ops/BUSINESS_ADMIN_OPS_MANUAL.md` |
+| Forms, listings, Spatial Twin, stale UI | `docs/ops/WORKING_WITH_VBA.md` |
+| Staff User Manual | Planned stub — `docs/ops/BUSINESS_ADMIN_USER_MANUAL.md`. Do not author it from this skill |
 | HTTP API catalog (this version) | `GET /api` (open) and Settings → API (`/settings?tab=api`) |
-| Living API contract | `docs/production/state/state_api_contract.md` |
-| Records editor UX | `docs/production/state/state_records_editor_ux.md` |
-| Locked upgrade design D1–D6 | `docs/production/state/state_upgradability.md` |
-| Feature map | `docs/production/state/shape_mission_control.md` |
+| Upgrade rules D1–D6 | Ops Manual §5 |
 | Public production repo (HTTPS) | `https://github.com/swartzlib7/versa-business-admin` |
 | SSH remote (when keys already work) | `git@github.com:swartzlib7/versa-business-admin.git` |
 | Production / stable line | `main` |
@@ -47,7 +44,7 @@ Never contradict the manual or D1–D6. Amend the manual rather than creating pa
 1. **Orient — already installed?** Decide install vs continue (mandatory first step).
 2. **Enablement** — setup seeds the reserved Project when the feature is ON. COA does not register a second name.
 3. **Clone / Install** — only if Orient said not installed **and** the Primary User agreed.
-4. **Read** — clone `AGENTS.md`, matching feature `state_*.md`, Ops Manual §2 (setup) and §1 (identity / Admin vs member).
+4. **Read** — clone `README.md`, `AGENTS.md`, Ops Manual §2 (setup) and §1 (identity / Admin vs member).
 5. **Implement the API / operate** — after Orient, load **`business_admin_operate`** for `GET /api`, D1–D6, restart, and health. Do not share the host AGi database.
 
 ## Orient (do this first, every time)
@@ -93,7 +90,7 @@ Ask the Primary User first. Do not clone, configure, or deploy until they agree.
    npm ci
    cp .env.example .env.local   # edit locally — never commit secrets
    ```
-2. Read `AGENTS.md`, the matching feature `docs/production/state/state_*.md`, and `docs/ops/MISSION_CONTROL_OPS_MANUAL.md` §2 (and §3.5 before any restart).
+2. Read `README.md`, `AGENTS.md`, and `docs/ops/BUSINESS_ADMIN_OPS_MANUAL.md` §2 (and §3.5 before any restart).
 3. Postgres is required (`DATA_SOURCE=postgres` + `DATABASE_URL` in `.env.local`, manual §2.4); `DATA_SOURCE=fixture` is opt-in.
 4. Boot (review often port **3200** — use the port the PU named):
    ```bash
@@ -134,7 +131,7 @@ VBA is a standalone product. Talk to it over HTTP (or Script Tasks), never by sh
 1. Health: `curl -s localhost:<port>/api/health` in its own call.
 2. Restart: manual §3.5 — exact PID from `ss -tlnp`, rebuild when switching SHAs, verify health separately.
 3. Backups: manual §3.7 (`.data/catalog.json` or `catalog_overlay` + zone tables).
-4. Stale UI: rebuild + restart `next start`; hard-reload the browser (`docs/ops/STALE_UI_AND_DEPLOY.md`).
+4. Stale UI / local enhance: `docs/ops/WORKING_WITH_VBA.md` (forms, listings, Spatial Twin, rebuild + restart).
 5. First install on a new host (Orient said not installed, PU agreed): manual §2.8 — provision → deploy artifact → env + empty durable store → migrations + **system seed** → first admin human + COA agent → smoke → change both passwords.
 6. Host Organization migrate: `scripts/migrate_agi_org.mjs` requires `--primary-source-org-id` to apply; extra own Wave businesses become Orgs (not Branch); it copies credential configuration (never prints it). Do **not** disable the built-in AGi Org module unless the Primary User has asked, after VBA is the system of record. The script **refuses** `--disable-host-org` unless the PU has asked. If both sides have production data, the agent team must merge after apply.
 7. Production packaging (container/systemd) is not authored yet — do not invent runbooks; track manual §8.
