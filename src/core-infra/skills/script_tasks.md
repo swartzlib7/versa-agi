@@ -54,6 +54,8 @@ agictl task add "Nightly export sync" --assignee coa --due-date "2026-06-22 02:0
 
 Lifeline runs due Script Tasks each tick (`agictl task run-due-scripts`), **before** normal agent spawn — no agent is woken. If a harness lock is already held for that agent, spawn is skipped but utility and script dispatch still run.
 
+At spawn, `system.md` lists script/utility jobs due within this agent's **Timeout (minutes)** under **TASKS EXECUTING IN {n} MINUTES**. They run on later ticks during the session and do not interrupt the cycle.
+
 | Interval | Outcome |
 |----------|---------|
 | Blank / `0` (once-off) | Task → `done` (rc `0`) or `blocked` (rc ≠ 0) |

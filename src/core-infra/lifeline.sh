@@ -1424,6 +1424,25 @@ ${OVERDUE_DETAILS}
   # Pattern mirrors message injection — agent should not need to discover tasks.
   TASK_SUMMARY=""
   if [ -f "${TASKS_DB}" ]; then
+    # Script/utility jobs due in this session window (agitop Timeout minutes).
+    # They run on Lifeline ticks outside the harness — omit if none.
+    _SESSION_MINS="${AGENT_TIMEOUT:-60}"
+    case "${_SESSION_MINS}" in
+      ''|*[!0-9]*) _SESSION_MINS=60 ;;
+    esac
+    EXECUTING_ROWS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
+      "SELECT '#' || id, title, task_kind, COALESCE(due_date, ''), COALESCE(script_path, '') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND task_kind IN ('script','utility') AND status NOT IN ('done', 'cancelled', 'frozen') AND due_date IS NOT NULL AND due_date <= datetime('now', '+${_SESSION_MINS} minutes') ORDER BY due_date ASC LIMIT 15;" 2>/dev/null || true)
+    if [ -n "${EXECUTING_ROWS}" ]; then
+      TASK_SUMMARY="
+## ── TASKS EXECUTING IN ${_SESSION_MINS} MINUTES ──
+[!] Script and utility jobs due in this session window (your Timeout). Lifeline runs them on its ticks — they do not stop this cycle. Do not plan your own work across those due times if a collision matters. They are not LLM work.
+[!] Format: #ID | Title | Kind | Due | Script
+
+${EXECUTING_ROWS}
+── END TASKS EXECUTING ──
+"
+    fi
+
     # Agent's own tasks (non-terminal: active, planned, in_progress, waiting, blocked)
     AGENT_TASKS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
       "SELECT '#' || id, title, status, priority, COALESCE(due_date, 'no due date') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND status NOT IN ('done', 'cancelled', 'frozen') ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 WHEN 'low' THEN 4 END, due_date ASC LIMIT 15;" 2>/dev/null || true)
