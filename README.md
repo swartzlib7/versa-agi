@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.4.8-FF9800" alt="Versa AGi version 3.4.8">
+    <img src="https://img.shields.io/badge/version-3.4.9-FF9800" alt="Versa AGi version 3.4.9">
     <!-- /VERSION -->
   </p>
   <p align="center">

@@ -183,6 +183,8 @@ agictl project git-setup                              # Configure git identity +
 agictl connection list                                # Primary User's contacts
 agictl connection list agent                          # Your established connections
 agictl connection request <uid>                       # Send connection invitation
+# countryOfBirth / nearestCity = language origin
+# countryOfResidence / stateOrProvince = where they live (optional)
 ```
 
 > **Flow**: `connection list` → discover UIDs → `connection request <uid>` → PU accepts in VersaVoice → contact appears in `connection list agent`.

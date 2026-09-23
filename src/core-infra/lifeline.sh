@@ -1382,11 +1382,15 @@ VersaVoice cloud messaging is OFF on this system — messaging uses internal rou
     pu_lang=$(jq -r '.primary_user.spokenLanguage // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
     pu_country=$(jq -r '.primary_user.countryOfBirth // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
     pu_city=$(jq -r '.primary_user.nearestCity // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
+    pu_residence=$(jq -r '.primary_user.countryOfResidence // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
+    pu_state=$(jq -r '.primary_user.stateOrProvince // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
     pu_abilities=$(jq -r '[.primary_user.abilities[]?.name] | join(", ") // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
     pu_profile=""
     [ -n "${pu_lang}" ] && pu_profile="${pu_profile} Language: ${pu_lang}."
     [ -n "${pu_country}" ] && pu_profile="${pu_profile} Dialect Origin (country where language was learned): ${pu_country}."
     [ -n "${pu_city}" ] && pu_profile="${pu_profile} Dialect Region (city/region influencing speech patterns): ${pu_city}."
+    [ -n "${pu_residence}" ] && pu_profile="${pu_profile} Country of residence: ${pu_residence}."
+    [ -n "${pu_state}" ] && pu_profile="${pu_profile} State / Province: ${pu_state}."
     [ -n "${pu_abilities}" ] && pu_profile="${pu_profile} Abilities: ${pu_abilities}."
     if [ -n "${pu_profile}" ]; then
       # Real newline — bash does not expand \n inside double quotes

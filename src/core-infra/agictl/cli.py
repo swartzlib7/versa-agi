@@ -1025,6 +1025,8 @@ def system_sync_profiles():
         pu["spokenLanguage"] = account_data.get("spokenLanguage", "en")
         pu["countryOfBirth"] = account_data.get("countryOfBirth")
         pu["nearestCity"] = account_data.get("nearestCity")
+        pu["countryOfResidence"] = account_data.get("countryOfResidence")
+        pu["stateOrProvince"] = account_data.get("stateOrProvince")
         pu["chromosome"] = account_data.get("chromosome")
         pu["dateOfBirth"] = account_data.get("dateOfBirth")
         pu["abilities"] = account_data.get("abilities", [])
@@ -1070,13 +1072,15 @@ def system_sync_profiles():
                             return json.dumps(val)
                         return str(val)
                     conn.execute("""
-                        INSERT INTO connections (uid, display_name, spoken_lang, country, city, chromosome, date_of_birth, abilities, profile_synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                        INSERT INTO connections (uid, display_name, spoken_lang, country, city, country_of_residence, state_or_province, chromosome, date_of_birth, abilities, profile_synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                         ON CONFLICT(uid) DO UPDATE SET
                             display_name = excluded.display_name,
                             spoken_lang = excluded.spoken_lang,
                             country = excluded.country,
                             city = excluded.city,
+                            country_of_residence = excluded.country_of_residence,
+                            state_or_province = excluded.state_or_province,
                             chromosome = excluded.chromosome,
                             date_of_birth = excluded.date_of_birth,
                             abilities = excluded.abilities,
@@ -1086,6 +1090,8 @@ def system_sync_profiles():
                         _str(c.get("spokenLanguage")),
                         _str(c.get("countryOfBirth")),
                         _str(c.get("nearestCity")),
+                        _str(c.get("countryOfResidence")),
+                        _str(c.get("stateOrProvince")),
                         _str(c.get("chromosome")),
                         _str(c.get("dateOfBirth")),
                         abilities_json,
@@ -9994,7 +10000,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         # Contact profiles from connections table
         for uid in all_contacts:
             row = tconn.execute(
-                "SELECT display_name, spoken_lang, country, city, chromosome, date_of_birth, abilities FROM connections WHERE uid=?",
+                "SELECT display_name, spoken_lang, country, city, country_of_residence, state_or_province, chromosome, date_of_birth, abilities FROM connections WHERE uid=?",
                 (uid,)
             ).fetchone()
             if row:
@@ -10079,6 +10085,8 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         cp["spoken_lang"] = cp.get("spoken_lang") or pu.get("spokenLanguage")
         cp["country"] = cp.get("country") or pu.get("countryOfBirth")
         cp["city"] = cp.get("city") or pu.get("nearestCity")
+        cp["country_of_residence"] = cp.get("country_of_residence") or pu.get("countryOfResidence")
+        cp["state_or_province"] = cp.get("state_or_province") or pu.get("stateOrProvince")
         cp["chromosome"] = cp.get("chromosome") or pu.get("chromosome")
         cp["date_of_birth"] = cp.get("date_of_birth") or pu.get("dateOfBirth")
         cp["abilities"] = cp.get("abilities") or json.dumps(pu.get("abilities", []))
@@ -10096,10 +10104,16 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
             attrs.append(f"Language: {lang}")
         country = prof.get("country")
         if country:
-            attrs.append(f"Country: {country}")
+            attrs.append(f"Dialect Origin (country where language was learned): {country}")
         city = prof.get("city")
         if city:
-            attrs.append(f"City: {city}")
+            attrs.append(f"Dialect Region (city/region influencing speech patterns): {city}")
+        residence = prof.get("country_of_residence")
+        if residence:
+            attrs.append(f"Country of residence: {residence}")
+        state_prov = prof.get("state_or_province")
+        if state_prov:
+            attrs.append(f"State / Province: {state_prov}")
         if attrs:
             parts.append(f"  {' | '.join(attrs)}")
         chrom = prof.get("chromosome")
@@ -10129,7 +10143,14 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         elif lang:
             directives.append("Communicate in English.")
         if country:
-            directives.append(f"Use culturally aware tone ({country}).")
+            directives.append(
+                f"Dialect origin is {country} (where they learned the language — not country of residence)."
+            )
+        if residence:
+            live_bits = [residence]
+            if state_prov:
+                live_bits.append(state_prov)
+            directives.append(f"Lives in {', '.join(live_bits)}.")
         if chrom == "X":
             directives.append("This person hears a MALE voice for your spoken messages.")
         elif chrom == "Y":
@@ -12075,7 +12096,11 @@ def connection_list(ctx):
 
 @connection_list.command("primary-user")
 def connection_list_primary_user():
-    """List the Primary User's contacts (people the agent can connect to)."""
+    """List the Primary User's contacts (people the agent can connect to).
+
+    countryOfBirth / nearestCity are linguistic identity (where the language
+    was learned). countryOfResidence / stateOrProvince are where they live.
+    """
     config = get_config()
     token = config.get("versavoice", {}).get("api_token")
     sub_account_id = config.get("versavoice", {}).get("sub_account_id")
@@ -12096,8 +12121,10 @@ def connection_list_primary_user():
             "uid": c.get("uid") or c.get("contactUid") or c.get("id"),
             "name": c.get("displayName") or c.get("name") or "Unknown",
             "language": c.get("spokenLanguage") or c.get("language") or "--",
-            "country": c.get("countryOfBirth"),
-            "city": c.get("nearestCity"),
+            "countryOfBirth": c.get("countryOfBirth"),
+            "nearestCity": c.get("nearestCity"),
+            "countryOfResidence": c.get("countryOfResidence"),
+            "stateOrProvince": c.get("stateOrProvince"),
             "chromosome": c.get("chromosome"),
             "dateOfBirth": c.get("dateOfBirth"),
             "abilities": c.get("abilities", []),
@@ -12121,7 +12148,15 @@ def connection_list_agent():
         """
         rows = conn.execute(query, (caller,)).fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["countryOfBirth"] = d.pop("country", None)
+            d["nearestCity"] = d.pop("city", None)
+            d["countryOfResidence"] = d.pop("country_of_residence", None)
+            d["stateOrProvince"] = d.pop("state_or_province", None)
+            result.append(d)
+        print(json.dumps(result, indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 

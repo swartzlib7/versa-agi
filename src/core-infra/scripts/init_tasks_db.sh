@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS connections (
   spoken_lang       TEXT,
   country           TEXT,
   city              TEXT,
+  country_of_residence TEXT,
+  state_or_province TEXT,
   chromosome        TEXT,
   date_of_birth     TEXT,
   abilities         TEXT,
@@ -164,8 +166,10 @@ for col_def in \
   sqlite3 "${DB_PATH}" "ALTER TABLE tasks ADD COLUMN ${col_def};" 2>/dev/null || true
 done
 
-# ─── Connections: comm_preferences migration ───
+# ─── Connections: comm_preferences + residence migrations ───
 sqlite3 "${DB_PATH}" "ALTER TABLE connections ADD COLUMN comm_preferences TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE connections ADD COLUMN country_of_residence TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE connections ADD COLUMN state_or_province TEXT;" 2>/dev/null || true
 
 # ─── Project Members: participation + comm_channels migration ───
 sqlite3 "${DB_PATH}" "ALTER TABLE project_members ADD COLUMN participation TEXT DEFAULT 'team_player';" 2>/dev/null || true

@@ -331,6 +331,8 @@ agictl project git-setup                              # Manual fallback: configu
 agictl connection list                                # List Primary User's contacts (default)
 agictl connection list primary-user                   # Same — explicit form
 agictl connection list agent                          # List agent's own established connections (local DB)
+# countryOfBirth / nearestCity = language origin
+# countryOfResidence / stateOrProvince = where they live (optional)
 agictl connection request <uid>                       # Send connection invitation to a Primary User contact
 ```
 
