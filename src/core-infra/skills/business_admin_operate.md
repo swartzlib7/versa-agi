@@ -67,6 +67,10 @@ VBA is a standalone product. Talk to it over HTTP (or Script Tasks), never by sh
 - Never ship a `db:seed` that truncates tenant data; never clone tenant data as seed.
 - Agent packages install/uninstall via the D5 API (0.7.132+); sample data via Settings → Modes.
 
+## First run
+
+A new install ships in **demo mode**. Turn it off in Settings → Modes before real use. Turning it off deletes the sample pack (`ba_sample:` rows). The Primary Org and the install accounts stay.
+
 ## Operate (already installed)
 
 1. Health: `curl -s localhost:<port>/api/health` in its own call.

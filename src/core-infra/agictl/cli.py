@@ -32,6 +32,7 @@ except ImportError:
 
 from privilege_guard import (  # noqa: E402
     coa_autonomous_allowed,
+    coa_autonomous_changed_since_sync,
     install_role_change_allowed,
     privilege_escalation_hit,
     refuse_agent_coa_autonomous,
@@ -1477,8 +1478,9 @@ def system_sync_instance(status_only, skip_coa_autonomous_apply):
     """Push projects/tasks/packages/coaAutonomous to VersaVoice and pull decisions.
 
     PUT /agi/instances/{hostname_hash} then GET …/package-decisions.
-    GET also returns PU Enable sudo access; apply via set-ini coa autonomous
-    unless --skip-coa-autonomous-apply (disarm-triggered hop).
+    coaAutonomous is sent only when [coa] autonomous changed since the last
+    sync (coa_autonomous_synced). Otherwise VersaVoice owns it: GET is applied
+    via set-ini coa autonomous unless --skip-coa-autonomous-apply (disarm hop).
     Lifeline runs this on new inbox inserts, the PU Sync to VV schedule, or --force.
     --status reports last-fired; do not loop the full command.
     """
@@ -1512,6 +1514,13 @@ def system_sync_instance(status_only, skip_coa_autonomous_apply):
         sys.exit(1)
 
     body = {"label": label, **payload}
+    auto_changed = coa_autonomous_changed_since_sync(
+        body.get("coaAutonomous"), vv.get("coa_autonomous_synced")
+    )
+    if auto_changed:
+        body["coaAutonomousChanged"] = True
+    else:
+        body.pop("coaAutonomous", None)
     encoded = quote(instance_id, safe="")
     put = api_request(f"/agi/instances/{encoded}", token, method="PUT", body=body)
     if not put or not put.get("success"):
@@ -1525,16 +1534,15 @@ def system_sync_instance(status_only, skip_coa_autonomous_apply):
     decisions_resp = api_request(dec_path, token) or {}
     decisions = decisions_resp.get("decisions") or []
     applied = {"approved": 0, "denied": 0, "requested": 0, "unchanged": 0, "missing": 0}
-    applied_auto = None
-    if (
-        not skip_coa_autonomous_apply
-        and decisions_resp.get("coaAutonomousResolvedBy") == "vv"
-    ):
-        applied_auto = _apply_remote_coa_autonomous(
-            decisions_resp.get("coaAutonomous")
-        )
-    elif skip_coa_autonomous_apply:
+    remote_auto = decisions_resp.get("coaAutonomous")
+    if skip_coa_autonomous_apply:
         applied_auto = "skipped_disarm_hop"
+    elif isinstance(remote_auto, bool):
+        applied_auto = _apply_remote_coa_autonomous(remote_auto)
+    else:
+        applied_auto = None
+    prev_synced = vv.get("coa_autonomous_synced")
+    vv["coa_autonomous_synced"] = _local_coa_autonomous()
     latest = since
     for d in decisions:
         if not isinstance(d, dict):
@@ -1546,8 +1554,11 @@ def system_sync_instance(status_only, skip_coa_autonomous_apply):
         if resolved and (not latest or str(resolved) > str(latest)):
             latest = str(resolved)
 
+    config_dirty = prev_synced != vv["coa_autonomous_synced"]
     if latest and latest != since:
         vv["package_decisions_since"] = latest
+        config_dirty = True
+    if config_dirty:
         config["versavoice"] = vv
         config_path = os.environ.get("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
         try:

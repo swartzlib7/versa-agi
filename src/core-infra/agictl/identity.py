@@ -56,7 +56,9 @@ def read_host_material(machine_id_path: str = "/etc/machine-id") -> str:
     return os.urandom(16).hex()
 
 
-def api_request(endpoint, token, method="GET", body=None):
+def api_request(endpoint, token, method="GET", body=None, with_status=False):
+    """JSON body or None. ``with_status=True`` returns ``(body, http_status)``;
+    status 0 = network error or unreadable body."""
     url = VV_API_BASE + endpoint
     headers = {
         "Authorization": f"Bearer {token}",
@@ -65,15 +67,24 @@ def api_request(endpoint, token, method="GET", body=None):
     data = json.dumps(body).encode("utf-8") if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
+    result, status = None, 0
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
-            return json.loads(response.read().decode("utf-8"))
+            status = response.status
+            result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        status = e.code
         console.print(f"[bold red]HTTP Error {e.code}:[/bold red] {e.read().decode('utf-8')}")
-        return None
     except Exception as e:
         console.print(f"[bold red]Network Error:[/bold red] {str(e)}")
-        return None
+        if status == 200:
+            status = 0
+    return (result, status) if with_status else result
+
+
+def _api_unavailable(status: int) -> bool:
+    """Outage / throttle — says nothing about the token or the sub-account."""
+    return status == 0 or status in (408, 429) or status >= 500
 
 
 def _normalize_install_email(email: str | None) -> str:
@@ -171,6 +182,21 @@ def _sync_display_name(token: str, sub_id: str, first_name: str, last_name: str)
         )
 
 
+def _report_unresolved(status: int, bound_id: str | None) -> None:
+    """Explain why provision stopped without scanning or registering."""
+    keep = f"; keeping sub_account_id {bound_id}" if bound_id else ""
+    if _api_unavailable(status):
+        console.print(
+            f"[bold yellow]VersaVoice API unavailable (HTTP {status or 'network'}){keep}. "
+            f"Not scanning or registering — re-run setup when the API is back.[/bold yellow]"
+        )
+    else:
+        console.print(
+            f"[bold red]VersaVoice API refused the request (HTTP {status}){keep}. "
+            f"Check the sponsor API token.[/bold red]"
+        )
+
+
 def provision_identity(
     agent_user,
     token,
@@ -237,11 +263,22 @@ def provision_identity(
 
     if existing_id:
         console.print(f"Found existing sub_account_id in config: {existing_id}")
-        verify = api_request(f"/accounts/{existing_id}", token)
+        verify, verify_status = api_request(
+            f"/accounts/{existing_id}", token, with_status=True
+        )
+        if verify_status != 404 and not (verify_status == 200 and verify):
+            _report_unresolved(verify_status, existing_id)
+            return False
         if verify:
             bound_key = None
             if not _is_shared_coa_agent_key(resolved_key):
-                bound_key = _bound_agent_key(api_request("/account", token), existing_id)
+                account_data, account_status = api_request(
+                    "/account", token, with_status=True
+                )
+                if account_status != 200 or not account_data:
+                    _report_unresolved(account_status, existing_id)
+                    return False
+                bound_key = _bound_agent_key(account_data, existing_id)
             if not _should_reuse_config_id(resolved_key, bound_key):
                 console.print(
                     f"Config sub_account_id {existing_id} is not this host's "
@@ -273,12 +310,13 @@ def provision_identity(
         f"(key={resolved_key}, email={'set' if norm_email else 'none'}, "
         f"name='{first_name} {last_name}')..."
     )
-    account_data = api_request("/account", token)
-    match_id = None
-    if account_data:
-        match_id = _find_sub_account(
-            account_data, first_name, last_name, norm_email, resolved_key
-        )
+    account_data, account_status = api_request("/account", token, with_status=True)
+    if account_status != 200 or not account_data:
+        _report_unresolved(account_status, None)
+        return False
+    match_id = _find_sub_account(
+        account_data, first_name, last_name, norm_email, resolved_key
+    )
 
     if match_id:
         console.print(f"Found existing VersaVoice account: {match_id}")

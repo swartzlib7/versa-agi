@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from privilege_guard import (  # noqa: E402
     coa_autonomous_allowed,
+    coa_autonomous_changed_since_sync,
     grant_landed_on_disk,
     install_role_change_allowed,
     privilege_escalation_hit,
@@ -120,6 +121,21 @@ class TestAgentDisarmPolicy(unittest.TestCase):
         err = refuse_agent_coa_autonomous(False, "agi-web", "coa")
         self.assertIsNotNone(err)
         self.assertIn("Only the COA", err)
+
+
+class TestSyncChangeDetection(unittest.TestCase):
+    def test_no_record_pushes(self):
+        self.assertTrue(coa_autonomous_changed_since_sync(False, None))
+
+    def test_agitop_grant_pushes(self):
+        self.assertTrue(coa_autonomous_changed_since_sync(True, False))
+
+    def test_disarm_pushes(self):
+        self.assertTrue(coa_autonomous_changed_since_sync(False, True))
+
+    def test_unchanged_pulls(self):
+        self.assertFalse(coa_autonomous_changed_since_sync(False, False))
+        self.assertFalse(coa_autonomous_changed_since_sync(True, True))
 
 
 class TestInstallRolePromote(unittest.TestCase):

@@ -148,6 +148,18 @@ def refuse_agent_coa_autonomous(
     return None
 
 
+def coa_autonomous_changed_since_sync(local: bool, last_synced) -> bool:
+    """True when this host must push ``coaAutonomous`` up on the next sync.
+
+    ``last_synced`` is the value recorded after the previous successful sync.
+    No record yet counts as changed so the first sync seeds VersaVoice.
+    Unchanged means VersaVoice owns the value and the GET is applied.
+    """
+    if not isinstance(last_synced, bool):
+        return True
+    return bool(local) != last_synced
+
+
 def install_role_change_allowed(current: str, desired: str) -> tuple[bool, str]:
     """Sentinel → normal is a promote. Normal → sentinel is refused."""
     cur = (current or "normal").strip().lower() or "normal"

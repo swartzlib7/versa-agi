@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.9"
+PRODUCT_VERSION="3.4.10"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -314,7 +314,8 @@ enable_site_provider() {
 VV_API_BASE="${VV_API_BASE:-https://us-central1-versavoice-s777.cloudfunctions.net/api/v1}"
 
 # Validate a sponsor API token against GET /account (fail closed).
-# Returns: 0 valid · 1 invalid/unauthorized · 2 network/unreachable
+# Returns: 0 valid · 1 rejected (401/403, other 4xx, 200 without uid)
+#          2 unreachable (network, 408, 429, 5xx) — says nothing about the token
 validate_vv_api_token() {
   local token="$1"
   local tmp http_code body uid
@@ -337,13 +338,25 @@ validate_vv_api_token() {
       fi
       return 1
       ;;
-    000)
+    000|408|429|5??)
       return 2
       ;;
     *)
       return 1
       ;;
   esac
+}
+
+# API unreachable: ask Retry or Quit (Enter = Retry). Returns 0 to retry.
+_vv_unreachable_retry_or_quit() {
+  local choice
+  echo -e "${RED}Cannot reach VersaVoice API (${VV_API_BASE}/account) — the service is down or rate-limited, not a bad token.${NC}"
+  echo -e -n "  [R]etry or [Q]uit? [R]: "
+  read -r choice
+  case "${choice}" in
+    q|Q) echo "Installation cancelled."; exit 1 ;;
+  esac
+  return 0
 }
 
 # Same instruction block shown on first ask and every retry.
@@ -357,28 +370,37 @@ _vv_token_instruction_block() {
 }
 
 # Prompt until a live-validated VV sponsor token is provided.
-# Validates immediately after each entry; on failure re-prints the instruction
-# block and asks again. Optional $1 = prefill (e.g. from setup.ini) — checked
-# first without a prompt; if invalid, falls through to the interactive loop.
+# Validates immediately after each entry; a rejected token re-prints the
+# instruction block and asks again; an unreachable API asks Retry / Quit for
+# the same value. Optional $1 = prefill (e.g. from setup.ini) — checked first
+# without a prompt. $2 = keep_on_unreachable (--update): an unreachable API
+# keeps the prefill instead of blocking the update.
 prompt_valid_vv_api_token() {
   local candidate="${1:-}"
+  local unreachable_mode="${2:-}"
   local rc
   VV_TOKEN=""
 
-  if [ -n "${candidate}" ]; then
+  while [ -n "${candidate}" ]; do
     info "Validating VersaVoice API token from setup.ini…"
-    if validate_vv_api_token "${candidate}"; then
+    rc=0
+    validate_vv_api_token "${candidate}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
       VV_TOKEN="${candidate}"
       ok "VersaVoice API token verified"
       return 0
     fi
-    rc=$?
-    if [ "${rc}" -eq 2 ]; then
-      warn "Cannot reach VersaVoice API (${VV_API_BASE}/account) — enter the token again when ready"
-    else
-      warn "VersaVoice API token in setup.ini is invalid"
+    if [ "${rc}" -eq 1 ]; then
+      warn "VersaVoice API token in setup.ini was rejected"
+      break
     fi
-  fi
+    if [ "${unreachable_mode}" = "keep_on_unreachable" ]; then
+      VV_TOKEN="${candidate}"
+      warn "Cannot reach VersaVoice API (${VV_API_BASE}/account) — keeping the token from setup.ini (not verified this run)"
+      return 0
+    fi
+    _vv_unreachable_retry_or_quit
+  done
 
   while true; do
     _vv_token_instruction_block
@@ -389,18 +411,20 @@ prompt_valid_vv_api_token() {
       continue
     fi
     # Validate immediately — do not continue setup until this succeeds.
-    info "Validating VersaVoice API token…"
-    if validate_vv_api_token "${VV_TOKEN}"; then
+    while true; do
+      info "Validating VersaVoice API token…"
+      rc=0
+      validate_vv_api_token "${VV_TOKEN}" || rc=$?
+      [ "${rc}" -eq 2 ] || break
+      echo ""
+      _vv_unreachable_retry_or_quit
+    done
+    if [ "${rc}" -eq 0 ]; then
       ok "VersaVoice API token verified"
       return 0
     fi
-    rc=$?
     echo ""
-    if [ "${rc}" -eq 2 ]; then
-      echo -e "${RED}Cannot reach VersaVoice API (${VV_API_BASE}/account). Check network and try again.${NC}"
-    else
-      echo -e "${RED}Invalid VersaVoice API token — that value was not accepted.${NC}"
-    fi
+    echo -e "${RED}Invalid VersaVoice API token — that value was not accepted.${NC}"
     echo -e "  ${DGRAY}Press Ctrl+C to cancel and quit the installation.${RESET}"
     VV_TOKEN=""
   done
@@ -3460,7 +3484,7 @@ if [ "${UPDATE_MODE}" = true ]; then
     fi
   else
     # Collect + live-validate immediately (same instruction/retry UX as fresh install).
-    prompt_valid_vv_api_token "${VV_TOKEN_UPDATE}"
+    prompt_valid_vv_api_token "${VV_TOKEN_UPDATE}" keep_on_unreachable
     VV_TOKEN_UPDATE="${VV_TOKEN}"
     # Persist verified token back to setup.ini (source + deployed)
     for _ini_vv_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
