@@ -627,7 +627,13 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
         )
 
     skills = data.get("skills_to_inject") or []
-    for item in data.get("skills_recommended") or []:
+    if isinstance(skills, str):
+        skills = [skills]
+    elif not isinstance(skills, list):
+        skills = []
+    skills = [s for s in skills if isinstance(s, str)]
+    recommended = data.get("skills_recommended") or []
+    for item in recommended if isinstance(recommended, list) else []:
         if isinstance(item, dict) and item.get("name"):
             name = item["name"]
             if name not in skills:
@@ -644,20 +650,34 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
     except (TypeError, ValueError):
         media_c = None
 
+    try:
+        confidence = float(data.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    ack_advice = data.get("ack_advice") or {}
+    if isinstance(ack_advice, str):
+        ack_advice = {"posture": ack_advice}
+    elif not isinstance(ack_advice, dict):
+        ack_advice = {}
+
+    def _list_or_empty(value):
+        return value if isinstance(value, list) else []
+
+    signal_results = data.get("signal_results")
     result = TriageResult(
         classification=data.get("classification", "follow_up"),
-        confidence=float(data.get("confidence", 0.5)),
+        confidence=confidence,
         project_id=data.get("project_id"),
-        task_actions=data.get("task_actions", []),
+        task_actions=_list_or_empty(data.get("task_actions")),
         skills_to_inject=skills,
         strategy_notes=data.get("strategy_notes", ""),
         parallel_work_viable=data.get("parallel_work_viable", False),
         has_attachments=data.get("has_attachments", False),
-        signal_results=data.get("signal_results", {}),
+        signal_results=signal_results if isinstance(signal_results, dict) else {},
         required_work_modality=data.get("required_work_modality"),
         recommended_model=data.get("recommended_model"),
-        correlations=data.get("correlations") or [],
-        ack_advice=data.get("ack_advice") or {},
+        correlations=_list_or_empty(data.get("correlations")),
+        ack_advice=ack_advice,
         media_certainty=media_c,
         inputs_used=inputs_used,
     )

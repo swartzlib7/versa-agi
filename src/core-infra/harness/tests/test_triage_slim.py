@@ -231,5 +231,53 @@ class TestAdverseSignals(unittest.TestCase):
         self.assertNotIn("Negative signals:", text)
 
 
+class TestMalformedTriageJson(unittest.TestCase):
+    """Model returns wrong JSON types (e.g. ack_advice as a bare string)."""
+
+    def _run(self, payload: dict) -> TriageResult:
+        try:
+            import langchain_core  # noqa: F401
+        except ImportError:
+            self.skipTest("langchain_core not installed")
+        from unittest import mock
+        import json as _json
+        from harness import triage as triage_mod
+
+        class _Llm:
+            def invoke(self, _msgs):
+                return type("R", (), {"content": _json.dumps(payload)})()
+
+        with mock.patch.object(triage_mod, "loadable_skills_catalog", return_value=""), \
+             mock.patch.object(triage_mod, "already_loaded_skill_names", return_value=set()), \
+             mock.patch.object(triage_mod, "_gated_skill_filenames", return_value=set()):
+            return triage_mod.run_triage(
+                _Llm(), "wake", inbox_context="inbox", registry_context="registry",
+            )
+
+    def test_string_ack_advice_becomes_posture(self):
+        result = self._run({"classification": "work_request", "ack_advice": "reply"})
+        self.assertEqual(result.ack_advice, {"posture": "reply"})
+        self.assertIn("Ack advice: reply", build_triage_context(result))
+
+    def test_wrong_types_do_not_crash_context(self):
+        result = self._run({
+            "classification": "work_request",
+            "confidence": "high",
+            "ack_advice": ["reply"],
+            "signal_results": "ok",
+            "task_actions": "none",
+            "correlations": "none",
+            "skills_to_inject": "work_initiation",
+            "skills_recommended": "x",
+        })
+        self.assertEqual(result.confidence, 0.5)
+        self.assertEqual(result.ack_advice, {})
+        self.assertEqual(result.signal_results, {})
+        self.assertEqual(result.task_actions, [])
+        self.assertEqual(result.correlations, [])
+        self.assertEqual(result.skills_to_inject, ["work_initiation.md"])
+        build_triage_context(result)
+
+
 if __name__ == "__main__":
     unittest.main()

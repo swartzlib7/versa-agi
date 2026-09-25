@@ -71,6 +71,8 @@ VBA is a standalone product. Talk to it over HTTP (or Script Tasks), never by sh
 
 A new install ships in **demo mode**. Turn it off in Settings → Modes before real use. Turning it off deletes the sample pack (`ba_sample:` rows). The Primary Org and the install accounts stay.
 
+The first boot also installs the site pack (`ba_site:` rows): the Versa AGi Primary slides, the Analysis canvas, styles, and menus. Demo off never removes them. The whole site is in Postgres, so a database backup carries it.
+
 ## Operate (already installed)
 
 1. Health: `curl -s localhost:<port>/api/health` in its own call.
