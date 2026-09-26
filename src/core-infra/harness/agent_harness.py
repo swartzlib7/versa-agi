@@ -17,6 +17,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from harness.live_call import CALL_TURN_STEP_CAP, step_cap_message as live_step_cap_message
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -412,6 +413,9 @@ def _run_agictl(args_str: str, timeout: int = AGICTL_TOOL_TIMEOUT_SECONDS) -> st
         cmd = ["agictl"] + shlex.split(args_str)
     except ValueError as ve:
         return f"ERROR parsing command syntax: {ve}. Check quotation marks and escaping."
+    if "call-bridge" in cmd:
+        return ("ERROR: there is no terminal command for placing a call. COA calls the Primary "
+                "User with the agictl_call_pu tool.")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -957,6 +961,127 @@ def _is_organization_enabled():
 
 if _is_organization_enabled():
     ALL_TOOLS.append(agictl_organization)
+
+
+# ═══════════════════════════════════════════════════════
+# LIVE CALL — COA voice call to the Primary User (state_live_voice_call.md)
+# ═══════════════════════════════════════════════════════
+
+class CallPuInput(BaseModel):
+    reason: str = Field(description=(
+        "Why you are calling the Primary User, in one plain sentence. "
+        "The voice opens the call with it."
+    ))
+    last_call_summary: str = Field(default="", description=(
+        "Only when you already called this cycle: the 2–4 sentence summary of that call "
+        "(what was discussed, decided, and what happens next). It is saved as that call's note."
+    ))
+
+
+_LIVE_CALL_RUNTIME = None  # harness.live_call.LiveCallRuntime, set in main()
+
+
+@tool("agictl_call_pu", args_schema=CallPuInput)
+def agictl_call_pu(reason: str, last_call_summary: str = "") -> str:
+    """Place a live voice call to the Primary User in the VersaVoice app (COA only).
+    Use when talking settles something faster than chat, or when the Primary User asked you to call.
+    Rings their phone and returns when they join, decline, miss it, or have no device (up to about a minute).
+    Connected: end your turn. Each request they make arrives as a new message; your final reply to it is spoken.
+    Not connected: send a chat message instead. Calls per cycle are limited by the Live Call setting.
+    Approvals are never given by voice.
+    """
+    runtime = _LIVE_CALL_RUNTIME
+    gate = _LIVE_CALL_GATE
+    if runtime is None or gate is None or not gate.ok:
+        return json.dumps({"success": False, "status": "unavailable",
+                           "error": "Live Call is not available in this cycle. Send a chat message instead."})
+    try:
+        return json.dumps(runtime.place(reason, gate.settings, last_call_summary=last_call_summary))
+    except Exception as e:
+        runtime.shutdown("failed")
+        return json.dumps({"success": False, "status": "failed", "error": f"call failed: {e}"})
+
+
+def _evaluate_live_call_gate():
+    if os.environ.get("VERSA_AGENT_NAME", "").strip().lower() != "coa":
+        return None
+    try:
+        from live_call_config import evaluate_gate
+        return evaluate_gate("coa")
+    except Exception as e:
+        tlog(f"LIVE CALL: gate check failed — {e}")
+        return None
+
+
+_LIVE_CALL_GATE = _evaluate_live_call_gate()
+if _LIVE_CALL_GATE is not None and _LIVE_CALL_GATE.ok:
+    ALL_TOOLS.append(agictl_call_pu)
+
+
+_REASONING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _call_model_overrides(call_model: str) -> dict | None:
+    """Lowest reasoning effort the call model allows — spoken answers need speed."""
+    from harness.model_params import agent_overrides_from_values, allowed_reasoning_efforts
+
+    allowed = set(allowed_reasoning_efforts(call_model))
+    lowest = next((e for e in _REASONING_EFFORT_ORDER if e in allowed), None)
+    if not lowest:
+        return None
+    return agent_overrides_from_values(
+        temperature=None, reasoning_effort=lowest, reasoning_max_tokens=None, model_params_extra=None,
+    )
+
+
+def _agictl_config_value(key: str) -> dict:
+    try:
+        payload = json.loads(_run_agictl(f"system config get {key}"))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    value = payload.get("value") if isinstance(payload, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _agictl_json(args: list[str], timeout: int = 30):
+    """agictl JSON for harness-internal reads (no tool-output cap)."""
+    try:
+        proc = subprocess.run(["agictl", *args], capture_output=True, text=True, timeout=timeout)
+        return json.loads(proc.stdout)
+    except Exception:
+        return None
+
+
+_LIVE_CALL_STYLE_KEY = "pu.communication_style"
+_LIVE_CALL_STYLE_KEY_HINTS = ("communication", "style", "preference", "tone")
+
+
+def _live_call_context() -> dict:
+    """PU language, communication style, and the latest call — for the voice card and prompt.
+
+    Style: system memory `pu.communication_style` (saved in the get-to-know call); without it,
+    any system-memory keys that look like communication preferences.
+    """
+    from harness.live_call import last_call_line, resolve_call_language
+
+    pu = _agictl_config_value("primary_user")
+    rows = [r for r in (_agictl_json(["memory", "system", "list"]) or []) if isinstance(r, dict)]
+    explicit = next((r for r in rows if r.get("key") == _LIVE_CALL_STYLE_KEY), None)
+    notes = []
+    if explicit and str(explicit.get("value") or "").strip():
+        notes.append(" ".join(str(explicit["value"]).split()))
+    else:
+        for row in rows:
+            key = str(row.get("key") or "")
+            if key and not key.startswith("live_call.") and any(h in key.lower() for h in _LIVE_CALL_STYLE_KEY_HINTS):
+                notes.append(f"{key}: {' '.join(str(row.get('value') or '').split())}")
+    rows = _agictl_json(["message", "calls", "list", "--limit", "1"])
+    latest = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+    return {
+        "language": resolve_call_language(str(pu.get("spokenLanguage") or "")),
+        "style_notes": "; ".join(notes)[:400],
+        "last_call": last_call_line(latest),
+    }
 
 
 # ═══════════════════════════════════════════════════════
@@ -1680,6 +1805,25 @@ def main():
     if skill_content:
         enhanced_prompt = system_prompt + "\n" + skill_content
 
+    # ── Live Call status + last call (COA, feature on) — dynamic tail, cache-safe ──
+    if _LIVE_CALL_GATE is not None and _LIVE_CALL_GATE.settings and _LIVE_CALL_GATE.settings.enabled:
+        try:
+            from harness.live_call import prompt_block
+            from live_call_config import load_catalog, model_display, provider_labels
+
+            call_model = _LIVE_CALL_GATE.call_model
+            model_label = (model_display(call_model, load_catalog().get(call_model), provider_labels())
+                           if call_model else "none")
+            ctx = _live_call_context()
+            enhanced_prompt += prompt_block(
+                ready=_LIVE_CALL_GATE.ok, reasons=_LIVE_CALL_GATE.summary(), call_model=model_label,
+                language=ctx["language"], last_call=ctx["last_call"],
+                calls_per_cycle=getattr(_LIVE_CALL_GATE.settings, "calls_per_cycle", 1),
+            )
+            tlog(f"LIVE CALL: prompt block added (last call: {'yes' if ctx['last_call'] else 'none'})")
+        except Exception as e:
+            tlog(f"LIVE CALL: prompt block skipped — {e}")
+
     # Build triage-enhanced wake prompt
     triage_context = build_triage_context(triage_result)
     enhanced_wake = f"{triage_context}\n\n---\n\n{wake_prompt}"
@@ -1849,6 +1993,53 @@ def main():
         agent_kwargs["checkpointer"] = checkpointer
 
     agent = create_react_agent(**agent_kwargs)
+
+    # ── Live call mode (COA) ──
+    # Call turns run on [live_call] call_model through a second graph that shares
+    # this thread's checkpointer; the cycle's execution model resumes after the call.
+    global _LIVE_CALL_RUNTIME
+    live_runtime = None
+    call_agent = None
+    if _LIVE_CALL_GATE is not None:
+        if not _LIVE_CALL_GATE.ok:
+            tlog(f"LIVE CALL: off — {_LIVE_CALL_GATE.summary()}")
+        elif not checkpointer:
+            tlog("LIVE CALL: off — no checkpoint thread for call turns")
+        else:
+            try:
+                from harness.live_call import LiveCallRuntime, sanitize_for_call_model
+                from provider_runtime import resolve_provider_api_key
+
+                call_model = _LIVE_CALL_GATE.call_model
+                call_llm = get_llm(call_model, agent_overrides=_call_model_overrides(call_model))
+
+                def call_pre_model_hook(state):
+                    trimmed = pre_model_hook(state)["llm_input_messages"]
+                    return {"llm_input_messages": sanitize_for_call_model(trimmed)}
+
+                call_agent = create_react_agent(
+                    model=call_llm,
+                    tools=ALL_TOOLS,
+                    prompt=enhanced_prompt,
+                    pre_model_hook=call_pre_model_hook,
+                    checkpointer=checkpointer,
+                )
+                pu = _agictl_config_value("primary_user")
+                identity = _agictl_config_value("identity")
+                live_runtime = LiveCallRuntime(
+                    agent_label=identity.get("first_name") or "COA",
+                    pu_name=pu.get("display_name") or pu.get("first_name") or "",
+                    api_key_resolver=lambda: resolve_provider_api_key("openai"),
+                    log=tlog,
+                    context_provider=_live_call_context,
+                )
+                _LIVE_CALL_RUNTIME = live_runtime
+                tlog(f"LIVE CALL: ready — call model {call_model}, voice {_LIVE_CALL_GATE.settings.voice_model}")
+            except Exception as e:
+                live_runtime = None
+                call_agent = None
+                _LIVE_CALL_RUNTIME = None
+                tlog(f"LIVE CALL: off — call model setup failed: {e}")
 
     # ── Checkpoint State Inspection & Repair ──
     # Two-pass approach:
@@ -2021,9 +2212,16 @@ def main():
     # exhausted retry budget (or a non-transient error) crashes the cycle.
     MAX_TRANSIENT_RETRIES = 4
 
+    # Live call turns run on call_agent and do not spend the cycle step budget.
+    active_agent = agent
+    call_steps = 0
+
+    def _in_call_turn() -> bool:
+        return live_runtime is not None and live_runtime.in_turn()
+
     try:
-        while step_count < max_steps and not cycle_ended:
-            _HARNESS_VIEW_CTX["steps_remaining"] = max_steps - step_count
+        while (step_count - call_steps) < max_steps and not cycle_ended:
+            _HARNESS_VIEW_CTX["steps_remaining"] = max_steps - (step_count - call_steps)
             # Each stream invocation processes until a budget threshold or completion.
             # With checkpointing, the graph state persists between invocations —
             # we only need to pass NEW messages (e.g., the budget warning).
@@ -2035,15 +2233,24 @@ def main():
             stream_natural_end = False
             while True:
                 try:
-                    for chunk in agent.stream({"messages": input_messages}, config=config):
+                    for chunk in active_agent.stream({"messages": input_messages}, config=config):
                         step_count += 1
+                        if _in_call_turn():
+                            call_steps += 1
+                            live_runtime.turn_steps += 1
                         if "agent" in chunk:
                             msg = chunk["agent"]["messages"][0]
                             messages.append(msg)
+                            # Call turns log one line per request (runtime); the call log keeps detail.
                             if hasattr(msg, "tool_calls") and msg.tool_calls:
                                 tool_names = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
-                                tlog(f"[STEP {step_count}/{max_steps}] AGENT → tool call: {tool_names}")
-                            else:
+                                if _in_call_turn():
+                                    live_runtime.note_tool_calls(
+                                        [tc.get("name", "?") for tc in msg.tool_calls], msg.content,
+                                    )
+                                else:
+                                    tlog(f"[STEP {step_count}/{max_steps}] AGENT → tool call: {tool_names}")
+                            elif not _in_call_turn():
                                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                                 preview = content[:200].replace("\n", " ")
                                 tlog(f"[STEP {step_count}/{max_steps}] AGENT → {preview}")
@@ -2058,7 +2265,8 @@ def main():
                             messages.append(msg)
                             content = msg.content if isinstance(msg.content, str) else str(msg.content)
                             preview = content[:200].replace("\n", " ")
-                            tlog(f"[STEP {step_count}/{max_steps}] TOOL  ← {preview}")
+                            if not _in_call_turn():
+                                tlog(f"[STEP {step_count}/{max_steps}] TOOL  ← {preview}")
 
                             tool_name = getattr(msg, "name", "") or ""
                             if tool_name in ("agictl_view_image", "agictl_view_video") and isinstance(content, str):
@@ -2134,18 +2342,33 @@ def main():
                         # agent chunk. Breaking mid-batch checkpoints dangling tool_calls
                         # and the re-invoke raises INVALID_CHAT_HISTORY.
                         pending_tool_calls = bool(_unresolved_tool_call_ids(messages))
-                        remaining = max_steps - step_count
+                        remaining = max_steps - (step_count - call_steps)
                         warning = None
 
-                        if pending_tool_calls:
-                            pass  # defer warning to the next chunk
+                        # ── Live call: per-request step allowance ──
+                        if (
+                            _in_call_turn()
+                            and not pending_tool_calls
+                            and live_runtime.turn_steps >= CALL_TURN_STEP_CAP
+                            and not live_runtime.cap_nudged
+                        ):
+                            live_runtime.cap_nudged = True
+                            flush_note = _flush_stream_messages_to_checkpoint(agent, config, messages)
+                            if not flush_note.startswith("flush-failed"):
+                                input_messages = [HumanMessage(content=live_step_cap_message(), id=str(uuid.uuid4()))]
+                                messages.append(input_messages[0])
+                                tlog(f"LIVE CALL: step allowance reached (step {step_count})")
+                                break
+
+                        if pending_tool_calls or _in_call_turn():
+                            pass  # defer warning to the next chunk; none during call turns
                         elif remaining <= end_off_remaining and not warned_end_off:
                             warned_end_off = True
                             warned_80 = True  # suppress a stale 80% warning after this one
-                            warning = budget_end_off_message(step_count, max_steps)
-                        elif step_count >= budget_80 and not warned_80:
+                            warning = budget_end_off_message(step_count - call_steps, max_steps)
+                        elif (step_count - call_steps) >= budget_80 and not warned_80:
                             warned_80 = True
-                            warning = budget_wrap_message(step_count, max_steps)
+                            warning = budget_wrap_message(step_count - call_steps, max_steps)
 
                         if warning:
                             tlog(f"[BUDGET] Injecting warning into agent conversation (step {step_count})")
@@ -2170,7 +2393,7 @@ def main():
                         # ── Hard Budget Enforcement ──
                         # Same safety gate: wait until every parallel tool_call in the
                         # current batch has its ToolMessage before terminating.
-                        if step_count >= max_steps and not pending_tool_calls:
+                        if (step_count - call_steps) >= max_steps and not pending_tool_calls:
                             tlog(f"\n[BUDGET EXCEEDED] Hard limit reached ({step_count}/{max_steps}). Terminating cycle.")
                             cycle_ended = True
                             budget_hard_stop = True
@@ -2194,6 +2417,19 @@ def main():
                 break  # stream invocation finished without a transient error
 
             if stream_natural_end:
+                last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+                # ── Live call: the reply to "call ended" is the last-call note ──
+                if live_runtime is not None and live_runtime.awaiting_summary:
+                    live_runtime.capture_summary(last_ai.content if last_ai else "")
+                # ── Live call: speak this turn's answer, then wait for the next request ──
+                if live_runtime is not None and live_runtime.live:
+                    next_text = live_runtime.next_injection(last_ai.content if last_ai else "")
+                    if next_text is not None:
+                        next_msg = HumanMessage(content=next_text, id=str(uuid.uuid4()))
+                        input_messages = [next_msg]
+                        messages.append(next_msg)
+                        active_agent = call_agent if _in_call_turn() else agent
+                        continue
                 break
 
         final_message = messages[-1].content
@@ -2203,6 +2439,17 @@ def main():
         messages.append(AIMessage(content=f"FATAL EXCEPTION: {e}\nThe cycle crashed or hit recursion limit ({step_count} steps)."))
         tlog(messages[-1].content)
         _harness_crashed = True
+
+    if live_runtime is not None:
+        try:
+            if live_runtime.awaiting_summary:
+                last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+                live_runtime.capture_summary(last_ai.content if last_ai else "")
+            live_runtime.shutdown("failed" if _harness_crashed else "ended")
+        except Exception as e:
+            tlog(f"LIVE CALL: shutdown error — {e}")
+        if call_steps:
+            tlog(f"LIVE CALL: {call_steps} call-turn steps (outside the cycle budget)")
 
     result_messages = messages
 
@@ -2257,7 +2504,7 @@ def main():
 
     # Hard step budget: finalize cycle + signal lifeline to respawn (exit 53).
     if budget_hard_stop:
-        _finalize_cycle_step_budget(args.agent, step_count, max_steps)
+        _finalize_cycle_step_budget(args.agent, step_count - call_steps, max_steps)
         sys.exit(53)
 
 if __name__ == "__main__":

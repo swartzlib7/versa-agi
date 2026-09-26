@@ -426,6 +426,7 @@ class ModelManagerModal(ModalScreen):
         super().__init__(**kwargs)
         self._models_by_key = {}
         self._providers_by_slug = {}
+        self._call_capable: set[str] = set()
         self._dirty = False  # whether anything changed (drives parent refresh on close)
 
     def compose(self) -> ComposeResult:
@@ -456,13 +457,14 @@ class ModelManagerModal(ModalScreen):
                 yield Button("↩ Reset", id="mm-reset", variant="warning")
                 yield Button("✖ Remove", id="mm-remove", variant="error")
                 yield Button("＋ Add", id="mm-add", variant="success")
+                yield Button("📞 Call-capable", id="mm-call-capable", variant="default")
                 yield Button("Close", classes="dismiss-btn", variant="default", id="mm-close")
 
     def on_mount(self) -> None:
         mt = self.query_one("#mm-models-table", DataTable)
         mt.cursor_type = "row"
         mt.add_columns(
-            "Label", "Key", "Provider", "Type", "Work", "Rtr", "En", "COA", "Rsn",
+            "Label", "Key", "Provider", "Type", "Work", "Rtr", "Call", "En", "COA", "Rsn",
             "Input", "Input Price", "Output", "Output Price", "Drivers",
         )
         pt = self.query_one("#mm-providers-table", DataTable)
@@ -477,6 +479,8 @@ class ModelManagerModal(ModalScreen):
         models = data.get("models", []) if ok else []
         ok_p, data_p, err_p = _run_agictl(["provider", "list"])
         providers = data_p.get("providers", []) if ok_p else []
+        ok_c, data_c, _ = _run_agictl(["model", "live-call", "list"])
+        self._call_capable = set(data_c.get("effective", [])) if ok_c else set()
 
         self._models_by_key = {m["key"]: m for m in models}
         self._providers_by_slug = {p["slug"]: p for p in providers}
@@ -505,6 +509,7 @@ class ModelManagerModal(ModalScreen):
                 _model_type(m),
                 m.get("work_modality", "balanced"),
                 _yn(m.get("router_eligible")),
+                _yn(m["key"] in self._call_capable),
                 _enabled_val(m.get("enabled", False)),
                 _yn(m["coa"]),
                 m.get("reasoning_effort", "none"),
@@ -567,6 +572,15 @@ class ModelManagerModal(ModalScreen):
         bid = event.button.id
         if bid == "mm-close":
             self._close()
+        elif bid == "mm-call-capable":
+            key = self._selected_key("#mm-models-table")
+            if not key:
+                self._feedback("[yellow]Select a model row first.[/]")
+                return
+            if key in self._call_capable:
+                self._apply(["model", "live-call", "unset", key], f"'{key}' is no longer call-capable")
+            else:
+                self._apply(["model", "live-call", "set", key], f"'{key}' is call-capable")
         # ── Context-sensitive actions (based on active tab) ──
         elif bid in ("mm-add", "mm-edit", "mm-reset", "mm-remove"):
             tabs = self.query_one("#model-manager-tabs", TabbedContent)

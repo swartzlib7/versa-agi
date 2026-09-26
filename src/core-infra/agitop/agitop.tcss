@@ -1765,6 +1765,22 @@ SystemSettingsModal {
     text-style: bold;
 }
 
+#live-call-transcript {
+    height: 14;
+    border: round #dc2626 60%;
+}
+
+#settings-tabs #--content-tab-settings-live-call-tab {
+    border-top: heavy #dc2626;
+}
+
+#settings-tabs #--content-tab-settings-live-call-tab.-active {
+    background: #dc2626 25%;
+    color: #fca5a5;
+    border: heavy #dc2626;
+    text-style: bold;
+}
+
 #settings-image-processing-scroll {
     height: 100%;
 }
@@ -1912,14 +1928,16 @@ SystemSettingsModal {
 #settings-skills-pane,
 #settings-packages-pane,
 #settings-system-memory-pane,
-#settings-utility-models-pane {
+#settings-utility-models-pane,
+#settings-live-call-pane {
     height: 100%;
     layout: vertical;
 }
 
 #settings-general-scroll,
 #settings-audio-processing-scroll,
-#settings-image-processing-scroll {
+#settings-image-processing-scroll,
+#settings-live-call-scroll {
     height: 1fr;
     min-height: 0;
 }

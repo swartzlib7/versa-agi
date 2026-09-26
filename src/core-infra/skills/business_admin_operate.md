@@ -76,7 +76,7 @@ The first boot also installs the site pack (`ba_site:` rows): the Versa AGi Prim
 ## Operate (already installed)
 
 1. Health: `curl -s localhost:<port>/api/health` in its own call.
-2. Restart: manual §3.5 — exact PID from `ss -tlnp`, rebuild when switching SHAs, verify health separately.
+2. Restart: manual §3.5 — exact PID from `ss -tlnp`, rebuild when switching SHAs, verify health separately. Upgrade an already-customized install to 1.0.4 by manual §5.2.1. Leave `.data/site-settings.json` in place; do not restore the development database onto it.
 3. Backups: manual §3.7 (`.data/catalog.json` or `catalog_overlay` + zone tables).
 4. Stale UI / local enhance: `docs/ops/WORKING_WITH_VBA.md` (forms, listings, Spatial Twin, rebuild + restart).
 

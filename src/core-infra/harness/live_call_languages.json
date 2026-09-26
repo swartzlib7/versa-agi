@@ -1,0 +1,470 @@
+{
+  "_about": "Live Call language coverage for the 93 VersaVoice languages (app/lib/features/profile/domain/languages.dart). coverage: voice = dedicated GPT-Live voice; supported = GPT-Live speaks it with the default voice; english = speak English. Seeded 2026-09-26 from OpenAI's documented speech-to-text language list (no official GPT-Live list exists); set verified to a date after a live test. State doc: state_live_voice_call.md §3.4 P2-B.",
+  "languages": {
+    "en": {
+      "name": "English",
+      "coverage": "voice",
+      "verified": null
+    },
+    "ar": {
+      "name": "Arabic",
+      "coverage": "supported",
+      "verified": null
+    },
+    "bg": {
+      "name": "Bulgarian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "zh": {
+      "name": "Mandarin Chinese",
+      "coverage": "supported",
+      "verified": null
+    },
+    "hr": {
+      "name": "Croatian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "cs": {
+      "name": "Czech",
+      "coverage": "supported",
+      "verified": null
+    },
+    "da": {
+      "name": "Danish",
+      "coverage": "supported",
+      "verified": null
+    },
+    "nl": {
+      "name": "Dutch",
+      "coverage": "supported",
+      "verified": null
+    },
+    "fil": {
+      "name": "Filipino",
+      "coverage": "supported",
+      "verified": null
+    },
+    "fi": {
+      "name": "Finnish",
+      "coverage": "supported",
+      "verified": null
+    },
+    "fr": {
+      "name": "French",
+      "coverage": "supported",
+      "verified": null
+    },
+    "de": {
+      "name": "German",
+      "coverage": "supported",
+      "verified": null
+    },
+    "el": {
+      "name": "Greek",
+      "coverage": "supported",
+      "verified": null
+    },
+    "hi": {
+      "name": "Hindi",
+      "coverage": "supported",
+      "verified": null
+    },
+    "hu": {
+      "name": "Hungarian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "id": {
+      "name": "Indonesian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "it": {
+      "name": "Italian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ja": {
+      "name": "Japanese",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ko": {
+      "name": "Korean",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ms": {
+      "name": "Malay",
+      "coverage": "supported",
+      "verified": null
+    },
+    "no": {
+      "name": "Norwegian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "pl": {
+      "name": "Polish",
+      "coverage": "supported",
+      "verified": null
+    },
+    "pt": {
+      "name": "Portuguese",
+      "coverage": "voice",
+      "verified": null
+    },
+    "ro": {
+      "name": "Romanian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ru": {
+      "name": "Russian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "sk": {
+      "name": "Slovak",
+      "coverage": "supported",
+      "verified": null
+    },
+    "es": {
+      "name": "Spanish",
+      "coverage": "supported",
+      "verified": null
+    },
+    "sv": {
+      "name": "Swedish",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ta": {
+      "name": "Tamil",
+      "coverage": "supported",
+      "verified": null
+    },
+    "tr": {
+      "name": "Turkish",
+      "coverage": "supported",
+      "verified": null
+    },
+    "uk": {
+      "name": "Ukrainian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "vi": {
+      "name": "Vietnamese",
+      "coverage": "supported",
+      "verified": null
+    },
+    "af": {
+      "name": "Afrikaans",
+      "coverage": "supported",
+      "verified": null
+    },
+    "hy": {
+      "name": "Armenian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "as": {
+      "name": "Assamese",
+      "coverage": "english",
+      "verified": null
+    },
+    "az": {
+      "name": "Azerbaijani",
+      "coverage": "supported",
+      "verified": null
+    },
+    "be": {
+      "name": "Belarusian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "bn": {
+      "name": "Bengali",
+      "coverage": "english",
+      "verified": null
+    },
+    "bs": {
+      "name": "Bosnian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ca": {
+      "name": "Catalan",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ceb": {
+      "name": "Cebuano",
+      "coverage": "english",
+      "verified": null
+    },
+    "ny": {
+      "name": "Chichewa",
+      "coverage": "english",
+      "verified": null
+    },
+    "et": {
+      "name": "Estonian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "gl": {
+      "name": "Galician",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ka": {
+      "name": "Georgian",
+      "coverage": "english",
+      "verified": null
+    },
+    "gu": {
+      "name": "Gujarati",
+      "coverage": "english",
+      "verified": null
+    },
+    "ha": {
+      "name": "Hausa",
+      "coverage": "english",
+      "verified": null
+    },
+    "he": {
+      "name": "Hebrew",
+      "coverage": "supported",
+      "verified": null
+    },
+    "is": {
+      "name": "Icelandic",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ga": {
+      "name": "Irish",
+      "coverage": "english",
+      "verified": null
+    },
+    "jv": {
+      "name": "Javanese",
+      "coverage": "english",
+      "verified": null
+    },
+    "kn": {
+      "name": "Kannada",
+      "coverage": "supported",
+      "verified": null
+    },
+    "kk": {
+      "name": "Kazakh",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ky": {
+      "name": "Kirghiz",
+      "coverage": "english",
+      "verified": null
+    },
+    "lv": {
+      "name": "Latvian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ln": {
+      "name": "Lingala",
+      "coverage": "english",
+      "verified": null
+    },
+    "lt": {
+      "name": "Lithuanian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "lb": {
+      "name": "Luxembourgish",
+      "coverage": "english",
+      "verified": null
+    },
+    "mk": {
+      "name": "Macedonian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ml": {
+      "name": "Malayalam",
+      "coverage": "english",
+      "verified": null
+    },
+    "mr": {
+      "name": "Marathi",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ne": {
+      "name": "Nepali",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ps": {
+      "name": "Pashto",
+      "coverage": "english",
+      "verified": null
+    },
+    "fa": {
+      "name": "Persian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "pa": {
+      "name": "Punjabi",
+      "coverage": "english",
+      "verified": null
+    },
+    "sr": {
+      "name": "Serbian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "sd": {
+      "name": "Sindhi",
+      "coverage": "english",
+      "verified": null
+    },
+    "sl": {
+      "name": "Slovenian",
+      "coverage": "supported",
+      "verified": null
+    },
+    "so": {
+      "name": "Somali",
+      "coverage": "english",
+      "verified": null
+    },
+    "sw": {
+      "name": "Swahili",
+      "coverage": "supported",
+      "verified": null
+    },
+    "te": {
+      "name": "Telugu",
+      "coverage": "english",
+      "verified": null
+    },
+    "th": {
+      "name": "Thai",
+      "coverage": "supported",
+      "verified": null
+    },
+    "ur": {
+      "name": "Urdu",
+      "coverage": "supported",
+      "verified": null
+    },
+    "cy": {
+      "name": "Welsh",
+      "coverage": "supported",
+      "verified": null
+    },
+    "zu": {
+      "name": "Zulu",
+      "coverage": "english",
+      "verified": null
+    },
+    "xh": {
+      "name": "Xhosa",
+      "coverage": "english",
+      "verified": null
+    },
+    "yo": {
+      "name": "Yoruba",
+      "coverage": "english",
+      "verified": null
+    },
+    "my": {
+      "name": "Burmese",
+      "coverage": "english",
+      "verified": null
+    },
+    "mn": {
+      "name": "Mongolian",
+      "coverage": "english",
+      "verified": null
+    },
+    "uz": {
+      "name": "Uzbek",
+      "coverage": "english",
+      "verified": null
+    },
+    "sq": {
+      "name": "Albanian",
+      "coverage": "english",
+      "verified": null
+    },
+    "am": {
+      "name": "Amharic",
+      "coverage": "english",
+      "verified": null
+    },
+    "eu": {
+      "name": "Basque",
+      "coverage": "english",
+      "verified": null
+    },
+    "ht": {
+      "name": "Haitian Creole",
+      "coverage": "english",
+      "verified": null
+    },
+    "mg": {
+      "name": "Malagasy",
+      "coverage": "english",
+      "verified": null
+    },
+    "tg": {
+      "name": "Tajik",
+      "coverage": "english",
+      "verified": null
+    },
+    "nso": {
+      "name": "Northern Sotho",
+      "coverage": "english",
+      "verified": null
+    },
+    "tn": {
+      "name": "Setswana",
+      "coverage": "english",
+      "verified": null
+    },
+    "st": {
+      "name": "Southern Sotho",
+      "coverage": "english",
+      "verified": null
+    },
+    "ts": {
+      "name": "Xitsonga",
+      "coverage": "english",
+      "verified": null
+    },
+    "ss": {
+      "name": "siSwati",
+      "coverage": "english",
+      "verified": null
+    },
+    "ve": {
+      "name": "Tshivenda",
+      "coverage": "english",
+      "verified": null
+    },
+    "nr": {
+      "name": "isiNdebele",
+      "coverage": "english",
+      "verified": null
+    }
+  }
+}

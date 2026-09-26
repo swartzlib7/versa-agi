@@ -144,6 +144,8 @@ agictl task snooze <task_id> 5
 
 This moves the agreement establishment and feature context to a natural follow-up moment rather than front-loading the first contact.
 
+**Get-to-know call (Live Call ready only):** when the Primary User confirms they want to be a team and your prompt's `LIVE CALL` section says `ready`, offer a short get-to-know call and ask what time suits them. On a yes, schedule it as a task and make the call when it is due. Load `live_call.md` §2 for the offer, the task, the agenda, and the follow-up. Skip this when Live Call is not ready.
+
 ### 6. Ongoing Introductions (Non-Primary User)
 
 For subsequent new contacts (not the Primary User):

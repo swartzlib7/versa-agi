@@ -691,10 +691,11 @@ install_acceptance_feature_prompts() {
       "Organization is experimental and defaults to OFF." \
       "Versa - Business Admin defaults to OFF." \
       "Utility Models, Script Tasks, and Output Routing default to ON." \
+      "Live Call (COA voice calls to you) defaults to OFF." \
       "You can change these any time by re-running setup."
   else
     echo ""
-    echo "Optional features (Organization and Versa - Business Admin default OFF;"
+    echo "Optional features (Organization, Versa - Business Admin, and Live Call default OFF;"
     echo "Utility / Script / Routing default ON):"
     echo ""
   fi
@@ -753,6 +754,123 @@ install_acceptance_feature_prompts() {
     "a chosen model per cycle (the Output Routing tab in Model Routing)."
   export VERSA_FEATURE_OUTPUT_ROUTING_UI="$(_install_acceptance_feature_ask \
     "Enable Output Routing UI?" "${output_current}")"
+
+  local live_current live_model_current
+  if [ "${UPDATE_MODE:-false}" = true ]; then
+    live_current="$(_install_acceptance_features_get live_call false)"
+    live_model_current="$(_install_acceptance_section_get live_call call_model "")"
+  else
+    live_current="false"
+    live_model_current=""
+  fi
+  echo ""
+  _install_acceptance_feature_note \
+    "Live Call — COA can call you in the VersaVoice app when talking settles"
+  _install_acceptance_feature_cont \
+    "something faster than chat. Needs an OpenAI API key with GPT-Live access."
+  export VERSA_FEATURE_LIVE_CALL="$(_install_acceptance_feature_ask \
+    "Enable Live Call?" "${live_current}")"
+  export VERSA_LIVE_CALL_MODEL="${live_model_current}"
+  if [ "${VERSA_FEATURE_LIVE_CALL}" = "true" ]; then
+    VERSA_LIVE_CALL_MODEL="$(_install_acceptance_live_call_model_pick "${live_model_current}")"
+    export VERSA_LIVE_CALL_MODEL
+  fi
+}
+
+# Read one key from any section of the deployed setup.ini (default when absent).
+_install_acceptance_section_get() {
+  local section="$1" key="$2" default="${3:-}"
+  local ini="${INSTALL_ACCEPTANCE_SETUP_INI}"
+  [ -f "${ini}" ] || { echo "${default}"; return; }
+  awk -F= -v section="${section}" -v key="${key}" -v def="${default}" '
+    /^\[/ { gsub(/[][]/, "", $0); current=$0 }
+    current == section && $1 == key { v=substr($0, index($0, "=") + 1); gsub(/[ \t]/,"",v); print v; found=1; exit }
+    END { if (!found) print def }
+  ' "${ini}" 2>/dev/null || echo "${default}"
+}
+
+# Call-capable keys shipped in models.ini.stock [catalog_live_call], as
+# "Provider — Model name<TAB>key" lines sorted like Model Manager.
+_install_acceptance_live_call_keys() {
+  local stock
+  stock="$(dirname "${INSTALL_ACCEPTANCE_SOURCE_INI}")/models.ini.stock"
+  [ -f "${stock}" ] || return 0
+  awk '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    /^\[/ { current=$0; gsub(/[][]/, "", current); next }
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      eq = index($0, "="); if (!eq) next
+      k = trim(substr($0, 1, eq - 1)); v = trim(substr($0, eq + 1))
+      if (current == "provider_library") { split(v, p, "|"); plabel[k] = p[2] }
+      else if (current == "catalog_library") {
+        n = split(v, f, "|"); mprov[k] = f[2]
+        name = f[n]; sub(/ — .*/, "", name); mname[k] = name
+      }
+      else if (current == "catalog_live_call" && v == "true") live[++count] = k
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        k = live[i]; prov = plabel[mprov[k]]; if (prov == "") prov = mprov[k]
+        name = (k in mname) ? mname[k] : k
+        printf "%s — %s\t%s\n", prov, name, k
+      }
+    }
+  ' "${stock}" | LC_ALL=C sort -f
+}
+
+# Numbered pick of the call model. Echoes the chosen key ("" = choose later in agitop).
+# Prompts go to stderr — this runs in $().
+_install_acceptance_live_call_model_pick() {
+  local current="$1" keys=() labels=() reply idx=1 default_idx=0 k line
+  while IFS=$'\t' read -r line k; do
+    [ -n "${k}" ] || continue
+    labels+=("${line}")
+    keys+=("${k}")
+  done < <(_install_acceptance_live_call_keys)
+  if [ "${#keys[@]}" -eq 0 ]; then
+    echo "${current}"
+    return
+  fi
+  {
+    echo ""
+    echo "    Call model — COA thinks on this model while you talk:"
+    for k in "${keys[@]}"; do
+      [ "${k}" = "${current}" ] && default_idx="${idx}"
+      echo "      ${idx}) ${labels[$((idx - 1))]}"
+      idx=$((idx + 1))
+    done
+    echo "      0) Choose later (agitop → System Settings → Live Call)"
+  } >&2
+  [ "${default_idx}" -eq 0 ] && [ -z "${current}" ] && default_idx=1
+  _install_acceptance_read_line "    Select [${default_idx}]: " reply
+  reply="$(printf '%s' "${reply}" | tr -d '[:space:]')"
+  reply="${reply:-${default_idx}}"
+  if [[ "${reply}" =~ ^[0-9]+$ ]] && [ "${reply}" -ge 1 ] && [ "${reply}" -le "${#keys[@]}" ]; then
+    echo "${keys[$((reply - 1))]}"
+  elif [ "${reply}" = "0" ]; then
+    echo ""
+  else
+    echo "${current}"
+  fi
+}
+
+# Write one key into a section of the deployed setup.ini (create section if absent).
+_install_acceptance_section_set() {
+  local section="$1" key="$2" value="$3"
+  local ini="${INSTALL_ACCEPTANCE_SETUP_INI}"
+  [ -f "${ini}" ] || return 1
+  if ! grep -q "^\[${section}\]" "${ini}" 2>/dev/null; then
+    printf '\n[%s]\n' "${section}" >> "${ini}"
+  fi
+  if awk -v s="${section}" -v k="${key}" '
+      /^\[/ { gsub(/[][]/,"",$0); sec=$0 }
+      sec==s && $0 ~ "^"k"=" { found=1 }
+      END { exit(found?0:1) }' "${ini}" 2>/dev/null; then
+    sed -i "/^\[${section}\]/,/^\[/ s|^${key}=.*|${key}=${value}|" "${ini}"
+  else
+    sed -i "/^\[${section}\]/a ${key}=${value}" "${ini}"
+  fi
 }
 
 # Write a single [features] key into the deployed setup.ini (create section if
@@ -806,6 +924,10 @@ install_acceptance_persist_features() {
     || warn "Failed to set script_tasks_ui (non-fatal)"
   _install_acceptance_features_set output_routing_ui "$(_install_acceptance_norm_bool "${VERSA_FEATURE_OUTPUT_ROUTING_UI:-false}")" \
     || warn "Failed to set output_routing_ui (non-fatal)"
+  _install_acceptance_features_set live_call "$(_install_acceptance_norm_bool "${VERSA_FEATURE_LIVE_CALL:-false}")" \
+    || warn "Failed to set live_call (non-fatal)"
+  _install_acceptance_section_set live_call call_model "${VERSA_LIVE_CALL_MODEL:-}" \
+    || warn "Failed to set live_call call_model (non-fatal)"
   _install_acceptance_sync_source_ini || true
   ok "Feature flags saved to setup.ini [features]"
   return 0

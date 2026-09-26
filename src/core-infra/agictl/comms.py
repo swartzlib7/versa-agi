@@ -61,7 +61,7 @@ def _rate_limit_notify(sleep_duration: float):
     except Exception:
         pass  # Best-effort — don't break the API call chain
 
-def api_request(endpoint, token, method="GET", body=None):
+def api_request(endpoint, token, method="GET", body=None, timeout=None):
     _rate_limit_wait()
     url = VV_API_BASE + endpoint
     headers = {
@@ -70,7 +70,8 @@ def api_request(endpoint, token, method="GET", body=None):
     }
     data = json.dumps(body).encode("utf-8") if body else None
     # TTS generation (speak mode) can take 15-30s for longer messages
-    timeout = 60 if method in ("POST", "PUT") else 10
+    if timeout is None:
+        timeout = 60 if method in ("POST", "PUT") else 10
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -468,6 +469,41 @@ def send_message(token, sub_account_id, recipient_id, text, mode, messages_db, a
     except Exception as e:
         console.print(f"[red]DB Error persisting sent message:[/red] {str(e)}")
         return False
+
+# ── Live voice call signaling (state_live_voice_call.md §1.6) ──
+# The phone's WebRTC offer and the OpenAI answer pass through VersaVoice; audio
+# never does. GET /calls/{id} long-polls so ringing stays inside the 60/min limit.
+
+CALL_LONG_POLL_SECONDS = 25
+
+
+def call_open(token, sub_account_id, reason, ttl_seconds):
+    """POST /calls — ring the sponsor PU. data.status is 'calling' or 'offline'."""
+    return api_request("/calls", token, method="POST", body={
+        "subAccountId": sub_account_id,
+        "reason": reason,
+        "ttlSeconds": int(ttl_seconds),
+    })
+
+
+def call_wait_offer(token, sub_account_id, call_id, wait_seconds=CALL_LONG_POLL_SECONDS):
+    """GET /calls/{id}?wait=offer — returns when the PU joins, declines, or the wait ends."""
+    query = urllib.parse.urlencode({
+        "subAccountId": sub_account_id,
+        "wait": "offer",
+        "timeout": int(wait_seconds),
+    })
+    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}?{query}"
+    return api_request(endpoint, token, method="GET", timeout=int(wait_seconds) + 10)
+
+
+def call_update(token, sub_account_id, call_id, **fields):
+    """PUT /calls/{id} — sdpAnswer, status, closeReason, durationSeconds."""
+    body = {"subAccountId": sub_account_id}
+    body.update({k: v for k, v in fields.items() if v is not None})
+    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}"
+    return api_request(endpoint, token, method="PUT", body=body)
+
 
 def mark_message_processed(msg_id, messages_db):
     """Updates the local SQLite message instance to processed status so the Agent ignores it on subsequent wakes."""

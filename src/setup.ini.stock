@@ -372,11 +372,31 @@ output_tail_lines=20
 #     business_admin (coa_only).
 #   utility_models_ui / script_tasks_ui / output_routing_ui — stock ON (product
 #   defaults). Fresh install prompts [Y/n]; --update carries the site's value.
+#   live_call — stock OFF; COA may place a live voice call to the Primary User
+#     (GPT-Live voice on the OpenAI provider; call turns on [live_call] call_model).
 organization_ui=false
 business_admin=false
 utility_models_ui=true
 script_tasks_ui=true
 output_routing_ui=true
+live_call=false
+
+[live_call]
+# Live voice call (COA → Primary User). Edit via agitop → System Settings →
+# Live Call, or setup. PU-owned; reconcile carries values forward.
+# call_model — catalog key from models.ini [catalog_live_call] (call-capable),
+#   whose provider is keyed. Empty = no call tool.
+# voice_model — GPT-Live voice model id on the OpenAI provider.
+# max_minutes — spoken wrap-up, then close (1–55).
+# join_timeout_seconds — how long the call rings before it is missed (15–120).
+# narrate_progress — while COA works on a request, speak its short progress lines.
+# calls_per_cycle — calls COA may place in one cycle (1–5).
+call_model=
+voice_model=gpt-live-1
+max_minutes=15
+join_timeout_seconds=45
+narrate_progress=true
+calls_per_cycle=1
 
 [registration]
 # Runtime submission state (endpoint + key: core-infra/registration.conf)

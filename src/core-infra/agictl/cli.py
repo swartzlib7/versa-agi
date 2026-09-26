@@ -374,6 +374,16 @@ def system_config_set_ini(section, key, value):
                 error="sync_interval must be one of: " + ", ".join(_VV_SYNC_INTERVALS),
             )
             sys.exit(1)
+    elif section_l == "live_call" or (section_l == "features" and key_l == "live_call"):
+        if os.getenv("AGICTL_AGENT_USER"):
+            json_response(False, error="Live Call settings are Primary User only "
+                                       "(agitop → System Settings → Live Call).")
+            sys.exit(1)
+        import live_call_config
+        ok, err, value = live_call_config.validate_setting(section_l, key_l, value_s)
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
 
     try:
         _update_ini_key(ini_path, section, key, value)
@@ -1763,7 +1773,7 @@ _MODELS_UNION_SECTIONS = (
 _MODELS_SITE_SECTIONS = (
     "catalog_custom", "providers_custom", "model_params_custom",
     "providers_site", "provider_custom", "provider_overrides",
-    "catalog_selected", "catalog_overrides",
+    "catalog_selected", "catalog_overrides", "catalog_live_call_custom",
 )
 
 
@@ -14259,6 +14269,22 @@ try:
     )
 except ImportError:
     pass  # organization commands unavailable on server-only topology
+
+try:
+    from agictl import live_call_cli
+    live_call_cli.register(
+        message,
+        model,
+        json_response=json_response,
+        get_config=get_config,
+        messages_db_path=lambda: messages_db,
+        models_ini_write_targets=_models_ini_write_targets,
+        upsert_ini_entry=_upsert_models_ini_entry,
+        remove_ini_entry=_remove_ini_entry,
+        load_catalog=_load_catalog,
+    )
+except ImportError:
+    pass  # live call commands unavailable on server-only topology
 
 
 if __name__ == "__main__":

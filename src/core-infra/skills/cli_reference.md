@@ -285,6 +285,17 @@ agictl message send <uid> "Here are the reports" --mode typed \
 **Inbound attachments**: Downloaded automatically by Lifeline to `.agent/attachments/{message-id}/{media|markdown|urls}/`
 > **READ-ONLY** — The `attachments/` directory is owned by `watchdog`. You can READ files here but CANNOT create, modify, or delete them. To save processed data, write to your `workspace/` directory instead.
 
+### Live call (COA only)
+
+Placing a call is the harness tool **`agictl_call_pu(reason)`** only — there is **no terminal command** (see `cli_reference_agent.md` §4 Live call for the call flow). The call log is read-only:
+
+```bash
+agictl message calls list [--limit N]                  # Recent calls: status, reason, voice seconds
+agictl message calls show <call_id>                    # Transcript + delegations (tools used, what was spoken)
+```
+
+Live Call settings (`[features] live_call`, `[live_call]`) are **Primary User only** — agitop **System Settings → Live Call** or setup. `set-ini` refuses agent writes to them.
+
 ### Message Data (for system scripts)
 ```bash
 agictl message count-unprocessed <sub_account> <seconds>   # Count within time window
@@ -547,6 +558,16 @@ agictl model params clear <scope>                     # Remove custom override (
 ```
 
 **Scopes:** `default` (system baseline), `model:deepseek/deepseek-v4-flash`. Per-agent overrides are nullable `agents.db` columns — set via agitop **Technical Setup** (⚙) or leave empty to inherit. The `extra` JSON bag passes provider-specific keys verbatim (e.g. `top_p`, `frequency_penalty`).
+
+### model live-call — call-capable models (Live Call)
+
+```bash
+agictl model live-call list                           # Shipped, effective, and selectable call models + settings
+sudo agictl model live-call set <key>                 # PU/root — mark a catalog key call-capable
+sudo agictl model live-call unset <key>               # PU/root — remove it (shipped keys are overridden in the site layer)
+```
+
+Shipped call-capable keys live in `models.ini [catalog_live_call]` (Gemini 3.7 Flash, Grok 4.6, and their OpenRouter aliases); site changes go to `[catalog_live_call_custom]` and survive `--update`. agitop **Model Manager → 📞 Call-capable** toggles the selected row.
 
 ### provider — model providers (CRUD)
 

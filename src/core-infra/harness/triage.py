@@ -192,7 +192,8 @@ _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and resp
 - "founder_story.md" — Sharing the VersaVoice origin story
 - "solution_architect.md" — System/environment setup guidance for PU
 - "system_packages.md" — Requesting and installing system packages (apt)
-- "versa_agi_operations_guide.md" — PU-facing Versa AGi product/ops guidance (COA only; how the system works, agitop, troubleshooting)"""
+- "versa_agi_operations_guide.md" — PU-facing Versa AGi product/ops guidance (COA only; how the system works, agitop, troubleshooting)
+- "live_call.md" — Live Call — when and how to call the Primary User (COA only)"""
 
 _SKILLS_CATALOG_PATH = "/var/lib/versa-agi/skills_catalog.md"
 

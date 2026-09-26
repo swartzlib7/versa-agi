@@ -1,0 +1,627 @@
+"""Harness call mode with fake VersaVoice bridge, GPT-Live HTTP, and sideband socket.
+
+Scenarios follow state_live_voice_call.md §4 test data.
+"""
+
+import dataclasses
+import json
+import os
+import queue
+import re
+import threading
+import time
+import unittest
+
+from langchain_core.messages import AIMessage, HumanMessage
+
+from harness import live_call as lc
+from live_call_config import LiveCallSettings
+
+SETTINGS = LiveCallSettings(enabled=True, call_model="gemini-3.7-flash", voice_model="gpt-live-1",
+                            max_minutes=15, join_timeout_seconds=45)
+
+
+class FakeSocket:
+    def __init__(self):
+        self.inbox: queue.Queue = queue.Queue()
+        self.sent: list[dict] = []
+        self.closed = False
+
+    def push(self, event: dict):
+        self.inbox.put(json.dumps(event))
+
+    def recv(self, timeout=None):
+        try:
+            return self.inbox.get(timeout=timeout or 0.05)
+        except queue.Empty:
+            raise TimeoutError()
+
+    def send(self, raw: str):
+        event = json.loads(raw)
+        self.sent.append(event)
+        if event["type"] == "session.close":
+            self.push({"type": "session.closed", "reason": "close_requested", "usage": {"seconds": 61}})
+
+    def close(self):
+        self.closed = True
+
+    def sent_types(self):
+        return [e["type"] for e in self.sent]
+
+
+class FakeBridge:
+    def __init__(self, open_status="calling", offers=None):
+        self.calls: list[tuple[list[str], str | None]] = []
+        self.open_status = open_status
+        self.offers = list(offers if offers is not None else [{"status": "offered", "sdp_offer": "v=0 offer"}])
+
+    def __call__(self, args, stdin, timeout):
+        self.calls.append((args, stdin))
+        op = args[0]
+        if op == "open":
+            return {"success": True, "call_id": "call_1", "status": self.open_status}
+        if op == "wait-offer":
+            nxt = self.offers.pop(0) if self.offers else {"status": "calling"}
+            return {"success": True, **nxt}
+        return {"success": True}
+
+    def ops(self):
+        return [a[0] for a, _ in self.calls]
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _runtime(bridge, sock, clock=None, http_status=201, sleep=None):
+    posted = []
+
+    def http_post(url, body, headers):
+        posted.append((url, body, headers))
+        return http_status, json.dumps({"session": {"id": "live_abc"}, "transport": {"type": "webrtc", "sdp": "v=0 answer"}})
+
+    rt = lc.LiveCallRuntime(
+        agent_label="Versa", pu_name="Sam", api_key_resolver=lambda: "sk-test",
+        bridge=bridge, sideband_factory=lambda key, sid: sock, http_post=http_post,
+        log=lambda msg: None, clock=clock or time.monotonic, sleep=sleep or time.sleep,
+    )
+    return rt, posted
+
+
+class TestTranscript(unittest.TestCase):
+    def test_segments_and_cursor(self):
+        t = lc.Transcript()
+        t.add_delta("pu", "Can you ")
+        t.add_delta("pu", "check task 12?")
+        first = t.since_cursor()
+        self.assertEqual(first, [{"speaker": "pu", "text": "Can you check task 12?", "start_ms": None, "end_ms": None}])
+        t.add_delta("pu", "Actually task 13.")
+        second = t.since_cursor()
+        self.assertEqual([s["text"] for s in second], ["Actually task 13."])
+        self.assertEqual(len(t.all()), 2)
+
+    def test_clip_for_speech_sentence_boundary(self):
+        text = "First sentence is here. " * 200
+        clipped = lc.clip_for_speech(text, limit=100)
+        self.assertLessEqual(len(clipped), 100)
+        self.assertTrue(clipped.endswith("."))
+
+    def test_message_text_from_parts(self):
+        self.assertEqual(lc.message_text([{"type": "text", "text": "a"}, {"type": "image_url"}, "b"]), "a\nb")
+
+
+class TestPlace(unittest.TestCase):
+    def test_connected_flow(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, posted = _runtime(bridge, sock)
+        result = rt.place("Task 12 is blocked on a decision.", SETTINGS)
+        self.assertEqual(result["status"], "connected")
+        self.assertEqual(bridge.ops(), ["open", "wait-offer", "answer", "log"])
+        answer_args, answer_stdin = bridge.calls[2]
+        self.assertEqual(answer_args, ["answer", "call_1", "--session-id", "live_abc"])
+        self.assertEqual(answer_stdin, "v=0 answer")
+        url, body, headers = posted[0]
+        self.assertTrue(url.endswith("/live/sessions"))
+        self.assertEqual(body["session"]["delegation"], {"type": "client"})
+        self.assertEqual(body["session"]["model"], "gpt-live-1")
+        self.assertEqual(body["transport"], {"type": "webrtc", "sdp": "v=0 offer"})
+        self.assertIn("never", body["session"]["instructions"].lower())
+        self.assertEqual(headers["Authorization"], "Bearer sk-test")
+        rt.shutdown()
+
+    def test_offline_no_session(self):
+        bridge, sock = FakeBridge(open_status="offline"), FakeSocket()
+        rt, posted = _runtime(bridge, sock)
+        self.assertEqual(rt.place("x", SETTINGS)["status"], "offline")
+        self.assertEqual(posted, [])
+        self.assertIsNone(rt.session)
+
+    def test_declined(self):
+        bridge = FakeBridge(offers=[{"status": "calling"}, {"status": "declined"}])
+        rt, posted = _runtime(bridge, FakeSocket())
+        self.assertEqual(rt.place("x", SETTINGS)["status"], "declined")
+        self.assertEqual(posted, [])
+
+    def test_join_timeout_is_missed(self):
+        clock = FakeClock()
+        bridge = FakeBridge(offers=[])
+        orig = bridge.__call__
+
+        def advancing(args, stdin, timeout):
+            if args[0] == "wait-offer":
+                clock.now += 30
+            return orig(args, stdin, timeout)
+
+        rt, posted = _runtime(advancing, FakeSocket(), clock=clock)
+        self.assertEqual(rt.place("x", SETTINGS)["status"], "missed")
+        self.assertIn(["end", "call_1", "--status", "missed", "--close-reason", "join_timeout"],
+                      [a for a, _ in bridge.calls])
+        self.assertEqual(posted, [])
+
+    def test_session_create_failure_ends_call(self):
+        bridge = FakeBridge()
+        rt, _ = _runtime(bridge, FakeSocket(), http_status=429)
+        result = rt.place("x", SETTINGS)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("429", result["error"])
+        self.assertEqual(bridge.calls[-1][0][:4], ["end", "call_1", "--status", "failed"])
+
+    def test_one_call_per_cycle(self):
+        bridge = FakeBridge(open_status="offline")
+        rt, _ = _runtime(bridge, FakeSocket())
+        rt.place("x", SETTINGS)
+        refused = rt.place("again", SETTINGS)
+        self.assertEqual(refused["status"], "refused")
+        self.assertIn("1 call per cycle", refused["error"])
+
+    def test_calls_per_cycle_setting_allows_a_second_call(self):
+        two = dataclasses.replace(SETTINGS, calls_per_cycle=2)
+        bridge = FakeBridge(offers=[{"status": "offered", "sdp_offer": "v=0 offer"},
+                                    {"status": "offered", "sdp_offer": "v=0 offer"}])
+        sock = FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        self.assertEqual(rt.place("first", two)["status"], "connected")
+        self.assertEqual(rt.place("during", two)["status"], "refused")   # already on a call
+        sock.push({"type": "session.closed", "reason": "remote_hangup"})
+        self.assertIn("LIVE CALL ENDED", rt.next_injection(""))
+        self.assertTrue(rt.awaiting_summary)
+
+        no_summary = rt.place("second", two)
+        self.assertEqual(no_summary["status"], "refused")
+        self.assertIn("last_call_summary", no_summary["error"])
+
+        second = rt.place("second", two, last_call_summary="Agreed QA on Friday.")
+        self.assertEqual(second["status"], "connected")
+        self.assertIn((["summary", "call_1"], "Agreed QA on Friday."), bridge.calls)
+        self.assertFalse(rt.awaiting_summary)
+        self.assertEqual(rt.reason, "second")
+        self.assertEqual(rt.delegations, {})
+        self.assertEqual(rt.place("third", two, last_call_summary="x")["status"], "refused")
+        rt.shutdown()
+
+
+class TestTurns(unittest.TestCase):
+    def _connected(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        self.assertEqual(rt.place("Package request pending.", SETTINGS)["status"], "connected")
+        return rt, bridge, sock
+
+    def test_delegation_answer_then_hangup(self):
+        rt, bridge, sock = self._connected()
+        sock.push({"type": "session.output_transcript.delta", "delta": "Hi Sam, a package needs you."})
+        sock.push({"type": "session.input_transcript.delta", "delta": "Yes approve it."})
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_1", "target": "client"}})
+
+        text = rt.next_injection("Calling now.")
+        self.assertIn("item_1", text)
+        self.assertIn("PU: Yes approve it.", text)
+        self.assertIn("never an approval", text)
+        self.assertTrue(rt.in_turn())
+
+        rt.note_tool_calls(["agictl_system"])
+        self.assertIn("session.thinking.append", sock.sent_types())
+
+        sock.push({"type": "session.closed", "reason": "remote_hangup", "usage": {"seconds": 75}})
+        ended = rt.next_injection("I can't approve by voice — please use the Packages toggle in the app.")
+        commentary = [e for e in sock.sent if e["type"] == "session.commentary.append"]
+        self.assertEqual(commentary[0]["delegation_id"], "item_1")
+        self.assertIn("Packages toggle", commentary[0]["content"])
+        self.assertIn("LIVE CALL ENDED (remote_hangup", ended)
+        self.assertIn("agictl_message", ended)
+        self.assertFalse(rt.live)
+        self.assertIsNone(rt.next_injection("Summary sent."))
+
+        end_calls = [(a, s) for a, s in bridge.calls if a[0] == "end"]
+        self.assertEqual(len(end_calls), 1)
+        args, stdin = end_calls[0]
+        self.assertIn("--voice-seconds", args)
+        self.assertEqual(args[args.index("--voice-seconds") + 1], "75")
+        snap = json.loads(stdin)
+        self.assertEqual(snap["delegations"][0]["tools"], ["agictl_system"])
+        self.assertTrue(snap["delegations"][0]["spoken"])
+
+    def test_queued_delegations_merge_into_one_turn(self):
+        rt, _, sock = self._connected()
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_a"}})
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_b"}})
+        time.sleep(0.2)
+        text = rt.next_injection("")
+        self.assertIn("item_a, item_b", text)
+        sock.push({"type": "session.closed", "reason": "remote_hangup"})
+        rt.next_injection("Both done.")
+        commentary = [e for e in sock.sent if e["type"] == "session.commentary.append"]
+        self.assertEqual(commentary[-1]["delegation_id"], "item_b")
+        rt.shutdown()
+
+    def test_duration_cap_wraps_then_closes(self):
+        clock = FakeClock()
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock, clock=clock)
+        rt.place("x", SETTINGS)
+        clock.now += SETTINGS.max_minutes * 60 - 30
+        rt.session.enforce_duration()
+        self.assertIn("session.instructions.append", sock.sent_types())
+        clock.now += 40
+        text = rt.next_injection("")
+        self.assertIn("LIVE CALL ENDED (close_requested", text)
+        self.assertIn("session.close", sock.sent_types())
+
+    def test_shutdown_closes_open_call(self):
+        rt, bridge, sock = self._connected()
+        rt.shutdown("failed")
+        self.assertIn("session.close", sock.sent_types())
+        end_args = [a for a, _ in bridge.calls if a[0] == "end"][0]
+        self.assertEqual(end_args[:4], ["end", "call_1", "--status", "failed"])
+
+
+class TestLanguage(unittest.TestCase):
+    TABLE = {
+        "en": {"name": "English", "coverage": "voice"},
+        "es": {"name": "Spanish", "coverage": "supported"},
+        "zu": {"name": "Zulu", "coverage": "english"},
+    }
+
+    def test_supported_language_is_spoken(self):
+        lang = lc.resolve_call_language("es|Spanish", self.TABLE)
+        self.assertEqual((lang.code, lang.name, lang.coverage), ("es", "Spanish", "supported"))
+        self.assertEqual(lc.language_rule(lang), "Speak Spanish unless the Primary User asks to switch.")
+
+    def test_uncovered_language_falls_back_to_english(self):
+        lang = lc.resolve_call_language("zu|Zulu", self.TABLE)
+        self.assertEqual((lang.code, lang.requested), ("en", "Zulu"))
+        self.assertIn("not available in Zulu", lc.language_rule(lang))
+
+    def test_unknown_and_auto(self):
+        self.assertEqual(lc.resolve_call_language("xx|Klingon", self.TABLE).code, "en")
+        auto = lc.resolve_call_language("auto|Auto-detect", self.TABLE)
+        self.assertEqual(lc.language_rule(auto), "Speak English unless the Primary User asks to switch.")
+
+    def test_shipped_map_covers_the_93_versavoice_languages(self):
+        table = lc.load_language_map()
+        self.assertEqual(len(table), 93)
+        self.assertEqual({k for k, v in table.items() if v["coverage"] == "voice"}, {"en", "pt"})
+        app_langs = os.path.join(os.path.dirname(__file__), *[".."] * 5,
+                                 "app", "lib", "features", "profile", "domain", "languages.dart")
+        if os.path.isfile(app_langs):
+            text = open(app_langs, encoding="utf-8").read()
+            body = text[text.index("static const List<AppLanguage> all"):]
+            codes = set(re.findall(r"code:\s*'([^']+)'", body))
+            self.assertEqual(codes, set(table))
+
+
+class TestVoiceCardAndSummary(unittest.TestCase):
+    def test_voice_card_sections(self):
+        card = lc.voice_instructions("Versa", "Sam", "Task 12 needs a day.",
+                                     language=lc.CallLanguage("es", "Spanish", "supported", "Spanish"),
+                                     style_notes="prefers short updates")
+        for part in ("Delegation policy:", "Backend tools:", "Delegate to the backend when:",
+                     "Do not delegate to the backend when:", "Approvals cannot be given by voice",
+                     "Speak Spanish", "prefers short updates", "not a simulated personality"):
+            self.assertIn(part, card)
+        self.assertLess(len(card.split()), 320)
+
+    def test_context_drives_session_and_last_call(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        posted = []
+
+        def http_post(url, body, headers):
+            posted.append(body)
+            return 201, json.dumps({"session": {"id": "live_x"}, "transport": {"sdp": "ans"}})
+
+        rt = lc.LiveCallRuntime(
+            agent_label="Versa", pu_name="Sam", api_key_resolver=lambda: "k", bridge=bridge,
+            sideband_factory=lambda k, s: sock, http_post=http_post, log=lambda m: None,
+            context_provider=lambda: {
+                "language": lc.CallLanguage("fr", "French", "supported", "French"),
+                "style_notes": "", "last_call": "2026-09-26 04:41 UTC (4.2 min, ended) — Chose Friday.",
+            },
+        )
+        self.assertEqual(rt.place("x", SETTINGS)["status"], "connected")
+        self.assertIn("Speak French", posted[0]["session"]["instructions"])
+        thinking = [e for e in sock.sent if e["type"] == "session.thinking.append"]
+        self.assertIn("Chose Friday", thinking[0]["content"])
+        rt.shutdown()
+
+    def test_summary_captured_after_call_ended(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt.place("x", SETTINGS)
+        sock.push({"type": "session.closed", "reason": "remote_hangup", "usage": {"seconds": 30}})
+        ended = rt.next_injection("")
+        self.assertIn("CALL SUMMARY:", ended)
+        self.assertIn("Create a task", ended)
+        self.assertTrue(rt.awaiting_summary)
+        rt.capture_summary("Sent the summary.\nCALL SUMMARY: Discussed task 12; QA moved to Friday. Next: web-dev runs QA.")
+        args, stdin = bridge.calls[-1]
+        self.assertEqual(args, ["summary", "call_1"])
+        self.assertEqual(stdin, "Discussed task 12; QA moved to Friday. Next: web-dev runs QA.")
+        self.assertFalse(rt.awaiting_summary)
+        rt.capture_summary("again")
+        self.assertEqual(bridge.calls[-1][0], ["summary", "call_1"])
+        self.assertEqual(len([a for a, _ in bridge.calls if a[0] == "summary"]), 1)
+
+    def _narrating_runtime(self, narrate=True):
+        clock = FakeClock()
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock, clock=clock)
+        settings = LiveCallSettings(**{**SETTINGS.__dict__, "narrate_progress": narrate})
+        rt.place("x", settings)
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_n"}})
+        text = rt.next_injection("")
+        return rt, sock, clock, text
+
+    def test_narration_is_spoken_with_pacing(self):
+        rt, sock, clock, text = self._narrating_runtime()
+        self.assertIn("spoken while they wait", text)
+        rt.note_tool_calls(["agictl_task"], "Let me look at your tasks.")          # too soon
+        clock.now += 4
+        rt.note_tool_calls(["agictl_task"], "Let me pull up the QA schedule.")     # spoken
+        clock.now += 3
+        rt.note_tool_calls(["agictl_project"], "Checking the project too.")        # gap too short
+        clock.now += 9
+        rt.note_tool_calls(["agictl_task"], [{"type": "text", "text": "Almost there."}])  # spoken
+        rt.note_tool_calls(["agictl_task"], "")                                    # no text → quiet
+        spoken = [e["content"] for e in sock.sent if e["type"] == "session.commentary.append"]
+        quiet = [e["content"] for e in sock.sent if e["type"] == "session.thinking.append"]
+        self.assertEqual(spoken, ["Let me pull up the QA schedule.", "Almost there."])
+        self.assertIn("Let me look at your tasks.", quiet)
+        self.assertIn("Checking the project too.", quiet)
+        self.assertIn("Working on it: agictl_task.", quiet)
+        rt.shutdown()
+
+    def test_narration_off_keeps_progress_quiet(self):
+        rt, sock, clock, text = self._narrating_runtime(narrate=False)
+        self.assertNotIn("spoken while they wait", text)
+        clock.now += 10
+        rt.note_tool_calls(["agictl_task"], "Let me pull up the QA schedule.")
+        self.assertFalse([e for e in sock.sent if e["type"] == "session.commentary.append"])
+        rt.shutdown()
+
+    def test_parse_reply(self):
+        reply = lc.parse_reply(
+            "Friday is set.\nNOTE: QA owner is web-dev\n`STEER: ask whether Friday also works for web-dev`\n"
+            "FOLLOW UP: check web-dev's queue and report back"
+        )
+        self.assertEqual(reply.spoken, "Friday is set.")
+        self.assertEqual(reply.note, "QA owner is web-dev")
+        self.assertEqual(reply.steer, "ask whether Friday also works for web-dev")
+        self.assertEqual(reply.follow_up, "check web-dev's queue and report back")
+        self.assertEqual(lc.parse_reply("Plain answer.").spoken, "Plain answer.")
+
+    def _one_delegation(self, rt, sock, did="item_s"):
+        sock.push({"type": "session.delegation.created", "delegation": {"id": did}})
+        return rt.next_injection("")
+
+    def test_steer_note_and_unprompted_follow_up(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt.place("x", SETTINGS)
+        first = self._one_delegation(rt, sock)
+        self.assertIn("FOLLOW UP:", first)
+        follow = rt.next_injection(
+            "One moment, I'll check with web-dev.\nNOTE: web-dev owns QA\n"
+            "STEER: keep them company briefly while you check\nFOLLOW UP: check web-dev's queue"
+        )
+        sent = sock.sent
+        commentary = [e for e in sent if e["type"] == "session.commentary.append"]
+        self.assertEqual(commentary[-1], {**commentary[-1], "delegation_id": "item_s",
+                                          "content": "One moment, I'll check with web-dev."})
+        self.assertTrue(any(e["type"] == "session.thinking.append" and e["content"] == "web-dev owns QA"
+                            for e in sent))
+        steer = [e for e in sent if e["type"] == "session.instructions.append"]
+        self.assertEqual(steer[-1]["content"],
+                         "Guidance from COA (the backend): keep them company briefly while you check")
+        self.assertIn("follow-up you promised", follow)
+        self.assertIn("check web-dev's queue", follow)
+        self.assertTrue(rt.in_turn())
+        rt.note_tool_calls(["agictl_task"], "")
+        self.assertIsNone([e for e in sock.sent if e["type"] == "session.thinking.append"][-1]["delegation_id"])
+
+        threading.Timer(0.3, sock.push, args=({"type": "session.closed", "reason": "remote_hangup"},)).start()
+        rt.next_injection("web-dev can run QA Friday morning.")
+        unprompted = [e for e in sock.sent if e["type"] == "session.commentary.append"][-1]
+        self.assertIsNone(unprompted["delegation_id"])
+        self.assertEqual(unprompted["content"], "web-dev can run QA Friday morning.")
+        snap = json.loads([s for a, s in bridge.calls if a[0] == "end"][0])
+        self.assertEqual([d["delegation_id"] for d in snap["delegations"]], ["item_s", "follow_up_1"])
+        self.assertEqual(snap["delegations"][0]["follow_up"], "check web-dev's queue")
+
+    def _hang_up_soon(self, sock, delay=0.3):
+        threading.Timer(delay, sock.push, args=({"type": "session.closed", "reason": "remote_hangup"},)).start()
+
+    def test_follow_ups_are_capped_at_two(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt.place("x", SETTINGS)
+        self._one_delegation(rt, sock, "item_1")
+        nxt = rt.next_injection("Checking.\nFOLLOW UP: look at the build logs")
+        self.assertIn("Follow-up: look at the build logs", nxt)
+        nxt = rt.next_injection("Logs are clean.\nFOLLOW UP: second")
+        self.assertIn("Follow-up: second", nxt)
+        self._hang_up_soon(sock)
+        ended = rt.next_injection("Second done.\nFOLLOW UP: third")
+        self.assertIn("LIVE CALL ENDED", ended)           # third not run: cap of 2
+        self.assertEqual(rt.follow_ups_used, 2)
+
+    def test_correction_mid_turn_keeps_stale_answer_quiet(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt.place("x", SETTINGS)
+        self._one_delegation(rt, sock, "item_1")
+        sock.push({"type": "session.input_transcript.delta", "delta": "Actually, make it Thursday."})
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_2"}})
+        time.sleep(0.2)
+        nxt = rt.next_injection("QA is set for Friday.\nFOLLOW UP: tell web-dev")
+        self.assertIn("item_2", nxt)
+        self.assertIn("was NOT spoken", nxt)
+        self.assertIn("QA is set for Friday.", nxt)
+        self.assertIn("PU: Actually, make it Thursday.", nxt)
+        spoken = [e["content"] for e in sock.sent if e["type"] == "session.commentary.append"]
+        self.assertNotIn("QA is set for Friday.", spoken)
+        self.assertTrue(any("superseded" in e["content"] for e in sock.sent
+                            if e["type"] == "session.thinking.append"))
+        self.assertEqual(rt.pending_follow_up, "")
+        self._hang_up_soon(sock)
+        rt.next_injection("QA is set for Thursday.")
+        spoken = [e["content"] for e in sock.sent if e["type"] == "session.commentary.append"]
+        self.assertEqual(spoken[-1], "QA is set for Thursday.")
+
+    def test_repeat_delegation_is_answered_quietly(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt.place("x", SETTINGS)
+        sock.push({"type": "session.input_transcript.delta", "delta": "What's task 12 about?"})
+        self._one_delegation(rt, sock, "item_1")
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_1b"}})
+        self._hang_up_soon(sock, delay=2.5)
+        ended = rt.next_injection("Task 12 is the Live Call POC.")
+        self.assertIn("LIVE CALL ENDED", ended)
+        repeat = [e for e in sock.sent if e["type"] == "session.thinking.append" and e["delegation_id"] == "item_1b"]
+        self.assertIn("already answered: Task 12 is the Live Call POC.", repeat[0]["content"])
+        self.assertTrue(rt.delegations["item_1b"].duplicate)
+        spoken = [e["content"] for e in sock.sent if e["type"] == "session.commentary.append"]
+        self.assertEqual(spoken.count("Task 12 is the Live Call POC."), 1)
+
+    def test_prompt_block_and_last_call_line(self):
+        line = lc.last_call_line({"created_at": "2026-09-26T04:41:10Z", "voice_seconds": 252,
+                                  "status": "ended", "summary": "Chose Friday.", "reason": "x"})
+        self.assertEqual(line, "2026-09-26 04:41 UTC (4.2 min, ended) — Chose Friday.")
+        self.assertEqual(lc.last_call_line(None), "")
+        ready = lc.prompt_block(ready=True, reasons="ready", call_model="Google — Gemini 3.7 Flash",
+                                language=lc.ENGLISH, last_call=line)
+        self.assertIn("## ── LIVE CALL", ready)
+        self.assertIn("agictl_call_pu", ready)
+        self.assertIn("Last live call: 2026-09-26", ready)
+        self.assertIn("up to 1 call per cycle", ready)
+        self.assertIn("up to 3 calls per cycle",
+                      lc.prompt_block(ready=True, reasons="ready", call_model="m", language=lc.ENGLISH,
+                                      last_call="", calls_per_cycle=3))
+        off = lc.prompt_block(ready=False, reasons="no call model set", call_model="none",
+                              language=lc.ENGLISH, last_call="")
+        self.assertIn("Do not offer calls", off)
+        self.assertIn("Last live call: none yet", off)
+
+
+class TestAgentHangup(unittest.TestCase):
+    """§3.6 P3-D: COA ends the call with END CALL once the voice has finished."""
+
+    def _connected(self):
+        clock = FakeClock()
+
+        def sleep(seconds):
+            clock.now += seconds
+            time.sleep(0.005)
+
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock, clock=clock, sleep=sleep)
+        self.assertEqual(rt.place("QA date needs confirming.", SETTINGS)["status"], "connected")
+        sock.push({"type": "session.input_transcript.delta", "delta": "That's all, thanks. Bye!"})
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_bye"}})
+        self.assertIn("END CALL", rt.next_injection(""))
+        return rt, bridge, sock, clock
+
+    def _end_args(self, bridge):
+        return [a for a, _ in bridge.calls if a[0] == "end"][0]
+
+    def test_parse_end_call_variants(self):
+        for text in ("Bye Sam!\nEND CALL", "Bye Sam!\n`END CALL`", "Bye Sam!\nend call.", "Bye Sam!\nEND CALL:"):
+            reply = lc.parse_reply(text)
+            self.assertTrue(reply.end_call, text)
+            self.assertEqual(reply.spoken, "Bye Sam!")
+        self.assertFalse(lc.parse_reply("I'll end call notes later.").end_call)
+
+    def test_voice_card_says_only_backend_hangs_up(self):
+        card = lc.voice_instructions("Versa", "Sam", "x")
+        self.assertIn('delegate "end the call"', card)
+        self.assertIn("never say you will hang up", card)
+
+    def test_goodbye_then_close_as_agent_hangup(self):
+        rt, bridge, sock, clock = self._connected()
+        ended = rt.next_injection("Great, talk soon Sam!\nEND CALL")
+        spoken = [e["content"] for e in sock.sent if e["type"] == "session.commentary.append"]
+        self.assertEqual(spoken[-1], "Great, talk soon Sam!")
+        self.assertIn("session.close", sock.sent_types())
+        self.assertIn("LIVE CALL ENDED (agent_hangup", ended)
+        self.assertGreaterEqual(clock.now - 1000.0, lc.HANGUP_SPEECH_START_SECONDS)
+        args = self._end_args(bridge)
+        self.assertEqual(args[args.index("--close-reason") + 1], "agent_hangup")
+        snap = json.loads([s for a, s in bridge.calls if a[0] == "end"][0])
+        self.assertTrue(snap["delegations"][-1]["end_call"])
+        self.assertIsNone(rt.next_injection("CALL SUMMARY: done"))
+
+    def test_bare_end_call_closes_without_speaking(self):
+        rt, bridge, sock, clock = self._connected()
+        before = len([e for e in sock.sent if e["type"] == "session.commentary.append"])
+        ended = rt.next_injection("END CALL")
+        after = len([e for e in sock.sent if e["type"] == "session.commentary.append"])
+        self.assertEqual(before, after)
+        self.assertTrue(any(e["type"] == "session.thinking.append" and "ending the call" in e["content"]
+                            for e in sock.sent))
+        self.assertIn("agent_hangup", ended)
+        self.assertLess(clock.now - 1000.0, lc.HANGUP_SPEECH_START_SECONDS)
+
+    def test_waits_for_goodbye_to_trail_off(self):
+        rt, bridge, sock, clock = self._connected()
+        sock.push({"type": "session.output_transcript.delta", "delta": "Bye for now,"})
+        time.sleep(0.1)
+        rt.next_injection("END CALL")
+        self.assertGreaterEqual(clock.now - 1000.0, lc.HANGUP_QUIET_SECONDS - 0.01)
+        self.assertLess(clock.now - 1000.0, lc.HANGUP_MAX_WAIT_SECONDS)
+
+    def test_pending_follow_up_goes_to_chat(self):
+        rt, bridge, sock, clock = self._connected()
+        ended = rt.next_injection("I'll check the logs and message you.\nFOLLOW UP: check the build logs\nEND CALL")
+        self.assertIn("did not run: check the build logs", ended)
+        self.assertEqual(rt.follow_ups_used, 0)
+
+    def test_superseded_end_call_is_ignored(self):
+        rt, bridge, sock, clock = self._connected()
+        sock.push({"type": "session.input_transcript.delta", "delta": "Oh wait, one more thing."})
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_more"}})
+        time.sleep(0.2)
+        nxt = rt.next_injection("Bye!\nEND CALL")
+        self.assertIn("item_more", nxt)
+        self.assertNotIn("session.close", sock.sent_types())
+        self.assertFalse(rt.hangup_requested)
+        rt.shutdown()
+
+
+class TestSanitize(unittest.TestCase):
+    def test_text_only_copies(self):
+        human = HumanMessage(content=[{"type": "text", "text": "look"}, {"type": "image_url", "image_url": "data:..."}])
+        ai = AIMessage(content=[{"type": "thinking", "thinking": "secret"}, {"type": "text", "text": "done"}])
+        plain = HumanMessage(content="hi")
+        out = lc.sanitize_for_call_model([human, ai, plain])
+        self.assertEqual(out[0].content, "look\n[media omitted during call]")
+        self.assertEqual(out[1].content, "done")
+        self.assertIs(out[2], plain)
+        self.assertIsInstance(human.content, list)
+
+
+if __name__ == "__main__":
+    unittest.main()

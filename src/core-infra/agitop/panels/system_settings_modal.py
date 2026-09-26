@@ -105,6 +105,94 @@ def _write_ini_value(section: str, key: str, value: str) -> bool:
     return ok
 
 
+def _format_last_call(row: dict | None) -> str:
+    """Latest call-log row for the Live Call tab (local time)."""
+    if not row:
+        return "[dim]No calls yet.[/]"
+    from datetime import datetime, timezone
+
+    raw = str(row.get("created_at") or "")
+    try:
+        when = (datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                .astimezone().strftime("%Y-%m-%d %H:%M"))
+    except ValueError:
+        when = raw or "—"
+    secs = row.get("voice_seconds")
+    length = f"{int(secs) // 60} min {int(secs) % 60} s" if secs else "—"
+    lines = [
+        f"When: {when}   ·   Length: {length}   ·   Status: {row.get('status') or '—'}",
+        f"Reason: {row.get('reason') or '—'}",
+    ]
+    summary = " ".join(str(row.get("summary") or "").split())
+    if summary:
+        lines.append(f"Summary: {summary}")
+    return "\n".join(lines)
+
+
+def _live_call_db() -> str:
+    return os.environ.get("AGICTL_MESSAGES_DB", "/var/lib/versa-agi/messages.db")
+
+
+def _live_call_last_row() -> dict | None:
+    try:
+        import call_log_store
+        db = _live_call_db()
+        if not os.path.exists(db):
+            return None
+        rows = call_log_store.list_calls(db, "coa", limit=1)
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def _live_call_transcript(row: dict | None) -> str:
+    """Full transcript of a call-log row, speaker-labelled."""
+    if not row:
+        return ""
+    try:
+        import call_log_store
+        call = call_log_store.get_call(_live_call_db(), row["call_id"]) or {}
+        return call_log_store.transcript_text(call.get("transcript") or [], "You", "COA") or "No transcript."
+    except Exception:
+        return "No transcript."
+
+
+def _live_call_view() -> dict:
+    """Current Live Call settings, picker options, readiness, and last call for the tab."""
+    last_row = _live_call_last_row()
+    view = {"enabled": False, "call_model": "", "max_minutes": 15, "join_timeout_seconds": 45,
+            "calls_per_cycle": 1, "narrate_progress": True, "options": [("(none)", "")], "status": "",
+            "last_call": _format_last_call(last_row),
+            "last_transcript": _live_call_transcript(last_row)}
+    try:
+        import live_call_config as lcc
+        settings = lcc.read_settings()
+        view.update(enabled=settings.enabled, call_model=settings.call_model,
+                    max_minutes=settings.max_minutes, join_timeout_seconds=settings.join_timeout_seconds,
+                    calls_per_cycle=settings.calls_per_cycle, narrate_progress=settings.narrate_progress)
+        options = [("(none)", "")]
+        keys = set()
+        for row in lcc.selectable_call_models():
+            options.append((row["display"], row["key"]))
+            keys.add(row["key"])
+        if settings.call_model and settings.call_model not in keys:
+            current = lcc.model_display(
+                settings.call_model,
+                lcc.load_catalog().get(settings.call_model),
+                lcc.provider_labels(),
+            )
+            options.append((f"{current} (unavailable)", settings.call_model))
+        view["options"] = options
+        gate = lcc.evaluate_gate(lcc.CALL_AGENT, settings=settings)
+        view["status"] = (
+            "[bold green]● COA can call you[/]" if gate.ok
+            else "[bold yellow]● Not ready:[/] " + "; ".join(gate.reasons)
+        )
+    except Exception as e:
+        view["status"] = f"[bold red]● Live Call settings unavailable:[/] {e}"
+    return view
+
+
 
 def _sync_ini_copies(written_path: str) -> None:
     """Copy written setup.ini to the alternate location (source ↔ deployed)."""
@@ -1045,6 +1133,8 @@ class SystemSettingsModal(ModalScreen):
         aud_enabled = _read_ini_value("audio_processing", "enabled", "true").lower() == "true"
         aud_format = _read_ini_value("audio_processing", "format", "wav").lower()
 
+        live_call_view = _live_call_view()
+
         um_enabled = _read_ini_value("utility_models", "enabled", "true").lower() == "true"
         um_write_manifest = _read_ini_value("utility_models", "write_manifest", "true").lower() == "true"
         # Parked (VV required): vv_enabled = _read_ini_value("versavoice", "enabled", "true").lower() == "true"
@@ -1439,6 +1529,87 @@ class SystemSettingsModal(ModalScreen):
                                     classes="dismiss-btn",
                                 )
 
+                with TabPane("Live Call", id="settings-live-call-tab"):
+                    with Vertical(id="settings-live-call-pane"):
+                        with VerticalScroll(id="settings-live-call-scroll"):
+                            yield Static("", classes="modal-tab-spacer")
+                            yield Static("[bold #f87171]Live Call[/]")
+                            yield Static(
+                                "[dim]COA can call you in the VersaVoice app when talking settles "
+                                "something faster than chat, or when you ask it to call. The voice "
+                                "runs on GPT-Live (your OpenAI provider); COA works on the call model "
+                                "while you talk. Approvals still happen only on the app controls.[/]"
+                            )
+                            yield Static("")
+                            yield Static(live_call_view["status"], id="live-call-status")
+                            yield Static("")
+                            with Horizontal(classes="task-field-row"):
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Live Call[/]")
+                                    yield ClearCheckbox(
+                                        "Enabled", id="chk-live-call-enabled",
+                                        value=live_call_view["enabled"],
+                                    )
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]While COA works[/]")
+                                    yield ClearCheckbox(
+                                        "Speak progress", id="chk-live-call-narrate",
+                                        value=live_call_view["narrate_progress"],
+                                    )
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Call model[/]")
+                                    yield Select(
+                                        live_call_view["options"],
+                                        value=live_call_view["call_model"],
+                                        id="select-live-call-model",
+                                        allow_blank=False,
+                                    )
+                            yield Static(
+                                "[dim]Speak progress: COA says a short line like \"Let me pull up the QA "
+                                "schedule\" while it looks things up. Call model: only call-capable "
+                                "models with a provider key are listed (Model Manager → Call-capable).[/]"
+                            )
+                            yield Static("")
+                            with Horizontal(classes="task-field-row"):
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Longest call (minutes, 1–55)[/]")
+                                    yield Input(
+                                        value=str(live_call_view["max_minutes"]), placeholder="15",
+                                        id="input-live-call-max-minutes", type="integer",
+                                    )
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Ring for (seconds, 15–120)[/]")
+                                    yield Input(
+                                        value=str(live_call_view["join_timeout_seconds"]), placeholder="45",
+                                        id="input-live-call-join-timeout", type="integer",
+                                    )
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Calls per cycle (1–5)[/]")
+                                    yield Input(
+                                        value=str(live_call_view["calls_per_cycle"]), placeholder="1",
+                                        id="input-live-call-per-cycle", type="integer",
+                                    )
+                            yield Static(
+                                "[dim]A minute before the limit COA wraps up and says goodbye. If you don't "
+                                "join in time, COA sends a chat message instead. Calls per cycle: how many "
+                                "times COA may call you in one work cycle.[/]"
+                            )
+                            yield Static("")
+                            yield Static("[bold #f87171]Last call[/]")
+                            yield Static(live_call_view["last_call"], id="live-call-last")
+                            yield Static("")
+                            yield Static("[#f87171]Transcript[/]")
+                            yield TextArea(
+                                live_call_view["last_transcript"], read_only=True,
+                                id="live-call-transcript",
+                            )
+                        with Horizontal(classes="settings-tab-actions"):
+                            yield Button("Save", variant="success", id="btn-save-settings-live-call")
+                            yield Button(
+                                "Close", variant="default", id="btn-settings-close-live-call",
+                                classes="dismiss-btn",
+                            )
+
     def _fetch_utility_models(self) -> list[dict]:
         try:
             proc = subprocess.run(
@@ -1640,6 +1811,36 @@ class SystemSettingsModal(ModalScreen):
         else:
             self.app.notify("Failed to save audio_processing settings", severity="error")
 
+    def _save_live_call(self) -> bool:
+        """Persist [features] live_call + [live_call] (own Save button)."""
+        enabled = self.query_one("#chk-live-call-enabled", Checkbox).value
+        call_model = self.query_one("#select-live-call-model", Select).value or ""
+        max_minutes = self.query_one("#input-live-call-max-minutes", Input).value.strip() or "15"
+        join_timeout = self.query_one("#input-live-call-join-timeout", Input).value.strip() or "45"
+        per_cycle = self.query_one("#input-live-call-per-cycle", Input).value.strip() or "1"
+        narrate = self.query_one("#chk-live-call-narrate", Checkbox).value
+        if enabled and not call_model:
+            self.app.notify("Choose a call model before turning Live Call on.", severity="warning")
+            return False
+        writes = [
+            ("live_call", "call_model", str(call_model)),
+            ("live_call", "max_minutes", max_minutes),
+            ("live_call", "join_timeout_seconds", join_timeout),
+            ("live_call", "calls_per_cycle", per_cycle),
+            ("live_call", "narrate_progress", "true" if narrate else "false"),
+            ("features", "live_call", "true" if enabled else "false"),
+        ]
+        for section, key, value in writes:
+            ok, err = _write_ini_value_err(section, key, value)
+            if not ok:
+                self.app.notify(err or f"Failed to save {section}.{key}", severity="error", title="Live Call")
+                return False
+        self.app.notify(
+            f"Live Call {'on' if enabled else 'off'}" + (f" · {call_model}" if call_model else ""),
+            title="Settings Saved",
+        )
+        return True
+
     def _save_utility_models_enabled(self) -> None:
         was_enabled = _read_ini_value("utility_models", "enabled", "true").lower() == "true"
         enabled = self.query_one("#chk-utility-models-enabled", Checkbox).value
@@ -1793,6 +1994,11 @@ class SystemSettingsModal(ModalScreen):
             self.app.push_screen(RouterModeConfirmModal(current))
         elif event.button.id == "btn-save-settings-audio":
             self._save_audio_processing()
+            self.app.pop_screen()
+        elif event.button.id == "btn-save-settings-live-call":
+            if self._save_live_call():
+                self.app.pop_screen()
+        elif event.button.id == "btn-settings-close-live-call":
             self.app.pop_screen()
         elif event.button.id in (
             "btn-save-settings-general",

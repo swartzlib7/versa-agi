@@ -31,6 +31,7 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 | `organization` | `agictl_organization` | `organization org list` (only when Organization feature is ON) |
 | `search` | `agictl_search` | typed args: `query`, `count` (not a command string) |
 | `view` | `agictl_view_image` / `agictl_view_video` | typed arg: `path` (not a command string) |
+| *(live call — COA)* | `agictl_call_pu` | typed arg: `reason` (not a command string; no CLI equivalent — see §4 Live call) |
 
 **Convention:** Examples in this reference use **shell notation** (`agictl group subcommand …`) so they match `--help` and operator docs. Translate when calling a tool:
 
@@ -156,6 +157,21 @@ agictl message send <uid> "Here are the reports" --mode typed \
 
 **Inbound attachments**: Auto-downloaded to `.agent/attachments/{message-id}/{media|markdown|urls}/`
 > This directory is READ-ONLY. To save processed data, write to `workspace/` instead.
+
+### Live call (COA only)
+
+**Harness tool:** `agictl_call_pu(reason="...")` — rings the Primary User in the VersaVoice app. It appears only for COA, when Live Call is on and ready (see the `LIVE CALL` section of your prompt). **There is no terminal command for placing a call** — not through `agictl_message`, `agictl_execute`, or a shell. Do not look for one. Load **`live_call.md`** for when to call, the get-to-know call, and follow-through.
+
+- **When:** talking settles something faster than chat, or the Primary User asked you to call. Calls per cycle are limited (Live Call setting; shown in the `LIVE CALL` prompt section). A second call in the same cycle takes `last_call_summary` for the first.
+- **Result:** `connected`, `offline` (no device), `missed`, `declined`, or `failed`. Anything but `connected` → send a chat message instead.
+- **Connected:** end your turn. Each request the Primary User makes arrives as a new message; your final reply to it is **spoken** — short, facts and status, no Markdown. Say something is done only after the tool result confirms it. Do not end the cycle during the call. Optional reply lines `NOTE:` / `STEER:` / `FOLLOW UP:` / `END CALL` are explained in `live_call.md` §3.
+- **No verbal approvals:** a spoken "yes" is never an approval for packages, sudo, or agents. Ask them to use the control in the VersaVoice app; after they do, `system sync-instance` once (rule above), then confirm from local state.
+- **Hang-up:** a `LIVE CALL ENDED` message follows with the transcript. Send the chat summary, create tasks for anything agreed but not done, record decisions, update your status, and end that turn with `CALL SUMMARY:` + 2–4 sentences (saved as your last-call note, shown in later cycles).
+
+```bash
+agictl message calls list [--limit N]                        # Recent calls (read-only)
+agictl message calls show <call_id>                          # Transcript + what was done during the call
+```
 
 ## 5. cycle
 

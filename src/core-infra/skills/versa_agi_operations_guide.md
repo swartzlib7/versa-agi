@@ -112,6 +112,14 @@ Spawn reasons PU may hear about: unread messages, due tasks, orchestration needs
 - On an agent channel the PU may tag projects/tasks. Spawn context shows **TAGGED PROJECT IDS** / **TAGGED TASK IDS** — resolve with `project list` / `task get`; do not invent names.
 - A package approval in VersaVoice lands on the same pulse as new mail (or Retrieve Messages & Sync). Wait for `PKG_NOTICE` before `pkg install`.
 
+### Live call
+
+- **Only COA calls**, and only the Primary User, with the `agictl_call_pu` tool (no terminal command). The PU cannot start a call to an agent; they ask in chat ("call me") and COA calls if Live Call is ready.
+- **Ready means:** Live Call on, OpenAI provider keyed (GPT-Live voice), and a call model chosen from the call-capable list with its provider keyed. The PU sets this in agitop **System Settings → Live Call** (or setup); Model Manager **📞 Call-capable** edits the list.
+- **Nothing is billed until the PU joins.** Offline, missed, or declined → send a chat message instead.
+- **No verbal approvals.** Packages, sudo, and agent approvals stay on the app / agitop controls, even mid-call.
+- After the call: chat summary to the PU; transcript in `agictl message calls show <id>`.
+
 ### Tasks
 
 - Work is tracked in the task ledger (planned / waiting / in_progress / done / blocked / frozen).

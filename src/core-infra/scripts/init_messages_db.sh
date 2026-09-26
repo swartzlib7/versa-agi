@@ -44,7 +44,31 @@ CREATE TABLE IF NOT EXISTS deleted_message_ids (
   message_id  TEXT PRIMARY KEY,
   deleted_at  DATETIME NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Live voice call log (COA → Primary User). Same schema as call_log_store.py.
+CREATE TABLE IF NOT EXISTS calls (
+  call_id            TEXT PRIMARY KEY,
+  agent_name         TEXT NOT NULL,
+  pu_uid             TEXT,
+  channel_id         TEXT,
+  cycle_id           TEXT,
+  reason             TEXT,
+  status             TEXT NOT NULL CHECK(status IN ('calling','connecting','live','ended','offline','missed','declined','failed')),
+  close_reason       TEXT,
+  openai_session_id  TEXT,
+  voice_model        TEXT,
+  call_model         TEXT,
+  created_at         TEXT NOT NULL,
+  joined_at          TEXT,
+  ended_at           TEXT,
+  voice_seconds      INTEGER,
+  transcript_json    TEXT,
+  delegations_json   TEXT,
+  summary            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_calls_agent_created ON calls(agent_name, created_at);
+CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status);
 SQL
 
 echo "Messages database initialized: ${DB_PATH}"
-echo "Tables: messages, deleted_message_ids"
+echo "Tables: messages, deleted_message_ids, calls"

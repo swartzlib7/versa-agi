@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.11"
+PRODUCT_VERSION="3.4.12"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -886,6 +886,7 @@ _VERSA_LIB_SHARED_PY=(
   shipped_models.py
   catalog_compat.py
   privilege_guard.py
+  live_call_config.py
 )
 
 _deploy_server_agictl_shared_py() {
@@ -1481,7 +1482,20 @@ deploy_repo() {
     ok "Deployed ${name} → ${dest}"
   fi
 
-  chown -R "${owner}:${owner}" "${dest}"
+  # workspace/ holds live project trees (AGi-Tools, AGi-Knowledgebase, and the
+  # rest). chown -R ${owner}:${owner} resets them to that owner and group;
+  # the final permission pass only restores the shared directory roots, so
+  # the morning shared-dir guard then finds thousands of coa:coa paths it
+  # cannot repair (it runs as watchdog). Leave workspace/ untouched.
+  if [ -d "${dest}/workspace" ]; then
+    # Also skip the .agent/workspace symlink: chown follows it and would
+    # re-own the live workspace directory.
+    find "${dest}" \
+      \( -path "${dest}/workspace" -o -path "${dest}/.agent/workspace" \) -prune \
+      -o -exec chown "${owner}:${owner}" {} +
+  else
+    chown -R "${owner}:${owner}" "${dest}"
+  fi
   ok "Ownership set: ${dest} → ${owner}"
 }
 
