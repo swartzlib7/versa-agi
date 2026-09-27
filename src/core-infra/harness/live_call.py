@@ -16,9 +16,11 @@ messages.db or the VersaVoice token.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -195,42 +197,142 @@ def language_rule(lang: CallLanguage) -> str:
 
 # ── Prompts ───────────────────────────────────────────────────────────────
 
+# Shipped beside coa_poise.md; setup copies it next to the harness library (§3.7 P3-E).
+VOICE_CARD_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "live_call_voice.md"
+)
+_TEMPLATE_COMMENT = re.compile(r"<!--.*?-->\s*", re.DOTALL)
+
+
+def load_voice_card(path: str | None = None) -> str:
+    try:
+        with open(path or VOICE_CARD_PATH, encoding="utf-8") as f:
+            return _TEMPLATE_COMMENT.sub("", f.read()).strip()
+    except OSError as exc:
+        raise LiveCallError("voice_card", f"voice card template unavailable: {exc}") from exc
+
+
 def voice_instructions(agent_label: str, pu_name: str, reason: str, *,
-                       language: CallLanguage = ENGLISH, style_notes: str = "") -> str:
-    """GPT-Live voice card (§3.4 P2-D): identity, style, delegation policy, guardrails, language.
+                       language: CallLanguage = ENGLISH, style_notes: str = "",
+                       template: str | None = None) -> str:
+    """GPT-Live voice card: COA's purpose, duty, and stance toward the PU (from its poise),
+    plus style, delegation policy, guardrails, and language.
 
     COA's full poise stays with the harness, which answers every delegation.
     """
     who = pu_name or "the Primary User"
-    style = "Style: brief, warm, natural spoken turns. Do not read out IDs or lists unless asked."
-    if style_notes:
-        style += f" {who}'s preferences: {style_notes}"
-    return "\n".join([
-        f"You are the voice of {agent_label}, the Chief Orchestrator Agent (COA) of {who}'s "
-        "Versa AGi system — a precise, capable colleague, not a simulated personality.",
-        f"You placed this call to {who}. Reason: {reason}",
-        f"Open by greeting {who} by name and saying in one sentence why you called, then listen.",
-        style,
-        "",
-        "Delegation policy:",
-        "Backend tools: the COA agent — projects and tasks, agents and their status, messages, "
-        "memory, schedules, and system status.",
-        "Delegate to the backend when: they ask about or want to change anything in their "
-        "projects, tasks, agents, messages, or system; a correction changes work already "
-        "requested; the answer needs facts or careful reasoning.",
-        "Do not delegate to the backend when: greeting, small talk, repeating back what they "
-        "said, or asking a short clarifying question.",
-        "Delegate before giving an answer that depends on backend work. While it works, say "
-        "briefly that you are checking. Never guess results or say something is done before "
-        "the backend confirms it.",
-        "Ending the call: when the reason for the call is handled and they have nothing else, "
-        "or they say goodbye, say a short goodbye and then delegate \"end the call\" to the "
-        "backend. Only the backend can hang up; never say you will hang up without delegating it.",
-        "",
-        "Approvals cannot be given by voice. If they say yes, approve, or grant for a package, "
-        "sudo access, or an agent, tell them to use that control in the VersaVoice app.",
-        language_rule(language),
-    ])
+    card = template if template is not None else load_voice_card()
+    values = {
+        "{AGENT}": agent_label or "COA",
+        "{PU}": who,
+        "{REASON}": reason,
+        "{STYLE_NOTES}": f" {who}'s preferences: {style_notes}" if style_notes else "",
+        "{LANGUAGE_RULE}": language_rule(language),
+    }
+    for key, value in values.items():
+        card = card.replace(key, value)
+    return card
+
+
+# Game posture as a speaking tone, so the voice never hears the system term (§3.7 P3-F).
+POSTURE_TONE = {
+    "exploratory": "curious and open",
+    "steady": "calm and methodical",
+    "aggressive": "brisk and decisive",
+    "defensive": "calm, reassuring, and careful about risk",
+}
+PROFILE_MAX_CHARS = 600
+GAMES_MAX = 3
+ABILITIES_MAX = 10
+# VersaVoice chromosome is the PU's voice setting (X male, Y female).
+_VOICE_SETTING = {"x": "male voice", "y": "female voice", "reflective": "your voice"}
+
+
+def _born_phrase(raw: str) -> str:
+    text = raw.strip()[:10]
+    try:
+        day = datetime.date.fromisoformat(text)
+    except ValueError:
+        return f"born {raw.strip()}"
+    return f"born {day.strftime('%-d %B %Y')}"
+
+
+def _ability_word(level: int) -> str:
+    if level >= 8:
+        return "strong"
+    if level >= 5:
+        return "practiced"
+    return "some"
+
+
+def account_profile_line(pu: dict | None) -> str:
+    """My Information, already synced from VersaVoice into ``primary_user`` (§3.8)."""
+    pu = pu or {}
+    parts = []
+    born = " ".join(str(pu.get("dateOfBirth") or "").split())
+    origin = " ".join(str(pu.get("countryOfBirth") or "").split())
+    if born:
+        phrase = _born_phrase(born)
+        parts.append(f"{phrase} in {origin}" if origin else phrase)
+    elif origin:
+        parts.append(f"from {origin}")
+    home = [str(pu.get(key) or "").strip()
+            for key in ("nearestCity", "stateOrProvince", "countryOfResidence")]
+    home = [" ".join(p.split()) for p in home if p]
+    if home:
+        parts.append("lives in " + ", ".join(home))
+    voice = _VOICE_SETTING.get(str(pu.get("chromosome") or "").strip().lower())
+    if voice:
+        parts.append(f"voice setting: {voice}")
+    ranked = []
+    raw = pu.get("abilities") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            raw = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = " ".join(str(item.get("name") or "").split())
+        try:
+            level = int(item.get("level") or 0)
+        except (TypeError, ValueError):
+            continue
+        if name and 1 <= level <= 10:
+            ranked.append((level, name))
+    ranked.sort(key=lambda pair: (-pair[0], pair[1].lower()))
+    if ranked:
+        shown = ", ".join(f"{name} ({_ability_word(level)})" for level, name in ranked[:ABILITIES_MAX])
+        parts.append(f"abilities: {shown}")
+    return "; ".join(parts)
+
+
+def call_start_context(*, pu_name: str, brief: str = "", profile: str = "",
+                       games: list[dict] | None = None, last_call: str = "") -> list[str]:
+    """Quiet context for the start of a call, one ``thinking.append`` per item."""
+    who = pu_name or "the Primary User"
+    out = []
+    if brief.strip():
+        out.append(clip_for_speech(f"COA's brief for this call: {brief}"))
+    known = []
+    if profile:
+        known.append(f"What you know about {who}: {clip_for_speech(profile, PROFILE_MAX_CHARS)}")
+    lines = []
+    for game in (games or [])[:GAMES_MAX]:
+        name = " ".join(str(game.get("name") or "").split())
+        if not name:
+            continue
+        intent = clip_for_speech(str(game.get("postulate") or ""), 140)
+        tone = POSTURE_TONE.get(str(game.get("posture") or ""), "")
+        lines.append(name + (f" ({intent})" if intent else "") + (f" — tone: {tone}" if tone else ""))
+    if lines:
+        known.append(f"{who}'s active pursuits: " + "; ".join(lines) + ".")
+    if last_call:
+        known.append(f"Your last call with {who}: {last_call}")
+    if known:
+        out.append(clip_for_speech(" ".join(known)))
+    return out
 
 
 # Optional reply lines (D21) — never spoken as written.
@@ -740,10 +842,14 @@ class LiveCallRuntime:
         return self.session is not None and not self.ended_injected
 
     # ── placing the call (inside the tool) ──
-    def place(self, reason: str, settings, last_call_summary: str = "") -> dict:
+    def place(self, reason: str, settings, last_call_summary: str = "", brief: str = "") -> dict:
         limit = max(1, int(getattr(settings, "calls_per_cycle", 1) or 1))
         if self.live:
             return {"success": False, "status": "refused", "error": "You are already on this call."}
+        try:
+            card_template = load_voice_card()
+        except LiveCallError as exc:
+            return {"success": False, "status": "failed", "error": str(exc)}
         if self.calls_placed >= limit:
             plural = "call" if limit == 1 else "calls"
             return {"success": False, "status": "refused",
@@ -799,6 +905,7 @@ class LiveCallRuntime:
             "instructions": voice_instructions(
                 self.agent_label, self.pu_name, self.reason,
                 language=self.language, style_notes=context.get("style_notes") or "",
+                template=card_template,
             ),
             "delegation": {"type": "client"},
         }
@@ -819,9 +926,11 @@ class LiveCallRuntime:
             self._end("failed", "sideband")
             return {"success": False, "status": "failed", "error": f"sideband attach failed: {exc}"}
         self.session = LiveSession(session_id, ws, max_minutes=settings.max_minutes, clock=self._clock)
-        if context.get("last_call"):
-            self.session.thinking(None, f"Your last call with {self.pu_name or 'the Primary User'}: "
-                                        f"{context['last_call']}")
+        for item in call_start_context(
+            pu_name=self.pu_name, brief=brief, profile=context.get("pu_profile") or "",
+            games=context.get("games") or [], last_call=context.get("last_call") or "",
+        ):
+            self.session.thinking(None, item)
         self._bridge(["log", self.call_id, "--status", "live"], json.dumps(self._snapshot()), BRIDGE_TIMEOUT_SECONDS)
         self._log(f"LIVE CALL: connected call={self.call_id} session={session_id} language={self.language.code}")
         return {"success": True, "status": "connected", "call_id": self.call_id, "note": CONNECTED_TOOL_RESULT}

@@ -1,6 +1,8 @@
 # Skill: Live Call — when and how to call the Primary User (COA only)
 
-> **Scope:** COA only (`coa_only`). **Tool:** `agictl_call_pu(reason="...")` — there is no terminal command for placing a call.
+> **Scope:** COA only (`coa_only`). **Tool:** `agictl_call_pu(reason="...", brief="...")` — there is no terminal command for placing a call.
+>
+> **Brief:** the voice starts with only what you give it. In `brief`, write about 120 words of plain language: what you need decided or want to tell them, the facts that matter, the options, and what you recommend. No IDs or system terms. The harness adds what memory knows about the Primary User and their active games, so do not repeat those.
 > **Readiness:** the `LIVE CALL` section of your prompt says `ready` or `not ready`. Only offer or place calls when it says `ready`.
 
 ## 1. When to call instead of message

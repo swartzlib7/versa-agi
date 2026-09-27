@@ -1140,6 +1140,9 @@ class SystemSettingsModal(ModalScreen):
         # Parked (VV required): vv_enabled = _read_ini_value("versavoice", "enabled", "true").lower() == "true"
         vv_enabled = True  # checkbox locked on; local-only path parked
         vv_sync_interval = _read_ini_value("versavoice", "sync_interval", "off")
+        vv_profile_sync = _read_ini_value("versavoice", "profile_sync", "weekly")
+        if vv_profile_sync not in ("daily", "weekly", "monthly"):
+            vv_profile_sync = "weekly"
         _vv_sync_options = [
             ("Off", "off"),
             ("5min", "5min"),
@@ -1237,6 +1240,14 @@ class SystemSettingsModal(ModalScreen):
                                                     _vv_sync_options,
                                                     value=vv_sync_interval,
                                                     id="select-vv-sync-interval",
+                                                    allow_blank=False,
+                                                )
+                                            with Vertical(classes="settings-web-search-col"):
+                                                yield Static("[bold cyan]User Profile Sync[/]")
+                                                yield Select(
+                                                    [("Daily", "daily"), ("Weekly", "weekly"), ("Monthly", "monthly")],
+                                                    value=vv_profile_sync,
+                                                    id="select-vv-profile-sync",
                                                     allow_blank=False,
                                                 )
 
@@ -2036,6 +2047,10 @@ class SystemSettingsModal(ModalScreen):
                     self.query_one("#select-vv-sync-interval", Select).value or "off"
                 )
                 ok_vv_sync = _write_ini_value("versavoice", "sync_interval", str(vv_sync_interval))
+                vv_profile_sync = (
+                    self.query_one("#select-vv-profile-sync", Select).value or "weekly"
+                )
+                ok_vv_profile = _write_ini_value("versavoice", "profile_sync", str(vv_profile_sync))
 
                 # ── COA Autonomous (set-ini applies sudoers; do not sidecar sudo bash) ──
                 coa_autonomous = self.query_one("#chk-coa-autonomous", Checkbox).value
@@ -2078,7 +2093,7 @@ class SystemSettingsModal(ModalScreen):
                     ok12 = _write_ini_value("image_processing", "max_width", str(max_width))
                     ok13 = _write_ini_value("image_processing", "max_height", str(max_height))
 
-                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok_vv, ok_vv_sync, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
+                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok_vv, ok_vv_sync, ok_vv_profile, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
                     summary_parts = [
                         f"Task max spawn: {task_max_spawn}",
                         f"Circuit breaker: {cb_consecutive}/{cb_hourly}",
@@ -2086,6 +2101,7 @@ class SystemSettingsModal(ModalScreen):
                         f"Search: {'on' if search_enabled else 'off'}",
                         f"VersaVoice: {'on' if vv_enabled else 'off'}",
                         f"Sync to VV: {vv_sync_interval}",
+                        f"User Profile Sync: {vv_profile_sync}",
                         f"Browser timeout: {browser_timeout}s",
                         f"Autonomous: {'on' if coa_autonomous else 'off'}",
                     ]

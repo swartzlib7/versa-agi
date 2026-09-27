@@ -837,21 +837,27 @@ ${AGENT_REGISTRY_CONTENT}
 
   AGENT_DB="/var/lib/versa-agi/${AGENT_NAME}/agent_memory.db"
 
-  # ─── Profile Sync (7-day staleness) ────────────────
+  # ─── Profile Sync ([versavoice] profile_sync) ─────
   if [ -n "${API_TOKEN}" ] && [ -f "${SYSTEM_CONFIG}" ]; then
+    _profile_sync=$(sed -n '/^\[versavoice\]/,/^\[/{s/^profile_sync=//p}' /etc/versa-agi/setup.ini 2>/dev/null | head -1 | tr -d '[:space:]')
+    case "${_profile_sync}" in
+      daily) _profile_stale="1 day ago" ;;
+      monthly) _profile_stale="30 days ago" ;;
+      *) _profile_stale="7 days ago" ;;
+    esac
     LAST_PROFILE_SYNC=$(jq -r '.primary_user.profile_synced_at // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
     SYNC_NEEDED=false
     if [ -z "${LAST_PROFILE_SYNC}" ]; then
       SYNC_NEEDED=true
     else
       SYNC_EPOCH=$(date -d "${LAST_PROFILE_SYNC}" +%s 2>/dev/null || echo 0)
-      STALE_EPOCH=$(date -d '7 days ago' +%s)
+      STALE_EPOCH=$(date -d "${_profile_stale}" +%s)
       if [ "${SYNC_EPOCH}" -lt "${STALE_EPOCH}" ]; then
         SYNC_NEEDED=true
       fi
     fi
     if [ "${SYNC_NEEDED}" = true ]; then
-      log "Profile data stale (>7 days) — syncing via agictl..."
+      log "Profile data stale (${_profile_sync:-weekly}) — syncing via agictl..."
       AGICTL_CONFIG="${SYSTEM_CONFIG}" AGICTL_TASKS_DB="${TASKS_DB}" \
         /usr/local/bin/agictl system sync-profiles 2>/dev/null || log "WARN: profile sync failed"
     fi

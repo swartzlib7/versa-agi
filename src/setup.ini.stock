@@ -16,6 +16,9 @@ api_token=
 # Settings → General → Sync to VV. User value is carried on --update.
 # off | 5min | 15min | 30min | 1hr | 3hr | 6hr | 12hr | 1d | 2d | 1w
 sync_interval=off
+# Settings → General → User Profile Sync. How often Lifeline refreshes My Information.
+# daily | weekly | monthly. Missing key behaves as weekly.
+profile_sync=weekly
 
 [system]
 # Execution mode: "cloud", "local", or "hybrid"

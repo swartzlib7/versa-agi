@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.12"
+PRODUCT_VERSION="3.4.13"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -1963,6 +1963,14 @@ for _shared_py in "${_VERSA_LIB_SHARED_PY[@]}"; do
     chmod 644 "${LIB_DIR}/${_shared_py}"
   fi
 done
+# Live Call voice card (harness/live_call.py reads ../config/live_call_voice.md as the COA user).
+if [ -f "${DEPLOYED_CORE_INFRA}/config/live_call_voice.md" ]; then
+  mkdir -p "${LIB_DIR}/config"
+  cp "${DEPLOYED_CORE_INFRA}/config/live_call_voice.md" "${LIB_DIR}/config/live_call_voice.md"
+  chown -R root:root "${LIB_DIR}/config"
+  chmod 755 "${LIB_DIR}/config"
+  chmod 644 "${LIB_DIR}/config/live_call_voice.md"
+fi
 if [ -d "${DEPLOYED_CORE_INFRA}/model_drivers" ]; then
   rm -rf "${LIB_DIR}/model_drivers"
   cp -r "${DEPLOYED_CORE_INFRA}/model_drivers" "${LIB_DIR}/"

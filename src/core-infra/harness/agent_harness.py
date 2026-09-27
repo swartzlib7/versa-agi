@@ -972,6 +972,11 @@ class CallPuInput(BaseModel):
         "Why you are calling the Primary User, in one plain sentence. "
         "The voice opens the call with it."
     ))
+    brief: str = Field(default="", description=(
+        "What the voice should know before it speaks, in about 120 words of plain language: what "
+        "you need decided or want to tell them, the facts that matter, the options, and what you "
+        "recommend. No IDs or system terms."
+    ))
     last_call_summary: str = Field(default="", description=(
         "Only when you already called this cycle: the 2–4 sentence summary of that call "
         "(what was discussed, decided, and what happens next). It is saved as that call's note."
@@ -982,7 +987,7 @@ _LIVE_CALL_RUNTIME = None  # harness.live_call.LiveCallRuntime, set in main()
 
 
 @tool("agictl_call_pu", args_schema=CallPuInput)
-def agictl_call_pu(reason: str, last_call_summary: str = "") -> str:
+def agictl_call_pu(reason: str, brief: str = "", last_call_summary: str = "") -> str:
     """Place a live voice call to the Primary User in the VersaVoice app (COA only).
     Use when talking settles something faster than chat, or when the Primary User asked you to call.
     Rings their phone and returns when they join, decline, miss it, or have no device (up to about a minute).
@@ -996,7 +1001,8 @@ def agictl_call_pu(reason: str, last_call_summary: str = "") -> str:
         return json.dumps({"success": False, "status": "unavailable",
                            "error": "Live Call is not available in this cycle. Send a chat message instead."})
     try:
-        return json.dumps(runtime.place(reason, gate.settings, last_call_summary=last_call_summary))
+        return json.dumps(runtime.place(reason, gate.settings, last_call_summary=last_call_summary,
+                                        brief=brief))
     except Exception as e:
         runtime.shutdown("failed")
         return json.dumps({"success": False, "status": "failed", "error": f"call failed: {e}"})
@@ -1057,12 +1063,14 @@ _LIVE_CALL_STYLE_KEY_HINTS = ("communication", "style", "preference", "tone")
 
 
 def _live_call_context() -> dict:
-    """PU language, communication style, and the latest call — for the voice card and prompt.
+    """PU language, style, profile, active games, and the latest call — for the voice card,
+    the call's start context, and the prompt.
 
     Style: system memory `pu.communication_style` (saved in the get-to-know call); without it,
-    any system-memory keys that look like communication preferences.
+    any system-memory keys that look like communication preferences. Profile: My Information
+    already synced from VersaVoice (`primary_user`), then the other `pu.*` system-memory keys.
     """
-    from harness.live_call import last_call_line, resolve_call_language
+    from harness.live_call import account_profile_line, last_call_line, resolve_call_language
 
     pu = _agictl_config_value("primary_user")
     rows = [r for r in (_agictl_json(["memory", "system", "list"]) or []) if isinstance(r, dict)]
@@ -1075,11 +1083,21 @@ def _live_call_context() -> dict:
             key = str(row.get("key") or "")
             if key and not key.startswith("live_call.") and any(h in key.lower() for h in _LIVE_CALL_STYLE_KEY_HINTS):
                 notes.append(f"{key}: {' '.join(str(row.get('value') or '').split())}")
-    rows = _agictl_json(["message", "calls", "list", "--limit", "1"])
-    latest = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+    profile = [
+        f"{str(r['key'])[3:].replace('_', ' ')}: {' '.join(str(r.get('value') or '').split())}"
+        for r in rows
+        if str(r.get("key") or "").startswith("pu.") and r.get("key") != _LIVE_CALL_STYLE_KEY
+        and str(r.get("value") or "").strip()
+    ]
+    games = [g for g in (_agictl_json(["game", "list", "--status", "active"]) or []) if isinstance(g, dict)]
+    calls = _agictl_json(["message", "calls", "list", "--limit", "1"])
+    latest = calls[0] if isinstance(calls, list) and calls and isinstance(calls[0], dict) else None
+    account = account_profile_line(pu)
     return {
         "language": resolve_call_language(str(pu.get("spokenLanguage") or "")),
         "style_notes": "; ".join(notes)[:400],
+        "pu_profile": "; ".join(part for part in (account, "; ".join(profile)) if part),
+        "games": games,
         "last_call": last_call_line(latest),
     }
 

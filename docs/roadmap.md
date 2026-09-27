@@ -41,6 +41,7 @@
 - agitop Mission Control; token totals; thread manager; live cycle log.
 - VV rate limiter; VV-gated routing; local messaging; message delete; two-step removal.
 - 403 / quota Provider alerts to the Primary User (see `state_provider_alerts.md`).
+- **Live voice calls** — COA calls the Primary User in the VersaVoice app (OpenAI GPT-Live voice; the harness answers every request with COA's tools). Ringing in foreground and background, missed calls, transcript + summary in `messages.db calls`, agitop Settings → Live Call. Setup: [README](../README.md#optional-live-voice-calls).
 
 ### Operations
 

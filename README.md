@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.4.12-FF9800" alt="Versa AGi version 3.4.12">
+    <img src="https://img.shields.io/badge/version-3.4.13-FF9800" alt="Versa AGi version 3.4.13">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -77,6 +77,7 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 | 🧠 | **Deterministic cognitive ledger** | The LLM is the cognitive engine. Databases own the state ledger — no hallucinated “I already finished that.” |
 | 🔧 | **Real-world execution** | Agents write scripts, compile, run servers, manage git, and use venvs in their workspace. |
 | 💬 | **Human communication** | VersaVoice REST or local SQLite. Every exchange has an audit trail. VersaVoice is optional. |
+| 📞 | **Live voice calls** | Your COA can call you in the VersaVoice app when talking is faster than chat. OpenAI GPT-Live is the voice; your agent's full tools and judgment answer behind it. Transcript and summary stay on your machine. Optional. |
 | 🤝 | **Agent–human collaboration** | A two-player game of life. The human stays sovereign; the agent is a relentless partner. |
 | ❤️ | **Native emotional intelligence** | VersaVoice emotion detection is on the communication layer — independent of which model powers the agent. |
 | 🌍 | **Cross-cultural sync** | Localized translation in the VersaVoice ecosystem. |
@@ -158,6 +159,20 @@ OrbStack / WSL: `~/.versa-agi/` is the **Linux** home (`/home/<you>`), not macOS
 
 Details: [Models](docs/models.md).
 
+### Optional: live voice calls
+
+COA calls you in the **VersaVoice app** (Android, iOS, web) to settle a decision, report progress, or talk through a question. You answer, talk naturally, and COA looks things up and acts with its normal tools while you speak. Afterwards it sends a chat summary and files tasks for anything left open.
+
+**Needs:**
+
+- VersaVoice enabled, with the app signed in on your phone or browser
+- An **OpenAI** API key (GPT-Live voice)
+- A **call model**: a fast call-capable model with a keyed provider (e.g. Gemini 3.7 Flash or Grok 4.6)
+
+**Turn it on:** answer the Live Call question during `setup.sh` / `setup.sh --update`, or `sudo agitop` → System Settings → **Live Call** (on/off, call model, longest call, ring time, calls per cycle, spoken progress). The same tab shows your last call and its transcript.
+
+Ask COA in chat to call you, or let it call when a conversation will be faster. Only COA places calls. Approvals (packages, sudo, agents) are never given by voice. Use the app or agitop controls.
+
 ### Uninstall
 
 ```bash
@@ -195,6 +210,8 @@ sudo versa-agi-uninstall --dry-run
 | **Active agents** | Unlimited | Soft gate — warns |
 | **Message text** | 2048 characters | Server-side hard block |
 | **Attachments** | 10 per message, 50MB per file | Client + server |
+| **Live call length** | 1–55 min (default 15) | Spoken wrap-up, then close |
+| **Live calls per cycle** | 1–5 (default 1), one at a time | Harness |
 
 ## Engine & model support timeline
 
@@ -206,6 +223,7 @@ sudo versa-agi-uninstall --dry-run
 > | **2026.05** | Intel ARC (Docker SYCL) and **Server** topology (GPU host + laptop client). |
 > | **Edition 2** | **LangGraph Agent Harness.** Direct LangChain integrations (Google, Ollama, SYCL, xAI, OpenAI, Anthropic, OpenRouter). |
 > | **2026.08** | Vendor-agnostic catalog layers and first-login COA assign. See [Models](docs/models.md). |
+> | **2026.09** | **Live voice calls** — COA calls you in the VersaVoice app over OpenAI GPT-Live, with the harness answering every request. |
 
 ## Privacy & Terms of Service
 
@@ -213,6 +231,7 @@ sudo versa-agi-uninstall --dry-run
 
 - **Agent data stays local.** Memory, execution state, configs, and SQLite payloads stay on the box.
 - **Install registration.** You accept BSL-1.1 and provide an email (required) for release notes and to identify this install’s COA on VersaVoice. Setup derives a **COA call sign** from the email local-part; the COA’s external name becomes `Versa (callsign)`. A minimal install event (version, platform, acceptance timestamp, email, call sign) may be sent to VersaVoice if a registration endpoint is configured. No task or message content. If the endpoint is down, the event is stored and retried when you open agitop.
+- **Live voice calls (optional).** Call audio goes directly between the VersaVoice app and OpenAI; Versa AGi and VersaVoice do not carry or store it. The transcript reaches your machine as text and is stored locally in `messages.db`. VersaVoice keeps only the call record (status, reason, timing), not the conversation.
 - **Direct backend connections.** Messaging goes to [VersaVoice AI](https://versavoice.ai) when enabled. Inference goes to the providers you configured (Google, local Ollama/SYCL, xAI, OpenAI, Anthropic, [OpenRouter](https://openrouter.ai), …), each under their own Terms.
 
 *By using this infrastructure you assume responsibility for agent autonomy and security boundaries as stated in the License.*

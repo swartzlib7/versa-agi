@@ -374,6 +374,10 @@ def system_config_set_ini(section, key, value):
                 error="sync_interval must be one of: " + ", ".join(_VV_SYNC_INTERVALS),
             )
             sys.exit(1)
+    elif section_l == "versavoice" and key_l == "profile_sync":
+        if value_s not in ("daily", "weekly", "monthly"):
+            json_response(False, error="profile_sync must be daily, weekly, or monthly")
+            sys.exit(1)
     elif section_l == "live_call" or (section_l == "features" and key_l == "live_call"):
         if os.getenv("AGICTL_AGENT_USER"):
             json_response(False, error="Live Call settings are Primary User only "

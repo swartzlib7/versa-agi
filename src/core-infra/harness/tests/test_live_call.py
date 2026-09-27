@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import unittest
+import unittest.mock
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -321,9 +322,68 @@ class TestVoiceCardAndSummary(unittest.TestCase):
                                      style_notes="prefers short updates")
         for part in ("Delegation policy:", "Backend tools:", "Delegate to the backend when:",
                      "Do not delegate to the backend when:", "Approvals cannot be given by voice",
-                     "Speak Spanish", "prefers short updates", "not a simulated personality"):
+                     "Speak Spanish", "prefers short updates", "not a simulated personality",
+                     "Purpose:", "Duty: safeguard Sam", "Understanding Sam:", "Plain language:",
+                     "Stay within what is true:"):
             self.assertIn(part, card)
-        self.assertLess(len(card.split()), 320)
+        self.assertNotRegex(card, r"\{[A-Z_]+\}")
+        self.assertNotIn("<!--", card)
+        self.assertLess(len(card.split()), 520)   # ≈ 700 tokens
+
+    def test_missing_voice_card_fails_before_ringing(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, posted = _runtime(bridge, sock)
+        with unittest.mock.patch.object(lc, "VOICE_CARD_PATH", "/nonexistent/live_call_voice.md"):
+            result = rt.place("x", SETTINGS)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("voice card", result["error"])
+        self.assertEqual(bridge.calls, [])
+        self.assertEqual(posted, [])
+
+    def test_start_context_brief_profile_games(self):
+        items = lc.call_start_context(
+            pu_name="Sam", brief="Need a yes or no on moving QA to Friday; web-dev is free then.",
+            profile="timezone: America/New_York; role: founder",
+            games=[{"name": "Ship 2.4", "postulate": "Live calls in the stores", "posture": "aggressive"},
+                   {"name": "Health", "postulate": "", "posture": "defensive"}],
+            last_call="2026-09-26 (4.2 min, ended) — Chose Friday.",
+        )
+        self.assertEqual(len(items), 2)
+        self.assertTrue(items[0].startswith("COA's brief for this call: Need a yes or no"))
+        self.assertIn("What you know about Sam: timezone", items[1])
+        self.assertIn("Ship 2.4 (Live calls in the stores) — tone: brisk and decisive", items[1])
+        self.assertIn("Health — tone: calm, reassuring", items[1])
+        self.assertIn("Your last call with Sam", items[1])
+        self.assertNotIn("posture", " ".join(items).lower())
+        self.assertEqual(lc.call_start_context(pu_name="Sam"), [])
+
+    def test_account_profile_from_versavoice(self):
+        abilities = [{"name": f"Skill {i}", "level": i} for i in range(1, 12)]
+        abilities.append({"name": "Cooking", "level": 9})
+        line = lc.account_profile_line({
+            "dateOfBirth": "1980-05-12T00:00:00.000Z",
+            "countryOfBirth": "South Africa",
+            "nearestCity": "Austin",
+            "stateOrProvince": "Texas",
+            "countryOfResidence": "United States",
+            "chromosome": "X",
+            "abilities": abilities,
+        })
+        self.assertIn("born 12 May 1980 in South Africa", line)
+        self.assertIn("lives in Austin, Texas, United States", line)
+        self.assertIn("voice setting: male voice", line)
+        self.assertNotIn("chromosome", line.lower())
+        self.assertNotRegex(line, r"\bX\b")
+        shown = line.split("abilities: ", 1)[1].split(", ")
+        self.assertEqual(len(shown), 10)
+        self.assertEqual(shown[0], "Skill 10 (strong)")
+        self.assertIn("Cooking (strong)", shown)
+        self.assertNotIn("Skill 1 (some)", line)
+        self.assertNotIn("Skill 11", line)
+        self.assertEqual(lc.account_profile_line({"chromosome": "Y"}), "voice setting: female voice")
+        self.assertEqual(lc.account_profile_line({"chromosome": "Reflective"}), "voice setting: your voice")
+        self.assertEqual(lc.account_profile_line({}), "")
+        self.assertEqual(lc.account_profile_line({"abilities": "not json"}), "")
 
     def test_context_drives_session_and_last_call(self):
         bridge, sock = FakeBridge(), FakeSocket()
@@ -339,12 +399,17 @@ class TestVoiceCardAndSummary(unittest.TestCase):
             context_provider=lambda: {
                 "language": lc.CallLanguage("fr", "French", "supported", "French"),
                 "style_notes": "", "last_call": "2026-09-26 04:41 UTC (4.2 min, ended) — Chose Friday.",
+                "pu_profile": "role: founder",
+                "games": [{"name": "Ship 2.4", "postulate": "", "posture": "steady"}],
             },
         )
-        self.assertEqual(rt.place("x", SETTINGS)["status"], "connected")
+        self.assertEqual(rt.place("x", SETTINGS, brief="QA date: Friday or Monday?")["status"], "connected")
         self.assertIn("Speak French", posted[0]["session"]["instructions"])
-        thinking = [e for e in sock.sent if e["type"] == "session.thinking.append"]
-        self.assertIn("Chose Friday", thinking[0]["content"])
+        thinking = [e["content"] for e in sock.sent if e["type"] == "session.thinking.append"]
+        self.assertEqual(thinking[0], "COA's brief for this call: QA date: Friday or Monday?")
+        self.assertIn("role: founder", thinking[1])
+        self.assertIn("Ship 2.4 — tone: calm and methodical", thinking[1])
+        self.assertIn("Chose Friday", thinking[1])
         rt.shutdown()
 
     def test_summary_captured_after_call_ended(self):
