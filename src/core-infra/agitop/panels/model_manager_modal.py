@@ -457,7 +457,6 @@ class ModelManagerModal(ModalScreen):
                 yield Button("↩ Reset", id="mm-reset", variant="warning")
                 yield Button("✖ Remove", id="mm-remove", variant="error")
                 yield Button("＋ Add", id="mm-add", variant="success")
-                yield Button("📞 Call-capable", id="mm-call-capable", variant="default")
                 yield Button("Close", classes="dismiss-btn", variant="default", id="mm-close")
 
     def on_mount(self) -> None:
@@ -572,15 +571,6 @@ class ModelManagerModal(ModalScreen):
         bid = event.button.id
         if bid == "mm-close":
             self._close()
-        elif bid == "mm-call-capable":
-            key = self._selected_key("#mm-models-table")
-            if not key:
-                self._feedback("[yellow]Select a model row first.[/]")
-                return
-            if key in self._call_capable:
-                self._apply(["model", "live-call", "unset", key], f"'{key}' is no longer call-capable")
-            else:
-                self._apply(["model", "live-call", "set", key], f"'{key}' is call-capable")
         # ── Context-sensitive actions (based on active tab) ──
         elif bid in ("mm-add", "mm-edit", "mm-reset", "mm-remove"):
             tabs = self.query_one("#model-manager-tabs", TabbedContent)
@@ -666,7 +656,8 @@ class ModelManagerModal(ModalScreen):
             return
         self.app.push_screen(
             CatalogFormModal(list(self._providers_by_slug.keys()),
-                             existing=self._models_by_key.get(key)),
+                             existing=self._models_by_key.get(key),
+                             call_capable=key in self._call_capable),
             callback=self._on_model_form,
         )
 
@@ -750,6 +741,15 @@ class ModelManagerModal(ModalScreen):
         elif result.get("_clear_params"):
             self._apply(["model", "params", "clear", f"model:{result['key']}"],
                         f"Cleared default params for '{result['key']}'")
+        want = bool(result.get("call_capable"))
+        if want != (result["key"] in self._call_capable):
+            verb = "set" if want else "unset"
+            ok, _data, err = _run_agictl(["model", "live-call", verb, result["key"]])
+            if ok:
+                self._dirty = True
+                self._reload()
+            else:
+                self._feedback(f"[red]❌ {err}[/]")
 
     def _on_provider_form(self, result) -> None:
         if not result:
@@ -777,11 +777,12 @@ class ModelManagerModal(ModalScreen):
 class CatalogFormModal(ModalScreen):
     """Add or edit a single catalog model (writes [catalog_custom])."""
 
-    def __init__(self, providers, existing=None, source_providers=None, **kwargs):
+    def __init__(self, providers, existing=None, source_providers=None, call_capable=False, **kwargs):
         super().__init__(**kwargs)
         self._providers = providers or []
         self._existing = existing
         self._edit = existing is not None
+        self._call_capable = bool(call_capable)
         self._had_custom_params = False
         self._source_providers = source_providers
         self._hf_inspect = None
@@ -858,6 +859,11 @@ class CatalogFormModal(ModalScreen):
                 with Horizontal(classes="mm-form-row mm-check-row"):
                     yield ClearCheckbox("Enabled", value=e.get("enabled", True), id="f-enabled")
                     yield ClearCheckbox("COA approved", value=e.get("coa", False), id="f-coa")
+                    yield ClearCheckbox("Call-capable", value=self._call_capable, id="f-call-capable")
+                yield Static(
+                    "[dim]Call-capable only lists this model in the Live Call model picker. "
+                    "It does not test the model.[/]"
+                )
 
                 yield Static("[bold cyan]Routing Modalities[/]", classes="mm-section-heading")
                 with Horizontal(classes="mm-form-row"):
@@ -1413,6 +1419,7 @@ class CatalogFormModal(ModalScreen):
             "input_modalities": self.query_one("#f-input-modalities", Input).value.strip() or "text",
             "output_modalities": self.query_one("#f-output-modalities", Input).value.strip() or "text",
             "router_eligible": self.query_one("#f-router-eligible", Checkbox).value,
+            "call_capable": self.query_one("#f-call-capable", Checkbox).value,
         }
         from agitop.panels.model_params_ui import collect_catalog_generation_params
 

@@ -114,6 +114,30 @@ def _load_context_map() -> dict[str, tuple[int, int]]:
 MODEL_CONTEXT_MAP: dict[str, tuple[int, int]] = _load_context_map()
 
 
+def context_is_known(model_name: str) -> bool:
+    """True when the catalog has a context row for this model (or its basename)."""
+    if not model_name:
+        return False
+    if _lookup_context(model_name) is not None:
+        return True
+    if "/" in model_name:
+        return _lookup_context(model_name.rsplit("/", 1)[-1]) is not None
+    return False
+
+
+def resume_message_cap(window_tokens: int) -> int:
+    """Verbatim resume tail for a token window: a quarter of the window at
+    ~1,200 tokens per message, clamped to 12–200.
+
+    A 4096 placeholder (unknown model) falls under one message and clamps to 12.
+    """
+    window = int(window_tokens or 0)
+    if window <= 0:
+        window = DEFAULT_NUM_CTX
+    count = round(window * 0.25 / 1200)
+    return max(12, min(200, count))
+
+
 def _lookup_context(name: str) -> tuple[int, int] | None:
     """Exact match, then longest prefix match. None if unknown."""
     if not name:

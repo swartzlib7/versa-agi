@@ -412,6 +412,21 @@ class AgentPromptMenu(ModalScreen):
                                 classes="panel-btn dismiss-btn agent-modal-close",
                             )
 
+                with TabPane("Summary Frames", id="agent-frames-tab"):
+                    with Vertical(id="agent-frames-pane"):
+                        yield Static("", classes="modal-tab-spacer")
+                        yield Static("[bold cyan]Summary Frames[/]")
+                        yield Input(placeholder="Search summaries", id="agent-frames-search")
+                        with VerticalScroll(id="agent-frames-scroll"):
+                            yield DataTable(id="agent-frames-table", cursor_type="row")
+                        yield Static("", id="agent-frames-summary")
+                        with Horizontal(classes="agent-tab-actions"):
+                            yield Button(
+                                "Close", variant="default",
+                                id="btn-agent-frames-close",
+                                classes="panel-btn dismiss-btn agent-modal-close",
+                            )
+
                 # IDE mode is COA-only (agictl refuses other names), so the tab
                 # only exists where it can do something.
                 if self.agent_name == "coa":
@@ -499,6 +514,11 @@ class AgentPromptMenu(ModalScreen):
         thread_table.cursor_type = "row"
         thread_table.add_columns("Thread ID", "Project", "Checkpoints", "Writes", "Size")
         self.refresh_thread_table()
+
+        frames_table = self.query_one("#agent-frames-table", DataTable)
+        frames_table.cursor_type = "row"
+        frames_table.add_columns("Start", "End", "Status", "Thread", "Summary")
+        self.refresh_frames_table("")
 
         self._init_cycle_log_embed()
         from agitop.panels.agents import apply_technical_setup_hints
@@ -795,6 +815,39 @@ class AgentPromptMenu(ModalScreen):
         if self._cycle_embed:
             self._cycle_embed.refresh_after_purge()
 
+    def refresh_frames_table(self, text: str) -> None:
+        """Compaction frames for this agent (TD-CTX-FRAME-001), newest last."""
+        try:
+            table = self.query_one("#agent-frames-table", DataTable)
+            summary = self.query_one("#agent-frames-summary", Static)
+        except Exception:
+            return
+        table.clear()
+        reader = getattr(self._agents_panel(), "agent_reader", None)
+        rows = reader.list_frames(self.agent_name, text) if reader else []
+        for row in rows:
+            body = " ".join(str(row.get("summary") or "").split())
+            table.add_row(
+                str(row.get("frame_start") or ""),
+                str(row.get("frame_end") or ""),
+                str(row.get("status") or ""),
+                str(row.get("thread_id") or ""),
+                body[:160],
+            )
+        if rows:
+            active = sum(1 for r in rows if r.get("status") == "active")
+            summary.update(f"[dim]{len(rows)} frame(s) — {active} active, {len(rows) - active} rolled[/]")
+        elif text:
+            summary.update("[dim]No frames match that search.[/]")
+        else:
+            summary.update(
+                "[dim]No frames yet. A frame is written when a session nears its context limit.[/]"
+            )
+
+    @on(Input.Changed, "#agent-frames-search")
+    def on_frames_search(self, event: Input.Changed) -> None:
+        self.refresh_frames_table(event.value)
+
     def refresh_thread_table(self) -> None:
         try:
             table = self.query_one("#agent-thread-table", DataTable)
@@ -979,6 +1032,7 @@ class AgentPromptMenu(ModalScreen):
             "btn-agent-prompt-close",
             "btn-agent-cycle-close",
             "btn-agent-threads-close",
+            "btn-agent-frames-close",
             "btn-agent-ide-close",
         ):
             self._close_agent_modal()

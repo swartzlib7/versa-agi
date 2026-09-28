@@ -3836,6 +3836,7 @@ AgentPromptMenu {
 #agent-prompt-pane,
 #agent-cycle-pane,
 #agent-threads-pane,
+#agent-frames-pane,
 #agent-ide-pane {
     height: 100%;
     layout: vertical;
@@ -3925,6 +3926,7 @@ AgentPromptMenu {
 
 #agent-memory-scroll,
 #agent-threads-scroll,
+#agent-frames-scroll,
 #agent-poise-scroll,
 #agent-prompt-scroll {
     height: 1fr;
@@ -3934,7 +3936,8 @@ AgentPromptMenu {
 }
 
 #agent-tab-mem-table,
-#agent-thread-table {
+#agent-thread-table,
+#agent-frames-table {
     height: auto;
     min-height: 0;
     width: 100%;
@@ -4145,6 +4148,18 @@ AgentPromptMenu {
     background: $error 25%;
     color: $text;
     border: heavy $error;
+    text-style: bold;
+}
+
+/* Summary Frames tab — teal */
+#agent-tabs #--content-tab-agent-frames-tab {
+    border-top: heavy #0d9488;
+}
+
+#agent-tabs #--content-tab-agent-frames-tab.-active {
+    background: #0d9488 25%;
+    color: $text;
+    border: heavy #0d9488;
     text-style: bold;
 }
 

@@ -314,6 +314,8 @@ agictl cycle start [--agent NAME]                     # INSERT cycle row, return
 agictl cycle end "Summary" [--agent NAME]             # Mark end + kill execution (SIGTERM parent)
 agictl cycle tokens <agent> <in> <out> <think> <total> [--exit-code N]  # Log token metrics + exit code
 agictl cycle recent <agent>                           # Chronological summaries for context
+agictl cycle frames list [--agent] [--thread] [--status]  # Compaction frames (own agent; COA may name another)
+agictl cycle frames search <text> [--agent]               # Search frame summaries
 agictl cycle count <agent>                            # Total cycles executed by the agent
 ```
 
@@ -567,7 +569,7 @@ sudo agictl model live-call set <key>                 # PU/root — mark a catal
 sudo agictl model live-call unset <key>               # PU/root — remove it (shipped keys are overridden in the site layer)
 ```
 
-Shipped call-capable keys live in `models.ini [catalog_live_call]` (Gemini 3.7 Flash, Grok 4.6, and their OpenRouter aliases); site changes go to `[catalog_live_call_custom]` and survive `--update`. agitop **Model Manager → 📞 Call-capable** toggles the selected row.
+Shipped call-capable keys live in `models.ini [catalog_live_call]` (Gemini 3.7 Flash, Grok 4.6, and their OpenRouter aliases); site changes go to `[catalog_live_call_custom]` and survive `--update`. agitop **Model Manager → ✎ Edit → Call-capable** checkbox sets it for that model.
 
 ### provider — model providers (CRUD)
 

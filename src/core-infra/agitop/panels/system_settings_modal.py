@@ -1162,6 +1162,15 @@ class SystemSettingsModal(ModalScreen):
         if vv_sync_interval not in _vv_sync_values:
             vv_sync_interval = "off"
 
+        compaction_model = _read_ini_value("compaction", "model", "")
+        try:
+            from agitop.panels.agents import _load_models_ini
+            _compaction_options = list(_load_models_ini())
+        except Exception:
+            _compaction_options = []
+        if compaction_model and not any(k == compaction_model for _, k in _compaction_options):
+            _compaction_options.append((compaction_model, compaction_model))
+
         _browser_label = "Disable" if browser_enabled else "Enable"
         _browser_variant = "error" if browser_enabled else "success"
         _browser_status = "[bold green]● Enabled[/]" if browser_enabled else "[bold red]● Disabled[/]"
@@ -1250,6 +1259,19 @@ class SystemSettingsModal(ModalScreen):
                                                     id="select-vv-profile-sync",
                                                     allow_blank=False,
                                                 )
+
+                                    yield Static("")
+                                    with Vertical(classes="settings-section-box"):
+                                        yield Static("[bold cyan]Compaction Model[/]")
+                                        yield Static(
+                                            "[dim]Writes the summary frames when a long session nears its "
+                                            "context limit. Blank uses each agent's own model.[/]"
+                                        )
+                                        _cm_kwargs = {"id": "select-compaction-model", "allow_blank": True,
+                                                      "prompt": "Use the agent's model"}
+                                        if compaction_model:
+                                            _cm_kwargs["value"] = compaction_model
+                                        yield Select(_compaction_options, **_cm_kwargs)
 
                                 with Vertical(classes="settings-general-col"):
                                     if self._show_strategy:
@@ -1578,7 +1600,7 @@ class SystemSettingsModal(ModalScreen):
                             yield Static(
                                 "[dim]Speak progress: COA says a short line like \"Let me pull up the QA "
                                 "schedule\" while it looks things up. Call model: only call-capable "
-                                "models with a provider key are listed (Model Manager → Call-capable).[/]"
+                                "models with a provider key are listed (Models → Edit → Call-capable).[/]"
                             )
                             yield Static("")
                             with Horizontal(classes="task-field-row"):
@@ -2051,6 +2073,12 @@ class SystemSettingsModal(ModalScreen):
                     self.query_one("#select-vv-profile-sync", Select).value or "weekly"
                 )
                 ok_vv_profile = _write_ini_value("versavoice", "profile_sync", str(vv_profile_sync))
+                _cm_value = self.query_one("#select-compaction-model", Select).value
+                compaction_model = _cm_value if isinstance(_cm_value, str) else ""
+                ok_compaction, compaction_err = _write_ini_value_err("compaction", "model", compaction_model)
+                if not ok_compaction:
+                    self.app.notify(compaction_err or "Could not save the compaction model",
+                                    title="Compaction Model", severity="error")
 
                 # ── COA Autonomous (set-ini applies sudoers; do not sidecar sudo bash) ──
                 coa_autonomous = self.query_one("#chk-coa-autonomous", Checkbox).value
@@ -2093,7 +2121,7 @@ class SystemSettingsModal(ModalScreen):
                     ok12 = _write_ini_value("image_processing", "max_width", str(max_width))
                     ok13 = _write_ini_value("image_processing", "max_height", str(max_height))
 
-                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok_vv, ok_vv_sync, ok_vv_profile, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
+                if all([ok0, ok1, ok2, ok3, ok4, ok5, ok_vv, ok_vv_sync, ok_vv_profile, ok_compaction, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]):
                     summary_parts = [
                         f"Task max spawn: {task_max_spawn}",
                         f"Circuit breaker: {cb_consecutive}/{cb_hourly}",
@@ -2102,6 +2130,7 @@ class SystemSettingsModal(ModalScreen):
                         f"VersaVoice: {'on' if vv_enabled else 'off'}",
                         f"Sync to VV: {vv_sync_interval}",
                         f"User Profile Sync: {vv_profile_sync}",
+                        f"Compaction: {compaction_model or 'agent model'}",
                         f"Browser timeout: {browser_timeout}s",
                         f"Autonomous: {'on' if coa_autonomous else 'off'}",
                     ]

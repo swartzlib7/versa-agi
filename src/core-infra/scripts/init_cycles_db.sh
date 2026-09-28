@@ -66,5 +66,21 @@ sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN routing_work_modality TEXT;"
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN cost_usd_estimated REAL;" 2>/dev/null || true
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN pricing_source TEXT;" 2>/dev/null || true
 
+sqlite3 "${DB_PATH}" <<'SQL'
+CREATE TABLE IF NOT EXISTS frames (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name   TEXT NOT NULL,
+  cycle_id     TEXT,
+  thread_id    TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'rolled')),
+  frame_start  TEXT NOT NULL,
+  frame_end    TEXT NOT NULL,
+  summary      TEXT NOT NULL,
+  message_ids  TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_frames_agent_thread ON frames(agent_name, thread_id, status);
+SQL
+
 echo "Cycles database initialized: ${DB_PATH}"
-echo "Tables: cycles, config"
+echo "Tables: cycles, config, frames"

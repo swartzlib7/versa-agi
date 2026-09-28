@@ -178,6 +178,8 @@ agictl message calls show <call_id>                          # Transcript + what
 ```bash
 agictl cycle end "Summary" [--agent NAME]             # End cycle with summary
 agictl cycle recent <agent>                           # Recent cycle summaries for context
+agictl cycle frames list [--thread] [--status]            # Your compaction frames
+agictl cycle frames search <text>                         # Search your frame summaries. COA may add --agent <name>
 ```
 
 ## 6. project

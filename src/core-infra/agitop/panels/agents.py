@@ -772,12 +772,12 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
     agents = agents_panel.agent_reader.get_all_agents() if agents_panel.agent_reader else []
     agent = next((a for a in agents if a.get("name") == agent_name), {})
 
-    current_turns = str(agent.get("max_session_turns", 400))
+    current_turns = str(agent.get("max_session_turns", 500))
     current_tool_budget = str(agent.get("tool_output_token_budget", 5000))
     current_budget = str(agent.get("token_budget", 0))
     current_timeout = str(agent.get("timeout_minutes", 45))
     current_threshold = str(agent.get("runaway_threshold", 2500))
-    current_size_threshold = str(agent.get("runaway_size_threshold", 512))
+    current_size_threshold = str(agent.get("runaway_size_threshold", 2048))
     current_num_ctx = agent.get("num_ctx", 0)
     current_model = agent.get("model") or ""
     gen_ctx = _agent_model_gen_context(agents_panel, agent_name)
@@ -789,6 +789,11 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
         ctx_options = get_num_ctx_options(current_model, server_ctx_ceiling=server_ceiling)
     except ImportError:
         ctx_options = [("32K", 32768)]
+    try:
+        from harness.model_context import context_is_known
+        ctx_unknown = bool(current_model) and not context_is_known(current_model)
+    except ImportError:
+        ctx_unknown = False
 
     with Horizontal(classes="setup-form-row"):
         with Vertical(classes="setup-form-col"):
@@ -814,6 +819,11 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
                     id="select-num-ctx",
                     allow_blank=False,
                 )
+                if ctx_unknown:
+                    yield Static(
+                        "[yellow]The context window for this model is not known. "
+                        "It has been set to 4096. Set the real context size on this agent.[/]"
+                    )
             with Vertical(classes="setup-form-col"):
                 yield Static("[cyan]Token Budget (monthly)[/] — 0 = unlimited")
                 yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
@@ -862,7 +872,7 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
         allow_blank=False,
     )
     yield Static("[cyan]Resume Max Messages[/] — on resume, keep only the last N messages of rolled history (0 = unlimited; ignored when Resume is off)")
-    yield Input(value=str(agent.get("resume_max_messages", 25)), placeholder="e.g. 25 (0=unlimited)", id="input-resume-max-msgs", type="integer")
+    yield Input(value=str(agent.get("resume_max_messages", 50)), placeholder="e.g. 50 (0=unlimited)", id="input-resume-max-msgs", type="integer")
     yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
 
 
@@ -1666,6 +1676,7 @@ class AgentEditModal(ModalScreen):
                                 pass  # Defer model+num_ctx write to SyclActivationModal
                             else:
                                 ok_model = reader.update_agent_field(self.agent_name, "model", model_val)
+                                new_model = model_val
                                 # Auto-reset num_ctx to the new model's recommended default
                                 try:
                                     from harness.model_context import get_model_context
@@ -1770,6 +1781,18 @@ class AgentEditModal(ModalScreen):
                         ok_anchor, ok_browser, ok_triage, ok_routing, ok_skill,
                     ]):
                         app.notify(f"Saved settings for {self.agent_name}", title="Agent Settings")
+                        if new_model and new_model != self._original_model:
+                            try:
+                                from harness.model_context import context_is_known
+                                if not context_is_known(new_model):
+                                    app.notify(
+                                        "The context window for this model is not known. "
+                                        "It has been set to 4096. Set the real context size on this agent.",
+                                        title="Context window",
+                                        severity="warning",
+                                    )
+                            except Exception:
+                                pass
                         agents_panel.refresh_data()
                     else:
                         app.notify("Save failed — check DB permissions", title="Error", severity="error")

@@ -401,6 +401,12 @@ join_timeout_seconds=45
 narrate_progress=true
 calls_per_cycle=1
 
+[compaction]
+# Model that writes compaction frames (TD-CTX-FRAME-001). agitop → System
+# Settings → General → Compaction Model. Blank = the agent's spawned model.
+# Must be an enabled catalog key. PU-owned; reconcile carries it forward.
+model=
+
 [registration]
 # Runtime submission state (endpoint + key: core-infra/registration.conf)
 acceptance_file=/etc/versa-agi/install-acceptance.json

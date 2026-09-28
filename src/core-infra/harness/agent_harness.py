@@ -394,7 +394,7 @@ def _is_transient_transport_error(e) -> bool:
             return True
     return False
 
-from harness.model_context import get_trimmer_char_limit
+from harness.model_context import get_model_context, get_trimmer_char_limit, resume_message_cap
 
 from pydantic import BaseModel, Field
 
@@ -1905,6 +1905,33 @@ def main():
          f"{len(enhanced_prompt):,} − tool schemas {TOOL_SCHEMA_CHARS:,} "
          f"→ trim limit {CONTEXT_WINDOW_CHARS:,} chars")
 
+    # Compaction frames (TD-CTX-FRAME-001): active frames for this thread, cached per cycle.
+    _FRAME_CACHE: dict = {}
+    _CYCLE_STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # [compaction] model — blank means the spawned model writes the frames.
+    compaction_llm = None
+    compaction_model = ""
+    try:
+        import configparser as _cp
+        _ini = _cp.ConfigParser(delimiters=("=",), strict=False, interpolation=None)
+        _ini.read("/etc/versa-agi/setup.ini")
+        compaction_model = (_ini.get("compaction", "model", fallback="") or "").strip()
+    except Exception:
+        compaction_model = ""
+    if compaction_model and compaction_model != execution_model:
+        try:
+            compaction_llm = get_llm(compaction_model)
+            tlog(f"COMPACTION: model {compaction_model}")
+        except Exception as e:
+            compaction_llm = None
+            tlog(f"COMPACTION: model {compaction_model} unavailable ({e}) — using {execution_model}")
+    COMPACTION_SPAN_CHARS = int(
+        get_trimmer_char_limit(
+            compaction_model if compaction_llm else execution_model,
+            0 if compaction_llm else args.num_ctx,
+        ) * 0.9
+    )
+
     # Per-message serialization overhead (role, type, name, structural JSON).
     # Conservative flat estimate — keeps the proxy honest for many-message histories.
     MESSAGE_OVERHEAD_CHARS = 40
@@ -1975,30 +2002,151 @@ def main():
 
     def pre_model_hook(state):
         """Trim messages to fit context window before LLM call.
-        Returns llm_input_messages (not messages) to preserve full checkpoint history."""
-        all_msgs = state["messages"]
-        # start_on="human" empties first-contact / tool-only threads (no
-        # HumanMessage). Only require a human start when one exists.
+        Returns llm_input_messages (not messages) to preserve full checkpoint history.
+
+        Compaction frames (TD-CTX-FRAME-001): before a cycle-model call, when the
+        verbatim turns reach 90% of the character budget, the oldest 35% are
+        summarized into a frame. Call turns are not compacted.
+        """
+        from harness.compaction import (
+            HARNESS_NOTE, TRIGGER, framed_ids, frame_slots, message_text,
+            select_oldest_span, split_verbatim,
+        )
+
+        all_msgs = list(state["messages"])
+        in_call = False
+        try:
+            in_call = live_runtime is not None and (live_runtime.in_turn() or live_runtime.live)
+        except NameError:
+            in_call = False
+
+        def _frames():
+            """Active frames for this thread. Cached until a compaction changes them."""
+            import json as _json
+            thread = getattr(args, "thread_id", "") or ""
+            if not thread:
+                return []
+            if _FRAME_CACHE.get("thread") == thread and "rows" in _FRAME_CACHE:
+                return _FRAME_CACHE["rows"]
+            try:
+                proc = subprocess.run(
+                    ["agictl", "cycle", "frames", "list", "--thread", thread, "--status", "active"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                data = _json.loads(proc.stdout or "[]")
+                rows = data if isinstance(data, list) else []
+            except Exception:
+                rows = []
+            _FRAME_CACHE.update(thread=thread, rows=rows)
+            return rows
+
+        def _span_text(span):
+            lines = []
+            for m in span:
+                text = message_text(m)[:4000]
+                calls = getattr(m, "tool_calls", None) or []
+                if calls:
+                    named = "; ".join(
+                        f"{c.get('name', '')}({str(c.get('args', ''))[:600]})" for c in calls
+                    )
+                    text = (text + "\n" if text else "") + f"TOOL CALLS: {named}"
+                lines.append(f"{type(m).__name__}: {text}")
+            return "\n".join(lines)[:COMPACTION_SPAN_CHARS]
+
+        def _write_frame(span, frame_start):
+            import json as _json
+            from datetime import datetime, timezone
+            prompt = (
+                "Summarize these agent turns as one compaction frame. In order: motivations, "
+                "actions, tool calls with their results, outcomes, conclusions. Plain prose. "
+                "Keep names, ids, file paths, and numbers the agent may need later."
+            )
+            reply = (compaction_llm or llm).invoke(
+                [HumanMessage(content=prompt + "\n\n" + _span_text(span))]
+            )
+            summary = message_text(reply).strip()
+            if not summary:
+                return None
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            ids = ",".join(str(getattr(m, "id", "") or "") for m in span if getattr(m, "id", None))
+            proc = subprocess.run(
+                ["agictl", "cycle", "frames", "add", "--thread", args.thread_id or "",
+                 "--start", frame_start or now, "--end", now, "--ids", ids or "-",
+                 "--cycle-id", os.environ.get("VERSA_CYCLE_ID", "")],
+                input=summary, capture_output=True, text=True, timeout=20,
+            )
+            try:
+                return _json.loads(proc.stdout or "{}")
+            except Exception:
+                return None
+
+        def _frames_block(rows):
+            if not rows:
+                return None
+            parts = [HARNESS_NOTE]
+            for row in rows:
+                parts.append(
+                    f"Frame {row.get('frame_start')} to {row.get('frame_end')}:\n{row.get('summary')}"
+                )
+            return HumanMessage(content="\n\n".join(parts))
+
+        frames = [] if in_call else _frames()
+        covered = framed_ids(frames)
+        verbatim = split_verbatim(all_msgs, covered) if not in_call else all_msgs
+        block = None if in_call else _frames_block(frames)
+        block_chars = _count_message_chars([block]) if block else 0
+        if (
+            not in_call and args.thread_id
+            and _count_message_chars(verbatim) >= int((CONTEXT_WINDOW_CHARS - block_chars) * TRIGGER)
+            and len(verbatim) > 4
+        ):
+            span, _rest = select_oldest_span(verbatim)
+            last_end = frames[-1].get("frame_end") if frames else _CYCLE_STARTED_AT
+            try:
+                written = _write_frame(span, last_end)
+            except Exception as exc:
+                written = None
+                tlog(f"COMPACTION: skipped — {exc}")
+            if written and written.get("success"):
+                tlog(f"COMPACTION: framed {len(span)} messages as frame {written.get('id')}")
+                _FRAME_CACHE.clear()
+                frames = _frames()
+                size = max(len(str(r.get("summary") or "")) for r in frames) if frames else 1
+                keep = frame_slots(CONTEXT_WINDOW_CHARS, size)
+                extra = frames[:-keep] if len(frames) > keep else []
+                for old in extra:
+                    subprocess.run(
+                        ["agictl", "cycle", "frames", "roll", "--id", str(old.get("id"))],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                if extra:
+                    tlog(f"COMPACTION: rolled {len(extra)} oldest frame(s) out of the payload")
+                    _FRAME_CACHE.clear()
+                    frames = _frames()
+                covered = covered | framed_ids(frames)
+                verbatim = split_verbatim(all_msgs, covered)
+                block = _frames_block(frames)
+                block_chars = _count_message_chars([block]) if block else 0
+
+        budget = max(CONTEXT_WINDOW_CHARS - block_chars, TRIM_BUDGET_FLOOR // 2)
         trim_kwargs = dict(
-            max_tokens=CONTEXT_WINDOW_CHARS,
+            max_tokens=budget,
             strategy="last",
             token_counter=_count_message_chars,
-            include_system=True,     # always preserve system prompt
+            include_system=True,
             allow_partial=False,
         )
-        if any(isinstance(m, HumanMessage) for m in all_msgs):
+        if any(isinstance(m, HumanMessage) for m in verbatim):
             trim_kwargs["start_on"] = "human"
-        trimmed = trim_messages(all_msgs, **trim_kwargs)
-        if len(trimmed) < len(all_msgs):
-            tlog(f"CONTEXT TRIM: {len(all_msgs)} → {len(trimmed)} messages "
-                 f"({_count_message_chars(trimmed):,} chars, limit: {CONTEXT_WINDOW_CHARS:,})")
-        if not trimmed and all_msgs:
-            # Never send an empty window — keep the tail even if over budget.
-            trimmed = all_msgs[-min(4, len(all_msgs)):]
-            tlog(
-                f"CONTEXT TRIM: trim_messages returned empty — kept last "
-                f"{len(trimmed)} message(s) as fallback"
-            )
+        trimmed = trim_messages(verbatim, **trim_kwargs)
+        if len(trimmed) < len(verbatim):
+            tlog(f"CONTEXT TRIM: {len(verbatim)} → {len(trimmed)} messages "
+                 f"({_count_message_chars(trimmed):,} chars, limit: {budget:,})")
+        if not trimmed and verbatim:
+            trimmed = verbatim[-min(4, len(verbatim)):]
+            tlog(f"CONTEXT TRIM: trim_messages returned empty — kept last {len(trimmed)} message(s)")
+        if block is not None:
+            trimmed = [block] + list(trimmed)
         return {"llm_input_messages": trimmed}
 
     agent_kwargs = {
@@ -2096,7 +2244,31 @@ def main():
                 if not current:
                     tlog(f"CHECKPOINT: Resume with empty state (thread: {args.thread_id})")
                 else:
-                    clean, changed, stats = _canonicalize_messages(current, args.resume_max_messages)
+                    window = args.num_ctx if args.num_ctx and args.num_ctx > 0 else 0
+                    if window <= 0:
+                        _, window = get_model_context(args.model or "")
+                    resume_cap = resume_message_cap(window)
+                    # Frames are pinned: messages they already cover do not count
+                    # toward the verbatim resume tail (TD-CTX-FRAME-001).
+                    try:
+                        import json as _json
+                        from harness.compaction import framed_ids
+                        _proc = subprocess.run(
+                            ["agictl", "cycle", "frames", "list", "--thread", args.thread_id,
+                             "--status", "active"],
+                            capture_output=True, text=True, timeout=20,
+                        )
+                        _rows = _json.loads(_proc.stdout or "[]")
+                        _covered = framed_ids(_rows if isinstance(_rows, list) else [])
+                        _pinned = sum(1 for m in current if str(getattr(m, "id", "") or "") in _covered)
+                    except Exception:
+                        _pinned = 0
+                    tlog(
+                        f"RESUME CAP: {resume_cap} messages "
+                        f"(window {window} tokens; stored max {args.resume_max_messages}; "
+                        f"{_pinned} framed)"
+                    )
+                    clean, changed, stats = _canonicalize_messages(current, resume_cap + _pinned)
                     # A non-empty `next` means the prior cycle was interrupted
                     # mid-superstep (e.g. `agictl cycle end` SIGTERM during a
                     # parallel tool batch, timeout, or runaway kill). The
@@ -2117,7 +2289,7 @@ def main():
                         )
                         post = agent.get_state(config)
                         post_count = len(post.values.get("messages", [])) if post else -1
-                        depth = args.resume_max_messages if args.resume_max_messages > 0 else "unlimited"
+                        depth = resume_cap
                         pending_note = f", cleared pending step next={pending_next}" if pending_next else ""
                         tlog(
                             f"CHECKPOINT REPAIR: {len(current)} → {post_count} messages "

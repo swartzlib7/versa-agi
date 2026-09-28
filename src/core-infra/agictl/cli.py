@@ -378,6 +378,18 @@ def system_config_set_ini(section, key, value):
         if value_s not in ("daily", "weekly", "monthly"):
             json_response(False, error="profile_sync must be daily, weekly, or monthly")
             sys.exit(1)
+    elif section_l == "compaction" and key_l == "model":
+        value_s = value_s.strip()
+        value = value_s
+        if value_s:
+            cat = _load_catalog()
+            entry = cat.get(value_s)
+            if not entry:
+                json_response(False, error=f"'{value_s}' is not in the model catalog")
+                sys.exit(1)
+            if not entry.get("enabled", True):
+                json_response(False, error=f"'{value_s}' is not an enabled catalog model")
+                sys.exit(1)
     elif section_l == "live_call" or (section_l == "features" and key_l == "live_call"):
         if os.getenv("AGICTL_AGENT_USER"):
             json_response(False, error="Live Call settings are Primary User only "
@@ -7530,10 +7542,10 @@ def agent_add(name, role):
         # ── Read defaults from setup.ini (stock harness defaults when absent) ──
         default_timeout = 45
         default_runaway = 2500
-        default_max_turns = 400
+        default_max_turns = 500
         default_tool_budget = 5000
         default_resume_enabled = 1
-        default_resume_max = 25
+        default_resume_max = 50
         # Canonical location: /etc/versa-agi/setup.ini
         setup_ini = "/etc/versa-agi/setup.ini"
         if not os.path.isfile(setup_ini):
@@ -8738,10 +8750,16 @@ def agent_set_model(name, model, clear_model):
                 "updated_at=datetime('now') WHERE name='coa' "
                 "AND COALESCE(status,'') NOT IN ('circuit_breaker', 'halted', 'ide')"
             )
+        context_warning = ""
         if new_model:
             try:
-                from harness.model_context import get_model_context
+                from harness.model_context import context_is_known, get_model_context
                 recommended, _ = get_model_context(new_model)
+                if not context_is_known(new_model):
+                    context_warning = (
+                        "The context window for this model is not known. "
+                        "It has been set to 4096. Set the real context size on this agent."
+                    )
                 # Always persist, including 0 (cloud Auto). `if recommended`
                 # is false for 0 and left a leftover 4K local default on COA.
                 conn.execute(
@@ -8752,7 +8770,11 @@ def agent_set_model(name, model, clear_model):
                 pass
         conn.commit()
         conn.close()
-        json_response(True, agent=name, model=new_model or "", message=f"Model assigned to '{name}'.")
+        json_response(
+            True, agent=name, model=new_model or "",
+            message=f"Model assigned to '{name}'.",
+            **({"context_warning": context_warning} if context_warning else {}),
+        )
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -8921,7 +8943,7 @@ def agent_get_active():
         runaway_size = a.get("runaway_size_threshold", 512)
         injection_mode = a.get("context_injection_mode") or "relevant"
         token_budget = a.get("token_budget", 0)
-        max_turns = a.get("max_session_turns", 400)
+        max_turns = a.get("max_session_turns", 500)
         ov = agent_overrides.get(a["name"], {})
         tool_budget = ov.get("tool_output_token_budget")
         if tool_budget is None:
@@ -8931,7 +8953,7 @@ def agent_get_active():
         num_ctx = a.get("num_ctx", 0)
         convo_depth = a.get("conversation_depth", 10)
         resume_enabled = a.get("resume_enabled", 1)
-        resume_max_msgs = a.get("resume_max_messages", 25)
+        resume_max_msgs = a.get("resume_max_messages", 50)
         skill_mode = a.get("skill_injection_mode") or "hybrid"
         temperature = a.get("temperature")
         temperature_str = "" if temperature is None else str(temperature)
@@ -10421,6 +10443,117 @@ def message_stamp_cycle(sub_account, cycle_id, agent_name):
 def cycle():
     """Agent cycle management and telemetry."""
     pass
+
+def _frames_agent(requested: str | None) -> str:
+    """Rows belong to the calling agent. COA may name another agent."""
+    own = get_agent_name()
+    asked = (requested or "").strip()
+    if asked and asked != own and own not in ("coa", "watchdog"):
+        json_response(False, error="Only COA can read another agent's frames.")
+        sys.exit(1)
+    return asked or own
+
+@cycle.group("frames")
+def cycle_frames():
+    """Compaction frames for a thread (TD-CTX-FRAME-001)."""
+    pass
+
+@cycle_frames.command("add", hidden=True)
+@click.option("--thread", "thread_id", required=True)
+@click.option("--start", "frame_start", required=True)
+@click.option("--end", "frame_end", required=True)
+@click.option("--ids", required=True, help="Comma-separated message ids covered by this frame")
+@click.option("--cycle-id", default="")
+def frames_add(thread_id, frame_start, frame_end, ids, cycle_id):
+    """Record one frame. Summary is read from stdin."""
+    summary = sys.stdin.read().strip()
+    if not summary:
+        json_response(False, error="A summary on stdin is required.")
+        sys.exit(1)
+    agent = get_agent_name()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        cur = conn.execute(
+            """INSERT INTO frames
+               (agent_name, cycle_id, thread_id, status, frame_start, frame_end, summary, message_ids)
+               VALUES (?, ?, ?, 'active', ?, ?, ?, ?)""",
+            (agent, cycle_id or None, thread_id, frame_start, frame_end, summary, ids),
+        )
+        conn.commit()
+        frame_id = cur.lastrowid
+        conn.close()
+        json_response(True, id=frame_id, agent=agent, thread_id=thread_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@cycle_frames.command("roll", hidden=True)
+@click.option("--thread", "thread_id", default="")
+@click.option("--id", "frame_id", type=int, default=0)
+def frames_roll(thread_id, frame_id):
+    """Mark frames rolled: one id, or every active frame on a thread."""
+    agent = get_agent_name()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        if frame_id:
+            conn.execute(
+                "UPDATE frames SET status='rolled' WHERE id=? AND agent_name=? AND status='active'",
+                (frame_id, agent),
+            )
+        elif thread_id:
+            conn.execute(
+                "UPDATE frames SET status='rolled' WHERE agent_name=? AND thread_id=? AND status='active'",
+                (agent, thread_id),
+            )
+        else:
+            conn.close()
+            json_response(False, error="Pass --id or --thread.")
+            sys.exit(1)
+        conn.commit()
+        conn.close()
+        json_response(True, agent=agent)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+def _frames_rows(agent: str, text: str = "", status: str = ""):
+    conn = db_connect.connect_compat(cycles_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    query = "SELECT * FROM frames WHERE agent_name=?"
+    args = [agent]
+    if status:
+        query += " AND status=?"
+        args.append(status)
+    if text:
+        query += " AND summary LIKE ?"
+        args.append(f"%{text}%")
+    query += " ORDER BY id"
+    try:
+        rows = [dict(r) for r in conn.execute(query, args).fetchall()]
+    except Exception:
+        rows = []
+    conn.close()
+    return rows
+
+@cycle_frames.command("list")
+@click.option("--agent", "agent_name", default=None)
+@click.option("--thread", "thread_id", default="")
+@click.option("--status", default="", help="active, rolled, or blank for all")
+def frames_list(agent_name, thread_id, status):
+    """List compaction frames for an agent."""
+    agent = _frames_agent(agent_name)
+    rows = _frames_rows(agent, status=status)
+    if thread_id:
+        rows = [r for r in rows if r.get("thread_id") == thread_id]
+    print(json.dumps(rows, indent=2, default=str))
+
+@cycle_frames.command("search")
+@click.argument("text")
+@click.option("--agent", "agent_name", default=None)
+def frames_search(text, agent_name):
+    """Search compaction frame summaries."""
+    agent = _frames_agent(agent_name)
+    print(json.dumps(_frames_rows(agent, text=text), indent=2, default=str))
 
 @cycle.command("start")
 @click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")

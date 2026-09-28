@@ -179,6 +179,26 @@ class AgentReader:
         except Exception:
             return False
 
+    def list_frames(self, agent_name: str, text: str = "") -> list:
+        """Compaction frames for one agent. Empty when the table is not there yet."""
+        query = (
+            "SELECT id, frame_start, frame_end, status, summary, thread_id "
+            "FROM frames WHERE agent_name = ?"
+        )
+        args: tuple = (agent_name,)
+        if text:
+            query += " AND summary LIKE ?"
+            args = (agent_name, f"%{text}%")
+        query += " ORDER BY id"
+        try:
+            conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = [dict(r) for r in conn.execute(query, args).fetchall()]
+            conn.close()
+            return rows
+        except Exception:
+            return []
+
     def get_last_cycle(self, agent_name: str = "") -> Optional[dict]:
         """Get the most recent cycle from cycles.db, optionally filtered by agent."""
         if agent_name:

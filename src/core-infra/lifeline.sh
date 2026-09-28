@@ -2286,6 +2286,8 @@ ${IDE_RESUME_CONTEXT}"
     else
       log "CHECKPOINT: Resume disabled for ${AGENT_NAME} — no checkpoint DB, starting fresh"
     fi
+    # Fresh thread: its active compaction frames leave the payload (kept as rolled).
+    sudo -u "${AGENT_USER}" bash -c "AGICTL_CONFIG='${SYSTEM_CONFIG}' AGICTL_CYCLES_DB='${CYCLES_DB}' AGICTL_AGENT_DIR='${AGENT_PATH}/.agent' agictl cycle frames roll --thread '${THREAD_ID}'" >/dev/null 2>&1 || true
   fi
 
   # Harness result capture (TEXT) for readable debugging logs.
