@@ -27,6 +27,7 @@ class FakeSocket:
         self.inbox: queue.Queue = queue.Queue()
         self.sent: list[dict] = []
         self.closed = False
+        self.voice: list[list[dict]] = []   # events pushed after each "Tell Sam now" report
 
     def push(self, event: dict):
         self.inbox.put(json.dumps(event))
@@ -42,6 +43,9 @@ class FakeSocket:
         self.sent.append(event)
         if event["type"] == "session.close":
             self.push({"type": "session.closed", "reason": "close_requested", "usage": {"seconds": 61}})
+        if event["type"] == "session.instructions.append" and "Tell Sam now" in event["content"] and self.voice:
+            for scripted in self.voice.pop(0):
+                self.push(scripted)
 
     def close(self):
         self.closed = True
@@ -76,6 +80,17 @@ class FakeClock:
 
     def __call__(self):
         return self.now
+
+
+def _fake_time():
+    """Clock + sleep for speech waits: fake seconds pass, real time barely does."""
+    clock = FakeClock()
+
+    def sleep(seconds):
+        clock.now += seconds
+        time.sleep(0.005)
+
+    return {"clock": clock, "sleep": sleep}
 
 
 def _runtime(bridge, sock, clock=None, http_status=201, sleep=None):
@@ -484,7 +499,7 @@ class TestVoiceCardAndSummary(unittest.TestCase):
 
     def test_steer_note_and_unprompted_follow_up(self):
         bridge, sock = FakeBridge(), FakeSocket()
-        rt, _ = _runtime(bridge, sock)
+        rt, _ = _runtime(bridge, sock, **_fake_time())
         rt.place("x", SETTINGS)
         first = self._one_delegation(rt, sock)
         self.assertIn("FOLLOW UP:", first)
@@ -509,9 +524,13 @@ class TestVoiceCardAndSummary(unittest.TestCase):
 
         threading.Timer(0.3, sock.push, args=({"type": "session.closed", "reason": "remote_hangup"},)).start()
         rt.next_injection("web-dev can run QA Friday morning.")
-        unprompted = [e for e in sock.sent if e["type"] == "session.commentary.append"][-1]
-        self.assertIsNone(unprompted["delegation_id"])
-        self.assertEqual(unprompted["content"], "web-dev can run QA Friday morning.")
+        report = [e for e in sock.sent if e["type"] == "session.instructions.append"][-1]
+        self.assertIsNone(report["delegation_id"])
+        self.assertIn("Tell Sam now", report["content"])
+        self.assertIn("web-dev can run QA Friday morning.", report["content"])
+        self.assertNotIn("web-dev can run QA Friday morning.",
+                         [e["content"] for e in sock.sent if e["type"] == "session.commentary.append"])
+        self.assertTrue(rt.delegations["follow_up_1"].spoken)
         snap = json.loads([s for a, s in bridge.calls if a[0] == "end"][0])
         self.assertEqual([d["delegation_id"] for d in snap["delegations"]], ["item_s", "follow_up_1"])
         self.assertEqual(snap["delegations"][0]["follow_up"], "check web-dev's queue")
@@ -521,21 +540,31 @@ class TestVoiceCardAndSummary(unittest.TestCase):
 
     def test_follow_ups_are_capped_at_two(self):
         bridge, sock = FakeBridge(), FakeSocket()
-        rt, _ = _runtime(bridge, sock)
+        rt, _ = _runtime(bridge, sock, **_fake_time())
         rt.place("x", SETTINGS)
         self._one_delegation(rt, sock, "item_1")
         nxt = rt.next_injection("Checking.\nFOLLOW UP: look at the build logs")
         self.assertIn("Follow-up: look at the build logs", nxt)
+        self.assertIn("FOLLOW UP:", nxt)
         nxt = rt.next_injection("Logs are clean.\nFOLLOW UP: second")
         self.assertIn("Follow-up: second", nxt)
+        self.assertNotIn("FOLLOW UP:", nxt)                # last one: this reply is the report
+        self.assertIn("No follow-ups are left on this call", nxt)
         self._hang_up_soon(sock)
         ended = rt.next_injection("Second done.\nFOLLOW UP: third")
         self.assertIn("LIVE CALL ENDED", ended)           # third not run: cap of 2
+        self.assertIn("did not run: third", ended)
         self.assertEqual(rt.follow_ups_used, 2)
+
+    def test_delegation_offers_follow_up_only_while_under_cap(self):
+        self.assertIn("FOLLOW UP:", lc.delegation_message(["d"], [], "x", follow_ups_left=1))
+        spent = lc.delegation_message(["d"], [], "x", follow_ups_left=0)
+        self.assertNotIn("FOLLOW UP:", spent)
+        self.assertIn("No follow-ups are left on this call", spent)
 
     def test_correction_mid_turn_keeps_stale_answer_quiet(self):
         bridge, sock = FakeBridge(), FakeSocket()
-        rt, _ = _runtime(bridge, sock)
+        rt, _ = _runtime(bridge, sock, **_fake_time())
         rt.place("x", SETTINGS)
         self._one_delegation(rt, sock, "item_1")
         sock.push({"type": "session.input_transcript.delta", "delta": "Actually, make it Thursday."})
@@ -546,10 +575,11 @@ class TestVoiceCardAndSummary(unittest.TestCase):
         self.assertIn("was NOT spoken", nxt)
         self.assertIn("QA is set for Friday.", nxt)
         self.assertIn("PU: Actually, make it Thursday.", nxt)
+        self.assertIn("Delivery check — your report \"QA is set for Friday.\"", nxt)
         spoken = [e["content"] for e in sock.sent if e["type"] == "session.commentary.append"]
         self.assertNotIn("QA is set for Friday.", spoken)
-        self.assertTrue(any("superseded" in e["content"] for e in sock.sent
-                            if e["type"] == "session.thinking.append"))
+        handed = [e["content"] for e in sock.sent if e["type"] == "session.instructions.append"]
+        self.assertTrue(any("If this still answers" in c and "QA is set for Friday." in c for c in handed))
         self.assertEqual(rt.pending_follow_up, "")
         self._hang_up_soon(sock)
         rt.next_injection("QA is set for Thursday.")
@@ -658,11 +688,41 @@ class TestAgentHangup(unittest.TestCase):
         self.assertGreaterEqual(clock.now - 1000.0, lc.HANGUP_QUIET_SECONDS - 0.01)
         self.assertLess(clock.now - 1000.0, lc.HANGUP_MAX_WAIT_SECONDS)
 
-    def test_pending_follow_up_goes_to_chat(self):
+    def test_end_call_waits_for_follow_up_report(self):
         rt, bridge, sock, clock = self._connected()
+        nxt = rt.next_injection("One moment, I'll check the logs.\nFOLLOW UP: check the build logs\nEND CALL")
+        self.assertIn("Follow-up: check the build logs", nxt)
+        self.assertIn("last report before the hang-up", nxt)
+        self.assertNotIn("FOLLOW UP:", nxt)
+        self.assertNotIn("session.close", sock.sent_types())
+        self.assertTrue(rt.end_after_follow_up)
+        ended = rt.next_injection("The build logs are clean.\nFOLLOW UP: rerun the suite")
+        report = [e for e in sock.sent if e["type"] == "session.instructions.append"][-1]
+        self.assertIn("The build logs are clean.", report["content"])
+        self.assertIn("session.close", sock.sent_types())
+        self.assertIn("LIVE CALL ENDED (agent_hangup", ended)
+        self.assertIn("did not run: rerun the suite", ended)
+        self.assertEqual(rt.follow_ups_used, 1)
+
+    def test_follow_up_goes_to_chat_when_pu_hangs_up_first(self):
+        rt, bridge, sock, clock = self._connected()
+        sock.push({"type": "session.closed", "reason": "remote_hangup"})
+        time.sleep(0.2)
         ended = rt.next_injection("I'll check the logs and message you.\nFOLLOW UP: check the build logs\nEND CALL")
         self.assertIn("did not run: check the build logs", ended)
         self.assertEqual(rt.follow_ups_used, 0)
+
+    def test_report_ready_after_close_goes_to_chat(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt.place("x", SETTINGS)
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_1"}})
+        rt.next_injection("")
+        rt.next_injection("Checking.\nFOLLOW UP: look at the build logs")
+        sock.push({"type": "session.closed", "reason": "remote_hangup"})
+        time.sleep(0.2)
+        ended = rt.next_injection("The build logs are clean.")
+        self.assertIn("they did not hear it: The build logs are clean.", ended)
 
     def test_superseded_end_call_is_ignored(self):
         rt, bridge, sock, clock = self._connected()
@@ -674,6 +734,91 @@ class TestAgentHangup(unittest.TestCase):
         self.assertNotIn("session.close", sock.sent_types())
         self.assertFalse(rt.hangup_requested)
         rt.shutdown()
+
+
+def _voice(text):
+    return {"type": "session.output_transcript.delta", "delta": text}
+
+
+def _pu(text):
+    return {"type": "session.input_transcript.delta", "delta": text}
+
+
+class TestDeliveryCheck(unittest.TestCase):
+    """G25: a report handed to the voice is checked against what the voice said."""
+
+    def _call(self, voice):
+        bridge, sock = FakeBridge(), FakeSocket()
+        sock.voice = voice
+        rt, _ = _runtime(bridge, sock, **_fake_time())
+        rt.place("x", SETTINGS)
+        sock.push({"type": "session.delegation.created", "delegation": {"id": "item_1"}})
+        rt.next_injection("")
+        return rt, sock
+
+    def _later(self, sock, *events, delay=0.4):
+        def push():
+            for event in events:
+                sock.push(event)
+        threading.Timer(delay, push).start()
+
+    def _reports(self, sock):
+        return [e for e in sock.sent
+                if e["type"] == "session.instructions.append" and "Tell Sam now" in e["content"]]
+
+    def test_spoken_report_is_confirmed_to_coa(self):
+        rt, sock = self._call([[_voice("Build logs are clean, Sam. Does that answer it?")]])
+        rt.next_injection("Checking.\nFOLLOW UP: look at the build logs")
+        self._later(sock, _pu("Great. And QA?"),
+                    {"type": "session.delegation.created", "delegation": {"id": "item_2"}})
+        nxt = rt.next_injection("The build logs are clean.")
+        self.assertIn("item_2", nxt)
+        self.assertIn('your report "The build logs are clean.": the voice spoke after it was sent '
+                      "and was not interrupted", nxt)
+        self.assertIn('The voice said: "Build logs are clean, Sam. Does that answer it?"', nxt)
+        self.assertIn("check briefly that it answers", self._reports(sock)[0]["content"])
+        self.assertEqual(len(self._reports(sock)), 1)
+        self.assertEqual(rt.delegations["follow_up_1"].delivery, lc.DELIVERY_SPOKEN)
+        rt.shutdown()
+
+    def test_unspoken_report_is_sent_again_then_flagged(self):
+        rt, sock = self._call([[], []])
+        rt.next_injection("Checking.\nFOLLOW UP: look at the build logs")
+        self._later(sock, _pu("Hello?"),
+                    {"type": "session.delegation.created", "delegation": {"id": "item_2"}})
+        nxt = rt.next_injection("The build logs are clean.")
+        self.assertEqual(len(self._reports(sock)), 2)
+        self.assertIn("the voice said nothing after it was sent", nxt)
+        self.assertIn("restate it first in your reply", nxt)
+        self.assertEqual(rt.delegations["follow_up_1"].delivery, lc.DELIVERY_NOT_SPOKEN)
+        rt.shutdown()
+
+    def test_cut_off_report_goes_back_to_coa(self):
+        rt, sock = self._call([[_voice("The build logs are"), _pu("Wait, which build?")]])
+        rt.next_injection("Checking.\nFOLLOW UP: look at the build logs")
+        self._later(sock, {"type": "session.delegation.created", "delegation": {"id": "item_2"}})
+        nxt = rt.next_injection("The build logs are clean.")
+        self.assertEqual(len(self._reports(sock)), 1)       # the PU spoke: COA decides, no resend
+        self.assertIn("they spoke over it", nxt)
+        self.assertIn('The voice said: "The build logs are"', nxt)
+        self.assertIn("PU: Wait, which build?", nxt)
+        rt.shutdown()
+
+    def test_unheard_closing_report_goes_to_chat(self):
+        rt, sock = self._call([[], []])
+        nxt = rt.next_injection("One moment.\nFOLLOW UP: check the build logs\nEND CALL")
+        self.assertIn("last report before the hang-up", nxt)
+        ended = rt.next_injection("The build logs are clean.")
+        self.assertEqual(len(self._reports(sock)), 2)
+        self.assertIn("LIVE CALL ENDED (agent_hangup", ended)
+        self.assertIn("they did not hear it: The build logs are clean.", ended)
+
+    def test_spoken_closing_report_hangs_up_without_chat_note(self):
+        rt, sock = self._call([[_voice("Build logs are clean. Bye, Sam!")]])
+        rt.next_injection("One moment.\nFOLLOW UP: check the build logs\nEND CALL")
+        ended = rt.next_injection("The build logs are clean.")
+        self.assertIn("LIVE CALL ENDED (agent_hangup", ended)
+        self.assertNotIn("did not hear it", ended)
 
 
 class TestSanitize(unittest.TestCase):

@@ -9,10 +9,79 @@ if _CORE_INFRA not in sys.path:
     sys.path.insert(0, _CORE_INFRA)
 import db_connect  # noqa: E402
 
+import glob
 import os
+import re
 import shutil
 import subprocess
+import time
 from typing import Optional
+
+# Lifeline writes /tmp/versa_agi_<agent>.cooldown. Names are registry keys.
+_SPAWN_HOLD_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+SPAWN_HOLD_DIR = "/tmp"
+
+
+def list_spawn_holds(directory: str = SPAWN_HOLD_DIR, now: Optional[int] = None) -> list:
+    """Active spawn holds. Each item is agent, remaining_seconds, and type.
+
+    type is ``quota`` when at least 30 minutes remain (the 1-hour quota pause),
+    otherwise ``rate_limit`` (429 / 503). Expired files are omitted.
+    """
+    if now is None:
+        now = int(time.time())
+    holds = []
+    for path in sorted(glob.glob(os.path.join(directory, "versa_agi_*.cooldown"))):
+        filename = os.path.basename(path)
+        agent = filename[len("versa_agi_"):-len(".cooldown")]
+        if not _SPAWN_HOLD_AGENT.match(agent):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                resume_at = int(handle.read().strip())
+        except (ValueError, OSError):
+            continue
+        if resume_at <= now:
+            continue
+        remaining = resume_at - now
+        holds.append({
+            "agent": agent,
+            "remaining_seconds": remaining,
+            "type": "quota" if remaining >= 1800 else "rate_limit",
+        })
+    holds.sort(key=lambda row: row["remaining_seconds"], reverse=True)
+    return holds
+
+
+def lift_spawn_hold(agent: str, directory: str = SPAWN_HOLD_DIR) -> bool:
+    """Delete one agent's cooldown file. Does not change model or agent status.
+
+    ``sudo rm`` is used only for the live ``/tmp`` directory when the file
+    is not writable by this user. A test directory never calls sudo.
+    """
+    if not agent or not _SPAWN_HOLD_AGENT.match(agent):
+        return False
+    directory_real = os.path.realpath(directory)
+    path = os.path.join(directory_real, f"versa_agi_{agent}.cooldown")
+    if os.path.dirname(os.path.realpath(path)) != directory_real:
+        return False
+    if not os.path.lexists(path):
+        return True
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        if os.path.realpath(directory) != os.path.realpath(SPAWN_HOLD_DIR):
+            return False
+        try:
+            subprocess.run(
+                ["sudo", "rm", "-f", path],
+                capture_output=True, timeout=5, check=False,
+            )
+        except Exception:
+            return False
+    return not os.path.lexists(path)
 
 
 class SystemReader:
@@ -426,40 +495,15 @@ class SystemReader:
             dict with 'type' ('quota' or 'rate_limit'), 'agent', and
             'remaining_seconds', or None if no cooldown is active.
         """
-        import glob
-        import time as _time
-
-        now = int(_time.time())
-        worst: Optional[dict] = None
-
-        for path in glob.glob("/tmp/versa_agi_*.cooldown"):
-            try:
-                with open(path) as f:
-                    resume_at = int(f.read().strip())
-                if resume_at <= now:
-                    continue  # expired
-
-                remaining = resume_at - now
-                # Extract agent name from filename: versa_agi_{name}.cooldown
-                filename = path.rsplit("/", 1)[-1]
-                agent_name = filename.replace("versa_agi_", "").replace(".cooldown", "")
-
-                # Determine tier: ≥ 1800s remaining ≈ daily quota, else rate limit
-                cooldown_type = "quota" if remaining >= 1800 else "rate_limit"
-
-                entry = {
-                    "type": cooldown_type,
-                    "agent": agent_name,
-                    "remaining_seconds": remaining,
-                }
-
-                # Keep the worst (longest) cooldown for display
-                if worst is None or remaining > worst["remaining_seconds"]:
-                    worst = entry
-            except (ValueError, OSError):
-                continue
-
-        return worst
+        holds = list_spawn_holds()
+        if not holds:
+            return None
+        worst = holds[0]
+        return {
+            "type": worst["type"],
+            "agent": worst["agent"],
+            "remaining_seconds": worst["remaining_seconds"],
+        }
 
     def is_inference_endpoint_running(self) -> bool:
         """Check if Inference Endpoint is available.

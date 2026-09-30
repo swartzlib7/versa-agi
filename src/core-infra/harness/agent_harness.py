@@ -1,5 +1,6 @@
 
 import db_connect
+import hashlib
 import os
 import sys
 import json
@@ -2409,6 +2410,41 @@ def main():
     def _in_call_turn() -> bool:
         return live_runtime is not None and live_runtime.in_turn()
 
+    from harness.midcycle_mail import MidcycleInbox
+    # System prompt holds this cycle's NEW MESSAGES block. The wake is only the reason line.
+    midcycle_inbox = MidcycleInbox.from_env(
+        args.agent, f"{enhanced_prompt}\n{enhanced_wake}", log=tlog,
+    )
+
+    def _inject_midcycle_mail() -> bool:
+        """Fold unread mail that arrived after the wake prompt into this cycle.
+
+        Same gate as a budget warning: no unanswered tool call, and not inside
+        a live-call turn. Does not mark the rows processed.
+        """
+        nonlocal input_messages
+        if _in_call_turn() or _unresolved_tool_call_ids(messages):
+            return False
+        found = midcycle_inbox.poll()
+        if not found:
+            return False
+        text, new_ids = found
+        flush_note = _flush_stream_messages_to_checkpoint(agent, config, messages)
+        tlog(f"MID-CYCLE MAIL: checkpoint {flush_note}")
+        if flush_note.startswith(("flush-failed", "skip-local-unresolved")):
+            tlog("MID-CYCLE MAIL: skipping inject — checkpoint not safe")
+            return False
+        midcycle_inbox.commit(new_ids)
+        digest = hashlib.sha256(",".join(sorted(new_ids)).encode()).hexdigest()[:16]
+        injected = HumanMessage(content=text, id=f"midcycle-{digest}")
+        input_messages = [injected]
+        messages.append(injected)
+        tlog(
+            f"MID-CYCLE MAIL: injected {len(new_ids)} unread message(s) "
+            f"for {args.agent} (step {step_count})"
+        )
+        return True
+
     try:
         while (step_count - call_steps) < max_steps and not cycle_ended:
             _HARNESS_VIEW_CTX["steps_remaining"] = max_steps - (step_count - call_steps)
@@ -2484,6 +2520,11 @@ def main():
                             # telemetry writes before the process terminates.
                             if "\U0001f6d1 Cycle ended:" in content:
                                 tlog(f"\n--- CYCLE END DETECTED (step {step_count}) ---")
+                                # Mail that landed during this reply still has to be
+                                # handled. Only hold the end when the tool batch is
+                                # closed; an open tool call keeps the existing break.
+                                if _inject_midcycle_mail():
+                                    break
                                 cycle_ended = True
                                 break
 
@@ -2534,6 +2575,11 @@ def main():
                         pending_tool_calls = bool(_unresolved_tool_call_ids(messages))
                         remaining = max_steps - (step_count - call_steps)
                         warning = None
+
+                        # Unread mail fetched while this cycle holds the lock.
+                        # Same break-and-reinvoke as the budget warning below.
+                        if _inject_midcycle_mail():
+                            break
 
                         # ── Live call: per-request step allowance ──
                         if (
@@ -2620,6 +2666,8 @@ def main():
                         messages.append(next_msg)
                         active_agent = call_agent if _in_call_turn() else agent
                         continue
+                if _inject_midcycle_mail():
+                    continue
                 break
 
         final_message = messages[-1].content

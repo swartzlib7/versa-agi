@@ -443,50 +443,30 @@ def _reply_to_message_id(raw_payload):
     return str(payload.get("replyToMessageId") or "").strip()
 
 
-def _message_identity_ids(agent_name: str) -> list:
-    ids = []
-    config_path = os.environ.get("AGICTL_CONFIG", "")
-    if config_path and os.path.isfile(config_path):
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                sub = (json.load(f).get("versavoice") or {}).get("sub_account_id") or ""
-            if sub:
-                ids.append(sub)
-        except Exception:
-            pass
-    if agent_name and agent_name not in ids:
-        ids.append(agent_name)
-    return ids
-
-
 def build_inbox_context(agent_name: str) -> str:
-    """Unread inbound bodies + VV tags + media flag. No char cap."""
-    db_path = os.environ.get("AGICTL_MESSAGES_DB", "")
-    if not db_path or not os.path.isfile(db_path):
+    """Unread inbound bodies + VV tags + media flag. No char cap.
+
+    Read through agictl for this agent. A failed read is empty, not a crash.
+    """
+    from harness.agent_mailbox import identity_ids, load_received_unread, rows_for_agent
+
+    rows = load_received_unread(agent_name)
+    if rows is None:
         return "(none)"
-    ids = _message_identity_ids(agent_name)
-    if not ids:
-        return "(none)"
-    placeholders = ",".join("?" * len(ids))
-    try:
-        conn = db_connect.connect_compat(db_path, timeout=5)
-        rows = conn.execute(
-            f"SELECT message_id, created_at, from_user_id, display_name, "
-            f"COALESCE(original_text, text, '') AS body, "
-            f"has_attachments, attachment_path, raw_payload "
-            f"FROM messages WHERE status='unprocessed' AND direction='received' "
-            f"AND to_user_id IN ({placeholders}) ORDER BY created_at ASC",
-            tuple(ids),
-        ).fetchall()
-        conn.close()
-    except Exception:
-        return "(none)"
+    rows = rows_for_agent(rows, identity_ids(agent_name))
     if not rows:
         return "(none)"
 
     lines = [f"{len(rows)} unread inbound message(s):", ""]
     for row in rows:
-        mid, created, from_uid, dname, body, has_att, att_path, raw = row
+        mid = row.get("message_id")
+        created = row.get("created_at")
+        from_uid = row.get("from_user_id")
+        dname = row.get("display_name")
+        body = row.get("original_text") or row.get("text") or ""
+        has_att = row.get("has_attachments")
+        att_path = row.get("attachment_path")
+        raw = row.get("raw_payload")
         who = dname or from_uid or "?"
         lines.append(f"[{created}] FROM {who} ({from_uid}): {body}")
         try:
@@ -516,55 +496,32 @@ def build_inbox_context(agent_name: str) -> str:
 
 
 def build_registry_context(agent_name: str) -> str:
-    """Projects and tasks: id, name/title, description. COA = all; else assigned."""
-    db_path = os.environ.get("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
-    if not os.path.isfile(db_path):
+    """Projects and tasks: id, name/title, description. COA = all; else assigned.
+
+    Read through agictl for this agent. A failed read is empty, not a crash.
+    """
+    from harness.agent_mailbox import load_registry
+
+    data = load_registry(agent_name)
+    if data is None:
         return "(none)"
-    is_coa = (agent_name or "").lower() == "coa"
-    try:
-        conn = db_connect.connect_compat(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-        if is_coa:
-            projects = conn.execute(
-                "SELECT id, name, COALESCE(description, '') FROM projects "
-                "WHERE status NOT IN ('archived') ORDER BY id"
-            ).fetchall()
-            tasks = conn.execute(
-                "SELECT id, title, COALESCE(description, ''), project_id, status, assigned_to "
-                "FROM tasks WHERE status NOT IN ('done', 'cancelled', 'frozen') ORDER BY id"
-            ).fetchall()
-        else:
-            projects = conn.execute(
-                "SELECT DISTINCT p.id, p.name, COALESCE(p.description, '') "
-                "FROM projects p "
-                "LEFT JOIN project_members pm ON pm.project_id = p.id "
-                "  AND pm.member_type='agent' AND pm.member_id=? "
-                "LEFT JOIN tasks t ON t.project_id = p.id AND t.assigned_to=? "
-                "  AND t.status NOT IN ('done', 'cancelled', 'frozen') "
-                "WHERE p.status NOT IN ('archived') AND (pm.member_id IS NOT NULL OR t.id IS NOT NULL) "
-                "ORDER BY p.id",
-                (agent_name, agent_name),
-            ).fetchall()
-            tasks = conn.execute(
-                "SELECT id, title, COALESCE(description, ''), project_id, status, assigned_to "
-                "FROM tasks WHERE assigned_to=? AND status NOT IN ('done', 'cancelled', 'frozen') "
-                "ORDER BY id",
-                (agent_name,),
-            ).fetchall()
-        conn.close()
-    except Exception:
-        return "(none)"
+    projects = data.get("projects") or []
+    tasks = data.get("tasks") or []
 
     lines = ["PROJECTS (id | name | description):"]
     if projects:
-        for pid, name, desc in projects:
-            lines.append(f"  #{pid} | {name} | {desc}")
+        for row in projects:
+            lines.append(f"  #{row.get('id')} | {row.get('name')} | {row.get('description') or ''}")
     else:
         lines.append("  (none)")
     lines.append("")
     lines.append("TASKS (id | title | project_id | status | assignee | description):")
     if tasks:
-        for tid, title, desc, proj, status, assignee in tasks:
-            lines.append(f"  #{tid} | {title} | project={proj} | {status} | {assignee} | {desc}")
+        for row in tasks:
+            lines.append(
+                f"  #{row.get('id')} | {row.get('title')} | project={row.get('project_id')} "
+                f"| {row.get('status')} | {row.get('assigned_to')} | {row.get('description') or ''}"
+            )
     else:
         lines.append("  (none)")
     return "\n".join(lines)
@@ -704,38 +661,18 @@ def enrich_triage_from_inbox(result: TriageResult, agent_name: str) -> TriageRes
             result.inputs_used = list(result.inputs_used) + ["attachment-enrich"]
         return result
 
-    db_path = os.environ.get("AGICTL_MESSAGES_DB", "")
-    if not db_path or not os.path.isfile(db_path):
-        return result
+    from harness.agent_mailbox import identity_ids, load_received_unread, rows_for_agent
 
-    sub_account = ""
-    config_path = os.environ.get("AGICTL_CONFIG", "")
-    if config_path and os.path.isfile(config_path):
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                sub_account = (json.load(f).get("versavoice") or {}).get("sub_account_id") or ""
-        except Exception:
-            pass
-
-    ids = list(dict.fromkeys(x for x in (sub_account, agent_name) if x))
-    if not ids:
+    loaded = load_received_unread(agent_name)
+    if not loaded:
         return result
-
-    placeholders = ",".join("?" * len(ids))
-    try:
-        import sqlite3
-        conn = db_connect.connect_compat(db_path, timeout=5)
-        rows = conn.execute(
-            f"SELECT has_attachments, attachment_path, raw_payload FROM messages "
-            f"WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({placeholders})",
-            tuple(ids),
-        ).fetchall()
-        conn.close()
-    except Exception:
-        return result
+    rows = rows_for_agent(loaded, identity_ids(agent_name))
 
     paths: list[str] = []
-    for has_flag, attach_path, raw_payload in rows:
+    for row in rows:
+        has_flag = row.get("has_attachments")
+        attach_path = row.get("attachment_path")
+        raw_payload = row.get("raw_payload")
         path = (attach_path or "").strip()
         if path and not path.startswith("http"):
             paths.append(path)

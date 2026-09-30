@@ -169,7 +169,7 @@ class ProviderPickModal(ModalScreen):
             else:
                 help_text = (
                     "[dim]Chat-capable models not yet in your catalog. "
-                    "In/Out: 📝 text · 🖼 image · 🔊 audio · 🎬 video (icon + name in table). "
+                    "In/Out: 📝 text · 📷 image · 🔊 audio · 🎬 video (icon + name in table). "
                     "Context limits are tokens (provider API; inferred where absent). "
                     "PgUp/PgDn (Mac: Fn+↑/↓ or Ctrl+B/F) to page · select a row · "
                     "Use selected to fill the Add Model form.[/]"

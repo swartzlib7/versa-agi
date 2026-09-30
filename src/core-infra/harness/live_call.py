@@ -107,6 +107,20 @@ class Transcript:
         with self._lock:
             return [s.as_dict() for s in self._segments if s.text.strip()]
 
+    def mark(self) -> int:
+        """Position for ``speech_after``; the next delta starts a new segment."""
+        with self._lock:
+            self._split_next = True
+            return len(self._segments)
+
+    def speech_after(self, mark: int) -> tuple[str, str]:
+        """(voice words, PU words) captured since ``mark``."""
+        with self._lock:
+            later = self._segments[mark:]
+            voice = " ".join(s.text.strip() for s in later if s.speaker == "assistant" and s.text.strip())
+            pu = " ".join(s.text.strip() for s in later if s.speaker == "pu" and s.text.strip())
+            return voice, pu
+
 
 def format_segments(segments: list[dict], pu_label: str = "PU", agent_label: str = "You (voice)") -> str:
     lines = []
@@ -349,17 +363,36 @@ HANGUP_MAX_WAIT_SECONDS = 12.0
 REPEAT_GRACE_SECONDS = 1.5
 STEER_MAX_CHARS = 300
 
-REPLY_LINES_HELP = (
-    " Optional lines at the end of your reply, each on its own line and not spoken as written: "
-    f"`{NOTE_MARKER} <fact the voice should keep in mind>`; "
-    f"`{STEER_MARKER} <what the voice should do next, e.g. ask whether Friday works>`; "
-    f"`{FOLLOW_UP_MARKER} <work you will do right after this answer and report back on>` — "
-    "for slow work you can do yourself, answer briefly now (\"one moment, I'll check\") and use "
-    "FOLLOW UP instead of making them wait; "
-    f"`{END_CALL_MARKER}` — when they are done or the voice asked to end the call: the call "
-    "closes after the voice finishes speaking (if the voice already said goodbye, reply with "
-    f"only `{END_CALL_MARKER}`)."
-)
+def reply_lines_help(follow_ups_left: int = MAX_FOLLOW_UPS) -> str:
+    """Optional reply lines. With no follow-ups left, FOLLOW UP is not offered."""
+    if follow_ups_left > 0:
+        follow = (
+            f"`{FOLLOW_UP_MARKER} <work you will do right after this answer and report back on>` — "
+            "for slow work you can do yourself, answer briefly now (\"one moment, I'll check\") and "
+            "use FOLLOW UP instead of making them wait; the report is told to them on this call, "
+            "before any hang-up; "
+        )
+        limit = ""
+    else:
+        follow = ""
+        limit = (
+            " No follow-ups are left on this call: do the work now and put the result in this "
+            "reply. Do not promise to get back to them on the call; anything still open goes in "
+            "your chat summary after the call."
+        )
+    return (
+        " Optional lines at the end of your reply, each on its own line and not spoken as written: "
+        f"`{NOTE_MARKER} <fact the voice should keep in mind>`; "
+        f"`{STEER_MARKER} <what the voice should do next, e.g. ask whether Friday works>`; "
+        f"{follow}"
+        f"`{END_CALL_MARKER}` — when they are done or the voice asked to end the call: the call "
+        "closes after the voice finishes speaking (if the voice already said goodbye, reply with "
+        f"only `{END_CALL_MARKER}`)."
+        f"{limit}"
+    )
+
+
+REPLY_LINES_HELP = reply_lines_help()
 
 SUB_AGENT_RULE = (
     " Sub-agents are not live during a call (they run on the next Lifeline tick and reply by "
@@ -403,26 +436,78 @@ def parse_reply(text: Any) -> ParsedReply:
     )
 
 
-def follow_up_message(task: str, segments: list[dict], reason: str) -> str:
+def follow_up_message(task: str, segments: list[dict], reason: str,
+                      follow_ups_left: int = MAX_FOLLOW_UPS, ending: bool = False,
+                      delivery: str = "") -> str:
+    check = f"{delivery}\n" if delivery else ""
+    closing = (
+        "They are ending the call. This is your last report before the hang-up: give the result "
+        "now. The call closes after it is spoken. "
+        if ending else ""
+    )
     return (
         "📞 LIVE CALL — follow-up you promised (no new request from the Primary User).\n"
         f"Follow-up: {task}\nCall reason: {reason}\n\n"
         f"Transcript since your last answer:\n{format_segments(segments)}\n\n"
-        "Do the work with your tools, then reply. Your final reply is spoken to them unprompted: "
-        "open naturally (\"I've checked the build logs…\"), short, facts and status. Say something "
-        "is done only after the tool result confirms it. No verbal approvals."
-        + SUB_AGENT_RULE + REPLY_LINES_HELP
+        f"{check}"
+        f"{closing}"
+        "Do the work with your tools, then reply. Your final reply is told to them right away, "
+        "unprompted: open naturally (\"I've checked the build logs…\"), short, facts and status. "
+        "This reply is the report, so give the result, not another promise. Say something is done "
+        "only after the tool result confirms it. No verbal approvals."
+        + SUB_AGENT_RULE + reply_lines_help(0 if ending else follow_ups_left)
+    )
+
+
+def report_instruction(pu_name: str, answer: str) -> str:
+    """A finished follow-up report: GPT-Live says it now (instructions.append)."""
+    who = pu_name or "them"
+    return (
+        f"COA (the backend) has the result {who} is waiting for. Tell {who} now, in your own words: "
+        f"{answer} Then check briefly that it answers what they needed."
+    )
+
+
+DELIVERY_SPOKEN = "spoken"
+DELIVERY_CUT_OFF = "cut_off"
+DELIVERY_NOT_SPOKEN = "not_spoken"
+
+
+def delivery_check_line(report: str, status: str, voice_said: str) -> str:
+    """What happened to a report handed to the voice; COA compares the words (G25)."""
+    label = {
+        DELIVERY_SPOKEN: "the voice spoke after it was sent and was not interrupted",
+        DELIVERY_CUT_OFF: "the voice started, and they spoke over it",
+    }.get(status, "the voice said nothing after it was sent")
+    said = f' The voice said: "{clip_for_speech(voice_said, 400)}".' if voice_said else ""
+    return (
+        f"Delivery check — your report \"{clip_for_speech(report, 400)}\": {label}.{said} "
+        "Compare the voice's words with your report. If the result got through, do not repeat it. "
+        "If it did not and it still answers them, restate it first in your reply.\n"
+    )
+
+
+def stale_answer_instruction(answer: str) -> str:
+    """An answer that finished while they were still talking: say it only if it still fits."""
+    return (
+        "COA finished the earlier request while they were still talking. If this still answers "
+        f"what they want, tell them now: {answer} If they changed or corrected the request, do not "
+        "say it; COA is working on their latest words."
     )
 
 
 def delegation_message(delegation_ids: list[str], segments: list[dict], reason: str,
-                       narrate: bool = False, unspoken_answer: str = "") -> str:
+                       narrate: bool = False, unspoken_answer: str = "",
+                       follow_ups_left: int = MAX_FOLLOW_UPS, delivery: str = "") -> str:
     ids = ", ".join(delegation_ids)
     carried = (
-        f"\nYour previous answer was NOT spoken, because they spoke again before it was ready: "
-        f"\"{unspoken_answer}\". Use what still applies; follow their latest words.\n"
+        f"\nYour previous answer finished after they spoke again, so it was NOT spoken as your "
+        f"reply. The voice was told to say it only if it still fits: \"{unspoken_answer}\". "
+        "Follow their latest words.\n"
         if unspoken_answer else ""
     )
+    if delivery:
+        carried += f"\n{delivery}"
     narration = (
         " When you call a tool you may add one short, natural sentence in the same message "
         "about what you are doing (e.g. \"Let me pull up the QA schedule.\") — it is spoken "
@@ -437,7 +522,7 @@ def delegation_message(delegation_ids: list[str], segments: list[dict], reason: 
         "the Primary User: short, facts and status, no Markdown or lists. Say something is done "
         "only after the tool result confirms it. A spoken \"yes\" or \"approve\" is never an "
         "approval — ask them to use the control in the VersaVoice app. Do not end the cycle "
-        f"during the call.{SUB_AGENT_RULE}{narration}{REPLY_LINES_HELP}"
+        f"during the call.{SUB_AGENT_RULE}{narration}{reply_lines_help(follow_ups_left)}"
     )
 
 
@@ -453,13 +538,19 @@ SUMMARY_MAX_CHARS = 600
 
 
 def call_ended_message(close_reason: str, voice_seconds: int | None, segments: list[dict],
-                       language: CallLanguage = ENGLISH, pending_follow_up: str = "") -> str:
+                       language: CallLanguage = ENGLISH, pending_follow_up: str = "",
+                       unheard: str = "") -> str:
     minutes = f"{(voice_seconds or 0) / 60:.1f} min" if voice_seconds else "unknown length"
     promised = (
         f"You promised this follow-up on the call and it did not run: {pending_follow_up}. "
         "Do it now and include the result in your chat summary.\n\n"
         if pending_follow_up else ""
     )
+    if unheard:
+        promised += (
+            f"This result was ready after the call closed, so they did not hear it: {unheard} "
+            "Include it in your chat summary.\n\n"
+        )
     return (
         f"📞 LIVE CALL ENDED ({close_reason}, {minutes}, spoken in {language.name}).\n\n"
         f"Full transcript:\n{format_segments(segments, agent_label='You')}\n\n"
@@ -614,6 +705,8 @@ class LiveSession:
         self._wrap_sent = False
         self._close_reason_override = ""
         self.last_output_at: float | None = None
+        # Times the PU spoke while the voice was mid-sentence (delivery check, G25).
+        self.barge_ins: list[float] = []
         self._reader = threading.Thread(target=self._read_loop, name="live-call-sideband", daemon=True)
         self._reader.start()
 
@@ -646,17 +739,20 @@ class LiveSession:
         self._close_sent = True
         self._send({"type": "session.close"})
 
-    def hang_up_after_speech(self, sleep: Callable[[float], None], expect_speech: bool) -> None:
-        """COA ends the call (§3.6): close once the voice has finished speaking.
+    def wait_for_speech(self, sleep: Callable[[float], None], expect_speech: bool) -> float | None:
+        """Wait until the voice has finished speaking; return when it started, if it did.
 
-        With ``expect_speech`` (a goodbye was just sent), wait for it to start, then for
+        With ``expect_speech`` (something was just sent to say), wait for it to start, then for
         HANGUP_QUIET_SECONDS of silence; otherwise only for the current speech to trail off.
         """
         asked = self._clock()
+        started: float | None = None
         while not self.closed.is_set():
             now = self._clock()
             last = self.last_output_at
             spoke_since = last is not None and last >= asked
+            if spoke_since and started is None:
+                started = last
             if now - asked >= HANGUP_MAX_WAIT_SECONDS:
                 break
             if spoke_since and now - last >= HANGUP_QUIET_SECONDS:
@@ -665,6 +761,11 @@ class LiveSession:
                 if last is None or now - last >= HANGUP_QUIET_SECONDS:
                     break
             sleep(0.2)
+        return started
+
+    def hang_up_after_speech(self, sleep: Callable[[float], None], expect_speech: bool) -> None:
+        """COA ends the call (§3.6): close once the voice has finished speaking."""
+        self.wait_for_speech(sleep, expect_speech)
         self._close_reason_override = "agent_hangup"
         self.close()
 
@@ -687,6 +788,9 @@ class LiveSession:
     def handle_event(self, event: dict) -> None:
         etype = event.get("type") or ""
         if etype == "session.input_transcript.delta":
+            now = self._clock()
+            if self.last_output_at is not None and now - self.last_output_at < HANGUP_QUIET_SECONDS:
+                self.barge_ins.append(now)
             self.transcript.add_delta("pu", event.get("delta") or "", event.get("start_ms"), event.get("end_ms"))
         elif etype == "session.output_transcript.delta":
             self.last_output_at = self._clock()
@@ -782,14 +886,26 @@ class DelegationRecord:
     duplicate: bool = False
     superseded: bool = False
     end_call: bool = False
+    delivery: str = ""  # DELIVERY_* for a report handed to the voice
 
     def as_dict(self) -> dict:
         out = {"delegation_id": self.delegation_id, "offset_ms": self.offset_ms,
                "tools": self.tools, "result_text": self.result_text, "spoken": self.spoken}
-        for key in ("steer", "note", "follow_up", "duplicate", "superseded", "end_call"):
+        for key in ("steer", "note", "follow_up", "duplicate", "superseded", "end_call", "delivery"):
             if getattr(self, key):
                 out[key] = getattr(self, key)
         return out
+
+
+@dataclass
+class HandedReport:
+    """A result sent with ``instructions.append`` for the voice to say (G25)."""
+    record_id: str
+    text: str
+    kind: str  # "report" (follow-up) | "stale" (superseded answer)
+    mark: int
+    status: str = ""
+    voice_said: str = ""
 
 
 class LiveCallRuntime:
@@ -836,6 +952,15 @@ class LiveCallRuntime:
         self.unspoken_answer = ""
         self.hangup_requested = False
         self.hangup_after_speech = False
+        # END CALL with a follow-up still queued: run it and speak the report first.
+        self.end_after_follow_up = False
+        # Promised work that cannot run on this call; the call-ended message hands it to chat.
+        self.after_call: list[str] = []
+        # Answers that finished after the call closed, or reports the voice never got across.
+        self.unheard: list[str] = []
+        # Report sent to the voice and not yet checked; then its result for COA's next message.
+        self.handed: HandedReport | None = None
+        self.delivery: HandedReport | None = None
 
     @property
     def live(self) -> bool:
@@ -945,21 +1070,29 @@ class LiveCallRuntime:
             return None
         if self.current:
             self._deliver_reply(last_ai_text)
+        if self.handed is not None:
+            self._check_delivery()
         if self.hangup_requested and not self.session.closed.is_set():
             self._log("LIVE CALL: COA is ending the call")
             self.session.hang_up_after_speech(self._sleep, expect_speech=self.hangup_after_speech)
             return self._ended_injection()
 
         while True:
+            # A queued PU request runs first, unless they are ending the call.
             if (self.pending_follow_up and not self.session.closed.is_set()
-                    and not self.session.has_pending_events()):
+                    and (self.end_after_follow_up or not self.session.has_pending_events())):
                 self.follow_ups_used += 1
                 fid = f"follow_up_{self.follow_ups_used}"
                 self.delegations[fid] = DelegationRecord(delegation_id=fid)
                 task, self.pending_follow_up = self.pending_follow_up, ""
                 self._start_turn([fid])
-                self._log(f"LIVE CALL: {fid} — {task[:80]}")
-                return follow_up_message(task, self.session.transcript.since_cursor(), self.reason)
+                self._log(f"LIVE CALL: {fid} — {task[:80]}"
+                          f"{' (report before hang-up)' if self.end_after_follow_up else ''}")
+                return follow_up_message(
+                    task, self.session.transcript.since_cursor(), self.reason,
+                    follow_ups_left=MAX_FOLLOW_UPS - self.follow_ups_used,
+                    ending=self.end_after_follow_up, delivery=self._take_delivery(),
+                )
 
             kind, ids = ("closed", []) if self.session.closed.is_set() else self.session.wait_for_work()
             if kind != "delegation":
@@ -973,7 +1106,9 @@ class LiveCallRuntime:
             carried, self.unspoken_answer = self.unspoken_answer, ""
             self._log(f"LIVE CALL: delegation {', '.join(ids)}")
             return delegation_message(ids, segments, self.reason, narrate=self.narrate,
-                                      unspoken_answer=carried)
+                                      unspoken_answer=carried,
+                                      follow_ups_left=MAX_FOLLOW_UPS - self.follow_ups_used,
+                                      delivery=self._take_delivery())
         if self.pending_follow_up:
             self._log("LIVE CALL: call ended before the follow-up ran — reported by chat")
         return self._ended_injection()
@@ -1010,29 +1145,65 @@ class LiveCallRuntime:
         self.last_remark_at = None
 
     def _deliver_reply(self, last_ai_text: Any) -> None:
-        """Speak the reply; apply NOTE / STEER; queue FOLLOW UP (D21).
+        """Speak the reply; apply NOTE / STEER; queue FOLLOW UP (D21, G24).
 
-        If the PU spoke again and a new delegation is waiting, the finished answer is stale:
-        it is sent quietly and carried into the next turn instead of being spoken.
+        A follow-up report goes out as ``instructions.append`` so the voice says it now.
+        If the PU spoke again and a new delegation is waiting, the finished answer is handed
+        to the voice to say only if it still fits, and carried into the next turn.
+        ``END CALL`` with a follow-up queued waits for that report before the hang-up.
         """
         reply = parse_reply(last_ai_text)
         answer = clip_for_speech(reply.spoken)
         target = self.current[-1]
         wire = self._wire_id(target)
+        is_follow_up = wire is None
         open_call = not self.session.closed.is_set()
         superseded = (open_call and self.session.has_pending_events()
                       and self.session.transcript.has_new_pu_speech())
         if superseded:
             if answer:
-                self.session.thinking(wire, f"Earlier answer, superseded by what they just said: {answer}")
+                mark = self.session.transcript.mark()
+                if self.session.instructions(stale_answer_instruction(answer)):
+                    self.handed = HandedReport(target, answer, "stale", mark)
             self.unspoken_answer = answer
             reply = ParsedReply(spoken=answer, note=reply.note)
+            self.end_after_follow_up = False
             spoken = False
+        elif not open_call:
+            spoken = False
+            if answer:
+                self.unheard.append(answer)
+        elif is_follow_up:
+            spoken = False
+            if answer:
+                mark = self.session.transcript.mark()
+                spoken = self.session.instructions(report_instruction(self.pu_name, answer))
+                if spoken:
+                    self.handed = HandedReport(target, answer, "report", mark)
+                else:
+                    self.unheard.append(answer)
         else:
-            spoken = bool(answer) and open_call and self.session.commentary(wire, answer)
-            if spoken:
-                self.last_answer = answer
-            if reply.end_call and open_call:
+            spoken = bool(answer) and self.session.commentary(wire, answer)
+        if spoken:
+            self.last_answer = answer
+
+        if reply.follow_up:
+            if self.end_after_follow_up:
+                self.after_call.append(reply.follow_up)
+                self._log("LIVE CALL: follow-up during the closing report — left for chat")
+            elif self.follow_ups_used < MAX_FOLLOW_UPS:
+                self.pending_follow_up = reply.follow_up
+            else:
+                self.after_call.append(reply.follow_up)
+                self._log("LIVE CALL: follow-up limit reached — left for chat")
+
+        closing_report = is_follow_up and self.end_after_follow_up
+        if open_call and not superseded and (reply.end_call or closing_report):
+            if self.pending_follow_up:
+                self.end_after_follow_up = True
+                self._log("LIVE CALL: end call after the follow-up report")
+            else:
+                self.end_after_follow_up = False
                 self.hangup_requested = True
                 self.hangup_after_speech = spoken
                 if not spoken:
@@ -1041,11 +1212,6 @@ class LiveCallRuntime:
             self.session.thinking(wire, reply.note)
         if open_call and reply.steer:
             self.session.instructions(f"Guidance from COA (the backend): {reply.steer}")
-        if reply.follow_up:
-            if self.follow_ups_used < MAX_FOLLOW_UPS:
-                self.pending_follow_up = reply.follow_up
-            else:
-                self._log("LIVE CALL: follow-up limit reached — not queued")
         tools: list[str] = []
         for did in self.current:
             rec = self.delegations.get(did)
@@ -1054,17 +1220,61 @@ class LiveCallRuntime:
                 rec.spoken = spoken and did == target
                 rec.superseded = superseded
                 rec.steer, rec.note, rec.follow_up = reply.steer, reply.note, reply.follow_up
-                rec.end_call = self.hangup_requested and did == target
+                rec.end_call = (self.hangup_requested or self.end_after_follow_up) and did == target
                 tools.extend(rec.tools)
         self._log(
             f"LIVE CALL: answered {target} ({self.turn_steps} steps; tools: "
             f"{', '.join(sorted(set(tools))) or 'none'}; spoken={spoken}"
             f"{'; superseded' if superseded else ''}"
             f"{'; steer' if reply.steer else ''}{'; follow-up queued' if self.pending_follow_up else ''}"
+            f"{'; end call after report' if self.end_after_follow_up else ''}"
             f"{'; end call' if self.hangup_requested else ''})"
         )
         self.current = []
         self._snapshot_async()
+
+    def _check_delivery(self) -> None:
+        """Wait for the voice to say a handed report; mark it for COA's next message (G25).
+
+        A follow-up report is sent once more when the voice said nothing and the PU is quiet,
+        or when the call is ending. Unconfirmed reports at hang-up go to the chat summary.
+        """
+        h, self.handed = self.handed, None
+        s = self.session
+        ending = self.hangup_requested or self.end_after_follow_up
+        started = s.wait_for_speech(self._sleep, expect_speech=True)
+        status, voice, pu = self._delivery_status(h.mark, started)
+        if (h.kind == "report" and status != DELIVERY_SPOKEN and not s.closed.is_set()
+                and (ending or (status == DELIVERY_NOT_SPOKEN and not pu))):
+            self._log(f"LIVE CALL: report {h.record_id} {status} — sent again")
+            mark = s.transcript.mark()
+            if s.instructions(report_instruction(self.pu_name, h.text)):
+                started = s.wait_for_speech(self._sleep, expect_speech=True)
+                status, again, _ = self._delivery_status(mark, started)
+                voice = " ".join(v for v in (voice, again) if v)
+        h.status, h.voice_said = status, voice
+        rec = self.delegations.get(h.record_id)
+        if rec:
+            rec.delivery = status
+        self._log(f"LIVE CALL: delivery check {h.record_id} ({h.kind}) — {status}")
+        if self.hangup_requested:
+            self.hangup_after_speech = False
+            if status != DELIVERY_SPOKEN and h.kind == "report":
+                self.unheard.append(h.text)
+            return
+        self.delivery = h
+
+    def _delivery_status(self, mark: int, started: float | None) -> tuple[str, str, str]:
+        voice, pu = self.session.transcript.speech_after(mark)
+        if not voice:
+            return DELIVERY_NOT_SPOKEN, voice, pu
+        if started is not None and any(t >= started for t in self.session.barge_ins):
+            return DELIVERY_CUT_OFF, voice, pu
+        return DELIVERY_SPOKEN, voice, pu
+
+    def _take_delivery(self) -> str:
+        h, self.delivery = self.delivery, None
+        return delivery_check_line(h.text, h.status, h.voice_said) if h else ""
 
     @property
     def narrate(self) -> bool:
@@ -1105,8 +1315,16 @@ class LiveCallRuntime:
         seconds = session.voice_seconds if session else None
         segments = session.transcript.all() if session else []
         self._log(f"LIVE CALL: ended ({reason}, {seconds}s)")
-        pending, self.pending_follow_up = self.pending_follow_up, ""
-        return call_ended_message(reason, seconds, segments, self.language, pending_follow_up=pending)
+        work = [w for w in [self.pending_follow_up, *self.after_call] if w]
+        last = self.delivery
+        if last and last.kind == "report" and last.status != DELIVERY_SPOKEN:
+            self.unheard.append(last.text)
+        unheard = " ".join(self.unheard)
+        self.pending_follow_up, self.after_call, self.unheard = "", [], []
+        self.handed = self.delivery = None
+        self.end_after_follow_up = False
+        return call_ended_message(reason, seconds, segments, self.language,
+                                  pending_follow_up="; ".join(work), unheard=unheard)
 
     def capture_summary(self, last_ai_text: Any) -> None:
         """Save COA's reply to the call-ended message as the call's last-call note (G16)."""

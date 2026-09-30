@@ -1204,6 +1204,14 @@ class SystemSettingsModal(ModalScreen):
                                             yield Input(value=cb_hourly, placeholder="e.g. 20", id="input-cb-hourly", type="integer")
 
                                     yield Static("")
+                                    yield Static("[bold cyan]Quota pause[/]")
+                                    yield Static(
+                                        "[dim]When an assigned model reaches its quota, "
+                                        "spawning pauses for 1 hour.[/]"
+                                    )
+                                    yield Vertical(id="settings-spawn-hold-list")
+
+                                    yield Static("")
                                     with Horizontal(classes="settings-aligned-field-row", id="settings-flood-task-row"):
                                         with Vertical(classes="settings-aligned-field-col"):
                                             yield Static("[cyan]Flood Guard Timeout (hours)[/]")
@@ -1713,8 +1721,36 @@ class SystemSettingsModal(ModalScreen):
         else:
             table.border_title = "Utility Models (0) — select New to add a profile"
 
+    def _format_hold_remaining(self, remaining: int) -> str:
+        if remaining >= 3600:
+            return f"{remaining // 3600}h {(remaining % 3600) // 60:02d}m"
+        return f"{remaining // 60}m {remaining % 60:02d}s"
+
+    async def _refresh_spawn_holds(self) -> None:
+        """List agents whose quota (or rate-limit) pause is still running."""
+        from agitop.data.system_reader import list_spawn_holds
+
+        box = self.query_one("#settings-spawn-hold-list", Vertical)
+        await box.remove_children()
+        holds = list_spawn_holds()
+        if not holds:
+            box.mount(Static("[dim]No pause.[/]", id="spawn-hold-empty"))
+            return
+        for hold in holds:
+            agent = hold["agent"]
+            box.mount(
+                Vertical(
+                    Static(f"{agent}  {self._format_hold_remaining(hold['remaining_seconds'])}"),
+                    Button("Lift", variant="warning", id=f"btn-lift-cooldown-{agent}"),
+                    classes="spawn-hold-row",
+                    id=f"spawn-hold-row-{agent}",
+                )
+            )
+
     def on_mount(self) -> None:
         """Populate the skills and packages DataTables after mount."""
+        self.run_worker(self._refresh_spawn_holds(), exclusive=True, group="spawn-holds")
+
         try:
             table = self.query_one("#skills-registry-table", DataTable)
             table.cursor_type = "row"
@@ -2022,6 +2058,20 @@ class SystemSettingsModal(ModalScreen):
             self._update_skills_table()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id.startswith("btn-lift-cooldown-"):
+            from agitop.data.system_reader import lift_spawn_hold
+
+            agent = button_id[len("btn-lift-cooldown-"):]
+            if lift_spawn_hold(agent):
+                self.app.notify(f"Quota pause lifted for {agent}.")
+            else:
+                self.app.notify(
+                    f"Could not lift the pause for {agent}.",
+                    severity="error",
+                )
+            self.run_worker(self._refresh_spawn_holds(), exclusive=True, group="spawn-holds")
+            return
         if event.button.id == "btn-toggle-strategy":
             current = _read_ini_value("local_ai", "model_loading_strategy", "single")
             self.app.push_screen(RouterModeConfirmModal(current))

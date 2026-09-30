@@ -11,7 +11,7 @@
 # Usage:  ./lifeline.sh
 #         ./lifeline.sh --force                 # agitop Retrieve / RUN NOW
 #         ./lifeline.sh --ide-prompt <agent>   # generate IDE seed, no harness
-# CRON:   */5 * * * * /path/to/core-infra/lifeline.sh
+# CRON:   installed by setup.sh as */N (setup.ini [agent] cron_interval, default 1)
 # ─────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -387,6 +387,50 @@ for line in sys.stdin:
         pass
 print(int(last.get("inserted") or 0))
 ' 2>/dev/null || echo 0
+}
+
+# Cloud inbox for one agent. Persist unread rows only — do not spawn and do
+# not rebuild the prompt. $6 = true is the during-spawn poll: log only when
+# rows insert (a zero result every 10 seconds would fill the log).
+_vv_sync_agent_inbox() {
+  local agent_user="$1"
+  local agent_name="$2"
+  local agent_path="$3"
+  local sub_id="$4"
+  local token="$5"
+  local while_spawned="${6:-false}"
+  local vv_enabled inbox_out inserted
+  vv_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
+  if [ "${vv_enabled:-true}" != "true" ] || [ -z "${sub_id}" ] || [ -z "${token}" ]; then
+    return 0
+  fi
+  inbox_out=$(AGICTL_MESSAGES_DB="/var/lib/versa-agi/messages.db" \
+    /usr/local/bin/agictl message sync-inbox "${agent_user}" --agent-path "${agent_path}" --sub-account "${sub_id}" --token "${token}" 2>&1) \
+    || log "WARN: agictl message sync-inbox failed for ${agent_name}"
+  inserted=$(_vv_inbox_inserted "${inbox_out}")
+  if [ "${inserted:-0}" -gt 0 ]; then
+    _vv_run_instance_sync inbox
+  fi
+  if [ "${while_spawned}" = "true" ] && [ "${inserted:-0}" -gt 0 ]; then
+    log "INBOX: ${agent_name} — sync while spawned (inserted ${inserted})"
+  fi
+}
+
+# Inbox poll for the life of one spawn. Sleeps first because the free-lock
+# sync already ran. The caller kills this when the harness returns.
+# Each pass clears the once-per-tick instance-sync flag so an insert can
+# still sync once in that 10-second window.
+_vv_inbox_while_spawned() {
+  local agent_user="$1"
+  local agent_name="$2"
+  local agent_path="$3"
+  local sub_id="$4"
+  local token="$5"
+  while true; do
+    sleep 10
+    _VV_INSTANCE_SYNCED_THIS_TICK=false
+    _vv_sync_agent_inbox "${agent_user}" "${agent_name}" "${agent_path}" "${sub_id}" "${token}" true
+  done
 }
 
 _vv_run_instance_sync() {
@@ -863,19 +907,10 @@ ${AGENT_REGISTRY_CONTENT}
     fi
   fi
 
-  # Only sync cloud inbox when VV is enabled
-  # IMPORTANT: scope to [versavoice] section — enabled= exists in multiple INI sections
-  VV_ENABLED=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' /etc/versa-agi/setup.ini 2>/dev/null)
-  if [ "${VV_ENABLED:-true}" = "true" ] && [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${API_TOKEN}" ]; then
-    # Step 1: Fetch inbox — persist unread messages to SQLite
-    INBOX_OUT=$(AGICTL_MESSAGES_DB="${MESSAGES_DB}" \
-      /usr/local/bin/agictl message sync-inbox "${AGENT_USER}" --agent-path "${AGENT_PATH}" --sub-account "${SUB_ACCOUNT_ID}" --token "${API_TOKEN}" 2>&1) || log "WARN: agictl message sync-inbox failed for ${AGENT_NAME}"
-    INBOX_INSERTED=$(_vv_inbox_inserted "${INBOX_OUT}")
-    if [ "${INBOX_INSERTED:-0}" -gt 0 ]; then
-      _vv_run_instance_sync inbox
-    fi
-
-  fi
+  # Step 1: Fetch inbox — persist unread messages to SQLite.
+  # Idle agents only. A spawned agent is fetched by _vv_inbox_while_spawned
+  # inside its own cycle, not by this tick.
+  _vv_sync_agent_inbox "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}" "${SUB_ACCOUNT_ID}" "${API_TOKEN}" false
 
   # ─── Utility / Script Tasks — due jobs without harness spawn ───
   _run_due_utility_and_scripts "${SYSTEM_CONFIG}" "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}" "${TASKS_DB}"
@@ -2424,6 +2459,15 @@ ${IDE_RESUME_CONTEXT}"
       "UPDATE tasks SET spawn_attempts = spawn_attempts + 1, updated_at = datetime('now') WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true
   fi
   rm -f "${STEP_RESUME_SENTINEL}" 2>/dev/null || true
+  # One inbox poll per spawn. The 1-minute tick does not sync this agent
+  # while the lock is held. Killed with the runaway monitor below.
+  INBOX_POLL_PID=""
+  _vv_poll_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
+  if [ "${_vv_poll_enabled:-true}" = "true" ] && [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${API_TOKEN}" ]; then
+    _vv_inbox_while_spawned "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}" "${SUB_ACCOUNT_ID}" "${API_TOKEN}" &
+    INBOX_POLL_PID=$!
+    trap 'kill "${INBOX_POLL_PID}" 2>/dev/null || true' EXIT
+  fi
   sudo -u "${AGENT_USER}" \
     timeout "${TIMEOUT_DURATION}" \
       bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --games-file '${GAMES_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} ${ROUTING_ARGS} > '${RESULT_FILE}' 2>&1"
@@ -2433,8 +2477,13 @@ ${IDE_RESUME_CONTEXT}"
   # on already-dead processes and must not terminate the subshell.
 
   # Stop the runaway monitor (it may have already exited if it killed the agent)
+  # and the during-spawn inbox poll.
   kill "${MONITOR_PID}" 2>/dev/null || true
   wait "${MONITOR_PID}" 2>/dev/null || true
+  if [ -n "${INBOX_POLL_PID}" ]; then
+    kill "${INBOX_POLL_PID}" 2>/dev/null || true
+    wait "${INBOX_POLL_PID}" 2>/dev/null || true
+  fi
 
   rm -f "${ENV_SCRIPT}" "${TASKS_FILE}" "${CONVO_FILE}" "${GAMES_FILE}" "${ROUTING_FILE}" "${ROUTING_ATTACHMENTS_FILE}"
   # Keep a readable log copy alongside the result file

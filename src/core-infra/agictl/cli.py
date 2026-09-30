@@ -9041,6 +9041,17 @@ def task_list(show_all):
         tasks = tasks_reader.get_active_tasks()
     print(json.dumps(tasks, indent=2, default=str))
 
+@task.command("triage-registry", hidden=True)
+@click.option("--agent", "agent_name", required=True, help="Spawned agent this read is for")
+def task_triage_registry(agent_name):
+    """Projects and open tasks for one agent. Harness triage. JSON object."""
+    try:
+        from agent_reads import registry_for_agent
+        print(json.dumps(registry_for_agent(tasks_db, agent_name), default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
 @task.command("get")
 @click.argument("task_id", type=int)
 def task_get(task_id):
@@ -9890,6 +9901,20 @@ def message_sync_inbox(agent_user, agent_path, sub_account, token, full):
 def message_count_unprocessed(sub_account, within_seconds, agent_name):
     """Count unprocessed messages within time window."""
     print(message_reader.count_unprocessed(sub_account, within_seconds, agent_name=agent_name))
+
+@message.command("received-unread", hidden=True)
+@click.option("--agent", "agent_name", required=True, help="Spawned agent this read is for")
+def message_received_unread(agent_name):
+    """Unprocessed received rows for one agent. Harness mailbox. JSON array."""
+    try:
+        from agent_reads import ids_for_spawned_agent, received_unread
+        config = get_config()
+        sub = str((config.get("versavoice") or {}).get("sub_account_id") or "").strip()
+        ids = ids_for_spawned_agent(agent_name, get_agent_name(), sub)
+        print(json.dumps(received_unread(messages_db, ids), default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
 
 @message.command("count-stale")
 @click.argument("sub_account")
