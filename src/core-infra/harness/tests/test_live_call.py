@@ -343,6 +343,8 @@ class TestVoiceCardAndSummary(unittest.TestCase):
             self.assertIn(part, card)
         self.assertNotRegex(card, r"\{[A-Z_]+\}")
         self.assertNotIn("<!--", card)
+        self.assertIn("full name, Sam", card)
+        self.assertIn("Never say a placeholder", card)
         self.assertLess(len(card.split()), 520)   # ≈ 700 tokens
 
     def test_missing_voice_card_fails_before_ringing(self):
