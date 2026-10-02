@@ -147,6 +147,22 @@ class TestBridgeGuard(_Base):
                           env={"AGICTL_AGENT_USER": "coa"}, stdin="forged")
         self.assertNotEqual(res.exit_code, 0)
 
+    def test_status_reads_callee_call_document(self):
+        call_log_store.insert_attempt(self.messages, call_id="call_7", agent_name="coa", status="live",
+                                      reason="x", callee_uid="uid_ashok")
+        conf = os.path.join(self.tmp.name, "coa_config.json")
+        with open(conf, "w") as f:
+            json.dump({"versavoice": {"api_token": "tok", "sub_account_id": "sub_1"}}, f)
+        env = {"AGICTL_AGENT_USER": "coa", "VERSA_CALL_BRIDGE": "harness", "AGICTL_CONFIG": conf}
+        import comms
+        with patch.object(comms, "call_status",
+                          return_value={"success": True, "data": {"status": "ended"}}) as read:
+            res = self.invoke(["message", "call-bridge", "status", "call_7"], env=env)
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertEqual(json.loads(res.output.strip().splitlines()[-1])["status"], "ended")
+        read.assert_called_once_with("tok", "sub_1", "call_7", callee_uid="uid_ashok")
+        self.assertEqual(call_log_store.get_call(self.messages, "call_7")["status"], "live")
+
     def test_bridge_hidden_from_help(self):
         res = self.invoke(["message", "--help"])
         self.assertNotIn("call-bridge", res.output)

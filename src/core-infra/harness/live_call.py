@@ -44,6 +44,10 @@ NARRATE_MIN_DELAY_SECONDS = 3
 NARRATE_MIN_GAP_SECONDS = 8
 CLOSE_GRACE_SECONDS = 30
 CALL_TURN_STEP_CAP = 16
+# The phone can end the call (VersaVoice call document) without session.closed reaching
+# the sideband: app closed, sign-out, network lost.
+PHONE_STATUS_POLL_SECONDS = 10
+PHONE_ENDED_STATUSES = ("ended", "declined", "missed", "failed")
 
 CALL_TOOL_NAME = "agictl_call_pu"
 
@@ -226,16 +230,38 @@ def load_voice_card(path: str | None = None) -> str:
         raise LiveCallError("voice_card", f"voice card template unavailable: {exc}") from exc
 
 
+# A connection is not the Primary User. No profile, games, or home. Same delegation rules.
+CONNECTION_VOICE_CARD = """
+You are the voice of {AGENT}, calling {PU}.
+You placed this call to {PU}. Reason: {REASON}
+Open with hello and their full name, {PU}, then one sentence on why you called, and listen. Speak that name as written. Never say a placeholder such as [last name] in its place.
+Style: brief, warm, natural spoken turns. Do not read out IDs or lists unless asked. Do not mention the Primary User's private details, home, or other people.{STYLE_NOTES}
+
+Delegation policy:
+Backend tools: the COA agent — projects and tasks, agents and their status, messages, memory, schedules, and system status.
+Delegate to the backend when: they ask about or want to change anything that needs facts from the backend; a correction changes work already requested.
+Do not delegate to the backend when: greeting, small talk, repeating back what they said, or asking a short clarifying question.
+Delegate before giving an answer that depends on backend work. While it works, say briefly that you are checking. Never guess results or say something is done before the backend confirms it. When the backend sends a result to tell them, say all of it, then check briefly that it answers what they needed.
+Ending the call: when the reason for the call is handled and they have nothing else, or they say goodbye, say a short goodbye and then delegate "end the call" to the backend. Only the backend can hang up; never say you will hang up without delegating it.
+
+Approvals cannot be given by voice. If they say yes, approve, or grant for a package, sudo access, or an agent, tell them to use that control in the VersaVoice app.
+{LANGUAGE_RULE}
+""".strip()
+
+
 def voice_instructions(agent_label: str, pu_name: str, reason: str, *,
                        language: CallLanguage = ENGLISH, style_notes: str = "",
-                       template: str | None = None) -> str:
-    """GPT-Live voice card: COA's purpose, duty, and stance toward the PU (from its poise),
-    plus style, delegation policy, guardrails, and language.
+                       template: str | None = None, connection: bool = False) -> str:
+    """GPT-Live voice card: COA's purpose, duty, and stance toward the person on the call.
 
-    COA's full poise stays with the harness, which answers every delegation.
+    A Primary User call uses the shipped card. A connection call uses a short card that
+    does not carry the Primary User's profile. COA's full poise stays with the harness.
     """
-    who = pu_name or "the Primary User"
-    card = template if template is not None else load_voice_card()
+    who = pu_name or ("them" if connection else "the Primary User")
+    if connection:
+        card = CONNECTION_VOICE_CARD
+    else:
+        card = template if template is not None else load_voice_card()
     values = {
         "{AGENT}": agent_label or "COA",
         "{PU}": who,
@@ -597,7 +623,8 @@ def prompt_block(*, ready: bool, reasons: str, call_model: str, language: CallLa
     if ready:
         limit = f"up to {calls_per_cycle} call{'s' if calls_per_cycle != 1 else ''} per cycle"
         status = (
-            "Status: ready — you can call the Primary User with the `agictl_call_pu` tool "
+            "Status: ready — you can call the Primary User, or a VersaVoice connection, with "
+            "the `agictl_call_pu` tool "
             f"({limit}). Load `live_call.md` before placing or planning a call, and check system "
             f"memory `live_call.when_to_call`. Call model: {call_model}. Call language: {language.name}."
         )
@@ -688,13 +715,16 @@ def open_sideband(api_key: str, session_id: str):
 class LiveSession:
     """Sideband control of one running GPT-Live session."""
 
-    def __init__(self, session_id: str, ws, *, max_minutes: int, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, session_id: str, ws, *, max_minutes: int, clock: Callable[[], float] = time.monotonic,
+                 phone_status: Callable[[], str] | None = None):
         self.session_id = session_id
         self._ws = ws
         self._send_lock = threading.Lock()
         self._events: queue.Queue = queue.Queue()
         self._clock = clock
+        self._phone_status = phone_status
         self.started_at = clock()
+        self._phone_checked_at = self.started_at
         self.deadline = self.started_at + max_minutes * 60
         self.transcript = Transcript()
         self.closed = threading.Event()
@@ -783,7 +813,10 @@ class LiveSession:
                 event = json.loads(raw)
             except (TypeError, json.JSONDecodeError):
                 continue
-            self.handle_event(event)
+            try:
+                self.handle_event(event)
+            except Exception as exc:
+                self.errors.append(f"event {event.get('type') if isinstance(event, dict) else '?'}: {exc}")
 
     def handle_event(self, event: dict) -> None:
         etype = event.get("type") or ""
@@ -838,6 +871,25 @@ class LiveSession:
         if now >= self.deadline + CLOSE_GRACE_SECONDS:
             self._mark_closed("expired")
 
+    def phone_ended(self) -> bool:
+        """Every PHONE_STATUS_POLL_SECONDS: if the call document is final, close the session."""
+        if self._phone_status is None or self.closed.is_set():
+            return False
+        now = self._clock()
+        if now - self._phone_checked_at < PHONE_STATUS_POLL_SECONDS:
+            return False
+        self._phone_checked_at = now
+        try:
+            status = self._phone_status()
+        except Exception as exc:
+            self.errors.append(f"phone status: {exc}")
+            return False
+        if status not in PHONE_ENDED_STATUSES:
+            return False
+        self._close_reason_override = self._close_reason_override or "phone_ended"
+        self.close()
+        return True
+
     def has_pending_events(self) -> bool:
         return not self._events.empty()
 
@@ -845,6 +897,8 @@ class LiveSession:
         """Block until a delegation or the close. Returns ("delegation", ids) or ("closed", [])."""
         while True:
             self.enforce_duration()
+            if self.phone_ended():
+                return "closed", []
             try:
                 kind, value, _ = self._events.get(timeout=poll_seconds)
             except queue.Empty:
@@ -937,6 +991,9 @@ class LiveCallRuntime:
         """Per-call state; cleared before each call of the cycle."""
         self.call_id = ""
         self.reason = ""
+        self.calling_connection = False
+        self.callee_name = ""
+        self.callee_language = ""
         self.session: LiveSession | None = None
         self.ended_injected = False
         self.finalized = False
@@ -967,7 +1024,8 @@ class LiveCallRuntime:
         return self.session is not None and not self.ended_injected
 
     # ── placing the call (inside the tool) ──
-    def place(self, reason: str, settings, last_call_summary: str = "", brief: str = "") -> dict:
+    def place(self, reason: str, settings, last_call_summary: str = "", brief: str = "",
+              recipient_id: str = "") -> dict:
         limit = max(1, int(getattr(settings, "calls_per_cycle", 1) or 1))
         if self.live:
             return {"success": False, "status": "refused", "error": "You are already on this call."}
@@ -991,13 +1049,24 @@ class LiveCallRuntime:
         self.calls_placed += 1
         self.settings = settings
         self.reason = reason.strip()
-        opened = self._bridge(["open", "--reason", self.reason], None, BRIDGE_TIMEOUT_SECONDS)
+        self.calling_connection = bool(recipient_id.strip())
+        self.callee_name = ""
+        open_args = ["open", "--reason", self.reason]
+        if self.calling_connection:
+            open_args += ["--recipient", recipient_id.strip()]
+        opened = self._bridge(open_args, None, BRIDGE_TIMEOUT_SECONDS)
         if not opened.get("success"):
-            return {"success": False, "status": "failed", "error": opened.get("error") or "call could not be placed"}
+            return {"success": False, "status": "failed",
+                    "error": opened.get("error") or "call could not be placed"}
         self.call_id = opened.get("call_id") or ""
+        self.callee_name = str(opened.get("callee_name") or "").strip()
+        self.callee_language = str(opened.get("callee_language") or "").strip()
         if opened.get("status") == "offline":
-            return {"success": True, "status": "offline",
-                    "note": "The Primary User has no reachable device. Send a chat message instead."}
+            if self.calling_connection:
+                note = "They have no reachable device. Send them a chat message instead."
+            else:
+                note = "The Primary User has no reachable device. Send a chat message instead."
+            return {"success": True, "status": "offline", "note": note}
 
         deadline = self._clock() + settings.join_timeout_seconds
         sdp_offer = ""
@@ -1012,25 +1081,38 @@ class LiveCallRuntime:
                 sdp_offer = polled["sdp_offer"]
                 break
             if status in ("declined", "missed", "ended"):
+                if self.calling_connection:
+                    note = "They did not join. Send them a chat message instead."
+                else:
+                    note = "The Primary User did not join. Send a chat message instead."
                 return {"success": True, "status": status if status != "ended" else "missed",
-                        "note": "The Primary User did not join. Send a chat message instead."}
+                        "note": note}
         if not sdp_offer:
             self._end("missed", "join_timeout")
-            return {"success": True, "status": "missed",
-                    "note": "The Primary User did not join in time. Send a chat message instead."}
+            if self.calling_connection:
+                note = "They did not join in time. Send them a chat message instead."
+            else:
+                note = "The Primary User did not join in time. Send a chat message instead."
+            return {"success": True, "status": "missed", "note": note}
 
         api_key = self._api_key_resolver()
         if not api_key:
             self._end("failed", "no_openai_key")
             return {"success": False, "status": "failed", "error": "OpenAI API key unavailable"}
         context = self._call_context()
-        self.language = context.get("language") or ENGLISH
+        if self.calling_connection and self.callee_language:
+            self.language = resolve_call_language(self.callee_language)
+        else:
+            self.language = context.get("language") or ENGLISH
+        spoken_name = self.callee_name if self.calling_connection else self.pu_name
         session_config = {
             "model": settings.voice_model,
             "instructions": voice_instructions(
-                self.agent_label, self.pu_name, self.reason,
-                language=self.language, style_notes=context.get("style_notes") or "",
+                self.agent_label, spoken_name, self.reason,
+                language=self.language,
+                style_notes="" if self.calling_connection else (context.get("style_notes") or ""),
                 template=card_template,
+                connection=self.calling_connection,
             ),
             "delegation": {"type": "client"},
         }
@@ -1050,15 +1132,26 @@ class LiveCallRuntime:
         except Exception as exc:
             self._end("failed", "sideband")
             return {"success": False, "status": "failed", "error": f"sideband attach failed: {exc}"}
-        self.session = LiveSession(session_id, ws, max_minutes=settings.max_minutes, clock=self._clock)
-        for item in call_start_context(
-            pu_name=self.pu_name, brief=brief, profile=context.get("pu_profile") or "",
-            games=context.get("games") or [], last_call=context.get("last_call") or "",
-        ):
+        self.session = LiveSession(session_id, ws, max_minutes=settings.max_minutes, clock=self._clock,
+                                   phone_status=self._phone_status)
+        if self.calling_connection:
+            start = call_start_context(pu_name=spoken_name, brief=brief)
+        else:
+            start = call_start_context(
+                pu_name=self.pu_name, brief=brief, profile=context.get("pu_profile") or "",
+                games=context.get("games") or [], last_call=context.get("last_call") or "",
+            )
+        for item in start:
             self.session.thinking(None, item)
         self._bridge(["log", self.call_id, "--status", "live"], json.dumps(self._snapshot()), BRIDGE_TIMEOUT_SECONDS)
         self._log(f"LIVE CALL: connected call={self.call_id} session={session_id} language={self.language.code}")
-        return {"success": True, "status": "connected", "call_id": self.call_id, "note": CONNECTED_TOOL_RESULT}
+        if self.calling_connection:
+            note = ("They joined — you are on a live call. End your turn now with one short line "
+                    "(it is not spoken). Each thing they ask arrives as a new message; your final "
+                    "reply to it is spoken.")
+        else:
+            note = CONNECTED_TOOL_RESULT
+        return {"success": True, "status": "connected", "call_id": self.call_id, "note": note}
 
     # ── driving turns (harness outer loop) ──
     def next_injection(self, last_ai_text: str) -> str | None:
@@ -1379,6 +1472,10 @@ class LiveCallRuntime:
         if session and session.voice_seconds is not None:
             args += ["--voice-seconds", str(session.voice_seconds)]
         self._bridge(args, json.dumps(self._snapshot()), BRIDGE_TIMEOUT_SECONDS)
+
+    def _phone_status(self) -> str:
+        polled = self._bridge(["status", self.call_id], None, BRIDGE_TIMEOUT_SECONDS)
+        return str(polled.get("status") or "") if polled.get("success") else ""
 
     def _end(self, status: str, reason: str) -> None:
         self.finalized = True

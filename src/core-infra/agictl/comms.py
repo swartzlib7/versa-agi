@@ -477,29 +477,46 @@ def send_message(token, sub_account_id, recipient_id, text, mode, messages_db, a
 CALL_LONG_POLL_SECONDS = 25
 
 
-def call_open(token, sub_account_id, reason, ttl_seconds):
-    """POST /calls — ring the sponsor PU. data.status is 'calling' or 'offline'."""
-    return api_request("/calls", token, method="POST", body={
+def call_open(token, sub_account_id, reason, ttl_seconds, recipient_id=""):
+    """POST /calls — ring the sponsor, or a connection when recipient_id is set."""
+    body = {
         "subAccountId": sub_account_id,
         "reason": reason,
         "ttlSeconds": int(ttl_seconds),
-    })
+    }
+    if recipient_id:
+        body["recipientId"] = recipient_id
+    return api_request("/calls", token, method="POST", body=body)
 
 
-def call_wait_offer(token, sub_account_id, call_id, wait_seconds=CALL_LONG_POLL_SECONDS):
-    """GET /calls/{id}?wait=offer — returns when the PU joins, declines, or the wait ends."""
-    query = urllib.parse.urlencode({
+def call_wait_offer(token, sub_account_id, call_id, wait_seconds=CALL_LONG_POLL_SECONDS,
+                    callee_uid=""):
+    """GET /calls/{id}?wait=offer — returns when the callee joins, declines, or the wait ends."""
+    query = {
         "subAccountId": sub_account_id,
         "wait": "offer",
         "timeout": int(wait_seconds),
-    })
-    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}?{query}"
+    }
+    if callee_uid:
+        query["calleeUid"] = callee_uid
+    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}?{urllib.parse.urlencode(query)}"
     return api_request(endpoint, token, method="GET", timeout=int(wait_seconds) + 10)
 
 
-def call_update(token, sub_account_id, call_id, **fields):
+def call_status(token, sub_account_id, call_id, callee_uid=""):
+    """GET /calls/{id} — the call document's status, without waiting."""
+    query = {"subAccountId": sub_account_id}
+    if callee_uid:
+        query["calleeUid"] = callee_uid
+    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}?{urllib.parse.urlencode(query)}"
+    return api_request(endpoint, token, method="GET")
+
+
+def call_update(token, sub_account_id, call_id, callee_uid="", **fields):
     """PUT /calls/{id} — sdpAnswer, status, closeReason, durationSeconds."""
     body = {"subAccountId": sub_account_id}
+    if callee_uid:
+        body["calleeUid"] = callee_uid
     body.update({k: v for k, v in fields.items() if v is not None})
     endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}"
     return api_request(endpoint, token, method="PUT", body=body)

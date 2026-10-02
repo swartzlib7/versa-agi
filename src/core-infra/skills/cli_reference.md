@@ -180,8 +180,6 @@ agictl task count-pending <agent_name>                # Count pending active tas
 agictl task count-due-blocked <agent_name>            # Count past-due blocked tasks
 agictl task count-total-blocked <agent_name>          # Count all blocked tasks
 agictl task get-blocked-detail <agent_name>           # Blocked task diagnostics
-agictl task check-followup <agent_name>               # Check callback_action routing
-agictl task inject-followup <agent_name>              # Inject connection follow-up task
 agictl task freeze-all <agent_name>                   # Freeze all non-terminal tasks (saves prior status)
 agictl task unfreeze <task_id>                        # Restore one frozen task (resets spawn_attempts)
 agictl task unfreeze-all <agent_name>                 # Restore all frozen tasks to their prior status
@@ -287,7 +285,7 @@ agictl message send <uid> "Here are the reports" --mode typed \
 
 ### Live call (COA only)
 
-Placing a call is the harness tool **`agictl_call_pu(reason, brief)`** only — there is **no terminal command** (see `cli_reference_agent.md` §4 Live call for the call flow). The call log is read-only:
+Placing a call is the harness tool **`agictl_call_pu(reason, brief, recipient_id)`** only — there is **no terminal command** (see `cli_reference_agent.md` §4 Live call for the call flow). Empty `recipient_id` rings the Primary User; a connection's user id rings that contact. The call log is read-only:
 
 ```bash
 agictl message calls list [--limit N]                  # Recent calls: status, reason, voice seconds
@@ -346,10 +344,12 @@ agictl connection list primary-user                   # Same — explicit form
 agictl connection list agent                          # List agent's own established connections (local DB)
 # countryOfBirth / nearestCity = language origin
 # countryOfResidence / stateOrProvince = where they live (optional)
-agictl connection request <uid>                       # Send connection invitation to a Primary User contact
+agictl connection request <uid> [--reason "<why>"]    # Send connection invitation to a Primary User contact
 ```
 
 > **Flow**: Run `agictl connection list` to discover contact UIDs → `agictl connection request <uid>` to send invitation → Primary User accepts in VersaVoice app → contact appears in `agictl connection list agent`.
+>
+> **Follow-up**: on `invitation_sent` the command creates one `check_connection` task per contact (tag `connection:<uid>`, first check in 15 minutes, reason in the description) and returns `follow_up_task_id`. Re-sending to the same contact reuses the open task. Schedule: `connection_lifecycle.md` §4.
 >
 > **GUARD**: `connection request` requires the agent to have external comms enabled (`can_message_connections`). Protected agents (COA, Watchdog) have this by default. Sub-agents need it enabled by the Primary User via `agictl agent toggle-comms <name>`.
 

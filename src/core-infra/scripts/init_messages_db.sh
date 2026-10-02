@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS calls (
   call_id            TEXT PRIMARY KEY,
   agent_name         TEXT NOT NULL,
   pu_uid             TEXT,
+  callee_uid         TEXT,
   channel_id         TEXT,
   cycle_id           TEXT,
   reason             TEXT,

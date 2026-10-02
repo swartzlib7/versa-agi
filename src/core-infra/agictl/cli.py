@@ -9486,18 +9486,6 @@ def task_get_blocked_detail(agent_name):
     if detail:
         print(detail)
 
-@task.command("check-followup")
-@click.argument("agent_name")
-def task_check_followup(agent_name):
-    """Check if tasks have callback_action requiring routing."""
-    print(tasks_reader.check_connection_followup(agent_name))
-
-@task.command("inject-followup")
-@click.argument("agent_name")
-def task_inject_followup(agent_name):
-    """Inject connection follow-up task into the queue."""
-    tasks_reader.inject_connection_followup(agent_name)
-
 @task.command("freeze-all")
 @click.argument("agent_name")
 def task_freeze_all(agent_name):
@@ -12345,9 +12333,11 @@ def connection_list_agent():
 
 @connection.command("request")
 @click.argument("uid")
-def connection_request(uid):
+@click.option("--reason", default="", help="Why you are connecting, e.g. 'Live call: <reason>'. Kept on the follow-up task.")
+def connection_request(uid, reason):
     """Send a VersaVoice connection invitation to a Primary User contact.
 
+    Schedules its own follow-up: a check_connection task for this contact, first check in 15 minutes.
     Only agents with can_message_connections=1 (or protected) can send invitations.
     Sub-agents need external comms enabled via 'agictl agent toggle-comms' (dashboard).
     """
@@ -12414,7 +12404,14 @@ def connection_request(uid):
                 )
             conn.commit()
             conn.close()
-            json_response(True, uid=uid, display_name=display_name, status="invitation_sent")
+            task_id = tasks_reader.schedule_connection_check(caller, uid, display_name, reason) if tasks_reader else None
+            if task_id:
+                from agitop.data.tasks_reader import CONNECTION_CHECK_MINUTES
+                follow_up = f"Task {task_id} checks in {CONNECTION_CHECK_MINUTES} minutes whether they accepted."
+            else:
+                follow_up = "The follow-up task could not be created. Add a check_connection task yourself."
+            json_response(True, uid=uid, display_name=display_name, status="invitation_sent",
+                          follow_up_task_id=task_id, follow_up=follow_up)
         else:
             conn.close()
             err = response.get("message", str(response)) if response else "API Error"

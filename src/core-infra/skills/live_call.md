@@ -1,8 +1,8 @@
 # Skill: Live Call — when and how to call the Primary User (COA only)
 
-> **Scope:** COA only (`coa_only`). **Tool:** `agictl_call_pu(reason="...", brief="...")` — there is no terminal command for placing a call.
+> **Scope:** COA only (`coa_only`). **Tool:** `agictl_call_pu(reason="...", brief="...", recipient_id="")` — there is no terminal command for placing a call. Leave `recipient_id` empty to call the Primary User. Set it to a connection's VersaVoice user id to call that person. They must already be a contact, the same rule as messaging them.
 >
-> **Brief:** the voice starts with only what you give it. In `brief`, write about 120 words of plain language: what you need decided or want to tell them, the facts that matter, the options, and what you recommend. No IDs or system terms. The harness adds what memory knows about the Primary User and their active games, so do not repeat those.
+> **Brief:** the voice starts with only what you give it. In `brief`, write about 120 words of plain language: what you need decided or want to tell them, the facts that matter, the options, and what you recommend. No IDs or system terms. On a call to the Primary User, the harness adds what memory knows about them and their active games, so do not repeat those. On a call to a connection, the voice receives only this brief and that person's name.
 > **Readiness:** the `LIVE CALL` section of your prompt says `ready` or `not ready`. Only offer or place calls when it says `ready`.
 
 ## 1. When to call instead of message
@@ -12,12 +12,18 @@
    - The Primary User asked you to call ("call me", "ring me when…").
    - A decision blocks work and back-and-forth by chat would take several rounds.
    - Something time-sensitive needs them now, and a message may sit unread.
-   - The scheduled **get-to-know call** task is due (§2).
+   - The scheduled **get-to-know call** task is due (§2). That call is to the Primary User. Leave `recipient_id` empty.
+   - A connection should hear it directly, and they are already a contact you may message. Pass their user id as `recipient_id`. Do not put the Primary User's private details in the brief.
 3. **Message instead when:**
    - It is a status update, an FYI, or a single yes/no they can answer in chat.
    - It is outside the hours or conditions in `live_call.when_to_call`.
    - You already used this cycle's calls (the limit is in the `LIVE CALL` section of your prompt). To call again in the same cycle, pass the earlier call's summary as `last_call_summary`.
 4. **Never call to get an approval.** Approvals (packages, sudo, agents) happen only on the VersaVoice app or agitop controls. You may call to discuss one, then ask them to use the control.
+5. **If they do not join,** or they have no device, send the chat message to the person you called. A missed connection call is not a message to the Primary User unless they asked for one.
+6. **Not a contact yet?** A call to them is refused until they accept a connection. With the Primary User's authorization (`connection_lifecycle.md` gate):
+   1. `agictl connection request <uid> --reason "Live call: <reason>. Brief: <brief>"`.
+   2. Tell the Primary User: *"I've invited {name}. I'll check in 15 minutes and call once they accept."*
+   3. The command's `check_connection` task does the rest: 15 min, then 30 min, then you ask the Primary User when to check again. Once they accept, place the call from that task (`connection_lifecycle.md` §4).
 
 ## 2. Get-to-know call (onboarding)
 

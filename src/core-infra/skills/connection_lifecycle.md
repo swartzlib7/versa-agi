@@ -36,12 +36,13 @@ Find the contact by name in the output and note their `uid`.
 ### 2. Send the Connection Request
 
 ```bash
-# Send invitation using the contact's UID
-agictl connection request <uid>
+# Send invitation using the contact's UID; say why
+agictl connection request <uid> --reason "<why you are connecting>"
 ```
 
-> **NOTE**: The Lifeline will automatically inject a follow-up task after your cycle completes.
-> You do NOT need to create the follow-up task yourself — it is system-managed.
+For a call that waits on this connection, start the reason with `Live call:` and include the brief, e.g. `--reason "Live call: test call Stephen asked for. Brief: ..."`.
+
+> **NOTE**: The command schedules its own follow-up. The result carries `follow_up_task_id`: a `check_connection` task for this contact, first check in **15 minutes**, with the reason in its description. Do not create another one.
 > When you wake with a `check_connection` task, **re-read this skill (`connection_lifecycle.md`)** for the full procedure — you have no memory between cycles.
 
 ### 3. Acknowledge to the Requester
@@ -49,51 +50,49 @@ agictl connection request <uid>
 Always inform whoever asked for the connection:
 
 ```
-"I've sent a connection invitation to {contact_name}. I'll follow up once they accept and introduce myself."
+"I've sent a connection invitation to {contact_name}. I'll check in 15 minutes and introduce myself once they accept."
 ```
+
+If the invitation is for a call, say so: *"I'll check in 15 minutes and call {contact_name} once they accept."*
 
 ### 4. Follow-Up — Handling `check_connection` Tasks
 
 When you wake and see a `check_connection` task (check with `agictl task list`):
 
-1. Note the **task ID** from the task list output
+1. Note the **task ID**, its `wake_cycle_count`, and the contact uid and reason in its description (`agictl task list`)
 2. Check if the connection is active using `agictl connection list agent`
 3. Look for the contact in the connections list
 
 **If accepted:**
 - Trigger the `self_introduction.md` skill — send your introduction
-- **COMPLETE the task immediately:**
+- **If the reason starts with `Live call:`,** place the call now: `agictl_call_pu(reason=..., brief=..., recipient_id=<uid>)` per `live_call.md`. Use the reason and brief from the task description.
+- **COMPLETE the task:**
   ```bash
-  agictl task done <task_id> "Connected and introduced"
+  agictl task done <task_id>
   ```
-- Notify the Primary User: "I've connected with {contact_name} and introduced myself."
+- Notify the requester: "I've connected with {contact_name} and introduced myself." Add the call outcome if you called.
 
-**If still pending — Escalating Retry:**
+**If still pending — schedule:**
 
-The contact hasn't accepted yet. **Do NOT complete the task.** Use escalating snooze:
+The contact hasn't accepted yet. **Do NOT complete the task.**
 
 ```bash
-# Check how many times we've already retried
-agictl task list   # Look at wake_cycle_count for this task
+# wake_cycle_count 0 — first check, 15 min after the invitation:
+agictl message send <requester_uid> "{contact_name} hasn't accepted the connection invitation yet. I'll check again in 30 minutes." --mode typed
+agictl task snooze <task_id> 30
 
-# Wake cycle 0 (first check, ~2 min after request):
-agictl message send <requester_uid> "Connection to {contact_name} is still pending. They may not have seen the invitation yet. I'll check again shortly." --mode typed
-agictl task snooze <task_id> 5   # Retry in 5 minutes
-
-# Wake cycle 1 (~7 min):
-agictl message send <requester_uid> "Still waiting on {contact_name} to accept. I'll keep checking." --mode typed
-agictl task snooze <task_id> 15  # Retry in 15 minutes
-
-# Wake cycle 2 (~22 min):
-agictl message send <requester_uid> "{contact_name} hasn't responded yet. I'll try once more." --mode typed
-agictl task snooze <task_id> 30  # Final retry in 30 minutes
-
-# Wake cycle 3+ (final):
-agictl message send <requester_uid> "{contact_name} hasn't accepted the connection invitation. You may want to reach out to them directly and let them know to check their VersaVoice app." --mode typed
-agictl task done <task_id> "Pending — exhausted retries, notified requester"
+# wake_cycle_count 1 or more — still pending:
+agictl message send <requester_uid> "{contact_name} still hasn't accepted. When would you like me to check again? I can also stop checking." --mode typed
+agictl task snooze <task_id> 1440   # hold until they answer, so the task does not wake every tick
 ```
 
-> **KEY RULE**: Only `task done` when the connection is accepted OR after exhausting all retry cycles. Never complete a pending connection task on the first check.
+**When the requester answers:**
+
+- They give a time: `agictl task snooze <task_id> <minutes until then>`.
+- They say stop: `agictl task cancel <task_id>`, and confirm in one line.
+- The task wakes again: same as `wake_cycle_count` 1 — check, and ask again if still pending.
+
+> **KEY RULE**: Only `task done` when the connection is accepted. Only cancel when the requester says stop. Never complete a pending connection task.
 
 ### 5. Connection Reason
 
@@ -123,7 +122,7 @@ After successfully connecting and introducing yourself to a contact:
 ## Critical Rules
 
 - **ALWAYS** acknowledge the connection request to whoever asked
-- **NEVER** complete a `check_connection` task on the first check if the connection is still pending — snooze it instead
+- **NEVER** complete a `check_connection` task while the connection is still pending — snooze it on the schedule in §4
 - **ALWAYS** report back to the Primary User after connecting and introducing yourself
 - **ALWAYS** relay the contact's response to the requester
 - The self-introduction message should reference the connection reason when introducing yourself

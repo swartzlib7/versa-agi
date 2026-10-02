@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS calls (
   call_id            TEXT PRIMARY KEY,
   agent_name         TEXT NOT NULL,
   pu_uid             TEXT,
+  callee_uid         TEXT,
   channel_id         TEXT,
   cycle_id           TEXT,
   reason             TEXT,
@@ -70,7 +71,7 @@ def utc_now() -> str:
 
 
 # Columns added after the first release — ADD COLUMN on older tables.
-_ADDED_COLUMNS = (("summary", "TEXT"),)
+_ADDED_COLUMNS = (("summary", "TEXT"), ("callee_uid", "TEXT"))
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -93,6 +94,7 @@ def insert_attempt(
     status: str,
     reason: str,
     pu_uid: str = "",
+    callee_uid: str = "",
     channel_id: str = "",
     cycle_id: str = "",
     call_model: str = "",
@@ -106,13 +108,13 @@ def insert_attempt(
     conn = _connect(db_path)
     try:
         conn.execute(
-            "INSERT INTO calls (call_id, agent_name, pu_uid, channel_id, cycle_id, reason, status, "
-            "close_reason, voice_model, call_model, created_at, ended_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO calls (call_id, agent_name, pu_uid, callee_uid, channel_id, cycle_id, "
+            "reason, status, close_reason, voice_model, call_model, created_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                call_id, agent_name, pu_uid or None, channel_id or None, cycle_id or None,
-                reason, status, close_reason, voice_model or None, call_model or None,
-                now, ended_at,
+                call_id, agent_name, pu_uid or None, callee_uid or None, channel_id or None,
+                cycle_id or None, reason, status, close_reason, voice_model or None,
+                call_model or None, now, ended_at,
             ),
         )
         conn.commit()
@@ -176,7 +178,7 @@ def has_open_call(db_path: str, agent_name: str) -> bool:
 
 _LIST_COLUMNS = (
     "call_id, agent_name, status, close_reason, reason, created_at, joined_at, "
-    "ended_at, voice_seconds, call_model, cycle_id, summary"
+    "ended_at, voice_seconds, call_model, cycle_id, summary, callee_uid"
 )
 
 

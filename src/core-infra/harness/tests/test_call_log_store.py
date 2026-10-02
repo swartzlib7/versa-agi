@@ -47,6 +47,11 @@ class TestCallLogStore(unittest.TestCase):
         self.assertEqual(listed[0]["call_id"], "c2")
         self.assertNotIn("transcript_json", listed[0])
 
+    def test_callee_uid_is_stored(self):
+        self._insert("c-who", callee_uid="contact_9")
+        self.assertEqual(store.get_call(self.db, "c-who")["callee_uid"], "contact_9")
+        self.assertEqual(store.list_calls(self.db, "coa")[0]["callee_uid"], "contact_9")
+
     def test_rejects_unknown_status(self):
         with self.assertRaises(ValueError):
             self._insert("c3", status="ringing")

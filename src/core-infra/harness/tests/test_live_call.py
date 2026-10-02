@@ -55,19 +55,30 @@ class FakeSocket:
 
 
 class FakeBridge:
-    def __init__(self, open_status="calling", offers=None):
+    def __init__(self, open_status="calling", offers=None, refuse=False):
         self.calls: list[tuple[list[str], str | None]] = []
         self.open_status = open_status
+        self.refuse = refuse
         self.offers = list(offers if offers is not None else [{"status": "offered", "sdp_offer": "v=0 offer"}])
+        self.phone_status = "live"
 
     def __call__(self, args, stdin, timeout):
         self.calls.append((args, stdin))
         op = args[0]
         if op == "open":
-            return {"success": True, "call_id": "call_1", "status": self.open_status}
+            if self.refuse:
+                return {"success": False, "error": "Sub-account is not connected to this recipient."}
+            out = {"success": True, "call_id": "call_1", "status": self.open_status}
+            if "--recipient" in args:
+                out["callee_uid"] = args[args.index("--recipient") + 1]
+                out["callee_name"] = "Ashok Patel"
+                out["callee_language"] = "en|English"
+            return out
         if op == "wait-offer":
             nxt = self.offers.pop(0) if self.offers else {"status": "calling"}
             return {"success": True, **nxt}
+        if op == "status":
+            return {"success": True, "status": self.phone_status}
         return {"success": True}
 
     def ops(self):
@@ -287,6 +298,31 @@ class TestTurns(unittest.TestCase):
         self.assertIn("LIVE CALL ENDED (close_requested", text)
         self.assertIn("session.close", sock.sent_types())
 
+    def test_phone_hangup_without_sideband_close_ends_call(self):
+        clock = FakeClock()
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock, clock=clock)
+        rt.place("x", SETTINGS, recipient_id="uid_ashok")
+        bridge.phone_status = "ended"
+        clock.now += lc.PHONE_STATUS_POLL_SECONDS + 1
+        text = rt.next_injection("Connected to Ashok.")
+        self.assertIn("LIVE CALL ENDED (phone_ended", text)
+        self.assertIn("session.close", sock.sent_types())
+        args = [a for a, _ in bridge.calls if a[0] == "end"][0]
+        self.assertEqual(args[args.index("--close-reason") + 1], "phone_ended")
+        self.assertIsNone(rt.next_injection("CALL SUMMARY: done"))
+
+    def test_phone_status_live_keeps_waiting(self):
+        clock = FakeClock()
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock, clock=clock)
+        rt.place("x", SETTINGS)
+        clock.now += lc.PHONE_STATUS_POLL_SECONDS + 1
+        self.assertFalse(rt.session.phone_ended())
+        self.assertIn("status", bridge.ops())
+        self.assertNotIn("session.close", sock.sent_types())
+        rt.shutdown()
+
     def test_shutdown_closes_open_call(self):
         rt, bridge, sock = self._connected()
         rt.shutdown("failed")
@@ -428,6 +464,50 @@ class TestVoiceCardAndSummary(unittest.TestCase):
         self.assertIn("Ship 2.4 — tone: calm and methodical", thinking[1])
         self.assertIn("Chose Friday", thinking[1])
         rt.shutdown()
+
+    def test_connection_call_omits_pu_profile(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        posted = []
+
+        def http_post(url, body, headers):
+            posted.append(body)
+            return 201, json.dumps({"session": {"id": "live_x"}, "transport": {"sdp": "ans"}})
+
+        rt = lc.LiveCallRuntime(
+            agent_label="Versa", pu_name="Sam", api_key_resolver=lambda: "k", bridge=bridge,
+            sideband_factory=lambda k, s: sock, http_post=http_post, log=lambda m: None,
+            context_provider=lambda: {
+                "language": lc.CallLanguage("fr", "French", "supported", "French"),
+                "style_notes": "short updates", "last_call": "Chose Friday.",
+                "pu_profile": "role: founder",
+                "games": [{"name": "Ship 2.4", "postulate": "", "posture": "steady"}],
+            },
+        )
+        result = rt.place("Checking in.", SETTINGS, brief="The invoice is ready.",
+                          recipient_id="contact_1")
+        self.assertEqual(result["status"], "connected")
+        self.assertEqual(bridge.calls[0][0],
+                         ["open", "--reason", "Checking in.", "--recipient", "contact_1"])
+        instructions = posted[0]["session"]["instructions"]
+        self.assertIn("Ashok Patel", instructions)
+        self.assertIn("Do not mention the Primary User", instructions)
+        self.assertNotIn("role: founder", instructions)
+        self.assertNotIn("Speak French", instructions)
+        thinking = [e["content"] for e in sock.sent if e["type"] == "session.thinking.append"]
+        self.assertEqual(len(thinking), 1)
+        self.assertIn("The invoice is ready.", thinking[0])
+        self.assertNotIn("founder", thinking[0])
+        rt.shutdown()
+
+    def test_unconnected_recipient_does_not_ring(self):
+        bridge, sock = FakeBridge(refuse=True), FakeSocket()
+        rt, posted = _runtime(bridge, sock)
+        result = rt.place("Hello.", SETTINGS, recipient_id="stranger")
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("not connected", result["error"])
+        self.assertEqual(bridge.ops(), ["open"])
+        self.assertEqual(posted, [])
+        self.assertIsNone(rt.session)
 
     def test_summary_captured_after_call_ended(self):
         bridge, sock = FakeBridge(), FakeSocket()

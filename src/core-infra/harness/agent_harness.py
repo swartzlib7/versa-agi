@@ -982,18 +982,25 @@ class CallPuInput(BaseModel):
         "Only when you already called this cycle: the 2–4 sentence summary of that call "
         "(what was discussed, decided, and what happens next). It is saved as that call's note."
     ))
+    recipient_id: str = Field(default="", description=(
+        "VersaVoice user id of a connection to call. Leave empty to call the Primary User. "
+        "The person must already be a contact, the same rule as messaging them."
+    ))
 
 
 _LIVE_CALL_RUNTIME = None  # harness.live_call.LiveCallRuntime, set in main()
 
 
 @tool("agictl_call_pu", args_schema=CallPuInput)
-def agictl_call_pu(reason: str, brief: str = "", last_call_summary: str = "") -> str:
-    """Place a live voice call to the Primary User in the VersaVoice app (COA only).
-    Use when talking settles something faster than chat, or when the Primary User asked you to call.
-    Rings their phone and returns when they join, decline, miss it, or have no device (up to about a minute).
+def agictl_call_pu(reason: str, brief: str = "", last_call_summary: str = "",
+                   recipient_id: str = "") -> str:
+    """Place a live voice call in the VersaVoice app (COA only).
+    Empty recipient_id rings the Primary User. A recipient_id rings that connection, if they
+    are already a contact. Use when talking settles something faster than chat, or when they
+    asked you to call. Rings their phone and returns when they join, decline, miss it, or have
+    no device (up to about a minute).
     Connected: end your turn. Each request they make arrives as a new message; your final reply to it is spoken.
-    Not connected: send a chat message instead. Calls per cycle are limited by the Live Call setting.
+    Not connected: send a chat message to that person instead. Calls per cycle are limited by the Live Call setting.
     Approvals are never given by voice.
     """
     runtime = _LIVE_CALL_RUNTIME
@@ -1003,7 +1010,7 @@ def agictl_call_pu(reason: str, brief: str = "", last_call_summary: str = "") ->
                            "error": "Live Call is not available in this cycle. Send a chat message instead."})
     try:
         return json.dumps(runtime.place(reason, gate.settings, last_call_summary=last_call_summary,
-                                        brief=brief))
+                                        brief=brief, recipient_id=recipient_id))
     except Exception as e:
         runtime.shutdown("failed")
         return json.dumps({"success": False, "status": "failed", "error": f"call failed: {e}"})

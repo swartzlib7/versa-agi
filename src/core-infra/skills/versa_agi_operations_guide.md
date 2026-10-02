@@ -114,7 +114,7 @@ Spawn reasons PU may hear about: unread messages, due tasks, orchestration needs
 
 ### Live call
 
-- **Only COA calls**, and only the Primary User, with the `agictl_call_pu` tool (no terminal command). The PU cannot start a call to an agent; they ask in chat ("call me") and COA calls if Live Call is ready.
+- **Only COA calls**, with the `agictl_call_pu` tool (no terminal command). Empty `recipient_id` rings the Primary User. A connection's user id rings that contact, the same people COA may message. The PU cannot start a call to an agent; they ask in chat ("call me") and COA calls if Live Call is ready.
 - **Ready means:** Live Call on, OpenAI provider keyed (GPT-Live voice), and a call model chosen from the call-capable list with its provider keyed. The PU sets this in agitop **System Settings → Live Call** (or setup); the **Call-capable** checkbox on Model Manager's ✎ Edit form edits the list.
 - **Nothing is billed until the PU joins.** Offline, missed, or declined → send a chat message instead.
 - **No verbal approvals.** Packages, sudo, and agent approvals stay on the app / agitop controls, even mid-call.

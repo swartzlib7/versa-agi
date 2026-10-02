@@ -2637,27 +2637,6 @@ ${IDE_RESUME_CONTEXT}"
 
 
 
-  # Detect connection-related REST calls in the result file
-  # and programmatically inject follow-up tasks. This ensures
-  # connection follow-ups happen even if the agent forgot.
-  if [ -f "${RESULT_FILE}" ] && [ -f "${TASKS_DB}" ]; then
-    # Detect connect_sub_account activity (agictl CLI command)
-    # Robustness: look for the explicit agictl command execution to avoid 
-    # false positives from agent thought processes just mentioning the command.
-    if grep -qiE "agictl\s+connection\s+request" "${RESULT_FILE}" 2>/dev/null; then
-      # Check if a follow-up task already exists
-      EXISTING_FOLLOWUP=$(sqlite3 "${TASKS_DB}" \
-        "SELECT COUNT(*) FROM tasks WHERE callback_action = 'check_connection' AND status IN ('blocked','pending','in_progress') AND (assigned_to='${AGENT_NAME}' OR assigned_to IS NULL);" 2>/dev/null || echo "0")
-
-      if [ "${EXISTING_FOLLOWUP:-0}" -eq 0 ]; then
-        /usr/local/bin/agictl task inject-followup "${AGENT_NAME}"
-        log "INJECTED: connection follow-up task (wake in 2 min)"
-      else
-        log "POST-CYCLE: connection activity detected but follow-up task already exists"
-      fi
-    fi
-  fi
-
   # Move result files to archive — watchdog owns the entire cycles tree
   # No archive subdirectory needed since cycles/ is already watchdog-owned
   chown "$(whoami):$(whoami)" "${CYCLES_DIR}"/result_*.json 2>/dev/null || true

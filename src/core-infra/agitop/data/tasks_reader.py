@@ -26,6 +26,28 @@ except ImportError:
         return name in RESERVED_SYSTEM_PROJECTS
 
 
+CONNECTION_CHECK_MINUTES = 15
+CONNECTION_RECHECK_MINUTES = 30
+CONNECTION_HOLD_MINUTES = 1440
+
+
+def connection_check_description(uid: str, name: str, reason: str = "") -> str:
+    return (
+        "Re-read connection_lifecycle.md §4 before acting. "
+        f"Connection invitation sent to {name} (uid {uid}). "
+        f"Reason: {reason.strip() or 'not given'}. "
+        "Check `agictl connection list agent` for them. "
+        "Accepted: introduce yourself (self_introduction.md); if the reason is a live call, "
+        f"place it now with agictl_call_pu (recipient_id={uid}) and the brief from the reason; "
+        "then `agictl task done <this_task_id>`. "
+        "Not accepted, wake_cycle_count 0: tell whoever asked, then "
+        f"`agictl task snooze <this_task_id> {CONNECTION_RECHECK_MINUTES}`. "
+        "Not accepted, wake_cycle_count 1 or more: ask whoever asked when to check again, then "
+        f"`agictl task snooze <this_task_id> {CONNECTION_HOLD_MINUTES}` until they answer. "
+        "Their answer sets the next snooze; if they say stop, `agictl task cancel <this_task_id>`."
+    )
+
+
 class TasksReader:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -476,22 +498,27 @@ class TasksReader:
         rows = self._query("SELECT uid FROM connections WHERE relationship='blocked'")
         return [r["uid"] for r in rows if r["uid"]]
 
-    def check_connection_followup(self, agent_name: str) -> int:
-        rows = self._query(
-            "SELECT COUNT(*) as c FROM tasks WHERE callback_action = 'check_connection' "
-            "AND status IN ('blocked','pending','in_progress') AND (assigned_to=? OR assigned_to IS NULL)",
-            (agent_name,)
+    def schedule_connection_check(self, agent_name: str, uid: str, name: str,
+                                  reason: str = "") -> Optional[int]:
+        """One open ``check_connection`` task per invited contact, first check in
+        CONNECTION_CHECK_MINUTES (state_live_voice_call.md §3.11). Returns its id."""
+        tag = f"connection:{uid}"
+        existing = self._query(
+            "SELECT id FROM tasks WHERE callback_action = 'check_connection' AND tags = ? "
+            "AND status NOT IN ('done', 'cancelled') AND (assigned_to = ? OR assigned_to IS NULL) "
+            "ORDER BY id LIMIT 1",
+            (tag, agent_name),
         )
-        return rows[0]["c"] if rows else 0
-
-    def inject_connection_followup(self, agent_name: str) -> bool:
-        return self._execute(
-            "INSERT INTO tasks (title, description, status, priority, assigned_to, callback_action, wake_after, wake_cycle_count, created_at, updated_at) VALUES (?, ?, 'blocked', 'normal', ?, 'check_connection', datetime('now', '+2 minutes'), 0, datetime('now'), datetime('now'))",
-            (
-                'Follow up on connection request',
-                'SYSTEM-INJECTED: IMPORTANT — Re-read connection_lifecycle.md before processing this task. A connect_sub_account call was detected. Check if the connection was accepted using list_connections. If accepted: introduce yourself using the self_introduction skill, then COMPLETE this task with: agictl task done <this_task_id> "Connected and introduced". If still pending: inform Primary User the connection is pending, then COMPLETE this task. YOU MUST complete this task or you will be re-spawned repeatedly.',
-                agent_name
-            )
+        if existing:
+            return int(existing[0]["id"])
+        offset = f"+{CONNECTION_CHECK_MINUTES} minutes"
+        return self._insert(
+            "INSERT INTO tasks (title, description, status, priority, assigned_to, tags, "
+            "callback_action, wake_after, due_date, wake_cycle_count, created_at, updated_at) "
+            "VALUES (?, ?, 'blocked', 'normal', ?, ?, 'check_connection', datetime('now', ?), "
+            "datetime('now', ?), 0, datetime('now'), datetime('now'))",
+            (f"Check connection: {name}", connection_check_description(uid, name, reason),
+             agent_name, tag, offset, offset),
         )
 
     def delete_project(self, project_id: int) -> tuple[bool, str]:

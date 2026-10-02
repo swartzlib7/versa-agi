@@ -182,9 +182,14 @@ def register(
     def bridge():
         """Harness call-mode plumbing (not an agent command)."""
 
+    def _callee_uid(call_id: str) -> str:
+        row = call_log_store.get_call(messages_db_path(), call_id)
+        return str((row or {}).get("callee_uid") or "")
+
     @bridge.command("open")
     @click.option("--reason", required=True)
-    def bridge_open(reason):
+    @click.option("--recipient", default="", help="Connection uid. Empty rings the sponsor.")
+    def bridge_open(reason, recipient):
         _require_bridge()
         gate = live_call_config.evaluate_gate(live_call_config.CALL_AGENT)
         if not gate.ok:
@@ -198,7 +203,8 @@ def register(
         token, sub, pu_uid = _vv_identity()
         from comms import call_open
 
-        resp = call_open(token, sub, reason, settings.join_timeout_seconds)
+        resp = call_open(token, sub, reason, settings.join_timeout_seconds,
+                         recipient_id=recipient.strip())
         if not resp:
             _fail("VersaVoice call service unreachable", code="vv_unreachable")
         if not resp.get("success"):
@@ -209,6 +215,7 @@ def register(
         if status not in ("calling", "offline"):
             status = "failed"
         call_id = str(data.get("callId") or f"local_{uuid.uuid4().hex[:12]}")
+        callee_uid = str(data.get("calleeUid") or "")
         call_log_store.insert_attempt(
             messages_db_path(),
             call_id=call_id,
@@ -216,13 +223,16 @@ def register(
             status=status,
             reason=reason,
             pu_uid=str(data.get("puUid") or pu_uid),
+            callee_uid=callee_uid,
             channel_id=str(data.get("channelId") or ""),
             cycle_id=os.getenv("VERSA_CYCLE_ID", ""),
             call_model=gate.call_model,
             voice_model=settings.voice_model,
             close_reason="no_device" if status == "offline" else None,
         )
-        json_response(True, call_id=call_id, status=status)
+        json_response(True, call_id=call_id, status=status, callee_uid=callee_uid,
+                      callee_name=str(data.get("calleeName") or ""),
+                      callee_language=str(data.get("calleeLanguage") or ""))
 
     @bridge.command("wait-offer")
     @click.argument("call_id")
@@ -232,7 +242,8 @@ def register(
         token, sub, _ = _vv_identity()
         from comms import call_wait_offer
 
-        resp = call_wait_offer(token, sub, call_id, max(1, min(wait_seconds, 30)))
+        resp = call_wait_offer(token, sub, call_id, max(1, min(wait_seconds, 30)),
+                               callee_uid=_callee_uid(call_id))
         if not resp or not resp.get("success"):
             err = (resp or {}).get("message") or "VersaVoice call service unreachable"
             _fail(err, code="vv_unreachable")
@@ -247,6 +258,20 @@ def register(
             )
         json_response(True, call_id=call_id, status=status, sdp_offer=data.get("sdpOffer") or "")
 
+    @bridge.command("status")
+    @click.argument("call_id")
+    def bridge_status(call_id):
+        """The call document's status in VersaVoice (the phone ends calls there)."""
+        _require_bridge()
+        token, sub, _ = _vv_identity()
+        from comms import call_status
+
+        resp = call_status(token, sub, call_id, callee_uid=_callee_uid(call_id))
+        if not resp or not resp.get("success"):
+            _fail((resp or {}).get("message") or "VersaVoice call service unreachable",
+                  code="vv_unreachable")
+        json_response(True, call_id=call_id, status=str((resp.get("data") or {}).get("status") or ""))
+
     @bridge.command("answer")
     @click.argument("call_id")
     @click.option("--session-id", required=True)
@@ -259,7 +284,8 @@ def register(
         token, sub, _ = _vv_identity()
         from comms import call_update
 
-        resp = call_update(token, sub, call_id, sdpAnswer=sdp_answer, status="connecting")
+        resp = call_update(token, sub, call_id, callee_uid=_callee_uid(call_id),
+                           sdpAnswer=sdp_answer, status="connecting")
         if not resp or not resp.get("success"):
             _fail((resp or {}).get("message") or "VersaVoice call service unreachable", code="vv_unreachable")
         call_log_store.update_call(
@@ -281,7 +307,7 @@ def register(
             token, sub, _ = _vv_identity()
             from comms import call_update
 
-            call_update(token, sub, call_id, status="live")
+            call_update(token, sub, call_id, callee_uid=_callee_uid(call_id), status="live")
         call_log_store.update_call(
             messages_db_path(), call_id,
             status=status,
@@ -317,6 +343,7 @@ def register(
 
         call_update(
             token, sub, call_id,
+            callee_uid=_callee_uid(call_id),
             status=final_status,
             closeReason=close_reason or None,
             durationSeconds=voice_seconds,

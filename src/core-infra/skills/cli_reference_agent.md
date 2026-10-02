@@ -160,7 +160,7 @@ agictl message send <uid> "Here are the reports" --mode typed \
 
 ### Live call (COA only)
 
-**Harness tool:** `agictl_call_pu(reason="...", brief="...")` — rings the Primary User in the VersaVoice app. `brief` (~120 words, plain language) is what the voice knows before it speaks: see `live_call.md`. It appears only for COA, when Live Call is on and ready (see the `LIVE CALL` section of your prompt). **There is no terminal command for placing a call** — not through `agictl_message`, `agictl_execute`, or a shell. Do not look for one. Load **`live_call.md`** for when to call, the get-to-know call, and follow-through.
+**Harness tool:** `agictl_call_pu(reason="...", brief="...", recipient_id="")` — rings the Primary User, or a VersaVoice connection when `recipient_id` is their user id (they must already be a contact). `brief` (~120 words, plain language) is what the voice knows before it speaks: see `live_call.md`. It appears only for COA, when Live Call is on and ready (see the `LIVE CALL` section of your prompt). **There is no terminal command for placing a call** — not through `agictl_message`, `agictl_execute`, or a shell. Do not look for one. Load **`live_call.md`** for when to call, the get-to-know call, and follow-through.
 
 - **When:** talking settles something faster than chat, or the Primary User asked you to call. Calls per cycle are limited (Live Call setting; shown in the `LIVE CALL` prompt section). A second call in the same cycle takes `last_call_summary` for the first.
 - **Result:** `connected`, `offline` (no device), `missed`, `declined`, or `failed`. Anything but `connected` → send a chat message instead.
@@ -200,12 +200,14 @@ agictl project git-setup                              # Configure git identity +
 ```bash
 agictl connection list                                # Primary User's contacts
 agictl connection list agent                          # Your established connections
-agictl connection request <uid>                       # Send connection invitation
+agictl connection request <uid> --reason "<why>"      # Send connection invitation; schedules its follow-up
 # countryOfBirth / nearestCity = language origin
 # countryOfResidence / stateOrProvince = where they live (optional)
 ```
 
-> **Flow**: `connection list` → discover UIDs → `connection request <uid>` → PU accepts in VersaVoice → contact appears in `connection list agent`.
+> **Flow**: `connection list` → discover UIDs → `connection request <uid> --reason "..."` → PU accepts in VersaVoice → contact appears in `connection list agent`.
+>
+> **Follow-up**: the result's `follow_up_task_id` is a `check_connection` task for that contact, first check in 15 minutes, with your reason in its description. Do not add another. Schedule after that: `connection_lifecycle.md` §4.
 
 > **GUARD**: Requires external comms enabled (`can_message_connections`). Sub-agents need PU to enable via `agictl agent toggle-comms <name>`.
 
