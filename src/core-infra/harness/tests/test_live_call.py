@@ -55,12 +55,14 @@ class FakeSocket:
 
 
 class FakeBridge:
-    def __init__(self, open_status="calling", offers=None, refuse=False):
+    def __init__(self, open_status="calling", offers=None, refuse=False, end_failures=0):
         self.calls: list[tuple[list[str], str | None]] = []
         self.open_status = open_status
         self.refuse = refuse
         self.offers = list(offers if offers is not None else [{"status": "offered", "sdp_offer": "v=0 offer"}])
         self.phone_status = "live"
+        self.end_failures = end_failures
+        self.end_attempts = 0
 
     def __call__(self, args, stdin, timeout):
         self.calls.append((args, stdin))
@@ -79,6 +81,11 @@ class FakeBridge:
             return {"success": True, **nxt}
         if op == "status":
             return {"success": True, "status": self.phone_status}
+        if op == "end":
+            self.end_attempts += 1
+            if self.end_attempts <= self.end_failures:
+                return {"success": False, "error": "VersaVoice did not close the call",
+                        "code": "vv_close_failed"}
         return {"success": True}
 
     def ops(self):
@@ -311,6 +318,30 @@ class TestTurns(unittest.TestCase):
         args = [a for a, _ in bridge.calls if a[0] == "end"][0]
         self.assertEqual(args[args.index("--close-reason") + 1], "phone_ended")
         self.assertIsNone(rt.next_injection("CALL SUMMARY: done"))
+
+    def test_failed_end_update_is_retried(self):
+        logs = []
+        bridge, sock = FakeBridge(end_failures=1), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt._log = logs.append
+        rt.place("x", SETTINGS)
+        sock.push({"type": "session.closed", "reason": "connection_lost", "usage": {"seconds": 117}})
+        text = rt.next_injection("Connected.")
+        self.assertIn("LIVE CALL ENDED (connection_lost", text)
+        self.assertEqual(bridge.end_attempts, 2)
+        self.assertFalse(any("close unfinished" in line for line in logs))
+
+    def test_failed_end_update_stays_unfinished(self):
+        logs = []
+        bridge, sock = FakeBridge(end_failures=5), FakeSocket()
+        rt, _ = _runtime(bridge, sock)
+        rt._log = logs.append
+        rt.place("x", SETTINGS)
+        sock.push({"type": "session.closed", "reason": "connection_lost", "usage": {"seconds": 117}})
+        text = rt.next_injection("Connected.")
+        self.assertIn("LIVE CALL ENDED (connection_lost", text)
+        self.assertEqual(bridge.end_attempts, lc.END_CLOSE_ATTEMPTS)
+        self.assertTrue(any("VersaVoice close unfinished" in line for line in logs))
 
     def test_phone_status_live_keeps_waiting(self):
         clock = FakeClock()

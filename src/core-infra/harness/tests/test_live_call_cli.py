@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
 
 import agictl.cli as agictl_cli  # noqa: E402
 import call_log_store  # noqa: E402
+import live_call_config  # noqa: E402
 
 MODELS_INI = textwrap.dedent("""
     [catalog]
@@ -162,6 +163,118 @@ class TestBridgeGuard(_Base):
         self.assertEqual(json.loads(res.output.strip().splitlines()[-1])["status"], "ended")
         read.assert_called_once_with("tok", "sub_1", "call_7", callee_uid="uid_ashok")
         self.assertEqual(call_log_store.get_call(self.messages, "call_7")["status"], "live")
+
+    def _bridge_env(self):
+        conf = os.path.join(self.tmp.name, "coa_config.json")
+        with open(conf, "w") as f:
+            json.dump({"versavoice": {"api_token": "tok", "sub_account_id": "sub_1"}}, f)
+        return {"AGICTL_AGENT_USER": "coa", "VERSA_CALL_BRIDGE": "harness", "AGICTL_CONFIG": conf}
+
+    def _ready_gate(self):
+        settings = live_call_config.LiveCallSettings(
+            enabled=True, call_model="gemini-3.7-flash", voice_model="gpt-live-1",
+            max_minutes=15, join_timeout_seconds=45)
+        return patch.object(
+            live_call_config, "evaluate_gate",
+            return_value=live_call_config.GateResult(
+                ok=True, settings=settings, call_model="gemini-3.7-flash"))
+
+    def test_end_records_local_row_when_versavoice_update_fails(self):
+        call_log_store.insert_attempt(
+            self.messages, call_id="call_z", agent_name="coa", status="live",
+            reason="x", callee_uid="uid_stephen")
+        call_log_store.update_call(
+            self.messages, "call_z",
+            transcript_json=[{"speaker": "pu", "text": "hello"}])
+        import comms
+        with patch.object(comms, "call_update", return_value={"success": False, "error": "unavailable"}):
+            res = self.invoke(
+                ["message", "call-bridge", "end", "call_z", "--status", "ended",
+                 "--close-reason", "connection_lost", "--voice-seconds", "117"],
+                env=self._bridge_env())
+        self.assertNotEqual(res.exit_code, 0)
+        payload = json.loads(res.output.strip().splitlines()[-1])
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["code"], "vv_close_failed")
+        row = call_log_store.get_call(self.messages, "call_z")
+        self.assertEqual(row["status"], "ended")
+        self.assertEqual(row["close_reason"], "connection_lost")
+        self.assertEqual(row["voice_seconds"], 117)
+        self.assertEqual(row["transcript"][0]["text"], "hello")
+        with patch.object(comms, "call_update", return_value=None):
+            res = self.invoke(
+                ["message", "call-bridge", "end", "call_z", "--status", "ended",
+                 "--close-reason", "connection_lost"],
+                env=self._bridge_env())
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertEqual(call_log_store.get_call(self.messages, "call_z")["transcript"][0]["text"], "hello")
+
+    def test_end_succeeds_when_versavoice_update_succeeds(self):
+        call_log_store.insert_attempt(
+            self.messages, call_id="call_ok", agent_name="coa", status="live", reason="x")
+        import comms
+        with patch.object(comms, "call_update", return_value={"success": True, "data": {}}) as put:
+            res = self.invoke(
+                ["message", "call-bridge", "end", "call_ok", "--status", "ended",
+                 "--close-reason", "phone_ended"],
+                env=self._bridge_env())
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertEqual(call_log_store.get_call(self.messages, "call_ok")["status"], "ended")
+        put.assert_called_once()
+
+    def test_busy_open_closes_finished_local_call_and_posts_again(self):
+        call_log_store.insert_attempt(
+            self.messages, call_id="call_old", agent_name="coa", status="ended",
+            reason="earlier", close_reason="connection_lost", callee_uid="uid_stephen")
+        call_log_store.update_call(self.messages, "call_old", voice_seconds=117)
+        import comms
+        posts = []
+
+        def open_side(*args, **kwargs):
+            posts.append(args)
+            if len(posts) == 1:
+                return {"success": False, "error": "busy",
+                        "message": "A call is already in progress."}
+            return {"success": True, "data": {
+                "callId": "call_new", "status": "calling", "calleeUid": "",
+                "puUid": "pu_1", "channelId": "ch",
+            }}
+
+        with self._ready_gate(), \
+                patch.object(comms, "call_open", side_effect=open_side), \
+                patch.object(comms, "call_status",
+                             return_value={"success": True, "data": {"status": "live"}}) as status, \
+                patch.object(comms, "call_update",
+                             return_value={"success": True, "data": {}}) as put:
+            res = self.invoke(
+                ["message", "call-bridge", "open", "--reason", "check in"],
+                env=self._bridge_env())
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertEqual(len(posts), 2)
+        status.assert_called_once_with("tok", "sub_1", "call_old", callee_uid="uid_stephen")
+        put.assert_called_once_with(
+            "tok", "sub_1", "call_old", callee_uid="uid_stephen",
+            status="ended", closeReason="connection_lost", durationSeconds=117)
+        self.assertEqual(call_log_store.get_call(self.messages, "call_new")["status"], "calling")
+        self.assertEqual(call_log_store.get_call(self.messages, "call_old")["status"], "ended")
+
+    def test_busy_open_leaves_a_live_local_row(self):
+        call_log_store.insert_attempt(
+            self.messages, call_id="call_live", agent_name="coa", status="live", reason="x")
+        import comms
+        with self._ready_gate(), \
+                patch.object(comms, "call_open",
+                             return_value={"success": False, "error": "busy",
+                                           "message": "A call is already in progress."}) as opened, \
+                patch.object(comms, "call_update") as put:
+            res = self.invoke(
+                ["message", "call-bridge", "open", "--reason", "again"],
+                env=self._bridge_env())
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("already in progress", res.output)
+        opened.assert_not_called()
+        put.assert_not_called()
+        self.assertEqual(call_log_store.get_call(self.messages, "call_live")["status"], "live")
 
     def test_bridge_hidden_from_help(self):
         res = self.invoke(["message", "--help"])

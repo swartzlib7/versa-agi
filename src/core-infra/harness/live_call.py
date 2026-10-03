@@ -34,6 +34,7 @@ LIVE_WS_BASE = os.environ.get("VERSA_LIVE_WS_BASE", "wss://api.openai.com/v1")
 BRIDGE_ENV = "VERSA_CALL_BRIDGE"
 BRIDGE_ENV_VALUE = "harness"
 BRIDGE_TIMEOUT_SECONDS = 45
+END_CLOSE_ATTEMPTS = 3
 LONG_POLL_SECONDS = 25
 
 # GPT-Live append limit is 500 tokens; stay well inside it by characters.
@@ -1471,7 +1472,7 @@ class LiveCallRuntime:
         args = ["end", self.call_id, "--status", final_status, "--close-reason", close_reason]
         if session and session.voice_seconds is not None:
             args += ["--voice-seconds", str(session.voice_seconds)]
-        self._bridge(args, json.dumps(self._snapshot()), BRIDGE_TIMEOUT_SECONDS)
+        self._close_on_versavoice(args, json.dumps(self._snapshot()))
 
     def _phone_status(self) -> str:
         polled = self._bridge(["status", self.call_id], None, BRIDGE_TIMEOUT_SECONDS)
@@ -1480,7 +1481,16 @@ class LiveCallRuntime:
     def _end(self, status: str, reason: str) -> None:
         self.finalized = True
         if self.call_id:
-            self._bridge(["end", self.call_id, "--status", status, "--close-reason", reason], None, BRIDGE_TIMEOUT_SECONDS)
+            self._close_on_versavoice(
+                ["end", self.call_id, "--status", status, "--close-reason", reason], None)
+
+    def _close_on_versavoice(self, args: list[str], stdin: str | None) -> None:
+        """PUT the final status. A failed update is unfinished (LVC-27)."""
+        for _ in range(END_CLOSE_ATTEMPTS):
+            result = self._bridge(args, stdin, BRIDGE_TIMEOUT_SECONDS)
+            if result.get("success"):
+                return
+        self._log("LIVE CALL: VersaVoice close unfinished")
 
 
 def sanitize_for_call_model(messages: list) -> list:

@@ -24,6 +24,11 @@ import live_call_config
 BRIDGE_ENV = "VERSA_CALL_BRIDGE"
 BRIDGE_ENV_VALUE = "harness"
 READ_ROLES = ("coa", "watchdog")
+# VersaVoice statuses that still block a new call. Local final rows use the
+# call-log set (ended / missed / declined / failed).
+_CLOUD_OPEN = ("calling", "offered", "connecting", "live")
+_LOCAL_FINAL = ("ended", "missed", "declined", "failed")
+_STUCK_SCAN = 5
 
 
 def _caller() -> str:
@@ -205,11 +210,16 @@ def register(
 
         resp = call_open(token, sub, reason, settings.join_timeout_seconds,
                          recipient_id=recipient.strip())
+        if resp and not resp.get("success") and resp.get("error") == "busy":
+            if _release_finished_cloud_call(token, sub):
+                resp = call_open(token, sub, reason, settings.join_timeout_seconds,
+                                 recipient_id=recipient.strip())
         if not resp:
             _fail("VersaVoice call service unreachable", code="vv_unreachable")
         if not resp.get("success"):
+            code = "busy" if resp.get("error") == "busy" else "vv_refused"
             _fail(resp.get("message") or resp.get("error") or "VersaVoice refused the call",
-                  code="vv_refused")
+                  code=code)
         data = resp.get("data") or {}
         status = str(data.get("status") or "calling")
         if status not in ("calling", "offline"):
@@ -341,7 +351,7 @@ def register(
         token, sub, _ = _vv_identity()
         from comms import call_update
 
-        call_update(
+        updated = call_update(
             token, sub, call_id,
             callee_uid=_callee_uid(call_id),
             status=final_status,
@@ -357,4 +367,39 @@ def register(
             transcript_json=data.get("transcript"),
             delegations_json=data.get("delegations"),
         )
+        if not updated or not updated.get("success"):
+            _fail("VersaVoice did not close the call", code="vv_close_failed")
         json_response(True, call_id=call_id, status=final_status)
+
+    def _release_finished_cloud_call(token: str, sub: str) -> bool:
+        """Close one open VersaVoice document whose local row is already final.
+
+        Returns True when that close landed, so the caller can POST once more.
+        A local row that is still open is left alone. A failed close returns False.
+        """
+        from comms import call_status, call_update
+
+        rows = call_log_store.list_calls(
+            messages_db_path(), live_call_config.CALL_AGENT, limit=_STUCK_SCAN)
+        for row in rows:
+            if row.get("status") not in _LOCAL_FINAL:
+                continue
+            call_id = str(row.get("call_id") or "")
+            if not call_id:
+                continue
+            callee = str(row.get("callee_uid") or "")
+            current = call_status(token, sub, call_id, callee_uid=callee)
+            if not current or not current.get("success"):
+                continue
+            cloud = str((current.get("data") or {}).get("status") or "")
+            if cloud not in _CLOUD_OPEN:
+                continue
+            closed = call_update(
+                token, sub, call_id,
+                callee_uid=callee,
+                status=row.get("status"),
+                closeReason=row.get("close_reason") or None,
+                durationSeconds=row.get("voice_seconds"),
+            )
+            return bool(closed and closed.get("success"))
+        return False
