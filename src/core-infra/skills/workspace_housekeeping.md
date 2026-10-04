@@ -33,7 +33,7 @@ Do not re-flag a **Keep** or **Agreement** path unless the tree changed (gone, m
 |---|---|
 | `workspace/<registered-project>/` | Anything else under `workspace/` |
 | `$HOME/.ssh/`, `$HOME/.gitconfig` | Files/folders in `$HOME` that are not `workspace/` or a standard OS/dotfile |
-| AGi-Tools / AGi-Knowledgebase (reserved), including the housekeeping manifest and dated reports | Git worktrees that are not the project's current checkout |
+| AGi-Tools (reserved), including the housekeeping manifest and dated reports | Git worktrees that are not the project's current checkout |
 | In-project `__tmp/` you created this cycle | Empty shells of deleted projects; parked copies under `screenshots/`; detached review trees |
 | Paths listed **Keep** or **Agreement** on the manifest | The same path if it is no longer covered by that row |
 

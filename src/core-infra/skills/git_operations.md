@@ -57,6 +57,8 @@ git clone git@github.com:<owner>/<repo>.git .
 
 ## Standard Git Operations
 
+The public Versa - Business Admin checkout (`Versa-BusinessAdmin`, `github.com/swartzlib7/versa-business-admin`) is pull-only. Do not commit product changes there and do not `git push`. The Primary User publishes `main`.
+
 All git operations happen INSIDE `workspace/<project>/`:
 
 ```bash

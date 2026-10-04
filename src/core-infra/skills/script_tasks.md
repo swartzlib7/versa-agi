@@ -80,7 +80,7 @@ A **`blocked`** Script Task means the last run exited non-zero (or timed out). R
 - Scripts must resolve **inside** the AGi-Tools root (realpath-checked — path traversal and symlink escape are rejected); only `.sh` is allowed.
 - A per-host run-lock prevents overlapping runs of the same task/script.
 - The script executes as the task's **`assigned_to`** OS user with AGi-Tools as the working directory — normal UNIX permissions apply.
-- The reserved system projects **AGi-Tools**, **AGi-Knowledgebase**, and **Versa-BusinessAdmin** cannot be archived or deleted.
+- The reserved system projects **AGi-Tools** and **Versa-BusinessAdmin** cannot be archived or deleted.
 
 ## When to escalate to COA / PU
 

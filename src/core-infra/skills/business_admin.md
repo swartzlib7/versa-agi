@@ -34,8 +34,10 @@ After Orient finds `Versa-BusinessAdmin`, load clone `README.md`, `AGENTS.md`, a
 | HTTP API catalog (this version) | `GET /api` (open) and Settings → API (`/settings?tab=api`) |
 | Upgrade rules D1–D6 | Ops Manual §5 |
 | Public production repo (HTTPS) | `https://github.com/swartzlib7/versa-business-admin` |
-| SSH remote (when keys already work) | `git@github.com:swartzlib7/versa-business-admin.git` |
+| SSH remote (clone and pull only, when keys already work) | `git@github.com:swartzlib7/versa-business-admin.git` |
 | Production / stable line | `main` |
+
+This checkout is pull-only. Do not commit product changes and do not `git push`. The Primary User publishes `main`.
 
 Never contradict the manual or D1–D6. Amend the manual rather than creating parallel ops guides.
 
@@ -138,8 +140,9 @@ VBA is a standalone product. Talk to it over HTTP (or Script Tasks), never by sh
 
 ## Boundaries
 
-- No `main` promotion, no version or dependency bumps without the PU's explicit ask.
-- Commit-before-task on `main`; scoped eslint + `tsc --noEmit` + build before claiming done (manual §4).
+- This checkout is pull-only. Do not commit product changes and do not `git push`. The Primary User publishes `main`.
+- No version or dependency bumps without the PU's explicit ask.
+- Scoped eslint + `tsc --noEmit` + build before claiming a local change is done (manual §4).
 - If a PU decision is missing, hold and ask — VBA work is tight-deliverable-control by standing instruction.
 - Compatibility aliases / deprecation fallbacks: not until **v1.0.0** when the PU asks.
 - Ignore the internal development tree `versa-admin-system` — that is not this shipped project.

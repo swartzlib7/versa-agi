@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.4.18"
+PRODUCT_VERSION="3.4.19"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -1482,7 +1482,7 @@ deploy_repo() {
     ok "Deployed ${name} → ${dest}"
   fi
 
-  # workspace/ holds live project trees (AGi-Tools, AGi-Knowledgebase, and the
+  # workspace/ holds live project trees (AGi-Tools and the
   # rest). chown -R ${owner}:${owner} resets them to that owner and group;
   # the final permission pass only restores the shared directory roots, so
   # the morning shared-dir guard then finds thousands of coa:coa paths it
@@ -2692,16 +2692,6 @@ if [ -f "${AGICTL_PATH}" ]; then
   fi
   ok "AGi-Tools shared repository seeded"
 
-  # AGi-Knowledgebase — collaborative PU/agent documentation workspace.
-  # Content source for the LAN-accessible Grav CMS documentation site
-  # (provisioned separately via the knowledgebase skill + Vagrant).
-  sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "AGi-Knowledgebase" --desc "Shared collaborative documentation produced by the Primary User and agents — content source for the LAN Grav CMS site" >/dev/null 2>&1 || true
-  AGI_KB_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='AGi-Knowledgebase' LIMIT 1;" 2>/dev/null || true)
-  if [ -n "${AGI_KB_ID}" ]; then
-    sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${AGI_KB_ID}" --agent "${COA_USER}" >/dev/null 2>&1 || true
-  fi
-  ok "AGi-Knowledgebase shared repository seeded"
-
   # Versa-BusinessAdmin — shipped GitHub project (versa-business-admin), COA-only.
   # Formal name: Versa - Business Admin. Ignore internal versa-admin-system.
   # Opt-in like Organization: seed when [features] business_admin is ON.
@@ -2795,7 +2785,7 @@ if [ -f "${AGICTL_PATH}" ]; then
     if [ -n "${EXISTING_SUB_AGENTS}" ]; then
       while IFS= read -r SUB_AGENT; do
         [ -z "${SUB_AGENT}" ] && continue
-        for SHARED_ID in "${AGI_TOOLS_ID}" "${AGI_KB_ID}"; do
+        for SHARED_ID in "${AGI_TOOLS_ID}"; do
           [ -z "${SHARED_ID}" ] && continue
           "${AGICTL_PATH}" project assign "${SHARED_ID}" --agent "${SUB_AGENT}" >/dev/null 2>&1 || true
         done
@@ -4236,7 +4226,7 @@ apply_system_permissions() {
 
     # Reserved shared project roots + housekeeping drop folder (System Design §IX).
     # Directory only — do not chown -R (per-agent report files keep their owners).
-    for _shared_proj in AGi-Tools AGi-Knowledgebase; do
+    for _shared_proj in AGi-Tools; do
       _shared_root="${DEPLOYED_COA_ENV}/workspace/${_shared_proj}"
       [ -d "${_shared_root}" ] || continue
       chown "${COA_USER}:agi_agents" "${_shared_root}"

@@ -15,10 +15,11 @@ from typing import Iterable, Optional, Set
 COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
 
 # Shared / shipped system projects — name and on-disk directory must stay fixed.
-# AGi-Tools + AGi-Knowledgebase are fleet-shared (SHARED_SYSTEM_PROJECTS).
+# AGi-Tools is fleet-shared (SHARED_SYSTEM_PROJECTS).
 # Versa-BusinessAdmin is COA-only (seeded when [features] business_admin is on).
+# AGi-Knowledgebase is decommissioned — not reserved, not seeded.
 RESERVED_SYSTEM_PROJECTS = frozenset(
-    {"AGi-Tools", "AGi-Knowledgebase", "Versa-BusinessAdmin"}
+    {"AGi-Tools", "Versa-BusinessAdmin"}
 )
 BUSINESS_ADMIN_PROJECT_NAME = "Versa-BusinessAdmin"
 BUSINESS_ADMIN_REMOTE_URL = "https://github.com/swartzlib7/versa-business-admin.git"

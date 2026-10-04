@@ -7774,10 +7774,10 @@ def agent_approve(name, force):
         # ── Auto-assign to shared system projects if they exist ──
         # Shared system projects live physically in COA's workspace and are
         # symlinked into every agent's workspace/ at creation time:
-        #   AGi-Tools          — shared scripts and tooling
-        #   AGi-Knowledgebase  — collaborative PU/agent documentation (Grav CMS source)
+        #   AGi-Tools — shared scripts and tooling
         # Versa-BusinessAdmin is reserved + COA-only — do not add it here.
-        SHARED_SYSTEM_PROJECTS = ["AGi-Tools", "AGi-Knowledgebase"]
+        # AGi-Knowledgebase is decommissioned — do not auto-join agents to it.
+        SHARED_SYSTEM_PROJECTS = ["AGi-Tools"]
         try:
             conn_tasks = db_connect.connect_compat(tasks_db, timeout=5)
             conn_tasks.row_factory = sqlite3.Row
@@ -10094,7 +10094,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         else:
             # Own row preferred. COA fallback only for projects with an active
             # assigned task and no own row — membership alone is too broad
-            # (every agent is auto-joined to AGi-Tools / Knowledgebase).
+            # (every agent is auto-joined to AGi-Tools).
             proj_rows = tconn.execute(
                 """SELECT amp.* FROM agent_memory_project amp
                    JOIN projects p ON p.id = amp.project_id
@@ -10753,9 +10753,10 @@ def _get_project(conn, project_id):
 
 
 # TD-SCRIPT-001 / TD-MC-001: Reserved-name protection for system projects.
-# AGi-Tools and AGi-Knowledgebase are physically shared and symlinked into every
+# AGi-Tools is physically shared and symlinked into every
 # agent workspace (see SHARED_SYSTEM_PROJECTS in agent_add). Versa-BusinessAdmin
-# is reserved and COA-only (not fleet-shared). A reserved-name set is the
+# is reserved and COA-only (not fleet-shared). AGi-Knowledgebase is not reserved.
+# A reserved-name set is the
 # simplest durable guard — no `protected` column or migration needed — and it
 # must reject BOTH archive and hard-delete.
 # Display name may be renamed later; directory slug (basename of workspace_path)
@@ -10773,7 +10774,7 @@ try:
     )
 except ImportError:
     COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
-    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "AGi-Knowledgebase", "Versa-BusinessAdmin"}
+    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "Versa-BusinessAdmin"}
     BUSINESS_ADMIN_PROJECT_NAME = "Versa-BusinessAdmin"
 
     def is_reserved_system_project(name):

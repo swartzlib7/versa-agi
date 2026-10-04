@@ -12,6 +12,8 @@ This is **not** agitop. agitop is **Versa AGi - Mission Control**. Do not load t
 
 Do **not** clone, install, or run `agictl project add`. If Orient says the project or workspace is missing, stop and tell COA. COA uses **`business_admin`**.
 
+This checkout is pull-only. Do not commit product changes and do not `git push`. The Primary User publishes `main`.
+
 ## Sources of truth (read before acting)
 
 | Need | Source |

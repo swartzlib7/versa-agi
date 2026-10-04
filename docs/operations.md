@@ -18,13 +18,13 @@ After setup, two home-directory symlinks:
 **agitop** (`sudo agitop`) is the Mission Control dashboard: agents, messages, tasks, token usage, system health. `agictl` is the CLI for the same data.
 
 <div align="center">
-  <img src="brand/versa-agi-01.png" alt="agitop Mission Control Dashboard" width="100%">
+  <img src="brand/versa-agi-01.png" alt="agitop System and Controls" width="100%">
   <br>
-  <sub>agitop — Cloud mode</sub>
+  <sub>agitop — System and Controls. This install is in hybrid mode.</sub>
   <br><br>
-  <img src="brand/versa-agi-02.png" alt="agitop Hybrid Mode" width="100%">
+  <img src="brand/versa-agi-02.png" alt="agitop Agents" width="100%">
   <br>
-  <sub>agitop — Hybrid with local AI</sub>
+  <sub>agitop — Agents. Routing is hybrid for each agent.</sub>
 </div>
 
 Token usage is tracked per cycle and totaled monthly in agitop.

@@ -34,7 +34,7 @@ try:
     )
 except ImportError:
     COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
-    RESERVED = {"AGi-Tools", "AGi-Knowledgebase", "Versa-BusinessAdmin"}
+    RESERVED = {"AGi-Tools", "Versa-BusinessAdmin"}
 
     def is_reserved_system_project(name: str) -> bool:
         return name in RESERVED

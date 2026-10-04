@@ -13,12 +13,13 @@
   <p>
     <a href="https://versavoice.ai/versa-agi"><strong>Portal</strong></a> ·
     <a href="https://versavoice.ai"><strong>Ecosystem</strong></a> ·
+    <a href="docs/manual/versa-agi-manual.md"><strong>Manual</strong></a> ·
     <a href="docs/Contributing%20to%20Versa%20AGi.md"><strong>Contributing</strong></a> ·
     <a href="docs/Changelog.md"><strong>Changelog</strong></a>
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.4.18-FF9800" alt="Versa AGi version 3.4.18">
+    <img src="https://img.shields.io/badge/version-3.4.19-FF9800" alt="Versa AGi version 3.4.19">
     <!-- /VERSION -->
   </p>
   <p align="center">
