@@ -536,7 +536,8 @@ def _validate_versavoice_api_token(token: str) -> tuple[bool, str]:
         if exc.code in (401, 403):
             return False, (
                 "Invalid VersaVoice API token. Generate a sponsor token in the "
-                "VersaVoice app (Settings → System → Generate API Token)."
+                "VersaVoice app (Settings → Personal → Versa AGi & API → "
+                "Enable → Generate Token)."
             )
         return False, f"VersaVoice API rejected token (HTTP {exc.code})"
     except Exception as exc:  # noqa: BLE001

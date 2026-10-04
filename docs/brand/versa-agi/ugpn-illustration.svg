@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 600 450" role="img" aria-label="Four people and their agents in Tokyo, New York, São Paulo, and Johannesburg, each on their own machine, connected through VersaVoice AI toward shared human intent" xmlns="http://www.w3.org/2000/svg" font-family="Hack, ui-monospace, monospace">
+<defs>
+<linearGradient id="ugpn-core" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0c5a54"/><stop offset="1" stop-color="#08332f"/></linearGradient>
+<marker id="ugpn-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0c7c74"/></marker>
+<g id="ugpn-person"><circle cx="0" cy="-5" r="4.2" fill="#0c7c74"/><path d="M-7 7 Q0 -2 7 7 z" fill="#0c7c74"/></g>
+<g id="ugpn-agent"><rect x="-6" y="-6" width="12" height="12" rx="2.5" fill="#e7f6f4" stroke="#0c7c74" stroke-width="1.4"/><circle cx="-2.2" cy="-0.5" r="1.3" fill="#0c7c74"/><circle cx="2.2" cy="-0.5" r="1.3" fill="#0c7c74"/></g>
+</defs>
+<rect x="1" y="1" width="598" height="448" rx="14" fill="#f4f8f7" stroke="#d9e4e1"/>
+<g fill="none" stroke="#0c7c74" stroke-width="1.6" stroke-dasharray="5 4">
+<path d="M194 90 C 222 96, 222 140, 232 156" marker-start="url(#ugpn-arrow)" marker-end="url(#ugpn-arrow)"/>
+<path d="M406 90 C 378 96, 378 140, 368 156" marker-start="url(#ugpn-arrow)" marker-end="url(#ugpn-arrow)"/>
+<path d="M194 302 C 222 296, 222 250, 229 234" marker-start="url(#ugpn-arrow)" marker-end="url(#ugpn-arrow)"/>
+<path d="M406 302 C 378 296, 378 250, 371 234" marker-start="url(#ugpn-arrow)" marker-end="url(#ugpn-arrow)"/>
+</g>
+<path d="M300 252 L300 372" stroke="#0c7c74" stroke-width="2" marker-end="url(#ugpn-arrow)"/>
+<polygon points="200,195 250,140 350,140 400,195 350,250 250,250" fill="url(#ugpn-core)" stroke="#5ddec8" stroke-width="1.5"/>
+<text x="300" y="186" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="700" letter-spacing="1.5">VERSAVOICE AI</text>
+<text x="300" y="206" text-anchor="middle" fill="#c9e4df" font-size="10.5">translation · transcripts</text>
+<text x="300" y="221" text-anchor="middle" fill="#c9e4df" font-size="10.5">attachments · emotion</text>
+<g>
+<rect x="20" y="22" width="170" height="104" rx="9" fill="#ffffff" stroke="#c5d3d0"/>
+<text x="34" y="46" fill="#08332f" font-size="14" font-weight="700">Tokyo</text>
+<text x="34" y="62" fill="#5e656e" font-size="10">Japanese</text>
+<use href="#ugpn-person" x="41" y="86"/><text x="54" y="90" fill="#16181d" font-size="10.5">A person</text>
+<use href="#ugpn-agent" x="40" y="110"/><use href="#ugpn-agent" x="56" y="110"/><text x="70" y="114" fill="#0c7c74" font-size="10.5">Versa AGi</text>
+</g>
+<g>
+<rect x="410" y="22" width="170" height="104" rx="9" fill="#ffffff" stroke="#c5d3d0"/>
+<text x="424" y="46" fill="#08332f" font-size="14" font-weight="700">New York</text>
+<text x="424" y="62" fill="#5e656e" font-size="10">English</text>
+<use href="#ugpn-person" x="431" y="86"/><text x="444" y="90" fill="#16181d" font-size="10.5">A person</text>
+<use href="#ugpn-agent" x="430" y="110"/><use href="#ugpn-agent" x="446" y="110"/><use href="#ugpn-agent" x="462" y="110"/><text x="476" y="114" fill="#0c7c74" font-size="10.5">Versa AGi</text>
+</g>
+<g>
+<rect x="20" y="266" width="170" height="104" rx="9" fill="#ffffff" stroke="#c5d3d0"/>
+<text x="34" y="290" fill="#08332f" font-size="14" font-weight="700">São Paulo</text>
+<text x="34" y="306" fill="#5e656e" font-size="10">Portuguese</text>
+<use href="#ugpn-person" x="41" y="330"/><text x="54" y="334" fill="#16181d" font-size="10.5">A person</text>
+<use href="#ugpn-agent" x="40" y="354"/><text x="54" y="358" fill="#0c7c74" font-size="10.5">Versa AGi</text>
+</g>
+<g>
+<rect x="410" y="266" width="170" height="104" rx="9" fill="#ffffff" stroke="#c5d3d0"/>
+<text x="424" y="290" fill="#08332f" font-size="14" font-weight="700">Johannesburg</text>
+<text x="424" y="306" fill="#5e656e" font-size="10">Afrikaans</text>
+<text x="424" y="334" fill="#5e656e" font-size="10.5" font-style="italic">Unattended</text>
+<use href="#ugpn-agent" x="430" y="354"/><use href="#ugpn-agent" x="446" y="354"/><text x="460" y="358" fill="#0c7c74" font-size="10.5">Sentinel</text>
+</g>
+<rect x="195" y="378" width="210" height="36" rx="18" fill="#ffffff" stroke="#0c7c74" stroke-width="1.6"/>
+<text x="300" y="401" text-anchor="middle" fill="#08332f" font-size="12.5" font-weight="700">Shared human intent</text>
+<text x="300" y="436" text-anchor="middle" fill="#5e656e" font-size="10">Each person and their agents on their own machine.</text>
+</svg>

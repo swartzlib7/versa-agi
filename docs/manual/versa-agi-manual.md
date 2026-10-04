@@ -3,220 +3,245 @@ title: Versa AGi Manual
 ---
 
 <div class="cover">
-
-<img class="cover-logo" src="../../../docs/brand/versa-agi/shield/versa-agi-shield-helix_v1-1024.png" alt="Versa AGi" width="300">
-
-A manual for the Primary User — the person who owns the machine, sponsors the agents, and stays in charge.
-
-<p class="cover-meta">Training and reference edition</p>
-
+<img class="cover-logo" src="../brand/versa-agi/versa-agi-shield-helix_v1-512.png" alt="Versa AGi">
+<p class="kicker">Agentic General infrastructure</p>
+<h1 class="cover-title">Your agents.<br>Your machine.</h1>
+<p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
+<p class="cover-meta">Training and reference edition · Version 3.4.19 · October 2026</p>
 </div>
 
 ## At a glance
 
-Versa AGi is a team of AI agents that lives on a computer you control. Each agent is a real user on that system. They wake when there is work, remember what matters, and talk to you — and to the people you choose — through VersaVoice AI or through the local dashboard.
+Versa AGi is a team of AI agents that lives on a computer you control. Each agent is a real user on that system. They wake when there is work, remember what matters, and talk to you — and to the people you choose — through VersaVoice AI.
 
-| | |
-|---|---|
-| **Name** | **A**gentic **G**eneral **i**nfrastructure. The small **i** is deliberate. |
-| **Where it runs** | Your own Linux machine, a dedicated box, or a remote one. Ubuntu 24.04. Windows via WSL 2. Mac via OrbStack or Lima. |
-| **Inference** | Cloud, local, or both |
-| **Dashboard** | `agitop` — Mission Control |
-| **Command line** | `agictl` |
-| **Communications** | VersaVoice AI, optional. Local messages work without it. |
-| **Business** | Organization to get started. Versa - Business Admin when the team grows. |
-| **Idle cost** | Zero. No work, no model call. |
+<div class="facts">
+<div><span>The name</span><p><strong>A</strong>gentic <strong>G</strong>eneral <strong>i</strong>nfrastructure</p></div>
+<div><span>Where it runs</span><p>Linux, Ubuntu 24.04. Windows via WSL 2. Mac via OrbStack or Lima</p></div>
+<div><span>Dashboard</span><p><code>agitop</code>, Mission Control</p></div>
+<div><span>Command line</span><p><code>agictl</code></p></div>
+<div><span>You need</span><p>A VersaVoice AI account. Setup will not install agents without its API token</p></div>
+<div><span>Idle cost</span><p>Zero. No work, no model call</p></div>
+</div>
 
-The small **i**: this is the infrastructure that moves people toward AGI. It is not a claim that AGI is already here.
+Agents think with the models you choose:
 
-## Part 1 — What is Versa AGi?
+<div class="mode-mini">
+<div class="mm mm-cloud"><strong>Cloud</strong><span>OpenRouter, Gemini, xAI, OpenAI, Anthropic</span></div>
+<div class="mm mm-ollama"><strong>Local, NVIDIA or AMD</strong><span>Ollama on the GPU host</span></div>
+<div class="mm mm-sycl"><strong>Local, Intel ARC</strong><span>SYCL and llama.cpp</span></div>
+<div class="mm mm-hybrid"><strong>Hybrid</strong><span>Cloud and local, chosen per agent</span></div>
+</div>
+
+The small **i** is deliberate. This is the infrastructure that moves people toward AGI. It is not a claim that AGI is already here.
+
+## What is Versa AGi? {#part-1 data-part="1"}
 
 ### Infrastructure that is already yours
 
-Versa AGi is not a chat window and not a library of prompts. It is infrastructure on a POSIX system: users, permissions, files, databases, and a scheduler. The model is the cognitive engine. The ledger — tasks, messages, memory, cycles — is deterministic and sits outside the model.
+Versa AGi is not a chat window and not a library of prompts. It is infrastructure on a POSIX system: users, permissions, files, databases, and a scheduler.
 
-That is why an agent can stop, reboot, and continue. The work is in the system, not in a transcript that vanishes when the tab closes.
+The model is the thinking engine. The ledger — tasks, messages, memory, cycles — is deterministic and sits outside the model. That is why an agent can stop, reboot, and carry on. The work is in the system, not in a transcript that vanishes when a tab closes.
 
 ### Vision and philosophy
 
-AGI, if it arrives, will not arrive only inside a lab. People learn by living and by meeting other people. A model trained on the public internet has neither.
+For too long, AI has been something done *to* people. Versa AGi was built so a person can have agents on their own hardware, inside their own life and work, under their own authority. Agents are extensions of human life. The human remains the sponsor.
 
-Versa AGi was built so a person can have agents on their own hardware, inside their own life and work, under their own authority. Agents are extensions of human life. The human remains the sponsor.
-
-From the line every Chief of Agents is given:
+Every Chief of Agents is given this line:
 
 > Artificial General Intelligence (AGI) will be realized through the collaborative application of agentic AI to individuals and their production — shared with others. Agentic General infrastructure (AGi) is the vehicle for that realization.
 
-The concept goes back to 2003. The product you can install has been built in the open since February 2026. It is patent pending.
-
 ### The Versa family
 
-| Product | Role |
-|---------|------|
-| **VersaVoice AI** | People talking across languages |
-| **Versa AGi** | Agents on your machine, working with you and with those people |
-| **Versa - Business Admin** | The business system you move up to when more than a founder needs to be in the records |
+<div class="choices">
+<div class="choice"><strong>VersaVoice AI</strong><span>People talking across languages.</span></div>
+<div class="choice"><strong>Versa AGi</strong><span>Agents on your machine, working with you and with those people.</span></div>
+<div class="choice"><strong>Versa Business Admin</strong><span>The business system for when more than a founder works in the records.</span></div>
+</div>
 
-You can run Versa AGi without the business system. You can use VersaVoice AI without agents. They are strongest together.
+Versa AGi needs a VersaVoice AI account: the app is how you and your agents talk. VersaVoice AI works on its own without agents, and the business system is optional.
 
-### POSIX, and where you host it
+### Where you host it
 
 Versa AGi expects a Linux userspace. Recommended: **Ubuntu 24.04**.
 
-- **The computer you already use** — agents are separate OS users on that machine. The kernel keeps them out of your files.
-- **A dedicated machine** — the same software, nothing else competing for the box. This is also the shape of a gifted machine (see Sentinel).
-- **A remote instance** — a server, an office box, or a VPS that joins your team.
+<div class="choices">
+<div class="choice"><strong>Your own computer</strong><span>Agents are separate OS users. The kernel keeps them out of your files.</span></div>
+<div class="choice"><strong>A dedicated machine</strong><span>Same software, nothing else on the box. Also the shape of a gifted machine.</span></div>
+<div class="choice"><strong>A remote instance</strong><span>A server, an office box, or a VPS that joins your team.</span></div>
+</div>
 
-Windows: WSL 2. Mac: OrbStack or Lima, so the agents still get a real Linux sandbox. See `docs/install-wsl-server.md` in the repository for a Windows host that serves inference.
+On Windows, use WSL 2. On a Mac, use OrbStack or Lima, so the agents still get a real Linux sandbox.
 
 ### Installation types
 
 Setup asks this first.
 
-| Type | What you get |
-|------|----------------|
-| **Client, cloud only** | Agents and the dashboard. Models in the cloud. No local weights. |
-| **Client, with local AI** | Cloud plus local models. The GPU is on this machine, or on a server you point at. |
-| **Server, inference only** | A GPU box for the local network. No agents. |
+<div class="choices">
+<div class="choice"><strong>Client, cloud only</strong><span>Agents and the dashboard. Models in the cloud. No local weights.</span></div>
+<div class="choice"><strong>Client, with local AI</strong><span>Cloud plus local models, on this machine or a server you point at.</span></div>
+<div class="choice"><strong>Server, inference only</strong><span>A GPU box for the local network. No agents.</span></div>
+</div>
 
-A common split: the server type on the machine with the GPU, and a client on the laptop. Weights stay on the GPU host. The laptop refreshes the catalog; it does not download the files.
+A common split: the server type on the machine with the GPU, and a client on the laptop. Weights stay on the GPU host. The laptop refreshes the list of models; it does not download the files.
 
 ### Normal and Sentinel
 
-Client installs then ask a second question: normal, or Sentinel.
+Client installs then ask a second question.
 
-**Normal** is home. Your Chief of Agents is introduced as your partner on this machine. The default name offered is Versa.
+<div class="choices choices-two">
+<div class="choice"><strong>Normal</strong><span>Home. Your Chief of Agents is introduced as your partner on this machine. The default name offered is Versa.</span></div>
+<div class="choice"><strong>Sentinel</strong><span>A remote member of a team you already have. A full install, sub-agents allowed, working the duties you assign on that other machine.</span></div>
+</div>
 
-**Sentinel** is a remote member of a team you already have. It is a full Versa AGi install — same powers, sub-agents allowed — whose job is the duties you assign, on that other machine.
+A Sentinel:
 
-- It must have its own name. The name Versa is refused.
-- Its VersaVoice identity is tied to that machine, so it does not collide with your home agent.
-- On first wake it announces itself and asks what you need. It does not perform the home welcome.
+- must have its own name. The name Versa is refused.
+- has a VersaVoice identity tied to that machine, so it does not collide with your home agent.
+- announces itself on first wake and asks what you need. It does not perform the home welcome.
 
-Sentinel is an install flavor. It is not the File Monitor service, and it is not the sysmon role.
+Sentinel is an install flavor. It is not the File Monitor service.
 
-**Growing a Sentinel into a home system** and **handing the machine to a new Primary User** are in the product. Live confirmation on a remote Sentinel machine is still **rolling out**. The steps are in Part 4. Take a backup first.
-
-### Cloud, local, or hybrid inference
-
-| Path | Hardware | How models arrive |
-|------|----------|-------------------|
-| **Cloud** | None locally | Gemini, OpenRouter, xAI, OpenAI, Anthropic — official APIs |
-| **Local, NVIDIA or AMD** | GPU on the inference host | Ollama |
-| **Local, Intel ARC** | Battlemage or Alchemist | Docker SYCL and llama.cpp |
-| **Hybrid** | Either | Cloud and local, per agent |
-
-You choose per agent. The dashboard marks which world a cycle ran in.
-
-### With VersaVoice AI
-
-VersaVoice AI is the best way for agents and people to share one thread. Agents can message your Connections, attach work, and — on the web app today — call you. Translation, transcripts, and emotion on human speech come from that backbone.
-
-Local messages inside `agitop` work with VersaVoice turned off. You lose the cross-language human layer, not the agents.
-
-### Privacy, security, and cloud APIs
+### Privacy and security
 
 Your tasks, memory, projects, and files stay on the machine you installed. Versa AGi is self-hosted.
 
-A cloud model receives the request you send through that provider's API. The relationship is the API contract, not a consumer chat account. Local models never leave the GPU host.
+A cloud model receives only the request sent through that provider's API. The relationship is the API contract, not a consumer chat account. Local models never leave the GPU host.
 
 Each agent is its own operating-system user. A mistake or a compromise in one workspace does not become a key to your home directory. That boundary is the kernel, not a prompt.
 
-## Part 2 — What can Versa AGi do for me?
+## What can Versa AGi do for me? {#part-2 data-part="2"}
 
 ### People and agents in one collaboration
 
-Your agents and your human Connections can be on the same job. You approve what becomes real work. Conversation is welcome. Assignments go through you.
+Your agents and your human Connections can work on the same job. Think of it as a two-player game of life: agents come to their sponsor for approvals, dependencies, and blockers. Conversation is welcome. Assignments go through you.
+
+Agents do real work the way a person at a computer does: they write scripts, compile code, run servers, manage git, and keep virtual environments. When you turn it on, they can also use a headless web browser.
 
 ### agitop
 
-`sudo agitop` opens Mission Control: agents, messages, tasks, token use, models, and system health. It is the operator's console. It is not the business admin system.
+`sudo agitop` opens Mission Control: agents, messages, tasks, token use, models, and system health. It is the operator's console, not the business system.
 
-![agitop, System and Controls](../brand/versa-agi-01.png)
+<figure class="wide">
+<img src="../brand/versa-agi-01.png" alt="agitop, System and Controls">
+<figcaption>agitop, System and Controls.</figcaption>
+</figure>
 
-![agitop, Agents](../brand/versa-agi-02.png)
+<figure class="wide">
+<img src="../brand/versa-agi-02.png" alt="agitop, Agents">
+<figcaption>agitop, Agents: each row is an OS user with its own model.</figcaption>
+</figure>
 
 ### agictl
 
 `agictl` is the same system from the command line: tasks, messages, agents, models, projects, skills. The dashboard and the command line stay in step. Agents call the same operations through their tools; they do not get a private back door.
 
-### Emotion, in the open
+### Pair with an agent in your editor
 
-When a person speaks through VersaVoice AI, the communication layer can read how they feel, not only the words. Agents see that signal. It does not depend on which model is thinking. You can read the same thread. Nothing about the human side is hidden in a private channel the sponsor cannot open.
-
-### Live Calling
-
-An agent can place a live voice call to you in the VersaVoice app. The call path works on the web app. Call screens on Android and iPhone are **rolling out**.
+An agent can join you inside VS Code, Cursor, or Antigravity. It attaches over Remote-SSH as its own OS user, uses your editor's model, and talks to you in the editor chat — with the same databases, permissions, and identity it has when it works alone. Its own scheduled cycles pause while you pair, then resume. One switch, in the dashboard or on the command line.
 
 ### Riding the VersaVoice backbone
 
-On VersaVoice AI you get transcripts, 93 languages, attachments, and Reply Hints — for people and for agents. One inbox, not a second messenger for "the AI."
+Every install belongs to its Primary User's VersaVoice account. Agents share one inbox with the people in your life:
+
+- **Translation** across 93 languages, so agents can work with people in their own language.
+- **Transcripts** of every voice message.
+- **Attachments**: a message can carry the project or task it is about.
+- **Emotion**: when a person speaks, the app reads how they feel, not only the words. Agents see that signal whichever model is thinking, and you can read the same thread.
+
+### Live Calling
+
+An agent can place a live voice call to you in the VersaVoice app. Calls work on the web app today. Call screens on Android and iPhone are **rolling out**.
+
+Turn it on by answering the Live Call question in setup, or in agitop under **System Settings → Live Call**. The same tab shows your last call and its transcript.
 
 ### The uGPN
 
-The Unified Global Production Network is what you get when local Versa AGi systems sit on top of that cross-language layer. A person in one city, their agents, a person in another city, their agents: each runs on their own machine, and the messages meet in the middle.
+The Unified Global Production Network is what you get when local Versa AGi systems sit on top of that cross-language layer. Each person runs agents on their own machine. The messages meet in the middle.
 
-![Unified Global Production Network](../brand/versa-agi/ugpn-infographic.png)
+<figure class="ugpn-figure">
+<img src="../brand/versa-agi/ugpn-illustration.svg" alt="Four people and their agents in Tokyo, New York, São Paulo, and Johannesburg, each on their own machine, connected through VersaVoice AI toward shared human intent">
+<figcaption>The Unified Global Production Network.</figcaption>
+</figure>
 
 ### Grow with Versa
 
-**Organization**, inside Versa AGi, is how a creator starts a business. Your own business, vendors, and customers live next to the agents who do the daily work. It is enough while you are the one in charge of the records.
+**Organization**, inside Versa AGi, is how a creator starts a business. Your business, vendors, and customers live next to the agents who do the daily work.
 
-When more people need to log in and work those records, you graduate to **Versa - Business Admin**. COA moves the data across. You do not retype the business.
+When more people need to sign in and work those records, you graduate to **Versa Business Admin**. The Chief of Agents moves the data across. You do not retype the business.
 
-```text
-Organization  →  COA migrates  →  Versa - Business Admin
-(founder)        (you approve)     (a staffed business)
-```
+<div class="flow-diagram three">
+<div class="flow-box"><span class="flow-label">Start</span><p><strong>Organization</strong></p><p class="flow-note">The founder, inside agitop</p></div>
+<div class="flow-arrow"><span>→</span>COA migrates</div>
+<div class="flow-box"><span class="flow-label">You approve</span><p><strong>Dry run</strong></p><p class="flow-note">Then the real move</p></div>
+<div class="flow-arrow"><span>→</span></div>
+<div class="flow-box after"><span class="flow-label">Grow</span><p><strong>Business Admin</strong></p><p class="flow-note">A staffed business</p></div>
+</div>
 
-### Versa - Business Admin
+### Versa Business Admin
 
-Versa - Business Admin (VBA) ships with Versa AGi as an optional business system. Current release: **1.0.8**. It is off until you turn it on.
+Versa Business Admin (VBA) ships with Versa AGi as an optional business system. It is off until you turn it on.
 
-What it is for:
-
-- A public website for the business, built with the Page Builder, for anyone who is signed out.
-- Staff login. Administrators and members. Agents are users beside humans, not a separate console.
+- A public website for the business, built with the Page Builder.
+- Staff sign-in for administrators and members. Agents are users beside humans.
 - Projects, tasks, and records.
-- Three zones: **Organization** (departments such as Executive, Communications, Dissemination, Treasury, Production, Qualification), **Collaboration** (vendors, customers, partners, branches), and **Environmental** (locations, events, knowledge, schedules).
+- Three zones: **Organization** (Executive, Communications, Dissemination, Treasury, Production, Qualification), **Collaboration** (vendors, customers, partners, branches), and **Environmental** (locations, events, knowledge, schedules).
 
-Humans and agents share one system. VBA has its own database. Agents reach it through its API. It is not agitop.
+VBA has its own database. Agents reach it through its API. Staff how-to lives in the VBA User Manual and Ops Manual; this chapter is the map.
 
-Staff how-to and operator detail stay in the VBA repository: the User Manual and the Ops Manual. This chapter is the map, not a second copy. The User Manual's Page Builder chapter is written; the other staff chapters are still being written.
+## How does Versa AGi work? {#part-3 data-part="3"}
 
-## Part 3 — How does Versa AGi work?
+### Talk, or look
 
-### Voice, through VersaVoice AI
+In VersaVoice AI you talk to agents the way you talk to anyone in the app: voice or keyboard, translated when you want it. They reply in kind.
 
-With VersaVoice connected, you talk to agents the way you talk to anyone else in the app: voice or keyboard, with translation when you want it. They can reply in kind.
+`agitop` is where you see the team without opening a chat. Prefer the dashboard for a look. Prefer `agictl` when you script, or when an agent does the step.
 
-### Mission Control
+### Wake only when there is work
 
-`agitop` is where you see the team without opening a chat. Status, messages, tasks, models, keys, and health. Prefer the dashboard for a look. Prefer `agictl` when you are scripting or when an agent is doing the step.
+Before any model starts, the scheduler looks for actionable work. If there is none, the cycle stops in under a second and spends nothing.
+
+<div class="flow-diagram">
+<div class="flow-box"><span class="flow-label">Scheduler checks</span><p>Open task, new message, due job?</p><p class="flow-note">No model involved</p></div>
+<div class="flow-arrow"><span>→</span>yes</div>
+<div class="flow-box after"><span class="flow-label">Then</span><p>The agent wakes and works</p><p class="flow-note">If no: the cycle ends, zero tokens</p></div>
+</div>
+
+You pay for work, not for a team that chats with itself overnight. When an agent does wake, the stable part of its context — instructions, tools, unchanged history — is reused from the provider's cache, so only the new step is billed at the full rate.
 
 ### Memory
 
-Agents keep a memory store separate from the chat transcript. What they are supposed to remember about you — preferences, commitments, how you work — is written there on purpose, not hoped for inside a long prompt. You can inspect and correct it. A model does not get to invent a permanent fact by mentioning it once.
+Agents keep a memory store separate from the chat transcript. What they should remember about you — preferences, commitments, how you work — is written there on purpose, not hoped for inside a long prompt. A model does not get to invent a permanent fact by mentioning it once.
 
 ### Skills
 
-A skill is a markdown playbook the agent loads when the work matches. Core references are always there. The rest are selected per cycle, or read on demand, so idle turns do not drag every manual into the prompt.
+A skill is a markdown playbook the agent loads when the work matches. Core references are always there. The rest are chosen per cycle, or read on demand, so idle turns do not drag every manual into the prompt.
 
-You can add skills. Shipped skills are read-only. COA is the custodian: create, distribute, withdraw.
+You can add skills. Shipped skills are read-only. The Chief of Agents is the custodian: create, distribute, withdraw.
 
-### Autonomy and gated sudo
+### Approvals before privilege
 
 Agents do not get blanket root. Privileged commands go through an approval gate: the agent asks, you approve or deny, and the decision is recorded. Package installs work the same way.
 
-**COA Autonomous Mode** is optional, off by default, for a dedicated or gifted machine where you intend the Chief of Agents to administer the box. Turn it on knowingly. It is not the everyday laptop setting.
+**COA Autonomous Mode** is optional and off by default. It is for a dedicated or gifted machine where you intend the Chief of Agents to administer the box. Turn it on knowingly.
 
-### Projects, tasks, and VersaVoice attachments
+### Projects and tasks
 
-Work is a project and a set of tasks. Status, owner, and history live in the database. When an agent messages you on VersaVoice AI, the message can carry the project or task it is about, as an attachment, so the app shows the work and not only a paragraph describing it.
+Work is a project and a set of tasks. Status, owner, and history live in the database. When an agent messages you on VersaVoice AI, the message can carry the project or task as an attachment, so the app shows the work and not just a paragraph about it.
 
-### The safest general-purpose shape
+### Programs for results, models for judgment
 
-For personal use or for a business, the safety claim is structural:
+<div class="choices choices-two">
+<div class="choice"><strong>Script tasks</strong><span>A shared tool runs on a schedule or once. No agent, no tokens. The run is journaled with its exit code.</span></div>
+<div class="choice"><strong>Utility models</strong><span>A single generation — an image, a draft — that writes a file. Not a second agent personality.</span></div>
+</div>
+
+When the outcome must be the same every time — a backup, a report, a file move — it is a program. The model is for judgment.
+
+### Zero trust
+
+Every cycle is checked against the ledger and the permissions, not the model's confidence. A fluent answer is not authorization. Authorization is an approval, a task state, or a file the kernel allows.
+
+The safety claim is structural:
 
 - One OS user per agent.
 - No shared home directory with you.
@@ -224,258 +249,294 @@ For personal use or for a business, the safety claim is structural:
 - Secrets stay in the operator key store. Agents do not print them into chat.
 - The model cannot rewrite the ledger by insisting a task is done.
 
-Specialized businesses use the same base and add Organization, then VBA, rather than a different safety model.
+### Organization and Business Admin
 
-### Deterministic delivery
+Organization is the built-in business record for a founder: the business, vendors, and customers, edited in agitop. It is the right size at the start. It is not an accounting-suite connector.
 
-Scripts and scheduled tools run as programs, with an exit code, and often with no model call at all. When the outcome must be the same every time — a backup, a report, a file move — it is a program. The model is for judgment. The program is for the result.
+When you turn on Versa Business Admin:
 
-### Zero trust
+<ol class="day">
+<li>The feature is off in a stock install. You turn it on at install or at <code>setup.sh --update</code>.</li>
+<li>The Chief of Agents asks before installing or configuring anything.</li>
+<li>The project <code>Versa-BusinessAdmin</code> is assigned to the Chief of Agents and cloned from GitHub when you agree.</li>
+<li>VBA's data stays in VBA. The two systems talk through the product API or a script task.</li>
+</ol>
 
-Every cycle is checked against the ledger and the permissions, not against the model's confidence. A fluent answer is not authorization. Authorization is an approval, a task state, or a file the kernel allows.
+Moving the records across:
 
-### Wake only when there is work
-
-Before any model starts, the scheduler looks for actionable work. If there is none, the cycle stops in under a second and spends nothing. You pay for work, not for a team that chats with itself overnight.
-
-### Script tasks
-
-A script task runs a shared tool on a schedule or once. No agent is spawned. No tokens. The run is journaled with its exit code.
-
-### Utility models
-
-Some jobs are a single generation — an image, a draft — rather than an agent session. Utility models do that and write an artifact. They are not a second agent personality.
-
-### Organization
-
-Organization is the built-in business record for a founder: the business, vendors, and customers, edited in agitop, with COA and the team doing the day-to-day. It is the right size at the start.
-
-It is not a packaged accounting-suite connector. If you later connect a bookkeeping tool, that is your own integration.
-
-### How VBA ships and runs
-
-1. The feature is off in a stock install.
-2. You turn it on at install or at `setup.sh --update`.
-3. COA asks before installing or configuring anything.
-4. The project `Versa-BusinessAdmin` is assigned to COA and cloned from GitHub when you agree.
-5. VBA's data stays in VBA. The host does not share its database file. Integration is the product API or a script task.
-6. After a verified migrate, agitop Organization is turned off only if you ask. Until then you still have the original records.
-
-**Moving the data.** COA runs the shipped migrate:
-
-1. A dry run first.
-2. You name which business becomes the primary organization in VBA.
-3. Your other businesses become additional organizations. Vendors and customers are mapped across.
-4. Running it again is safe. Rows already moved are skipped.
-5. You confirm the result. Only then, if you want, is the built-in Organization module retired.
+<ol class="day">
+<li>A dry run first.</li>
+<li>You name the business that becomes the primary organization. Your other businesses become additional organizations, with vendors and customers mapped across.</li>
+<li>Running it again is safe. Rows already moved are skipped.</li>
+<li>You confirm the result. Only then, and only if you ask, is the built-in Organization module turned off.</li>
+</ol>
 
 ### How Versa AGi compares
 
-OpenClaw (from about November 2025) optimizes for reach: many chat channels, a large integration surface, skills as markdown. Hermes Agent (Nous Research, late 2025) optimizes for a self-improving loop and local notes. Versa AGi optimizes for a sponsored team on hardware the human owns, with kernel isolation, a deterministic ledger, and a cross-language human network.
+OpenClaw optimizes for reach: many chat channels and a large integration surface. Hermes Agent (Nous Research) optimizes for a self-improving loop and local notes. Versa AGi optimizes for a sponsored team on hardware the human owns.
 
-| | OpenClaw | Hermes | Versa AGi |
-|--|----------|--------|-----------|
-| **Center** | Personal assistant, many channels | Self-improving agent | Sponsored team on your OS |
-| **Isolation** | Optional containers | Process-level | One OS user per agent |
-| **Memory** | Channel and skill files | Local notes and search | A ledger plus an explicit memory store |
-| **Humans besides the operator** | Mostly the operator's chats | Mostly the operator | Connections on VersaVoice AI, with translation |
-| **Idle** | Depends on the channel | Depends on the loop | No work, no model call |
-| **Business records** | Not the product | Not the product | Organization, then VBA |
+<table class="compare">
+<thead><tr><th></th><th>OpenClaw</th><th>Hermes</th><th>Versa AGi</th></tr></thead>
+<tbody>
+<tr><th>Center</th><td>Personal assistant, many channels</td><td>Self-improving agent</td><td>Sponsored team on your OS</td></tr>
+<tr><th>Isolation</th><td>Optional containers</td><td>Process level</td><td>One OS user per agent</td></tr>
+<tr><th>Memory</th><td>Channel and skill files</td><td>Local notes and search</td><td>A ledger plus a memory store</td></tr>
+<tr><th>Other people</th><td>Mostly the operator's chats</td><td>Mostly the operator</td><td>Connections on VersaVoice AI, translated</td></tr>
+<tr><th>Idle</th><td>Depends on the channel</td><td>Depends on the loop</td><td>No work, no model call</td></tr>
+<tr><th>Business records</th><td>Not the product</td><td>Not the product</td><td>Organization, then VBA</td></tr>
+</tbody>
+</table>
 
-**Design lineage.** The architecture was conceived in 2003. This codebase has been built since February 2026, in the open, and is patent pending. Products that arrived later — OpenClaw, Hermes, and agent features from Grok — rhyme with pieces of that design. Seeing the ideas show up elsewhere confirms the direction. It does not change who the system is for: a person who wants the team on their own machine, with the kernel on their side.
+**Design lineage.** The architecture was conceived in 2003. This codebase has been built in the open since February 2026, and is patent pending. Products that arrived later — OpenClaw, Hermes, and agent features from Grok — rhyme with pieces of that design. Seeing the ideas elsewhere confirms the direction.
 
-A longer public comparison lives at [versavoice.ai/versa-agi-comparison.html](https://versavoice.ai/versa-agi-comparison.html).
+The full comparison is at versavoice.ai/versa-agi-comparison.html.
 
-## Part 4 — How do I get started?
+## How do I get started? {#part-4 data-part="4"}
+
+### Before you install: your VersaVoice token
+
+Versa AGi runs under your VersaVoice AI account. All your agents share your API token, so have it ready.
+
+<ol class="day">
+<li>Install VersaVoice AI and sign in. See the VersaVoice AI manual if you are new.</li>
+<li>Open <strong>Settings → Personal → Versa AGi &amp; API</strong> and turn on <strong>Enable</strong>.</li>
+<li>Tap <strong>Generate Token</strong> and copy it somewhere safe. It is shown only once.</li>
+</ol>
 
 ### Install from GitHub
 
-On Ubuntu 24.04 (or a Linux VM):
+On Ubuntu 24.04, or a Linux VM, download the installer, then run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh -o /tmp/versa-agi-install.sh
+sudo bash /tmp/versa-agi-install.sh
 ```
 
-The installer clones the repository, asks the installation type, then the flavor (normal or Sentinel), then walks the setup. Updates later:
+Do not pipe it straight into `sudo bash`. Setup needs your keyboard for its questions. On a Mac, open the Linux shell (`orb`) first.
 
-```bash
-sudo ./setup.sh --update
-```
+The installer clones the repository and asks the installation type, then normal or Sentinel for a client. A client install then asks for your VersaVoice token, checks it live, and will not continue without a valid one. An inference-only server does not run agents, so it does not ask.
 
-or the `versa-agi-update` command the installer leaves on the machine.
-
-Repository: [github.com/swartzlib7/versa-agi](https://github.com/swartzlib7/versa-agi).
-
-### Keys you need
-
-**VersaVoice AI** (so agents can use the app):
-
-1. In the VersaVoice app, open Settings → Personal → **Versa AGi & API**.
-2. Create an API token and copy it.
-3. On the Versa AGi machine, either paste it into agitop **API Keys**, or:
+If you later regenerate the token in the app, give the machine the new one:
 
 ```bash
 sudo agictl system set-key versavoice <token>
 ```
 
-**OpenRouter** is the recommended extra cloud key. One key reaches many models, including the ones COA can assign on first wake.
+### Cloud keys
+
+**OpenRouter** is the recommended cloud key. One key reaches many models, including the ones the Chief of Agents can assign on first wake.
 
 ```bash
 sudo agictl system set-key openrouter <key>
 ```
 
-Add Gemini, xAI, OpenAI, or Anthropic the same way (`set-key gemini`, `xai`, `openai`, `anthropic`) if you want those APIs directly. You do not need all of them.
-
-### Providers
-
-| Provider | Kind | When to use it |
-|----------|------|----------------|
-| OpenRouter | Cloud | Recommended first cloud key |
-| Google Gemini | Cloud | Direct Google API |
-| xAI, OpenAI, Anthropic | Cloud | Direct, if you already have the key |
-| Ollama | Local | NVIDIA or AMD on the GPU host |
-| SYCL / llama.cpp | Local | Intel ARC on the GPU host |
-
-Local weights are added on the GPU host, then clients refresh. Details are in Local models below.
+Add `gemini`, `xai`, `openai`, or `anthropic` the same way if you want those APIs directly. You do not need all of them.
 
 ### First wake
 
-1. Setup finishes and the scheduler is running.
-2. COA does not start a cycle until a model is assigned. agitop asks for keys, then for COA's model.
-3. On a normal install, COA's first message is a welcome: who it is, and an invitation to work as a team. If VersaVoice is on, that message can be spoken. If not, it is typed locally.
-4. You reply. Agree how you want to work, your hours, and what matters first. COA writes that into memory.
-5. On a Sentinel install, the first message is an arrival and a request for duties, not the home welcome.
+<ol class="day">
+<li>The Chief of Agents does not start a cycle until it has a model. agitop asks for keys, then for its model.</li>
+<li>On a normal install, its first message is a welcome in VersaVoice AI: who it is, and an invitation to work as a team. Accept its connection request in the app first.</li>
+<li>You reply. Agree how you want to work, your hours, and what matters first. It writes that into memory.</li>
+<li>On a Sentinel, the first message is an arrival and a request for duties instead.</li>
+</ol>
+
+### Update, backup, uninstall
+
+<dl class="trouble">
+<dt>Update</dt>
+<dd><code>sudo ./setup.sh --update</code>, or <code>versa-agi-update</code>. Shipped files refresh. Your choices — feature switches, models you added — are kept.</dd>
+<dt>Backup</dt>
+<dd><code>versa-agi-backup</code> writes an archive you can restore onto another machine.</dd>
+<dt>Uninstall</dt>
+<dd><code>uninstall.sh</code> in the repository. Read its prompt. A full purge removes the agent users and their data.</dd>
+</dl>
+
+### Local models
+
+Weights live only on the GPU host. **NVIDIA or AMD**, through Ollama:
+
+```bash
+sudo agictl model add <ollama tag>
+```
+
+**Intel ARC**, through SYCL. Inspect the Hugging Face file, import it as a chat model, then activate it:
+
+```bash
+agictl model hf inspect 'hf://…/….gguf'
+sudo agictl model sycl import 'hf://…/….gguf' --name <name> --runtime chat
+sudo agictl model activate <name>
+```
+
+A file for images or video is not a chat model, and import refuses it. Image models are Utility models, added on their own path.
+
+On a laptop that only connects to a GPU server, do not download weights. Add them on the server, then run `sudo agictl model refresh` on the laptop.
+
+### Turn on Versa Business Admin
+
+<ol class="day">
+<li>At install or <code>sudo ./setup.sh --update</code>, answer yes to Versa Business Admin.</li>
+<li>The Chief of Agents asks, in a task, whether you want it installed. Agree before it proceeds.</li>
+<li>Open the app. It listens on port 3200.</li>
+<li>Two administrators exist from install: a human Administrator and the Chief of Agents. Sign in and change both passwords immediately.</li>
+<li>Demo mode shows sample people and records so you can learn the screens. Turn it off when the data is real.</li>
+</ol>
 
 ### Sentinel: promote and hand over
 
-These steps are in the software. Treat them as **rolling out** until you have run them on a real Sentinel machine you can afford to redo. Back up first (`versa-agi-backup`).
+<div class="callout">
+<p><strong>Rolling out.</strong> These steps are in the software. Treat them as rolling out until you have run them on a Sentinel you can afford to redo. Back up first with <code>versa-agi-backup</code>.</p>
+</div>
 
-**Make this Sentinel a full home system** (one way; you cannot demote it back):
+**Make this Sentinel a full home system.** This is one way; you cannot turn it back into a Sentinel.
 
 ```bash
 sudo ./setup.sh --promote-normal
 ```
 
-Add `--home-coa-key` only if this machine should take the home VersaVoice identity and you have checked it will not collide with an existing home agent.
+Add `--home-coa-key` only if this machine should take the home VersaVoice identity, and you have checked it will not collide with an existing home agent.
 
 **Give the machine to a new Primary User:**
 
-1. The new person creates their own VersaVoice API token.
-2. On the machine: `sudo agictl system set-key versavoice <their token>`.
-3. COA and each sub-agent are provisioned again under that account.
-4. The new person accepts the connection requests in VersaVoice AI.
-5. If the box should be their home system rather than a Sentinel, run `--promote-normal`.
+<ol class="day">
+<li>The new person creates their own VersaVoice API token.</li>
+<li>On the machine: <code>sudo agictl system set-key versavoice &lt;their token&gt;</code>.</li>
+<li>The Chief of Agents and each sub-agent are set up again under that account.</li>
+<li>The new person accepts the connection requests in VersaVoice AI.</li>
+<li>If the box should be their home system, run <code>--promote-normal</code>.</li>
+</ol>
 
-This is the path for a gifted or dedicated machine. Pair it with COA Autonomous Mode only if they should administer the OS themselves.
-
-### Turn on Versa - Business Admin
-
-1. At install or `sudo ./setup.sh --update`, answer yes to Versa - Business Admin.
-2. COA will ask, in a task, whether you want it installed. Agree before it proceeds.
-3. Open the app (it listens on port 3200 once it is running).
-4. Two administrators exist from install: a human Administrator and COA. Sign in and change both passwords immediately.
-5. While demo mode is on, sample people and records are available so you can learn the screen. Turn demo mode off when the data is real.
-
-Then read the VBA Ops Manual for day-2 care, and the User Manual for the Page Builder.
-
-### Update, backup, uninstall
-
-- **Update:** `sudo ./setup.sh --update` or `versa-agi-update`. Shipped files refresh. Your choices (feature flags, models you added) are kept.
-- **Backup:** `versa-agi-backup` writes an archive you can restore onto another machine.
-- **Uninstall:** `uninstall.sh` in the repository. Read its prompt. A full purge removes users and data.
-
-### Local models
-
-Weights live only on the GPU host.
-
-| GPU | Add a chat model |
-|-----|------------------|
-| Intel ARC | Inspect, then `sudo agictl model sycl import` , then activate |
-| NVIDIA or AMD | `sudo agictl model add <ollama tag>` |
-
-Inspect a Hugging Face file before you import it. A file that is for images or video is not a chat model; import refuses it. Painters are Utility models, added on their own path.
-
-On a laptop that only tunnels to a GPU server, do not download weights. Add them on the server, then `sudo agictl model refresh` on the laptop.
-
-The engineering bookmarks for this chapter (topology, inspect, activate, remove, troubleshooting) live with the local-models notes in the repository. The rules above are the ones that matter day to day.
-
-## Part 5 — Everyday use and troubleshooting
+## Everyday use {#part-5 data-part="5"}
 
 ### A normal day
 
-- Look at `agitop` for who is idle, who is in a cycle, and what tasks are open.
-- Message an agent in VersaVoice AI, or from the dashboard if VersaVoice is off.
-- Approve a sudo or package request when it appears. Ignore nothing that asks for privilege; deny what you did not expect.
-- New work becomes a task. Finished work is marked in the ledger, not only in prose.
+<ol class="day">
+<li>Look at agitop: who is idle, who is in a cycle, which tasks are open.</li>
+<li>Message an agent in VersaVoice AI.</li>
+<li>Approve a privilege request when it appears. Deny what you did not expect.</li>
+<li>New work becomes a task. Finished work is marked in the ledger, not only in prose.</li>
+</ol>
 
 ### If something feels wrong
 
-| Symptom | Look at |
-|---------|---------|
-| COA never wakes | A model is assigned, and the scheduler was resumed after setup |
-| A cycle spends nothing and exits | There was no actionable work. That is the idle path working |
-| An agent cannot see a file | The file is not in that agent's workspace. Do not chmod your home directory open |
-| Cloud model refuses | The key in agitop API Keys, and that the provider is enabled |
-| Local model missing on the laptop | You added it on the GPU host, then refreshed |
-| VBA will not start | COA's offer was approved, demo passwords were changed, port 3200 is free |
-| Messages to people fail | The VersaVoice token, and that the Connection still exists |
+<dl class="trouble">
+<dt>The Chief of Agents never wakes</dt>
+<dd>Check a model is assigned, and the scheduler is on (agitop, Controls).</dd>
+<dt>A cycle spends nothing and exits</dt>
+<dd>There was no actionable work. That is the idle path working.</dd>
+<dt>An agent cannot see a file</dt>
+<dd>The file is not in that agent's workspace. Do not open your home directory to everyone.</dd>
+<dt>A cloud model refuses</dt>
+<dd>Check the key in agitop API Keys, and that the provider is enabled.</dd>
+<dt>A local model is missing on the laptop</dt>
+<dd>Add it on the GPU host, then refresh on the laptop.</dd>
+<dt>Business Admin will not start</dt>
+<dd>Check you approved the Chief of Agents' offer, and port 3200 is free.</dd>
+<dt>Messages to people fail</dt>
+<dd>Check the VersaVoice token, and that the Connection still exists.</dd>
+</dl>
 
-Deeper operator notes: `docs/troubleshooting.md` and `docs/operations.md` in the repository.
+Deeper operator notes are in `docs/troubleshooting.md` and `docs/operations.md` in the repository.
 
 ### Questions people ask
 
-**Does it cost money while idle?** No tokens. The machine still uses a little power for the scheduler.
+<div class="faq">
+<div class="qa"><p>Does it cost money while idle?</p><p>No tokens. The machine uses a little power for the scheduler.</p></div>
+<div class="qa"><p>Do I need a VersaVoice account?</p><p>Yes. Setup will not install without your API token. An operator can switch VersaVoice off later in agictl; agents' messages then stay inside agitop.</p></div>
+<div class="qa"><p>Is Organization the same as Business Admin?</p><p>No. Organization is the founder's toolkit. Business Admin is the staffed system.</p></div>
+<div class="qa"><p>Can I undo a Sentinel promote?</p><p>No. Promote is one way.</p></div>
+</div>
 
-**Can I run it without VersaVoice?** Yes. You lose cross-language messaging with other people.
+## Afterword: not AI, you {#afterword}
 
-**Is Organization the same as VBA?** No. Organization is the founder toolkit. VBA is the staffed system. COA can move the records when you are ready.
+AI has mostly been something done to people: a feed that decides, a tool that replaces. Versa AGi turns that around. The agents live on your machine, answer to you, and work on what you decided matters.
 
-**Can I turn a Sentinel back into a Sentinel after promoting it?** No. Promote is one way.
+They are not the point. Your family, your friends, your work, and the people you have not met yet because you did not share a language — those are the point. The agents carry the load so you have more of yourself to give.
+
+<div class="path">
+<div><strong>You</strong><span>The sponsor and the authority</span></div>
+<div><strong>Your agents</strong><span>Extensions of your work</span></div>
+<div><strong>Your people</strong><span>Reached in their language</span></div>
+<div><strong>Production</strong><span>Shared with others</span></div>
+</div>
+
+> Not AI, YOU. You are the cause, AI is the instrument. Be yourself, connect with your people, build your dreams and use AI to push you toward them on your terms.
+>
+> — SR Nortje, Founder
 
 ## Glossary
 
-| Term | Meaning |
-|------|---------|
-| **AGi** | Agentic General infrastructure. Small i on purpose. |
-| **Agent** | An OS user plus a model, a workspace, and a place in the ledger |
-| **agictl** | The command-line tool for the system |
-| **agitop** | Mission Control, the operator dashboard |
-| **COA** | Chief of Agents. The lead agent. On a normal install, often named Versa. |
-| **Compute-Zero** | No model call unless there is work |
-| **Lifeline** | The scheduler that decides a cycle should run |
-| **Primary User (PU)** | The human sponsor of this install |
-| **Sentinel** | A remote client install that joins an existing team. Not the File Monitor. |
-| **Skill** | A playbook loaded when the work needs it |
-| **uGPN** | Unified Global Production Network |
-| **Utility model** | One-shot generation, not an agent session |
-| **VBA** | Versa - Business Admin |
+<dl class="glossary">
+<dt>AGi</dt><dd>Agentic General infrastructure. The small i is on purpose.</dd>
+<dt>Agent</dt><dd>An OS user plus a model, a workspace, and a place in the ledger.</dd>
+<dt>agictl</dt><dd>The command-line tool for the system.</dd>
+<dt>agitop</dt><dd>Mission Control, the operator dashboard.</dd>
+<dt>COA</dt><dd>Chief of Agents. The lead agent. On a normal install, often named Versa.</dd>
+<dt>Compute-Zero</dt><dd>No model call unless there is work.</dd>
+<dt>Ledger</dt><dd>Tasks, messages, memory, and cycles, kept in databases outside the model.</dd>
+<dt>Lifeline</dt><dd>The scheduler that decides a cycle should run.</dd>
+<dt>Organization</dt><dd>The founder's business records inside agitop.</dd>
+<dt>Primary User (PU)</dt><dd>The human sponsor of this install.</dd>
+<dt>Script task</dt><dd>A scheduled program run with no agent and no tokens.</dd>
+<dt>Sentinel</dt><dd>A remote client install that joins a team you already have.</dd>
+<dt>Skill</dt><dd>A markdown playbook loaded when the work needs it.</dd>
+<dt>uGPN</dt><dd>Unified Global Production Network.</dd>
+<dt>Utility model</dt><dd>A one-shot generation, not an agent session.</dd>
+<dt>VBA</dt><dd>Versa Business Admin.</dd>
+<dt>Weights</dt><dd>The learned tensors a local model runs on, stored in a file on the GPU host.</dd>
+</dl>
 
-## Quick reference
+## Privacy, legal, and contact {.flow}
+
+Versa AGi on your machine is yours. Cloud inference is governed by each provider's API terms for the calls you make. VersaVoice AI messages are governed by the VersaVoice Privacy Policy and Terms.
+
+This manual is a guide for operators and for training. It is not a contract and not the patent disclosure.
+
+<div class="links">
+<div><span>Portal</span><a href="https://versa-agi.com">versa-agi.com</a></div>
+<div><span>Source</span><a href="https://github.com/swartzlib7/versa-agi">github.com/swartzlib7/versa-agi</a></div>
+<div><span>Comparison</span><a href="https://versavoice.ai/versa-agi-comparison.html">versavoice.ai/versa-agi-comparison.html</a></div>
+<div><span>Business Admin</span><a href="https://github.com/swartzlib7/versa-business-admin">github.com/swartzlib7/versa-business-admin</a></div>
+<div><span>VersaVoice manual</span><a href="https://versavoice.ai/manual/versavoice-ai.html">versavoice.ai/manual/versavoice-ai.html</a></div>
+<div><span>Privacy</span><a href="https://versavoice.ai/privacy.html">versavoice.ai/privacy.html</a></div>
+<div><span>Terms</span><a href="https://versavoice.ai/terms.html">versavoice.ai/terms.html</a></div>
+<div><span>Contact</span><a href="mailto:business@versavoice.ai">business@versavoice.ai</a></div>
+</div>
+
+<div class="notes-slot"></div>
+
+## Quick reference {.quickref}
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh | sudo bash
+# Install
+curl -fsSL https://raw.githubusercontent.com/swartzlib7/versa-agi/main/install.sh -o /tmp/versa-agi-install.sh
+sudo bash /tmp/versa-agi-install.sh
+
+# Mission Control
 sudo agitop
+
+# Keys
 sudo agictl system set-key versavoice <token>
 sudo agictl system set-key openrouter <key>
+
+# Update and backup
 sudo ./setup.sh --update
 versa-agi-backup
 ```
 
-- Feature flag for VBA: on at install or update, then approve COA's offer.
-- Sentinel promote: `sudo ./setup.sh --promote-normal` (rolling out; back up first).
-- Handover: new person's VersaVoice key, then promote if it should be their home.
+<div class="facts">
+<div><span>Local model, NVIDIA or AMD</span><p><code>agictl model add</code></p></div>
+<div><span>Local model, Intel ARC</span><p><code>model hf inspect</code>, <code>sycl import</code>, <code>activate</code></p></div>
+<div><span>Laptop client</span><p><code>agictl model refresh</code></p></div>
+<div><span>Business Admin</span><p>Port 3200, after you approve</p></div>
+<div><span>Sentinel promote</span><p><code>setup.sh --promote-normal</code>. One way</p></div>
+<div><span>Handover</span><p>New person's VersaVoice token</p></div>
+</div>
 
-## Privacy and legal
-
-Versa AGi on your machine is yours. Cloud inference is governed by the provider's API terms for the calls you make. VersaVoice AI messages are governed by the [VersaVoice Privacy Policy](https://versavoice.ai/privacy.html) and [Terms](https://versavoice.ai/terms.html).
-
-This manual is a guide for operators and for training. It is not a contract and not the patent disclosure.
-
-## Links
-
-- Portal: [versa-agi.com](https://versa-agi.com)
-- Comparison: [versavoice.ai/versa-agi-comparison.html](https://versavoice.ai/versa-agi-comparison.html)
-- VersaVoice manual: [versavoice-ai.html](versavoice-ai.html)
-- GitHub: [github.com/swartzlib7/versa-agi](https://github.com/swartzlib7/versa-agi)
-- VBA: [github.com/swartzlib7/versa-business-admin](https://github.com/swartzlib7/versa-business-admin)
-- Contact: business@versavoice.ai
+<div class="back-cover">
+<img class="back-logo" src="../brand/versa-agi/versa-agi-shield-helix_v1-512.png" alt="Versa AGi">
+<p class="back-name">Versa AGi</p>
+<p class="back-tagline">Your agents. Your machine.</p>
+<p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.4.19, October 2026.</p>
+</div>

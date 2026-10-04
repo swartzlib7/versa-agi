@@ -77,7 +77,7 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 | 🛡️ | **OS-level sandboxing** | Each agent is a dedicated Linux OS user. Boundaries are UNIX permissions, not the LLM. |
 | 🧠 | **Deterministic cognitive ledger** | The LLM is the cognitive engine. Databases own the state ledger — no hallucinated “I already finished that.” |
 | 🔧 | **Real-world execution** | Agents write scripts, compile, run servers, manage git, and use venvs in their workspace. |
-| 💬 | **Human communication** | VersaVoice REST or local SQLite. Every exchange has an audit trail. VersaVoice is optional. |
+| 💬 | **Human communication** | Over the VersaVoice AI REST API. Every exchange has an audit trail. A VersaVoice account and API token are required to install. |
 | 📞 | **Live voice calls** | Your COA can call you in the VersaVoice app when talking is faster than chat. OpenAI GPT-Live is the voice; your agent's full tools and judgment answer behind it. Transcript and summary stay on your machine. Optional. |
 | 🤝 | **Agent–human collaboration** | A two-player game of life. The human stays sovereign; the agent is a relentless partner. |
 | ❤️ | **Native emotional intelligence** | VersaVoice emotion detection is on the communication layer — independent of which model powers the agent. |
@@ -95,10 +95,9 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 </div>
 
 <div align="center">
-  Unified Global Production Network (uGPN)<br>
-  (excerpt from VersaVoice.AI — click the image to open)<br><br>
+  Unified Global Production Network (uGPN)<br><br>
   <a href="https://versavoice.ai/versa-agi">
-    <img src="docs/brand/versa-agi/ugpn-infographic.png" alt="Unified Global Production Network (uGPN)" width="900">
+    <img src="docs/brand/versa-agi/ugpn-illustration.svg" alt="Unified Global Production Network (uGPN): people and their agents in four cities, each on their own machine, connected through VersaVoice AI toward shared human intent" width="720">
   </a>
 </div>
 

@@ -363,7 +363,8 @@ _vv_unreachable_retry_or_quit() {
 _vv_token_instruction_block() {
   echo ""
   echo -e "All agents share the Primary User's (sponsor's) $(_install_acceptance_brand) API token."
-  echo -e "Get yours from: $(_install_acceptance_brand) App → Settings → System (tap label 5 times) → Generate API Token"
+  echo -e "Get yours from: $(_install_acceptance_brand) App → Settings → Personal → Versa AGi & API → turn on Enable → Generate Token"
+  echo -e "The token is shown only once. Copy it before you leave the screen."
   echo -e "The token is verified live against the VersaVoice API as soon as you enter it."
   echo -e "  ${DGRAY}Press Ctrl+C to cancel and quit the installation.${RESET}"
   echo ""
