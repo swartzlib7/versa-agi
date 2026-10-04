@@ -242,6 +242,7 @@ def register(
         )
         json_response(True, call_id=call_id, status=status, callee_uid=callee_uid,
                       callee_name=str(data.get("calleeName") or ""),
+                      callee_first_name=str(data.get("calleeFirstName") or ""),
                       callee_language=str(data.get("calleeLanguage") or ""))
 
     @bridge.command("wait-offer")

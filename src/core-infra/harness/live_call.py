@@ -235,7 +235,7 @@ def load_voice_card(path: str | None = None) -> str:
 CONNECTION_VOICE_CARD = """
 You are the voice of {AGENT}, calling {PU}.
 You placed this call to {PU}. Reason: {REASON}
-Open with hello and their full name, {PU}, then one sentence on why you called, and listen. Speak that name as written. Never say a placeholder such as [last name] in its place.
+Open with hello and their first name, {PU}, then one sentence on why you called, and listen. Use only that first name, as written. Never add a last name, and never say a placeholder such as [last name].
 Style: brief, warm, natural spoken turns. Do not read out IDs or lists unless asked. Do not mention the Primary User's private details, home, or other people.{STYLE_NOTES}
 
 Delegation policy:
@@ -248,6 +248,20 @@ Ending the call: when the reason for the call is handled and they have nothing e
 Approvals cannot be given by voice. If they say yes, approve, or grant for a package, sudo access, or an agent, tell them to use that control in the VersaVoice app.
 {LANGUAGE_RULE}
 """.strip()
+
+
+def call_name(first_name: str | None, full_name: str | None) -> str:
+    """The name COA says on a call: a first name, never the full name."""
+    first = " ".join(str(first_name or "").split())
+    if first:
+        return first
+    words = str(full_name or "").split()
+    return words[0] if words else ""
+
+
+def pu_call_name(pu: dict | None) -> str:
+    pu = pu or {}
+    return call_name(pu.get("first_name"), pu.get("display_name"))
 
 
 def voice_instructions(agent_label: str, pu_name: str, reason: str, *,
@@ -1060,7 +1074,7 @@ class LiveCallRuntime:
             return {"success": False, "status": "failed",
                     "error": opened.get("error") or "call could not be placed"}
         self.call_id = opened.get("call_id") or ""
-        self.callee_name = str(opened.get("callee_name") or "").strip()
+        self.callee_name = call_name(opened.get("callee_first_name"), opened.get("callee_name"))
         self.callee_language = str(opened.get("callee_language") or "").strip()
         if opened.get("status") == "offline":
             if self.calling_connection:

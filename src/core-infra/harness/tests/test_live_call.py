@@ -410,9 +410,41 @@ class TestVoiceCardAndSummary(unittest.TestCase):
             self.assertIn(part, card)
         self.assertNotRegex(card, r"\{[A-Z_]+\}")
         self.assertNotIn("<!--", card)
-        self.assertIn("full name, Sam", card)
-        self.assertIn("Never say a placeholder", card)
+        self.assertIn("first name, Sam", card)
+        self.assertNotIn("full name", card)
+        self.assertIn("never say a placeholder", card)
         self.assertLess(len(card.split()), 520)   # ≈ 700 tokens
+
+    def test_pu_call_name_is_first_name_only(self):
+        self.assertEqual(lc.pu_call_name({"first_name": "Stephen", "display_name": "Stephen Nortje"}), "Stephen")
+        self.assertEqual(lc.pu_call_name({"display_name": "Stephen Nortje"}), "Stephen")
+        self.assertEqual(lc.pu_call_name({"first_name": "  ", "display_name": "Stephen"}), "Stephen")
+        self.assertEqual(lc.pu_call_name({}), "")
+        self.assertEqual(lc.pu_call_name(None), "")
+
+    def test_call_name_prefers_stored_first_name(self):
+        self.assertEqual(lc.call_name("Mary Anne", "Mary Anne Smith"), "Mary Anne")
+        self.assertEqual(lc.call_name("", "Ashok Patel"), "Ashok")
+        self.assertEqual(lc.call_name(None, None), "")
+
+    def test_connection_call_uses_bridge_first_name(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        real_call = bridge.__call__
+
+        def with_first_name(args, stdin, timeout):
+            out = real_call(args, stdin, timeout)
+            if args[0] == "open":
+                out["callee_name"] = "Mary Anne Smith"
+                out["callee_first_name"] = "Mary Anne"
+            return out
+
+        rt, posted = _runtime(with_first_name, sock)
+        result = rt.place("Checking in.", SETTINGS, recipient_id="contact_1")
+        self.assertEqual(result["status"], "connected")
+        instructions = posted[0][1]["session"]["instructions"]
+        self.assertIn("first name, Mary Anne", instructions)
+        self.assertNotIn("Smith", instructions)
+        rt.shutdown()
 
     def test_missing_voice_card_fails_before_ringing(self):
         bridge, sock = FakeBridge(), FakeSocket()
@@ -520,7 +552,9 @@ class TestVoiceCardAndSummary(unittest.TestCase):
         self.assertEqual(bridge.calls[0][0],
                          ["open", "--reason", "Checking in.", "--recipient", "contact_1"])
         instructions = posted[0]["session"]["instructions"]
-        self.assertIn("Ashok Patel", instructions)
+        self.assertIn("first name, Ashok", instructions)
+        self.assertNotIn("Patel", instructions)
+        self.assertNotIn("full name", instructions)
         self.assertIn("Do not mention the Primary User", instructions)
         self.assertNotIn("role: founder", instructions)
         self.assertNotIn("Speak French", instructions)

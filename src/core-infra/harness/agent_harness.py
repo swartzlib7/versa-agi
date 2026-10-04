@@ -2181,7 +2181,7 @@ def main():
             tlog("LIVE CALL: off — no checkpoint thread for call turns")
         else:
             try:
-                from harness.live_call import LiveCallRuntime, sanitize_for_call_model
+                from harness.live_call import LiveCallRuntime, pu_call_name, sanitize_for_call_model
                 from provider_runtime import resolve_provider_api_key
 
                 call_model = _LIVE_CALL_GATE.call_model
@@ -2202,7 +2202,7 @@ def main():
                 identity = _agictl_config_value("identity")
                 live_runtime = LiveCallRuntime(
                     agent_label=identity.get("first_name") or "COA",
-                    pu_name=pu.get("display_name") or pu.get("first_name") or "",
+                    pu_name=pu_call_name(pu),
                     api_key_resolver=lambda: resolve_provider_api_key("openai"),
                     log=tlog,
                     context_provider=_live_call_context,

@@ -1049,6 +1049,7 @@ def system_sync_profiles():
     if account_data:
         pu = config.get("primary_user", {})
         pu["display_name"] = account_data.get("displayName") or account_data.get("firstName", "")
+        pu["first_name"] = (account_data.get("firstName") or "").strip()
         pu["uid"] = account_data.get("uid", pu.get("uid", ""))
         pu["spokenLanguage"] = account_data.get("spokenLanguage", "en")
         pu["countryOfBirth"] = account_data.get("countryOfBirth")

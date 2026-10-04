@@ -5,6 +5,7 @@ title: Versa AGi Manual
 <div class="cover">
 <img class="cover-logo" src="../brand/versa-agi/versa-agi-shield-helix_v1-512.png" alt="Versa AGi">
 <p class="kicker">Agentic General infrastructure</p>
+<p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
 <p class="cover-meta">Training and reference edition · Version 3.4.19 · October 2026</p>
