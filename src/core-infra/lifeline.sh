@@ -406,7 +406,7 @@ _vv_sync_agent_inbox() {
   fi
   inbox_out=$(AGICTL_MESSAGES_DB="/var/lib/versa-agi/messages.db" \
     /usr/local/bin/agictl message sync-inbox "${agent_user}" --agent-path "${agent_path}" --sub-account "${sub_id}" --token "${token}" 2>&1) \
-    || log "WARN: agictl message sync-inbox failed for ${agent_name}"
+    || log "WARN: agictl message sync-inbox failed for ${agent_name}: $(printf '%s' "${inbox_out}" | tail -n 1 | cut -c1-200)"
   inserted=$(_vv_inbox_inserted "${inbox_out}")
   if [ "${inserted:-0}" -gt 0 ]; then
     _vv_run_instance_sync inbox
@@ -1455,12 +1455,27 @@ VersaVoice cloud messaging is OFF on this system — messaging uses internal rou
 
 
   # ─── Overdue Context Injection ────────────────────────
-  # Built during daily sweep (above) — inject overdue details for agent review
+  # Built during daily sweep (above) — inject overdue details for agent review.
+  # spawn_attempts is still the count before this wake (it increments only after
+  # spawn prep succeeds). max-1 means this cycle is the last one before freeze.
   OVERDUE_CONTEXT=""
   if [ -n "${OVERDUE_DETAILS:-}" ]; then
+    _LAST_CHANCE=""
+    _FREEZE_AT=$(( ${MAX_SPAWN_ATTEMPTS:-3} - 1 ))
+    while IFS= read -r _od_row; do
+      [ -z "${_od_row}" ] && continue
+      _od_id=$(printf '%s' "${_od_row}" | awk -F' [|] ' '{print $1}' | tr -d ' ')
+      _od_title=$(printf '%s' "${_od_row}" | awk -F' [|] ' '{print $2}')
+      _od_attempts=$(printf '%s' "${_od_row}" | awk -F' [|] ' '{print $4}' | tr -d ' ')
+      if [ "${_od_attempts}" = "${_FREEZE_AT}" ]; then
+        _LAST_CHANCE="${_LAST_CHANCE}
+Task #${_od_id} (${_od_title}) is on its last wake. If you do not snooze it (\`agictl task snooze ${_od_id} <minutes>\`), finish it, or move its due time this cycle, Lifeline will freeze it before the next wake."
+      fi
+    done <<< "${OVERDUE_DETAILS}"
     OVERDUE_CONTEXT="
 ## ── OVERDUE PLANNED TASKS (missed due date — you MUST reschedule or cancel each) ──
 ${OVERDUE_DETAILS}
+${_LAST_CHANCE}
 "
   fi
 

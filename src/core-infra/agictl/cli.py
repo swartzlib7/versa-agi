@@ -9874,7 +9874,7 @@ def message_delete(message_id, channel):
 @click.option("--agent-path", required=True)
 @click.option("--sub-account", required=True)
 @click.option("--token", required=True)
-@click.option("--full", is_flag=True, help="Re-scan recent history (2h), not just unread")
+@click.option("--full", is_flag=True, help="Ignore the stored cursor and pull the inbox from the beginning")
 def message_sync_inbox(agent_user, agent_path, sub_account, token, full):
     """Pull messages from VersaVoice REST API and persist to SQLite."""
     success, inserted = fetch_inbox(

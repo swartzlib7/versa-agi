@@ -147,26 +147,86 @@ def delete_local_message(message_id, messages_db):
         return False
 
 
+def _parse_message_time(value):
+    """UTC time from a cloud ``timestamp`` or a SQLite ``created_at``."""
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def inbox_since(messages_db, sub_account_id, full_sync=False):
+    """``since`` for GET /messages/inbox. The API keeps particles strictly after it.
+
+    Normal pull: one second before the newest stored message for this sub-account
+    (cloud ``timestamp`` when the row has one, otherwise ``created_at`` as UTC).
+    The overlap is how a second message in that same second is not skipped; rows
+    already stored are dropped by ``message_id``. No stored row, a read failure,
+    or ``full_sync``: the beginning of the inbox, so older mail is not cut off.
+    """
+    from datetime import timedelta
+    epoch = "1970-01-01T00:00:00Z"
+    if full_sync or not messages_db or not os.path.isfile(messages_db):
+        return epoch
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        rows = conn.execute(
+            "SELECT created_at, raw_payload FROM messages "
+            "WHERE to_user_id = ? OR from_user_id = ?",
+            (sub_account_id, sub_account_id),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        console.print(f"[yellow]Inbox cursor unreadable, pulling from the beginning:[/yellow] {exc}")
+        return epoch
+    latest = None
+    for created_at, raw_payload in rows:
+        stamp = None
+        if raw_payload:
+            try:
+                payload = json.loads(raw_payload)
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                stamp = payload.get("timestamp")
+        parsed = _parse_message_time(stamp) or _parse_message_time(created_at)
+        if parsed is not None and (latest is None or parsed > latest):
+            latest = parsed
+    if latest is None:
+        return epoch
+    return (latest - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False):
     """Fetches messages from VersaVoice Cloud and persists them cleanly to messages.db.
 
     Returns ``(success, inserted)`` — ``inserted`` is new SQLite rows this fetch.
 
-    Default sync uses unreadOnly=true so lifeline only pulls new unread inbound messages.
-    markAsRead=true marks fetched particles viewed on VersaVoice (original lifeline
-    mailbox behaviour). Inserts are deduplicated by message_id. Deletes should go
+    ``since`` is the newest message already stored for this sub-account
+    (``inbox_since``). ``unreadOnly=false`` so a particle the server already
+    marked read, whose body never landed here, is still returned. ``markAsRead``
+    stays on. Inserts are deduplicated by message_id. Deletes should go
     through agictl message delete (cloud + local) so the sub-account particle is
     removed and will not be returned by the inbox API.
 
-    full_sync=True uses unreadOnly=false with a 2-hour window (manual catch-up only).
+    full_sync=True ignores the cursor and pulls from the beginning (manual catch-up).
     """
-    from datetime import datetime, timedelta, timezone
-    since = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    unread_only = "false" if full_sync else "true"
-
+    since = inbox_since(messages_db, sub_account_id, full_sync=full_sync)
     endpoint = (
         f"/messages/inbox?subAccountId={sub_account_id}"
-        f"&unreadOnly={unread_only}&markAsRead=true&since={since}"
+        f"&unreadOnly=false&markAsRead=true&since={since}"
     )
     response = api_request(endpoint, token)
     

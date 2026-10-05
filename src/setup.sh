@@ -4059,7 +4059,30 @@ migrate_legacy_infra_files() {
     sed -i '/^GEMINI_PASSTHROUGH_KEY=/d' "${new_env}" 2>/dev/null || true
   fi
   rm -f "/etc/versa-agi/inference_endpoint_config.yaml" 2>/dev/null || true
-  rm -f "/etc/versa-agi/litellm.env" 2>/dev/null || true
+  retire_litellm_proxy
+}
+
+# Cloud models call providers directly (TD-INF-025). The old proxy unit is not
+# installed anymore; an existing host can still have it enabled and crash-looping
+# after the binary was removed. Stop it and delete the unit, env, config, and tree.
+retire_litellm_proxy() {
+  local removed=false
+  if [ -f /etc/systemd/system/versa-agi-litellm.service ] || systemctl is-enabled versa-agi-litellm.service >/dev/null 2>&1; then
+    systemctl stop versa-agi-litellm.service 2>/dev/null || true
+    systemctl disable versa-agi-litellm.service 2>/dev/null || true
+    rm -f /etc/systemd/system/versa-agi-litellm.service
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed versa-agi-litellm.service 2>/dev/null || true
+    removed=true
+  fi
+  if [ -f /etc/versa-agi/litellm.env ] || [ -f /etc/versa-agi/litellm_config.yaml ] || [ -d /opt/versa-agi/litellm ]; then
+    rm -f /etc/versa-agi/litellm.env /etc/versa-agi/litellm_config.yaml
+    rm -rf /opt/versa-agi/litellm
+    removed=true
+  fi
+  if [ "${removed}" = true ]; then
+    ok "LiteLLM proxy removed (cloud models call providers directly)"
+  fi
 }
 
 # System Design §IX / 9.4 — lock shipped skills only; normalize the rest.
