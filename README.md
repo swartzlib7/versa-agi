@@ -13,13 +13,13 @@
   <p>
     <a href="https://versavoice.ai/versa-agi"><strong>Portal</strong></a> ·
     <a href="https://versavoice.ai"><strong>Ecosystem</strong></a> ·
-    <a href="docs/manual/versa-agi-manual.md"><strong>Manual</strong></a> ·
+    <a href="https://versavoice.ai/manual/versa-agi.html"><strong>Manual</strong></a> ·
     <a href="docs/Contributing%20to%20Versa%20AGi.md"><strong>Contributing</strong></a> ·
     <a href="docs/Changelog.md"><strong>Changelog</strong></a>
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.4.19-FF9800" alt="Versa AGi version 3.4.19">
+    <img src="https://img.shields.io/badge/version-3.4.20-FF9800" alt="Versa AGi version 3.4.20">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -184,6 +184,8 @@ sudo versa-agi-uninstall --dry-run
 `--purge` is irreversible. Backup first: [backup-restore.md](docs/backup-restore.md).
 
 ## Operator guides
+
+New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa-agi.html)** ([PDF](https://versavoice.ai/manual/versa-agi.pdf) · [source](docs/manual/versa-agi-manual.md)). It covers install, agitop, agents, approvals, and everyday use in plain language.
 
 | Page | What it covers |
 |------|----------------|

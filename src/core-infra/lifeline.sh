@@ -1093,17 +1093,29 @@ ${AGENT_REGISTRY_CONTENT}
           "UPDATE tasks SET status='frozen', pre_freeze_status='${TASK_STATUS}', updated_at=datetime('now') WHERE id=${TASK_ID};" 2>/dev/null || true
         log "AUTOFREEZE: Task #${TASK_ID} '${TASK_TITLE}' (${TASK_STATUS}) — spawn_attempts exhausted (${MAX_SPAWN_ATTEMPTS}/${MAX_SPAWN_ATTEMPTS})"
 
+        if [ "${TASK_STATUS}" = "waiting" ]; then
+          FREEZE_REASON="kept waking without snoozing or resolving"
+          RESTORE_STATUS="waiting"
+        else
+          FREEZE_REASON="was unable to complete"
+          RESTORE_STATUS="planned"
+        fi
+        # The assignee learns on their next wake. An unprocessed internal row
+        # is what lets that wake happen while other tasks stay frozen.
+        AGENT_FREEZE_MSG="Lifeline auto-froze task #${TASK_ID} \"${TASK_TITLE}\".
+Reason: ${FREEZE_REASON} after ${MAX_SPAWN_ATTEMPTS} wakes without resolving or snoozing.
+It will not wake you until it is unfrozen. To resume: agictl task unfreeze ${TASK_ID}"
+        if AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_AGENTS_DB="${AGENTS_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
+          /usr/local/bin/agictl message internal "${AGENT_NAME}" "${AGENT_FREEZE_MSG}" --from-lifeline 2>/dev/null; then
+          log "NOTIFY: Auto-freeze notice sent to ${AGENT_NAME} for task #${TASK_ID}"
+        else
+          log "WARN: Failed to send auto-freeze notice to ${AGENT_NAME} for task #${TASK_ID}"
+        fi
+
         # Send professional notification to Primary User via VersaVoice
         if [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${API_TOKEN}" ]; then
           SPONSOR_UID=$(jq -r '.primary_user.uid // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
           if [ -n "${SPONSOR_UID}" ]; then
-            if [ "${TASK_STATUS}" = "waiting" ]; then
-              FREEZE_REASON="kept waking without snoozing or resolving"
-              RESTORE_STATUS="waiting"
-            else
-              FREEZE_REASON="was unable to complete"
-              RESTORE_STATUS="planned"
-            fi
             FREEZE_MSG="⚠️ Task auto-frozen
 
 Agent: ${AGENT_NAME}

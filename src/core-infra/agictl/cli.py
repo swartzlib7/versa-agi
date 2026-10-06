@@ -9768,7 +9768,9 @@ def message_send(contact_uid, text, mode, media_paths, markdown_paths, urls):
 @click.argument("recipient_agent")
 @click.argument("text")
 @click.option("--from-pu", is_flag=True, default=False, help="Explicitly mark sender as the Primary User (used by agitop)")
-def message_internal(recipient_agent, text, from_pu):
+@click.option("--from-lifeline", is_flag=True, default=False, hidden=True,
+              help="Inbox notice from Lifeline. No outbox copy.")
+def message_internal(recipient_agent, text, from_pu, from_lifeline):
     """Send an internal message to another agent (direct SQLite, no VV API).
 
     Sub-agents use this to communicate with the COA and vice versa.
@@ -9793,20 +9795,27 @@ def message_internal(recipient_agent, text, from_pu):
             sys.exit(1)
         agents_conn.close()
 
-        # Explicit PU identity when called from the dashboard
-        if from_pu:
+        # Explicit PU identity when called from the dashboard.
+        # --from-lifeline is a system notice: inbox only, sender Lifeline.
+        if from_pu and from_lifeline:
+            conn.close()
+            json_response(False, error="--from-pu and --from-lifeline cannot be combined")
+            sys.exit(1)
+        if from_lifeline:
+            sender = "lifeline"
+            display_name = "Lifeline"
+        elif from_pu:
             config = get_config()
             pu = config.get("primary_user", {})
             sender = pu.get("uid", "primary_user")
             display_name = pu.get("display_name", "Primary User")
 
         # Insert sender record (outbox view) — only for agent-to-agent.
-        # When --from-pu, skip the outbox record: the PU sees everything via the
-        # dashboard, and inserting it causes the agent to see the same message
-        # twice in conversation history (once as 'sent'/YOU, once as 'received'/THEM).
+        # When --from-pu or --from-lifeline, skip the outbox record so the
+        # notice is not also stored as something the agent sent.
         import uuid
         msg_id = f"int_{uuid.uuid4().hex[:16]}"
-        if not from_pu:
+        if not from_pu and not from_lifeline:
             conn.execute(
                 "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
                 "message_id, text, mode, status, channel) "
