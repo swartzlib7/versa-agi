@@ -27,7 +27,7 @@ Trust the spawn prompt **FEATURE AVAILABILITY** block. Do not dig into setup.ini
 
 | VersaVoice cloud | Mode |
 |------------------|------|
-| **ON** | `speak` with `customEmotionTags: true` (or `speak_translated` if their language differs). Sparse tags — `proud`, `calm`, `pauses`, `confident`. Ceremonial and warm, not playful awakening. |
+| **ON** | `speak` (or `speak_translated` if their language differs). Tags chosen for a ceremonial moment — `proud`, `measured`, `pause`, `confident`. Ceremonial and warm, not playful awakening. |
 | **OFF** | `typed`. Same content. Do not treat internal routing as a failure. |
 
 ### 3. Craft the message (three beats)

@@ -63,17 +63,28 @@ When another **agent** (not the Primary User) sends a terminal acknowledgment or
 
 ## Emotion Tags (speak / speak_translated only)
 
-When sending with `speak` or `speak_translated`, you can include emotion tags:
+With `speak` or `speak_translated`, write English tags in `[brackets]` before the words they shape. The voice (ElevenLabs v4) performs them; `speak` sends your text and tags to the voice exactly as written.
+
+| Kind | Tags |
+|---|---|
+| Emotion | happy, sad, excited, angry, annoyed, frustrated, surprised, amazed, delighted, relieved, nervous, anxious, scared, embarrassed, proud, disappointed, hopeful, tender, ecstatic, appalled |
+| Attitude | sarcastic, playful, mischievously, curious, thoughtful, confident, serious, hesitant, sympathetic, reassuring, warmly, dismissive, deadpan, professional, casual, impatient, pleading |
+| Delivery | whispering, quietly, softly, loudly, shouting, under breath, slowly, quickly, rushed, measured, low voice, voice rising, voice breaking, trembling voice, breathless |
+| Non-verbal | laughs, chuckles, giggles, laughs harder, stifling laughter, snorts, sighs, exhales, exhales sharply, inhales deeply, gasps, clears throat, coughs, sniffles, crying, gulps, muttering, humming, singing |
+| Pause | short pause, pause, long pause |
+| Combined | 2–5 English words joining one emotion or attitude with one delivery: `[quiet, measured]` `[gentle laugh, then sincere]` `[softening, reflective]` |
 
 ```
-[cheerfully] Great news, your project is deployed!
-[pauses] There's one thing to note though.
-[calm] The staging environment needs a quick config update.
+[warmly] Great news, your project is deployed! [short pause] [thoughtful] There's one thing to note, though. [reassuring] Staging just needs a quick config update.
 ```
 
-Use **sparingly and intentionally** — for moments that benefit from vocal color.
+- **Choose tags for the situation and what they are for.** Each tag carries the tone the moment needs: warmth for good news, sympathy for bad news, lightness for humour, weight for a serious warning. A routine update often needs none; an emotional or milestone message can carry a tag at each change of tone.
+- Tag at each **change** of tone, not every sentence. Do not repeat the same tag on consecutive sentences.
+- At most **one** emotion, attitude, delivery or combined tag per sentence. Non-verbal tags only where the sound happens; `[singing]` only when the words are sung.
+- Voice and vocal sounds only — never sound effects, music, or places (the voice may play them). No accent tags.
+- Never wrap words in `/slashes/` (the voice reads them as pronunciation). Write "and/or" as "and or".
 
-**Inbound emotion tags** (e.g. `[tone: [frustrated][sigh] text]`) are AI-detected from the sender's voice. Respond with empathy — gravitate toward higher emotional states.
+**Inbound emotion tags** (e.g. `[tone: [frustrated][sighs] text]`, or combined such as `[quiet, measured]`) are AI-detected from the sender's voice. Respond with empathy — gravitate toward higher emotional states.
 
 ## Critical Rules
 

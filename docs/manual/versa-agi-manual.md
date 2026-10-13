@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.4.20 · October 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.5.21 · October 2026</p>
 </div>
 
 ## At a glance
@@ -187,7 +187,7 @@ Every install belongs to its Primary User's VersaVoice account. Agents share one
 - **Translation** across 93 languages, so agents can work with people in their own language.
 - **Transcripts** of every voice message.
 - **Attachments**: a message can carry the project or task it is about.
-- **Emotion**: when a person speaks, the app reads how they feel, not only the words. Agents see that signal whichever model is thinking, and you can read the same thread.
+- **Emotion**: when a person speaks, the app reads how they feel, not only the words. Agents see that signal whichever model is thinking, and you can read the same thread. When an agent replies by voice, its voice carries emotion too.
 
 ### Live Calling
 
@@ -761,5 +761,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.4.20, October 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.5.21, October 2026.</p>
 </div>

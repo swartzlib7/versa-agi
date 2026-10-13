@@ -19,7 +19,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.4.20-FF9800" alt="Versa AGi version 3.4.20">
+    <img src="https://img.shields.io/badge/version-3.5.21-FF9800" alt="Versa AGi version 3.5.21">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -80,7 +80,7 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 | 💬 | **Human communication** | Over the VersaVoice AI REST API. Every exchange has an audit trail. A VersaVoice account and API token are required to install. |
 | 📞 | **Live voice calls** | Your COA can call you in the VersaVoice app when talking is faster than chat. OpenAI GPT-Live is the voice; your agent's full tools and judgment answer behind it. Transcript and summary stay on your machine. Optional. |
 | 🤝 | **Agent–human collaboration** | A two-player game of life. The human stays sovereign; the agent is a relentless partner. |
-| ❤️ | **Native emotional intelligence** | VersaVoice emotion detection is on the communication layer — independent of which model powers the agent. |
+| ❤️ | **Native emotional intelligence** | VersaVoice emotion detection is on the communication layer — independent of which model powers the agent. Agent voice replies carry emotion too. |
 | 🌍 | **Cross-cultural sync** | Localized translation in the VersaVoice ecosystem. |
 | ⚡ | **Compute-zero** | No work → no spawn → no API cost. |
 | ⏱️ | **Deterministic script tasks** | Shared `.sh` tools from **AGi-Tools** on a schedule — no LLM, zero tokens. |
@@ -226,6 +226,7 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 > | **Edition 2** | **LangGraph Agent Harness.** Direct LangChain integrations (Google, Ollama, SYCL, xAI, OpenAI, Anthropic, OpenRouter). |
 > | **2026.08** | Vendor-agnostic catalog layers and first-login COA assign. See [Models](docs/models.md). |
 > | **2026.09** | **Live voice calls** — COA calls you in the VersaVoice app over OpenAI GPT-Live, with the harness answering every request. |
+> | **2026.10** | **ElevenLabs Eleven v4** — agent voice replies and VersaVoice Neural Voice move to Eleven v4 (Enhanced) and v4 Turbo (Standard): richer emotional delivery, Standard voice in 78 of the 93 languages. |
 
 ## Privacy & Terms of Service
 

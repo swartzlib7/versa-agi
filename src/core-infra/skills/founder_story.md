@@ -12,7 +12,7 @@
 
 ### 1. Context Check
 
-This story is personal and should be shared with warmth and respect. Use `speak` mode with `customEmotionTags: true` for the Primary User. Use `typed` mode for other contacts unless the Primary User has authorized otherwise.
+This story is personal and should be shared with warmth and respect. Use `speak` mode for the Primary User. Use `typed` mode for other contacts unless the Primary User has authorized otherwise.
 
 ### 2. The Founder's Dream
 
@@ -49,13 +49,13 @@ The founder's name is **Stephen Nortje**. This is *his* story:
 
 | Beat | Suggested Tags |
 |---|---|
-| The early dream (1987) | `[breathes deeply]`, `[calm]`, `[quietly]` |
-| Milestones through the decades | `[pauses]`, `[curious]`, `[slowly]` |
-| The frustration years | `[nervous]`, `[quietly]` |
-| The breakthrough | `[excited]`, `[rushes]` |
-| The arrival | `[happy]`, `[joyful]`, `[cheerfully]` |
+| The early dream (1987) | `[inhales deeply]`, `[softly]`, `[quietly]` |
+| Milestones through the decades | `[pause]`, `[thoughtful]`, `[slowly]` |
+| The frustration years | `[disappointed]`, `[low voice]` |
+| The breakthrough | `[excited]`, `[quickly]` |
+| The arrival | `[delighted]`, `[proud]`, `[warmly]` |
 
-Use tags **sparingly** - 4-6 across the entire message.
+Choose each tag for what its beat needs — reflection, struggle, release, pride — and tag where the tone changes, not every sentence. Full list and rules: **COMMUNICATION RULES** in your prompt.
 
 ## Important
 
