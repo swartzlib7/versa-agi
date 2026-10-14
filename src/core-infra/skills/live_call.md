@@ -76,7 +76,7 @@
 
 The `LIVE CALL ENDED` message lists the follow-through:
 
-1. Chat summary.
+1. Chat summary to the person who was on the call. That is the Primary User, or, when you called a connection, that person only.
 2. A task for anything agreed but not done.
 3. Memory for decisions and preferences.
 4. Agent status update.

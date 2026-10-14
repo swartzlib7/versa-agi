@@ -580,7 +580,7 @@ SUMMARY_MAX_CHARS = 600
 
 def call_ended_message(close_reason: str, voice_seconds: int | None, segments: list[dict],
                        language: CallLanguage = ENGLISH, pending_follow_up: str = "",
-                       unheard: str = "") -> str:
+                       unheard: str = "", callee_name: str = "", recipient_id: str = "") -> str:
     minutes = f"{(voice_seconds or 0) / 60:.1f} min" if voice_seconds else "unknown length"
     promised = (
         f"You promised this follow-up on the call and it did not run: {pending_follow_up}. "
@@ -592,13 +592,27 @@ def call_ended_message(close_reason: str, voice_seconds: int | None, segments: l
             f"This result was ready after the call closed, so they did not hear it: {unheard} "
             "Include it in your chat summary.\n\n"
         )
+    who = (callee_name or "").strip()
+    uid = (recipient_id or "").strip()
+    if uid:
+        person = who or "the person you called"
+        summary_step = (
+            f"1. Send {person} a short chat summary with agictl_message "
+            f"(`message send {uid} \"...\" --mode typed`): what was discussed, "
+            "what you did, and what comes next. Send it only to them. "
+        )
+    else:
+        summary_step = (
+            "1. Send the Primary User a short chat summary with agictl_message: what was discussed, "
+            "what you did, and what comes next. "
+        )
     return (
         f"📞 LIVE CALL ENDED ({close_reason}, {minutes}, spoken in {language.name}).\n\n"
         f"Full transcript:\n{format_segments(segments, agent_label='You')}\n\n"
         f"{promised}"
         "Follow through now:\n"
-        "1. Send the Primary User a short chat summary with agictl_message: what was discussed, "
-        "what you did, and what comes next. If the details are long, write them to a markdown "
+        f"{summary_step}"
+        "If the details are long, write them to a markdown "
         "file in your workspace and attach it (`--markdown <path>`); the message itself still "
         "carries the short summary and points them to the attachment.\n"
         "2. Create a task (due date + owner) for anything agreed on the call that is not done yet.\n"
@@ -1009,6 +1023,7 @@ class LiveCallRuntime:
         self.calling_connection = False
         self.callee_name = ""
         self.callee_language = ""
+        self.recipient_id = ""
         self.session: LiveSession | None = None
         self.ended_injected = False
         self.finalized = False
@@ -1065,6 +1080,7 @@ class LiveCallRuntime:
         self.settings = settings
         self.reason = reason.strip()
         self.calling_connection = bool(recipient_id.strip())
+        self.recipient_id = recipient_id.strip()
         self.callee_name = ""
         open_args = ["open", "--reason", self.reason]
         if self.calling_connection:
@@ -1432,7 +1448,8 @@ class LiveCallRuntime:
         self.handed = self.delivery = None
         self.end_after_follow_up = False
         return call_ended_message(reason, seconds, segments, self.language,
-                                  pending_follow_up="; ".join(work), unheard=unheard)
+                                  pending_follow_up="; ".join(work), unheard=unheard,
+                                  callee_name=self.callee_name, recipient_id=self.recipient_id)
 
     def capture_summary(self, last_ai_text: Any) -> None:
         """Save COA's reply to the call-ended message as the call's last-call note (G16)."""

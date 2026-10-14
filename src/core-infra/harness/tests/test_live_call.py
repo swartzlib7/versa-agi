@@ -968,6 +968,34 @@ class TestDeliveryCheck(unittest.TestCase):
         self.assertNotIn("did not hear it", ended)
 
 
+class TestCallSummaryRecipient(unittest.TestCase):
+    def test_primary_user_call_summarizes_to_them(self):
+        text = lc.call_ended_message("remote_hangup", 60, [])
+        self.assertIn("Send the Primary User a short chat summary", text)
+        self.assertNotIn("only to them", text)
+
+    def test_connection_call_summarizes_only_to_the_callee(self):
+        text = lc.call_ended_message(
+            "remote_hangup", 60, [], callee_name="Sam", recipient_id="uid-sam",
+        )
+        self.assertIn("Send Sam a short chat summary", text)
+        self.assertIn('message send uid-sam', text)
+        self.assertIn("only to them", text)
+        self.assertNotIn("Send the Primary User", text)
+
+    def test_ended_injection_uses_the_stored_recipient(self):
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock, **_fake_time())
+        rt.place("x", SETTINGS)
+        rt.recipient_id = "uid-sam"
+        rt.callee_name = "Sam"
+        sock.push({"type": "session.closed", "reason": "remote_hangup"})
+        time.sleep(0.2)
+        ended = rt.next_injection("")
+        self.assertIn("message send uid-sam", ended)
+        self.assertNotIn("Send the Primary User", ended)
+
+
 class TestSanitize(unittest.TestCase):
     def test_text_only_copies(self):
         human = HumanMessage(content=[{"type": "text", "text": "look"}, {"type": "image_url", "image_url": "data:..."}])
