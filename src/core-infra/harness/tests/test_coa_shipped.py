@@ -33,6 +33,7 @@ class CoaShippedMap(unittest.TestCase):
             keys_for_provider("openrouter", STOCK),
             [
                 "x-ai/grok-4.6",
+                "x-ai/grok-4.7",
                 "google/gemini-3.7-flash",
                 "openai/gpt-5.6-terra",
                 "anthropic/claude-opus-4.8",
@@ -44,10 +45,13 @@ class CoaShippedMap(unittest.TestCase):
         )
 
     def test_grok_dual_provider(self):
-        self.assertEqual(keys_for_provider("xai", STOCK), ["grok-4.6"])
+        self.assertEqual(keys_for_provider("xai", STOCK), ["grok-4.6", "grok-4.7"])
         self.assertIn("x-ai/grok-4.6", keys_for_provider("openrouter", STOCK))
+        self.assertIn("x-ai/grok-4.7", keys_for_provider("openrouter", STOCK))
         self.assertIn("grok-4.6", all_keys(STOCK))
+        self.assertIn("grok-4.7", all_keys(STOCK))
         self.assertIn("x-ai/grok-4.6", all_keys(STOCK))
+        self.assertIn("x-ai/grok-4.7", all_keys(STOCK))
 
     def test_pairs_label_order(self):
         labels = [label for _, label in recommended_pairs("openrouter", STOCK)]
@@ -55,6 +59,7 @@ class CoaShippedMap(unittest.TestCase):
             labels,
             [
                 "Grok 4.6",
+                "Grok 4.7",
                 "Gemini 3.7 Flash",
                 "GPT-5.6 Terra",
                 "Opus 4.8",
@@ -71,6 +76,7 @@ class CoaShippedMap(unittest.TestCase):
             [oid for oid, _, _ in offerings],
             [
                 "grok-4.6",
+                "grok-4.7",
                 "gemini-3.7-flash",
                 "gpt-5.6-terra",
                 "claude-opus-4-8",
@@ -138,6 +144,7 @@ class StockLayerParity(unittest.TestCase):
         expected = {
             "gemini-3.7-flash": 1_048_576,
             "grok-4.6": 500_000,
+            "grok-4.7": 500_000,
             "gpt-5.6-terra": 1_050_000,
             "gpt-5.6-sol": 1_050_000,
             "gpt-5.6-luna": 1_050_000,
@@ -157,6 +164,7 @@ class StockLayerParity(unittest.TestCase):
         expected = {
             "gemini-3.7-flash": ("medium", ["low", "medium", "high"]),
             "grok-4.6": ("high", ["low", "medium", "high", "xhigh"]),
+            "grok-4.7": ("high", ["low", "medium", "high", "xhigh"]),
             "gpt-5.6-terra": (
                 "none", ["none", "low", "medium", "high", "xhigh", "max"]
             ),

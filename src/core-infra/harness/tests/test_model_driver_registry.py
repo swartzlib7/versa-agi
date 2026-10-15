@@ -7,6 +7,7 @@ Run from core-infra::
 
 from __future__ import annotations
 
+import configparser
 import os
 import sys
 import tempfile
@@ -24,6 +25,7 @@ from model_catalog import (  # noqa: E402
     load_catalog,
     load_providers,
     model_output_includes,
+    parse_catalog_row,
     parse_input_modalities,
 )
 from model_drivers import registry as reg  # noqa: E402
@@ -54,10 +56,14 @@ EXPECTED_INPUT_BINDINGS = {
     "google/gemini-3.7-flash": "openrouter",
     # DR-CM-08
     "grok-4.5": "xai",
+    "grok-4.6": "xai",
+    "grok-4.7": "xai",
     # DR-CM-07
     "openai/gpt-5.6-luna": "openrouter",
     # DR-CM-11
     "x-ai/grok-4.5": "openrouter",
+    "x-ai/grok-4.6": "openrouter",
+    "x-ai/grok-4.7": "openrouter",
     # DR-CM-12
     "z-ai/glm-5.3-flash": "openrouter",
     # DR-LOC-01
@@ -144,6 +150,19 @@ class RegistryTestCase(unittest.TestCase):
         # None uses model_catalog.resolve_models_ini_path() → /etc/versa-agi.
         cls.catalog = load_catalog(MODELS_INI)
         cls.providers = load_providers(MODELS_INI)
+        # Grok 4.6/4.7 live in models.ini.stock. The resolver fixture catalog
+        # is models.ini, which still carries older keys such as grok-4.5.
+        stock = os.path.join(os.path.dirname(REPOSITORY_MODELS_INI), "models.ini.stock")
+        if os.path.isfile(stock):
+            cfg = configparser.ConfigParser(delimiters=("=",), strict=False)
+            cfg.optionxform = str
+            cfg.read(stock)
+            for key in ("grok-4.6", "x-ai/grok-4.6", "grok-4.7", "x-ai/grok-4.7"):
+                if key in cls.catalog or not cfg.has_option("catalog_library", key):
+                    continue
+                parsed = parse_catalog_row(cfg.get("catalog_library", key))
+                if parsed:
+                    cls.catalog[key] = parsed
 
     def resolve(self, catalog_key: str, direction: str, modality: str):
         return reg.resolve_model_driver(

@@ -165,12 +165,16 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
         modality="video",
         adapter_id=chat_video_in_google_media.ADAPTER_ID,
     ),
-    # DR-CM-08 — direct xAI image input (Grok 4.5 only).
+    # DR-CM-08 — direct xAI image input (Grok 4.5, 4.6, 4.7).
     _binding("grok-4.5"),
+    _binding("grok-4.6"),
+    _binding("grok-4.7"),
     # DR-CM-07 — promoted OpenRouter image input used by active agents.
     _binding("openai/gpt-5.6-luna"),
-    # DR-CM-11 — OpenRouter Grok 4.5 image input.
+    # DR-CM-11 — OpenRouter Grok image input (4.5, 4.6, 4.7).
     _binding("x-ai/grok-4.5"),
+    _binding("x-ai/grok-4.6"),
+    _binding("x-ai/grok-4.7"),
     # DR-CM-12 — OpenRouter GLM 5.3 Flash image + video input.
     _binding("z-ai/glm-5.3-flash"),
     _binding(

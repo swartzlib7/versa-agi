@@ -26,8 +26,8 @@ STOCK = os.path.abspath(STOCK)
 
 
 class RecommendedMap(unittest.TestCase):
-    def test_xai_is_grok_46_only(self):
-        self.assertEqual(cb.recommended_keys("xai", STOCK), ["grok-4.6"])
+    def test_xai_is_grok_46_and_47(self):
+        self.assertEqual(cb.recommended_keys("xai", STOCK), ["grok-4.6", "grok-4.7"])
 
     def test_anthropic_is_opus_48(self):
         self.assertEqual(cb.recommended_keys("anthropic", STOCK), ["claude-opus-4-8"])
@@ -37,6 +37,7 @@ class RecommendedMap(unittest.TestCase):
             cb.recommended_keys("openrouter", STOCK),
             [
                 "x-ai/grok-4.6",
+                "x-ai/grok-4.7",
                 "google/gemini-3.7-flash",
                 "openai/gpt-5.6-terra",
                 "anthropic/claude-opus-4.8",

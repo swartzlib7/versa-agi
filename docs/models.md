@@ -31,7 +31,7 @@ Remote class is **`cloud`**. Google is an ordinary provider. Extra / utility rem
 - Neither Import path writes generic `[model_params_custom]`.
 - **COA eligibility** is the live catalog `coa` flag only.
 
-Current shipped offerings (picker order): Grok 4.6, Gemini 3.7 Flash, GPT-5.6 Terra, Opus 4.8, GPT-5.6 Sol, GLM 5.3 Flash, DeepSeek V4Flash0731, GPT-5.6 Luna. Dual-provider offerings import both keys when both providers are enabled.
+Current shipped offerings (picker order): Grok 4.6, Grok 4.7, Gemini 3.7 Flash, GPT-5.6 Terra, Opus 4.8, GPT-5.6 Sol, GLM 5.3 Flash, DeepSeek V4Flash0731, GPT-5.6 Luna. Dual-provider offerings import both keys when both providers are enabled. Grok 4.6 and Grok 4.7 default to high reasoning (`low` / `medium` / `high` / `xhigh`) and image ingest is ◆ on both native xAI and OpenRouter keys.
 
 **GLM 5.3 Flash** (`z-ai/glm-5.3-flash`, OpenRouter) is native multimodal: image and video ingest (◆). Reasoning cannot be turned off — stock default is `max` (`low` / `high` / `max`). Use `agictl_view_image` / `agictl_view_video` (mp4, mkv, mov, 200 MB max).
 

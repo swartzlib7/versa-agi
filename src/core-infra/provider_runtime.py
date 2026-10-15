@@ -18,8 +18,9 @@ from model_catalog import (
 )
 
 OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://versavoice.ai",
-    "X-Title": "Versa AGi",
+    "HTTP-Referer": "https://versa-agi.com",
+    "X-OpenRouter-Title": "Versa AGi",
+    "X-OpenRouter-Categories": "personal-agent",
 }
 
 _PROVIDER_KEYS_ENV = "/etc/versa-agi/provider_keys.env"

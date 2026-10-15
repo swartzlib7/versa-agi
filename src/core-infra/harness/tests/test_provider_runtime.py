@@ -101,7 +101,11 @@ class TestExactProviderRoutes(unittest.TestCase):
             catalog={"plain": _catalog_row("openrouter")},
             providers=PROVIDERS,
         )
-        self.assertEqual(route.default_headers["X-Title"], "Versa AGi")
+        self.assertEqual(route.default_headers["X-OpenRouter-Title"], "Versa AGi")
+        self.assertEqual(route.default_headers["HTTP-Referer"], "https://versa-agi.com")
+        self.assertEqual(
+            route.default_headers["X-OpenRouter-Categories"], "personal-agent"
+        )
 
     def test_unknown_catalog_model_fails_cleanly(self):
         with self.assertRaises(ProviderRuntimeError) as raised:
@@ -316,7 +320,7 @@ class TestRuntimeKeysAndClients(unittest.TestCase):
         )
         self.assertEqual(client.kwargs["api_key"], "openrouter-key")
         self.assertEqual(client.kwargs["temperature"], 0.3)
-        self.assertEqual(client.kwargs["default_headers"]["X-Title"], "Versa AGi")
+        self.assertEqual(client.kwargs["default_headers"]["X-OpenRouter-Title"], "Versa AGi")
 
     def test_raw_openai_client_uses_provider_route(self):
         route = resolve_provider_route(

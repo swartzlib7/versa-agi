@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="https://versavoice.ai/versa-agi">
+  <a href="https://versa-agi.com">
     <img src="docs/brand/versa-agi/versa-agi-shield-helix_v1-512.png" alt="Versa AGi Shield" width="512"><br>
   </a>
   <br>
@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.5.21-FF9800" alt="Versa AGi version 3.5.21">
+    <img src="https://img.shields.io/badge/version-3.5.22-FF9800" alt="Versa AGi version 3.5.22">
     <!-- /VERSION -->
   </p>
   <p align="center">

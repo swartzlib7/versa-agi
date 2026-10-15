@@ -20,7 +20,7 @@ INFERENCE_ENV="/etc/versa-agi/provider_keys.env"
 _openrouter_write_attribution_env() {
   local env_file="$1"
   for kv in \
-    "OR_SITE_URL=https://versavoice.ai" \
+    "OR_SITE_URL=https://versa-agi.com" \
     "OR_APP_NAME=Versa AGi"; do
     local key="${kv%%=*}"
     local val="${kv#*=}"

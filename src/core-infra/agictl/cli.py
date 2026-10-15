@@ -913,7 +913,7 @@ def system_set_key(key_type, value):
             try:
                 with open(provider_keys_env, "w") as f:
                     f.write(f"{env_var}={value}\n")
-                    f.write("OR_SITE_URL=https://versavoice.ai\n")
+                    f.write("OR_SITE_URL=https://versa-agi.com\n")
                     f.write("OR_APP_NAME=Versa AGi\n")
                 _ensure_provider_keys_env_permissions(provider_keys_env)
                 updated_files.append(provider_keys_env)
@@ -922,7 +922,7 @@ def system_set_key(key_type, value):
 
         if os.path.isfile(provider_keys_env):
             for attr_kv in (
-                ("OR_SITE_URL", "https://versavoice.ai"),
+                ("OR_SITE_URL", "https://versa-agi.com"),
                 ("OR_APP_NAME", "Versa AGi"),
             ):
                 attr, attr_val = attr_kv
