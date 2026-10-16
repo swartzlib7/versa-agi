@@ -337,6 +337,24 @@ if [ -f "${SETUP_INI}" ]; then
   [ -n "${_fg_t}" ] && FLOOD_GUARD_TIMEOUT_HOURS="${_fg_t}"
 fi
 
+# ─── Lifeline tick + outage record ────────────────────
+# One tick per run. A previous tick older than the threshold is stored as a
+# gap; each agent's next wake block names it (state_spawn_context.md §1.13).
+OUTAGE_THRESHOLD_MINUTES="${VERSA_OUTAGE_THRESHOLD_MINUTES:-30}"
+if [ -f "${SETUP_INI}" ]; then
+  _ot=$(grep -Po '^\s*outage_threshold_minutes\s*=\s*\K[0-9]+' "${SETUP_INI}" 2>/dev/null || true)
+  [ -n "${_ot}" ] && OUTAGE_THRESHOLD_MINUTES="${_ot}"
+fi
+_tick_json=$(/usr/local/bin/agictl cycle tick --threshold-minutes "${OUTAGE_THRESHOLD_MINUTES}" 2>/dev/null || true)
+_tick_gap=$(printf '%s' "${_tick_json}" | jq -r 'if .gap then "\(.gap.start) to \(.gap.end) UTC" else empty end' 2>/dev/null || true)
+if [ -n "${_tick_gap}" ]; then
+  log "OUTAGE: Lifeline did not run from ${_tick_gap} (threshold ${OUTAGE_THRESHOLD_MINUTES}m) — agents are told on their next wake"
+fi
+
+# Pinned conclusions block (agictl AWARENESS_PIN_MAX is the same 10).
+AW_PIN_MAX=10
+AW_PIN_TRUNC=1200
+
 # ─── VV instance sync (Task 202) ─────────────────────
 # Once per tick. Inbox retrieval always syncs so package decisions land
 # before agents wake on new mail. --force and Sync to VV interval still
@@ -1582,19 +1600,15 @@ ${SUB_AGENT_TASKS}
   fi
 
   # ─── Operational Memory Injection ─────────────────────
-  # Query agent_memory_system for operational constraints, discoveries, and instructions
+  # This agent's system memory, standing-rule keys first, bounded
+  # (state_spawn_context.md §1.14).
   OPERATIONAL_MEMORY=""
   if [ -f "${TASKS_DB}" ]; then
-    SYS_MEM=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl memory system list 2>/dev/null || true)
-    if [ -n "${SYS_MEM}" ] && echo "${SYS_MEM}" | jq -e '.success' >/dev/null 2>&1; then
-      MEM_ITEMS=$(echo "${SYS_MEM}" | jq -r '.data[] | "  \(.key): \(.value)"' 2>/dev/null || true)
-      if [ -n "${MEM_ITEMS}" ]; then
-        OPERATIONAL_MEMORY="
-## ── OPERATIONAL MEMORY ──
-Your learned constraints, discoveries, and instructions — review before acting:
-${MEM_ITEMS}
+    SYS_MEM=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl memory system list --agent "${AGENT_NAME}" --prompt 2>/dev/null || true)
+    if [[ "${SYS_MEM}" == *"OPERATIONAL MEMORY"* ]]; then
+      OPERATIONAL_MEMORY="
+${SYS_MEM}
 "
-      fi
     fi
   fi
 
@@ -1632,13 +1646,15 @@ ${MEM_ITEMS}
       # orchestration visibility.
       AW_RECENT=5
       AW_TRUNC=300
-      AW_CONCLUSIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type conclusion --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      AW_PINNED=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --pinned --status active --type conclusion --agent "${AGENT_NAME}" --limit "${AW_PIN_MAX}" --truncate "${AW_PIN_TRUNC}" --dated 2>/dev/null || true)
+      [[ "${AW_PINNED}" != *"| ID |"* ]] && AW_PINNED=""
+      AW_CONCLUSIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --unpinned --status active,completed --type conclusion --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" --dated 2>/dev/null || true)
       [[ "${AW_CONCLUSIONS}" != *"| ID |"* ]] && AW_CONCLUSIONS=""
-      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --all --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --all --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" --dated 2>/dev/null || true)
       [[ "${AW_ACTIONS}" != *"| ID |"* ]] && AW_ACTIONS=""
 
       AWARENESS_TABLE=""
-      if [ -n "${AW_CONCLUSIONS}" ] || [ -n "${AW_ACTIONS}" ]; then
+      if [ -n "${AW_PINNED}" ] || [ -n "${AW_CONCLUSIONS}" ] || [ -n "${AW_ACTIONS}" ]; then
         AW_C_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='conclusion' AND status!='superseded';" 2>/dev/null || echo "?")
         AW_A_OPEN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE type='action' AND status='active';" 2>/dev/null || echo "?")
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
@@ -1647,10 +1663,17 @@ ${MEM_ITEMS}
           AW_WARN=" ⚠ YOUR active entries above the ~20 review guideline (${AW_OWN}) — consolidate duplicates and supersede dead entries; do not retire conclusions that are still true."
         fi
         AWARENESS_TABLE="YOUR ACTIVE AWARENESS — ${AW_C_OWN} current conclusions (yours) · ${AW_A_OPEN} open actions (team); showing most recent ${AW_RECENT} of each${AW_WARN}"
+        if [ -n "${AW_PINNED}" ]; then
+          AW_PIN_COUNT=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='conclusion' AND status='active' AND pinned=1;" 2>/dev/null || echo "?")
+          AWARENESS_TABLE="${AWARENESS_TABLE}
+
+PINNED CONCLUSIONS (${AW_PIN_COUNT} of ${AW_PIN_MAX} — standing rules, in force until you revise, supersede or unpin them):
+${AW_PINNED}"
+        fi
         if [ -n "${AW_CONCLUSIONS}" ]; then
           AWARENESS_TABLE="${AWARENESS_TABLE}
 
-Most recent ${AW_RECENT} conclusions (yours, superseded excluded):
+Most recent ${AW_RECENT} conclusions (yours, superseded and pinned excluded):
 ${AW_CONCLUSIONS}"
         fi
         if [ -n "${AW_ACTIONS}" ]; then
@@ -1703,13 +1726,15 @@ ${GAMES_BLOCK}
       # conclusions exclude superseded; actions include active + completed.
       AW_RECENT=5
       AW_TRUNC=300
-      AW_CONCLUSIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type conclusion --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      AW_PINNED=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --pinned --status active --type conclusion --agent "${AGENT_NAME}" --limit "${AW_PIN_MAX}" --truncate "${AW_PIN_TRUNC}" --dated 2>/dev/null || true)
+      [[ "${AW_PINNED}" != *"| ID |"* ]] && AW_PINNED=""
+      AW_CONCLUSIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --unpinned --status active,completed --type conclusion --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" --dated 2>/dev/null || true)
       [[ "${AW_CONCLUSIONS}" != *"| ID |"* ]] && AW_CONCLUSIONS=""
-      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" 2>/dev/null || true)
+      AW_ACTIONS=$(AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl awareness table --status active,completed --type action --agent "${AGENT_NAME}" --limit "${AW_RECENT}" --truncate "${AW_TRUNC}" --dated 2>/dev/null || true)
       [[ "${AW_ACTIONS}" != *"| ID |"* ]] && AW_ACTIONS=""
 
       AWARENESS_TABLE=""
-      if [ -n "${AW_CONCLUSIONS}" ] || [ -n "${AW_ACTIONS}" ]; then
+      if [ -n "${AW_PINNED}" ] || [ -n "${AW_CONCLUSIONS}" ] || [ -n "${AW_ACTIONS}" ]; then
         AW_C_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='conclusion' AND status!='superseded';" 2>/dev/null || echo "?")
         AW_A_OPEN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='action' AND status='active';" 2>/dev/null || echo "?")
         AW_OWN=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND status='active';" 2>/dev/null || echo "?")
@@ -1718,10 +1743,17 @@ ${GAMES_BLOCK}
           AW_WARN=" ⚠ active entries above the ~20 review guideline (${AW_OWN}) — consolidate duplicates and supersede dead entries; do not retire conclusions that are still true."
         fi
         AWARENESS_TABLE="YOUR ACTIVE AWARENESS — ${AW_C_OWN} current conclusions · ${AW_A_OPEN} open actions; showing most recent ${AW_RECENT} of each${AW_WARN}"
+        if [ -n "${AW_PINNED}" ]; then
+          AW_PIN_COUNT=$(sqlite3 "${TASKS_DB}" "SELECT COUNT(*) FROM agent_awareness WHERE agent_name='${AGENT_NAME}' AND type='conclusion' AND status='active' AND pinned=1;" 2>/dev/null || echo "?")
+          AWARENESS_TABLE="${AWARENESS_TABLE}
+
+PINNED CONCLUSIONS (${AW_PIN_COUNT} of ${AW_PIN_MAX} — standing rules, in force until you revise, supersede or unpin them):
+${AW_PINNED}"
+        fi
         if [ -n "${AW_CONCLUSIONS}" ]; then
           AWARENESS_TABLE="${AWARENESS_TABLE}
 
-Most recent ${AW_RECENT} conclusions (superseded excluded):
+Most recent ${AW_RECENT} conclusions (superseded and pinned excluded):
 ${AW_CONCLUSIONS}"
         fi
         if [ -n "${AW_ACTIONS}" ]; then
@@ -1886,7 +1918,7 @@ $(cat "${_fc_skill}")
       # Build anti-runaway block (local models only)
       ANTI_RUNAWAY=""
       if [ "${VERSA_GPU_BACKEND:-}" = "local" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
-        ANTI_RUNAWAY="CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When this session ends or the goal is accomplished, run \`agictl cycle end \"summary\"\` first, then finish with a short conversational message."
+        ANTI_RUNAWAY="CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When this session ends or the goal is accomplished, run \`agictl cycle end \"summary\" --handoff \"Open: … | Next: …\"\` first, then finish with a short conversational message."
       fi
 
       # Awareness block for template injection — AWARENESS_TABLE is prebuilt
@@ -2018,7 +2050,7 @@ ${CONVERSATION_CONTEXT}"
     if [ "${VERSA_GPU_BACKEND:-}" = "local" ] || [ "${VERSA_GPU_BACKEND:-}" = "remote" ]; then
       SYSTEM_PROMPT="${SYSTEM_PROMPT}
 
-CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When this session ends or the goal is accomplished, run \`agictl cycle end \"summary\"\` first, then finish with a short conversational message."
+CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the same tool call. When this session ends or the goal is accomplished, run \`agictl cycle end \"summary\" --handoff \"Open: … | Next: …\"\` first, then finish with a short conversational message."
     fi
   fi
 
@@ -2070,6 +2102,16 @@ Do not re-plan or re-do the session. Continue from recorded state."
 Current date and time: $(date '+%Y-%m-%dT%H:%M:%S%z').
 
 Wake reason: ${WAKE_REASON}."
+  # Last cycle, outages since, last handoff, carried awareness (§1.12–1.13).
+  # Rendered before cycle start so this spawn's own row is not the "last cycle".
+  if [ "${IDE_GENERATE}" != "true" ]; then
+    HANDOFF_CONTEXT=$(AGICTL_CYCLES_DB="${CYCLES_DB}" AGICTL_TASKS_DB="${TASKS_DB}" /usr/local/bin/agictl cycle handoff "${AGENT_NAME}" 2>/dev/null || true)
+    if [ -n "${HANDOFF_CONTEXT}" ]; then
+      WAKE_PROMPT="${WAKE_PROMPT}
+
+${HANDOFF_CONTEXT}"
+    fi
+  fi
   if [ -n "${IDE_RESUME_CONTEXT}" ]; then
     WAKE_PROMPT="${WAKE_PROMPT}
 
@@ -2088,7 +2130,7 @@ ${IDE_RESUME_CONTEXT}"
   # Auto-start cycle so agictl cycle end works — capture cycle_id for message stamping
   CURRENT_CYCLE_ID=""
   if [ "${IDE_GENERATE}" != "true" ]; then
-    CYCLE_START_JSON=$(sudo -u "${AGENT_USER}" bash -c "cd '${AGENT_PATH}' && AGICTL_CONFIG='${SYSTEM_CONFIG}' AGICTL_AGENTS_DB='${AGENTS_DB}' AGICTL_MESSAGES_DB='${MESSAGES_DB}' AGICTL_TASKS_DB='${TASKS_DB}' AGICTL_CYCLES_DB='${CYCLES_DB}' AGICTL_AGENT_DIR='${AGENT_PATH}/.agent' agictl cycle start" 2>/dev/null) || true
+    CYCLE_START_JSON=$(sudo -u "${AGENT_USER}" bash -c "cd '${AGENT_PATH}' && AGICTL_CONFIG='${SYSTEM_CONFIG}' AGICTL_AGENTS_DB='${AGENTS_DB}' AGICTL_MESSAGES_DB='${MESSAGES_DB}' AGICTL_TASKS_DB='${TASKS_DB}' AGICTL_CYCLES_DB='${CYCLES_DB}' AGICTL_AGENT_DIR='${AGENT_PATH}/.agent' agictl cycle start --wake-reason $(printf '%q' "${WAKE_REASON}")" 2>/dev/null) || true
     CURRENT_CYCLE_ID=$(echo "${CYCLE_START_JSON}" | jq -r '.cycle_id // empty' 2>/dev/null)
   fi
 

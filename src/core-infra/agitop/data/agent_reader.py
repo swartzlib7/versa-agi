@@ -319,27 +319,30 @@ class AgentReader:
         UTC). Consecutive identical summaries — the signature of a respawn
         loop — are collapsed into a single entry annotated with a repeat
         count, keeping the loop signal without wasting prompt tokens.
+        Each line names what woke that cycle: ``ts [woke: reason]: summary``.
         """
         # Over-fetch so duplicate collapsing can still yield `limit` entries
         rows = self._query_cycles(
-            "SELECT summary, ts FROM ("
-            "  SELECT COALESCE(summary, '(no summary)') AS summary, "
+            "SELECT summary, wake_reason, ts FROM ("
+            "  SELECT COALESCE(summary, '(no summary)') AS summary, wake_reason, "
             "         datetime(started_at, 'localtime') AS ts, started_at "
             "  FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT ?"
             ") ORDER BY started_at ASC",
             (f"{agent_name}-%", limit * 3)
         )
-        collapsed: list[list] = []  # [ts, summary, count]
+        collapsed: list[list] = []  # [ts, summary, reason, count]
         for r in rows:
-            if collapsed and collapsed[-1][1] == r["summary"]:
+            reason = r["wake_reason"] or ""
+            if collapsed and collapsed[-1][1] == r["summary"] and collapsed[-1][2] == reason:
                 collapsed[-1][0] = r["ts"]  # keep the most recent timestamp
-                collapsed[-1][2] += 1
+                collapsed[-1][3] += 1
             else:
-                collapsed.append([r["ts"], r["summary"], 1])
+                collapsed.append([r["ts"], r["summary"], reason, 1])
         collapsed = collapsed[-limit:]
         return [
-            f"{ts}: {summary}" + (f" (repeated ×{count})" if count > 1 else "")
-            for ts, summary, count in collapsed
+            f"{ts}" + (f" [woke: {reason}]" if reason else "") + f": {summary}"
+            + (f" (repeated ×{count})" if count > 1 else "")
+            for ts, summary, reason, count in collapsed
         ]
 
     def update_last_cycle_tokens(self, agent_name: str, t_in: int, t_out: int, t_think: int, t_total: int, exit_code: int = None, t_cached: int = 0, session_path: str = None) -> bool:

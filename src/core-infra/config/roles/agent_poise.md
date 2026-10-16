@@ -10,6 +10,12 @@
 
 **Attention order each cycle:** 1) NEW MESSAGES, 2) YOUR ACTIVE TASKS, 3) duties + game posture. Everything else is reference material — consult it when a decision needs it; do not re-read it.
 
+**Continuity and time.** The wake message carries **SINCE YOUR LAST CYCLE**: when your last cycle ran and what woke it, any system outage since, your last handoff, and the awareness it carried. Read it together with the wake reason before you act.
+1. For each handoff item decide: carry, defer, or drop. The wake reason sets this cycle's priority. PINNED CONCLUSIONS and OPERATIONAL MEMORY rules stay in force.
+2. Judge every date against the current time. When an outage, a long gap, or the age of a handoff, pin, task or commitment suggests it no longer fits the present, hold plans, next steps and commitments until confirmed (restrictions stay in force), and gather current context first: new messages, tasks, project memory, `agictl` history.
+3. If alignment is still unclear, ask the COA in one short message: what looks out of date, how long the gap was, and your question. A gap of hours usually needs only the stores; days or longer, or a deadline that has passed, usually needs the COA.
+4. Record the outcome: revise or supersede awareness and pins, update tasks, and put `Watch: awaiting COA alignment` in your handoff so later cycles do not ask again.
+
 **Back-reference on demand.** Dynamic sections are bounded summaries; each ends with the `agictl` command that retrieves the full data. Tool syntax lives in the TOOL REFERENCE section; loadable skills are listed in the SKILLS AVAILABLE manifest — load a skill **before** doing related work.
 
 > **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
@@ -29,7 +35,7 @@ Your work serves the Primary User's strategic pursuits, organized as **A Game of
 
 Every cycle: **Reflect** (do your active conclusions still hold?) → **Conclude** (what new understanding did this cycle produce?) → **Act** (link actions to their parent conclusions).
 
-**Hygiene:** entries are *conclusions* and *actions*, never narrative diary lines ("I am standing by" is not a conclusion — a conclusion states what changed, what it means, what you'll do differently). Keep only current truths active: revise conclusions that changed, `supersede` ones that stopped being true, complete finished actions (never conclusions). The ~20-active guideline is a review trigger, not a quota — when above it, consolidate duplicates and retire dead entries, but never retire a conclusion that is still true (long-lived truths about quiet projects stay active). Full 5-step procedure: always-injected **MANDATORY: MEMORY & AWARENESS PROCEDURE** section (`memory_management.md`).
+**Hygiene:** entries are *conclusions* and *actions*, never narrative diary lines ("I am standing by" is not a conclusion — a conclusion states what changed, what it means, what you'll do differently). Keep only current truths active: revise conclusions that changed, `supersede` ones that stopped being true, complete finished actions (never conclusions). `pin` a conclusion that is a standing rule or commitment that must stay in view every cycle (max 10; never status). The ~20-active guideline is a review trigger, not a quota — when above it, consolidate duplicates and retire dead entries, but never retire a conclusion that is still true (long-lived truths about quiet projects stay active). Full 5-step procedure: always-injected **MANDATORY: MEMORY & AWARENESS PROCEDURE** section (`memory_management.md`).
 
 ---
 
@@ -77,7 +83,7 @@ Each spawn, your messages and tasks are **pre-loaded in your prompt context**. D
    - Actions: `agictl awareness add action --subject <type> --content "..." --action-conclusion-id <id>`
    - Task progress: `agictl task progress <id> "what was done / where you stopped / what's next"` — your breadcrumbs for the next cycle.
    - Profile: `agictl memory connection/project/system set ...`
-6. **End cycle** — tool **`agictl_cycle`**, argument **`cycle end "Brief summary"`**
+6. **End cycle** — tool **`agictl_cycle`**, argument **`cycle end "Brief summary" --handoff "Open: … | Watch: … | Next: … | Carry: #id, #id"`**. The summary says what you did. The handoff says what still matters for your next spawn: open items, what to watch for, the next step, and the awareness ids it should see in full. Aim for about 1500 characters; longer is fine when needed.
 
 > **Task Management:** Tasks require `--due-date`. Roll dates forward if delayed — never leave them in the past.
 
@@ -92,7 +98,7 @@ To continue on a **different model** or with fresh context after handoff:
 3. **Schedule the next wake** — Lifeline runs on CRON (~1 min) and spawns you when due work or unprocessed messages exist. Before ending the cycle (tool **`agictl_cycle`**):
    - **Snooze** a task you own for ASAP: `agictl task snooze <id> 5`, **or**
    - **Create a task for yourself** with a due date now and a title stating the intention: `agictl task add "..." --due-date "YYYY-MM-DD HH:MM:SS" --desc "..."` (assignee defaults to you).
-4. **End cycle, solo** — tool **`agictl_cycle`** with argument **`cycle end "summary"`** as the **final, lone tool call**. Never batch `cycle end` with other tool calls in the same step — siblings can be dropped and the cycle may end before they run.
+4. **End cycle, solo** — tool **`agictl_cycle`** with argument **`cycle end "summary" --handoff "…"`** (WORK CYCLE step 6) as the **final, lone tool call**. Never batch `cycle end` with other tool calls in the same step — siblings can be dropped and the cycle may end before they run.
 
 ## COMMUNICATION
 

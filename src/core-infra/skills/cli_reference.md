@@ -308,8 +308,9 @@ agictl message sync-outbox <agent_uid> [file]              # Bulk-import outbox 
 ## 5. cycle — Telemetry Lifecycle
 
 ```bash
-agictl cycle start [--agent NAME]                     # INSERT cycle row, returns JSON {cycle_id}
-agictl cycle end "Summary" [--agent NAME]             # Mark end + kill execution (SIGTERM parent)
+agictl cycle start [--agent NAME] [--wake-reason TEXT]  # INSERT cycle row, returns JSON {cycle_id} (Lifeline)
+agictl cycle end "Summary" --handoff TEXT [--agent NAME]  # Mark end + stop; handoff appears in your next wake block
+                                                         # Without --handoff the cycle stays open; --no-handoff confirms ending without one
 agictl cycle tokens <agent> <in> <out> <think> <total> [--exit-code N]  # Log token metrics + exit code
 agictl cycle recent <agent>                           # Chronological summaries for context
 agictl cycle frames list [--agent] [--thread] [--status]  # Compaction frames (own agent; COA may name another)
@@ -378,6 +379,7 @@ agictl memory project list [--agent NAME]                            # All proje
 agictl memory system get [key] [--agent NAME]                        # Read all or one system memory entry
 agictl memory system set <key> <value> [--agent NAME]                # Write/update (UPSERT)
 agictl memory system list [--agent NAME]                             # All system memory entries
+agictl memory system list --agent NAME --prompt                      # The bounded OPERATIONAL MEMORY block a spawn sees
 ```
 
 **`--agent NAME`** (COA / PU only): operate on another agent's connection/project rows, or scope system get/list/set/delete/rename to that agent. Default is the caller. Sub-agents may only target themselves. Without `--agent`, system get/list stay global-by-key.
@@ -415,8 +417,10 @@ agictl awareness add action --subject <type> [--subject-id ID] --content "<text>
 agictl awareness revise <entry_id> --content "<updated text>"    # Supersedes old, creates new
 agictl awareness supersede <entry_id>                            # Retire entry no longer true (no replacement)
 agictl awareness complete <entry_id>                             # Mark action as done (actions only)
+agictl awareness pin <entry_id>                                  # Standing rule shown every spawn (active conclusions, max 10)
+agictl awareness unpin <entry_id>                                # Back to the normal board
 agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
-agictl awareness table [--status ...] [--type ...] [--agent NAME | --all] [--limit N]
+agictl awareness table [--status ...] [--type ...] [--agent NAME | --all] [--limit N] [--pinned | --unpinned] [--dated]
 agictl awareness get <entry_id>                                  # Single entry details
 ```
 
@@ -424,7 +428,7 @@ agictl awareness get <entry_id>                                  # Single entry 
 
 **Subject types**: `connection`, `project`, `game`, `system`, `self`
 
-**Status lifecycle**: conclusions: `active` → `superseded` (via revise or supersede); actions: `active` → `completed` (done) or `superseded` (moot)
+**Status lifecycle**: conclusions: `active` → `superseded` (via revise or supersede); actions: `active` → `completed` (done) or `superseded` (moot). A pin moves to the new entry on `revise` and ends with `supersede`.
 
 > **Enforcement**: `cycle end` checks for awareness entries this session. A warning is emitted if no conclusions or actions were logged.
 

@@ -73,6 +73,13 @@ agictl awareness add conclusion \
 > agictl awareness supersede <entry_id>
 > ```
 > Never use `complete` on a conclusion — `completed` is an action status only (the CLI rejects it).
+>
+> **Pin standing rules.** Your spawn shows only your newest five conclusions, so an older rule can slide out of view. Pin a conclusion that must stay visible every cycle — a constraint or commitment ("no nudges to Mandy until she writes first"), never a status note:
+> ```bash
+> agictl awareness pin <entry_id>      # max 10; shown as PINNED CONCLUSIONS at every spawn
+> agictl awareness unpin <entry_id>
+> ```
+> `revise` keeps the pin on the new entry. `supersede` ends it. Re-check pins when the wake block shows a long gap or an outage.
 > 
 > **Idle Cycle Rule**: If this cycle was completely idle (e.g., you just checked wait statuses, nothing changed, and no new messages were received), DO NOT log a new conclusion. It is correct and expected to exit an idle cycle without adding redundant awareness entries.
 
@@ -136,6 +143,8 @@ agictl memory system set "user_instruction_no_emoji" "Primary User prefers no em
 ```
 
 Key prefixes: `constraint_*`, `discovery_*`, `user_instruction_*`, `schedule_*`
+
+Your own system memory appears at every spawn as **OPERATIONAL MEMORY**, with each entry's last-updated date. Keys starting `constraint`, `user_instruction`, `rule` or `instruction` (then `_` or `.`) are listed first, then the rest, newest first. Values over 600 characters and entries past the block size are left out with a pointer — keep values short, and mark resolved entries as such or delete them.
 
 > Only write what changed — don't rewrite unchanged memory.
 

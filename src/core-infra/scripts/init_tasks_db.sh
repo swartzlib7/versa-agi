@@ -281,6 +281,7 @@ CREATE TABLE IF NOT EXISTS agent_awareness (
   action_conclusion_id  INTEGER,
   context               TEXT,
   status                TEXT DEFAULT 'active' CHECK(status IN ('active','revised','superseded','completed')),
+  pinned                INTEGER DEFAULT 0,
   created_at            DATETIME DEFAULT (datetime('now')),
   updated_at            DATETIME DEFAULT (datetime('now')),
   FOREIGN KEY (action_conclusion_id) REFERENCES agent_awareness(id)
@@ -319,6 +320,9 @@ VALUES ('Get to know and understand your PU',
 DELETE FROM project_members WHERE project_id NOT IN (SELECT id FROM projects);
 DELETE FROM agent_memory_project WHERE project_id NOT IN (SELECT id FROM projects);
 SQL
+
+# Pinned conclusions (state_game_of_life.md GOL-07)
+sqlite3 "${DB_PATH}" "ALTER TABLE agent_awareness ADD COLUMN pinned INTEGER DEFAULT 0;" 2>/dev/null || true
 
 echo "Tasks database initialized: ${DB_PATH}"
 echo "Tables: tasks, games, projects, connections, project_members, agent_memory_connection, agent_memory_project, agent_memory_system, agent_awareness, project_opponents"

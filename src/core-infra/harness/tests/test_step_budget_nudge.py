@@ -1,9 +1,12 @@
 """Step-budget wrap-up / end-off nudge tone and thresholds."""
 
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from harness.agent_harness import (
     END_OFF_REMAINING_CAP,
+    _finalize_cycle_step_budget,
     budget_end_off_message,
     budget_wrap_message,
     end_off_remaining_threshold,
@@ -33,6 +36,16 @@ class TestBudgetMessageTone(unittest.TestCase):
         self.assertIn("wrapping up", msg)
         self.assertNotIn("CRITICAL", msg)
         self.assertNotIn("STOP all work", msg)
+
+
+class TestBudgetFinalize(unittest.TestCase):
+    def test_harness_close_confirms_no_handoff(self):
+        done = subprocess.CompletedProcess([], 0, "🛑 Cycle ended: x", "")
+        with patch("harness.agent_harness.subprocess.run", return_value=done) as run:
+            _finalize_cycle_step_budget("coa", 300, 300)
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[:3], ["agictl", "cycle", "end"])
+        self.assertIn("--no-handoff", cmd)
 
 
 if __name__ == "__main__":

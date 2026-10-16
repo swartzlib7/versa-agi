@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.5.22 · October 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.5.24 · October 2026</p>
 </div>
 
 ## At a glance
@@ -267,6 +267,8 @@ You pay for work, not for a team that chats with itself overnight. When an agent
 ### Memory
 
 Agents keep a memory store separate from the chat transcript. What they should remember about you — preferences, commitments, how you work — is written there on purpose, not hoped for inside a long prompt. A model does not get to invent a permanent fact by mentioning it once.
+
+Each wake picks up where the last one stopped. Before it ends a cycle, an agent writes a short handoff: what is open, what to watch, what comes next. The next wake opens with that note, what woke the agent this time, and how long ago it last worked. Rules you set stay pinned and appear at every wake until the agent changes them. If the system was off for hours or longer, the agent checks its plans against today's date and asks you before acting on anything that may be out of date.
 
 ### Skills
 
@@ -631,6 +633,8 @@ The other tabs: **Skills Registry**, **System Memory**, **Image Processing**, **
 <dl class="trouble">
 <dt>The Chief Orchestrator Agent never wakes</dt>
 <dd>Check a model is assigned, and the scheduler is on (agitop, Controls).</dd>
+<dt>After downtime, an agent asks you to confirm its plans</dt>
+<dd>It saw the system was off for a while, or a deadline passed. Reply with what still stands. Sub-agents ask the Chief Orchestrator Agent instead of you.</dd>
 <dt>A cycle spends nothing and exits</dt>
 <dd>There was no actionable work. That is the idle path working.</dd>
 <dt>An agent cannot see a file</dt>
@@ -761,5 +765,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.5.22, October 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.5.24, October 2026.</p>
 </div>

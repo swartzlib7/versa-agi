@@ -10581,7 +10581,8 @@ def frames_search(text, agent_name):
 
 @cycle.command("start")
 @click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
-def cycle_start(agent_name):
+@click.option("--wake-reason", default=None, help="Why Lifeline spawned this cycle")
+def cycle_start(agent_name, wake_reason):
     """INSERT a new cycle row. Returns JSON with cycle_id."""
     if not agent_name:
         agent_name = get_agent_name()
@@ -10591,19 +10592,45 @@ def cycle_start(agent_name):
         conn.execute("INSERT INTO cycles (id, started_at, session_start_ts) VALUES (?, datetime('now'), datetime('now'))", (cycle_id,))
         conn.commit()
         conn.close()
-        json_response(True, cycle_id=cycle_id, agent=agent_name)
     except Exception as e:
         json_response(False, error=str(e), agent=agent_name)
         sys.exit(1)
+    # Separate write: the cycle row must exist even if the schema refresh
+    # that adds wake_reason was skipped (database locked during --update).
+    if wake_reason:
+        try:
+            conn = db_connect.connect_compat(cycles_db, timeout=5)
+            conn.execute("UPDATE cycles SET wake_reason=? WHERE id=?", (wake_reason, cycle_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            error_console.print(f"[yellow]wake_reason not stored: {e}[/yellow]")
+    json_response(True, cycle_id=cycle_id, agent=agent_name)
 
 @cycle.command("end")
 @click.argument("summary", nargs=-1)
+@click.option("--handoff", default=None,
+              help="For your next spawn: 'Open: … | Watch: … | Next: … | Carry: #id, #id'")
+@click.option("--no-handoff", "no_handoff", is_flag=True,
+              help="Confirm ending without a handoff (after the refusal message)")
 @click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
-def cycle_end(summary, agent_name):
+def cycle_end(summary, handoff, no_handoff, agent_name):
     """Mark cycle end and explicitly kill execution."""
     sum_text = " ".join(summary)
+    handoff_text = (handoff or "").strip()
     if not agent_name:
         agent_name = get_agent_name()
+
+    # The harness ends the stream only on the "🛑 Cycle ended:" line, so this
+    # refusal keeps the cycle open and the agent can add the handoff.
+    if not handoff_text and not no_handoff:
+        console.print(
+            "⏸ Cycle NOT ended — no handoff. Your next spawn starts from it: "
+            "what is open, what to watch, what comes next, which awareness ids to carry.\n"
+            "End with: cycle end \"summary\" --handoff \"Open: … | Watch: … | Next: … | Carry: #id\"\n"
+            "If there is nothing to hand off, confirm with: cycle end \"summary\" --no-handoff"
+        )
+        sys.exit(1)
 
     # ── Awareness Enforcement Gate ──
     # Check if agent logged any awareness this cycle (advisory, not hard-blocking)
@@ -10617,6 +10644,18 @@ def cycle_end(summary, agent_name):
         if row and row[0]:  # session_start_ts exists
             if not row[1] or row[1] <= row[0]:  # no awareness_ts or older than session start
                 awareness_warning = True
+        conn.close()
+    except Exception:
+        pass
+
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        if handoff_text:
+            conn.execute(
+                "UPDATE cycles SET handoff=? WHERE id LIKE ? AND ended_at IS NULL",
+                (handoff_text, f"{agent_name}-%")
+            )
+            conn.commit()
         conn.close()
     except Exception:
         pass
@@ -10652,7 +10691,6 @@ def cycle_end(summary, agent_name):
             "[yellow]⚠ AWARENESS NOT RECORDED — no conclusions or actions logged this cycle. "
             "Review your work and persist awareness before ending.[/yellow]"
         )
-
     console.print(f"🛑 Cycle ended: {sum_text}")
     # Exit the tool subprocess cleanly. The parent harness detects this output
     # ("🛑 Cycle ended:") and breaks out of the stream loop to write telemetry
@@ -10725,7 +10763,7 @@ def cycle_recent(agent_name, as_json):
     """Return chronological cycle summaries for context prompt."""
     if as_json:
         rows = agent_reader._query_cycles(
-            "SELECT id, summary, execution_model, routing_mode, routing_work_modality, "
+            "SELECT id, summary, wake_reason, execution_model, routing_mode, routing_work_modality, "
             "datetime(started_at, 'localtime') AS ts FROM cycles WHERE id LIKE ? "
             "ORDER BY started_at DESC LIMIT 10",
             (f"{agent_name}-%",),
@@ -10742,6 +10780,227 @@ def cycle_count(agent_name):
     """Return total number of cycles executed by the agent."""
     count = agent_reader.get_agent_cycles_count(agent_name)
     print(count)
+
+
+# ── Spawn handoff + time alignment (state_spawn_context.md §1.12–1.13) ──
+
+from datetime import datetime as _dt, timezone as _tz  # noqa: E402
+
+HANDOFF_INJECT_CUT = 3000
+AWARENESS_ENTRY_INJECT_CUT = 1200
+HANDOFF_CARRY_MAX = 5
+HANDOFF_LOOKBACK_CYCLES = 20
+LIFELINE_GAPS_KEPT = 10
+_SQLITE_TS = "%Y-%m-%d %H:%M:%S"
+
+
+def _utc_now() -> _dt:
+    return _dt.now(_tz.utc)
+
+
+def _parse_utc(value) -> _dt | None:
+    """Parse a stored sqlite datetime('now') value (UTC, no zone)."""
+    if not value:
+        return None
+    try:
+        return _dt.strptime(str(value)[:19], _SQLITE_TS).replace(tzinfo=_tz.utc)
+    except ValueError:
+        return None
+
+
+def _fmt_local(dt: _dt | None) -> str:
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else "?"
+
+
+def _fmt_age(dt: _dt | None, now: _dt | None = None) -> str:
+    """Human age such as '45m', '3h 12m', '2d 4h', '75d (about 2 months)'."""
+    if not dt:
+        return "?"
+    secs = max(0, int(((now or _utc_now()) - dt).total_seconds()))
+    mins = secs // 60
+    if mins < 1:
+        return "under 1m"
+    if mins < 60:
+        return f"{mins}m"
+    hours, mins = divmod(mins, 60)
+    if hours < 48:
+        return f"{hours}h {mins}m"
+    days, hours = divmod(hours, 24)
+    if days < 30:
+        return f"{days}d {hours}h"
+    months = round(days / 30.4)
+    return f"{days}d (about {months} month{'' if months == 1 else 's'})"
+
+
+def _fmt_duration(start: _dt | None, end: _dt | None) -> str:
+    if not start or not end:
+        return "?"
+    return _fmt_age(start, end)
+
+
+def _cut(text: str, limit: int, pointer: str) -> str:
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"… [cut — full: {pointer}]"
+
+
+def _config_get(conn, key: str):
+    row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _config_set(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO config (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, value),
+    )
+
+
+def _lifeline_gaps(conn) -> list[dict]:
+    try:
+        gaps = json.loads(_config_get(conn, "lifeline_gaps") or "[]")
+        return [g for g in gaps if isinstance(g, dict) and g.get("start") and g.get("end")]
+    except (ValueError, TypeError):
+        return []
+
+
+@cycle.command("tick", hidden=True)
+@click.option("--threshold-minutes", type=int, default=30, show_default=True)
+def cycle_tick(threshold_minutes):
+    """Lifeline heartbeat. Records a gap when the previous tick is too old."""
+    now = _utc_now()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        prev = _parse_utc(_config_get(conn, "lifeline_last_tick"))
+        gap = None
+        if prev and (now - prev).total_seconds() > threshold_minutes * 60:
+            gap = {"start": prev.strftime(_SQLITE_TS), "end": now.strftime(_SQLITE_TS)}
+            gaps = (_lifeline_gaps(conn) + [gap])[-LIFELINE_GAPS_KEPT:]
+            _config_set(conn, "lifeline_gaps", json.dumps(gaps))
+        _config_set(conn, "lifeline_last_tick", now.strftime(_SQLITE_TS))
+        conn.commit()
+        conn.close()
+        json_response(True, tick=now.strftime(_SQLITE_TS), gap=gap)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+def _carry_ids(handoff: str) -> list[int]:
+    """Awareness ids named after 'Carry:' in a handoff, in order, deduplicated."""
+    ids: list[int] = []
+    for m in re.finditer(r"carry\s*:([^\n|]*)", handoff or "", re.IGNORECASE):
+        for raw in re.findall(r"#?(\d+)", m.group(1)):
+            if int(raw) not in ids:
+                ids.append(int(raw))
+    return ids
+
+
+def _awareness_line(row, now: _dt) -> str:
+    updated = _parse_utc(row["updated_at"])
+    subj = str(row["subject_type"]) + (f"({row['subject_id']})" if row["subject_id"] else "")
+    content = _cut(
+        str(row["content"]).replace("\n", " "),
+        AWARENESS_ENTRY_INJECT_CUT,
+        f"agictl awareness get {row['id']}",
+    )
+    return (f"  #{row['id']} [{row['type']} · {subj}] updated {_fmt_local(updated)} "
+            f"({_fmt_age(updated, now)} ago): {content}")
+
+
+def render_handoff_block(agent_name: str, now: _dt | None = None) -> str:
+    """Wake-prompt block: last cycle, outages since, last handoff, carried awareness."""
+    now = now or _utc_now()
+    conn = db_connect.connect_compat(cycles_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, started_at, ended_at, exit_code, wake_reason, handoff FROM cycles "
+        "WHERE id LIKE ? ORDER BY started_at DESC LIMIT ?",
+        (f"{agent_name}-%", HANDOFF_LOOKBACK_CYCLES),
+    ).fetchall()
+    gaps = _lifeline_gaps(conn)
+    conn.close()
+    if not rows:
+        return ""
+
+    last = rows[0]
+    started = _parse_utc(last["started_at"])
+    ended = _parse_utc(last["ended_at"])
+    last_seen = ended or started
+    lines = ["## ── SINCE YOUR LAST CYCLE ──"]
+
+    when = f"Your last cycle: started {_fmt_local(started)}"
+    when += f", ended {_fmt_local(ended)}" if ended else ", never closed (no cycle end)"
+    when += f" — {_fmt_age(last_seen, now)} ago."
+    if last["wake_reason"]:
+        when += f" It woke for: {last['wake_reason']}."
+    if last["exit_code"] not in (None, 0):
+        when += f" Exit code {last['exit_code']}."
+    lines.append(when)
+
+    for g in gaps:
+        g_start, g_end = _parse_utc(g["start"]), _parse_utc(g["end"])
+        if g_end and last_seen and g_end > last_seen:
+            lines.append(
+                f"⚠ SYSTEM OFFLINE: Lifeline did not run from {_fmt_local(g_start)} "
+                f"to {_fmt_local(g_end)} ({_fmt_duration(g_start, g_end)}). Nothing was processed in that window."
+            )
+
+    source = last if last["handoff"] else None
+    if not source:
+        lines.append("")
+        lines.append("Your last cycle ended without a handoff.")
+        source = next((r for r in rows[1:] if r["handoff"]), None)
+    handoff_text = ""
+    if source:
+        written = _parse_utc(source["ended_at"]) or _parse_utc(source["started_at"])
+        label = "LAST HANDOFF" if source is last else "NEWEST EARLIER HANDOFF"
+        handoff_text = source["handoff"]
+        lines.append("")
+        lines.append(f"{label} (written {_fmt_local(written)}, {_fmt_age(written, now)} ago):")
+        lines.append(_cut(handoff_text, HANDOFF_INJECT_CUT, f"agictl cycle get {source['id']}"))
+
+    carry = _carry_ids(handoff_text)
+    if carry:
+        tconn = db_connect.connect_compat(tasks_db, timeout=5)
+        tconn.row_factory = sqlite3.Row
+        carried = []
+        for entry_id in carry:
+            if len(carried) >= HANDOFF_CARRY_MAX:
+                break
+            row = tconn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+            if not row:
+                carried.append(f"  #{entry_id} — not found")
+            elif row["status"] != "active":
+                carried.append(f"  #{entry_id} — no longer active ({row['status']})")
+            elif "pinned" in row.keys() and row["pinned"]:
+                continue
+            else:
+                carried.append(_awareness_line(row, now))
+        tconn.close()
+        if carried:
+            lines.append("")
+            lines.append("CARRIED AWARENESS (named in that handoff):")
+            lines.extend(carried)
+
+    lines.append("")
+    lines.append("Weigh this against the wake reason and the current time (CONTEXT MAP: Continuity and time).")
+    return "\n".join(lines)
+
+
+@cycle.command("handoff", hidden=True)
+@click.argument("agent_name")
+def cycle_handoff(agent_name):
+    """Print the SINCE YOUR LAST CYCLE wake block for an agent."""
+    try:
+        block = render_handoff_block(agent_name)
+    except Exception as e:
+        error_console.print(f"handoff block unavailable: {e}")
+        sys.exit(1)
+    if block:
+        print(block)
 
 
 # ═══════════════════════════════════════════════════════
@@ -12017,8 +12276,12 @@ def awareness_revise(entry_id, content, agent_name):
             (old['agent_name'], old['type'], old['subject_type'], old['subject_id'], content, old['action_conclusion_id'],
              f"Revised from id={entry_id}")
         )
-        conn.commit()
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # A revised standing rule stays pinned (GOL-07).
+        if old.get('pinned'):
+            conn.execute("UPDATE agent_awareness SET pinned=1 WHERE id=?", (new_id,))
+            conn.execute("UPDATE agent_awareness SET pinned=0 WHERE id=?", (entry_id,))
+        conn.commit()
         conn.close()
         _update_awareness_timestamp(agent_name)
         json_response(True, action="awareness_revise", old_id=entry_id, new_id=new_id, agent=agent_name)
@@ -12115,6 +12378,91 @@ def awareness_supersede(entry_id, agent_name):
         json_response(False, error=str(e))
         sys.exit(1)
 
+
+AWARENESS_PIN_MAX = 10
+
+
+def _awareness_may_modify(owner: str, agent_name: str) -> bool:
+    """Owner, or a protected agent (COA / watchdog)."""
+    if owner == agent_name:
+        return True
+    try:
+        aconn = db_connect.connect_compat(agents_db, timeout=5)
+        prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+        aconn.close()
+        return bool(prow and prow[0] == 1)
+    except Exception:
+        return False
+
+
+def _awareness_set_pin(entry_id: int, agent_name: str | None, pinned: bool) -> None:
+    if not agent_name:
+        agent_name = _caller_agent_name()
+    verb = "pin" if pinned else "unpin"
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT type, status, agent_name, pinned FROM agent_awareness WHERE id=?", (entry_id,)
+        ).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        if not _awareness_may_modify(row['agent_name'], agent_name):
+            conn.close()
+            json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{row['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can {verb} entries.")
+            sys.exit(1)
+        if pinned:
+            if row['type'] != 'conclusion':
+                conn.close()
+                json_response(False, error=f"Entry id={entry_id} is an action — only conclusions can be pinned.")
+                sys.exit(1)
+            if row['status'] != 'active':
+                conn.close()
+                json_response(False, error=f"Entry id={entry_id} is {row['status']} — only active conclusions can be pinned.")
+                sys.exit(1)
+            if not row['pinned']:
+                current = [r[0] for r in conn.execute(
+                    "SELECT id FROM agent_awareness WHERE agent_name=? AND type='conclusion' "
+                    "AND status='active' AND pinned=1 ORDER BY id",
+                    (row['agent_name'],),
+                ).fetchall()]
+                if len(current) >= AWARENESS_PIN_MAX:
+                    conn.close()
+                    json_response(False, error=(
+                        f"Pin limit reached ({AWARENESS_PIN_MAX}) for '{row['agent_name']}'. "
+                        f"Unpin, revise or supersede one first. Pinned: {', '.join('#' + str(i) for i in current)}"
+                    ))
+                    sys.exit(1)
+        conn.execute("UPDATE agent_awareness SET pinned=? WHERE id=?", (1 if pinned else 0, entry_id))
+        conn.commit()
+        conn.close()
+        json_response(True, action=f"awareness_{verb}", id=entry_id, agent=row['agent_name'])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@awareness.command("pin")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_pin(entry_id, agent_name):
+    """Pin a conclusion as a standing rule shown at every spawn (max 10 per agent).
+
+    Pin constraints and commitments that must never drop out of view — not
+    status. Revise keeps the pin; supersede retires it.
+    """
+    _awareness_set_pin(entry_id, agent_name, True)
+
+
+@awareness.command("unpin")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_unpin(entry_id, agent_name):
+    """Remove the pin from a conclusion. It stays active in the normal board."""
+    _awareness_set_pin(entry_id, agent_name, False)
+
 @awareness.command("list")
 @click.option("--type", "entry_type", type=click.Choice(['conclusion', 'action']), default=None, help="Filter by type")
 @click.option("--subject", "subject_type", type=click.Choice(['connection','project','game','system','self']), default=None)
@@ -12157,7 +12505,9 @@ def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_nam
 @click.option("--all", "show_all_agents", is_flag=True, help="Show entries from all agents (fleet view)")
 @click.option("--limit", type=int, default=15, help="Limit the number of entries returned")
 @click.option("--truncate", "truncate_chars", type=int, default=0, help="Truncate Content column to N chars (0 = full)")
-def awareness_table(entry_type, subject_type, entry_status, agent_name, show_all_agents, limit, truncate_chars):
+@click.option("--pinned/--unpinned", "pinned", default=None, help="Only pinned conclusions, or exclude them (default: both)")
+@click.option("--dated", is_flag=True, help="Add an Updated column (date and age)")
+def awareness_table(entry_type, subject_type, entry_status, agent_name, show_all_agents, limit, truncate_chars, pinned, dated):
     """Output awareness entries in a token-efficient markdown table.
 
     Default is the current caller's board. Pass --all for the fleet view
@@ -12183,6 +12533,10 @@ def awareness_table(entry_type, subject_type, entry_status, agent_name, show_all
         if agent_name:
             query += " AND agent_name=?"
             params.append(agent_name)
+        if pinned is True:
+            query += " AND pinned=1"
+        elif pinned is False:
+            query += " AND COALESCE(pinned, 0)=0"
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
         
@@ -12203,7 +12557,10 @@ def awareness_table(entry_type, subject_type, entry_status, agent_name, show_all
         cols += ["Type", "Subject"]
         if multi_status:
             cols.append("Status")
+        if dated:
+            cols.append("Updated")
         cols.append("Content")
+        now = _utc_now()
 
         print("| " + " | ".join(cols) + " |")
         print("|" + "|".join(["---"] * len(cols)) + "|")
@@ -12222,6 +12579,9 @@ def awareness_table(entry_type, subject_type, entry_status, agent_name, show_all
             vals += [str(r['type']), subj]
             if multi_status:
                 vals.append(str(r['status']))
+            if dated:
+                updated = _parse_utc(r['updated_at'])
+                vals.append(f"{_fmt_local(updated)[:10]} ({_fmt_age(updated, now)} ago)")
             vals.append(content)
             print("| " + " | ".join(vals) + " |")
                 
@@ -12760,10 +13120,61 @@ def memory_system_set(key, value, target_agent):
     except Exception as e:
         json_response(False, error=str(e))
 
+OPERATIONAL_MEMORY_VALUE_CUT = 600
+OPERATIONAL_MEMORY_BLOCK_CUT = 8000
+_STANDING_RULE_KEY = re.compile(r"^(constraint|user_instruction|rule|instruction)[._]")
+
+
+def render_operational_memory(agent_name: str, rows: list[dict], now=None) -> str:
+    """Spawn block for one agent's system memory (state_spawn_context.md §1.14)."""
+    if not rows:
+        return ""
+    now = now or _utc_now()
+
+    def newest_first(r):
+        return str(r.get("updated_at") or r.get("created_at") or "")
+
+    rules = sorted((r for r in rows if _STANDING_RULE_KEY.match(str(r["key"]))), key=newest_first, reverse=True)
+    rest = sorted((r for r in rows if not _STANDING_RULE_KEY.match(str(r["key"]))), key=newest_first, reverse=True)
+
+    header = (
+        f"## ── OPERATIONAL MEMORY (your system memory — {len(rows)} entries) ──\n"
+        "Standing rules first (constraint / user_instruction / rule / instruction keys), then newest. "
+        "Rules stay in force until you change them."
+    )
+    used = len(header)
+    shown, hidden = [], 0
+    for r in rules + rest:
+        updated = _parse_utc(r.get("updated_at") or r.get("created_at"))
+        value = _cut(
+            str(r["value"]).replace("\n", " "),
+            OPERATIONAL_MEMORY_VALUE_CUT,
+            f"agictl memory system get {r['key']}",
+        )
+        line = f"  {r['key']} (updated {_fmt_local(updated)[:10]}, {_fmt_age(updated, now)} ago): {value}"
+        if used + len(line) + 1 > OPERATIONAL_MEMORY_BLOCK_CUT:
+            hidden += 1
+            continue
+        shown.append(line)
+        used += len(line) + 1
+
+    more = f"{hidden} more not shown. " if hidden else ""
+    footer = (
+        f"[!] {more}Go deeper: 'agictl memory system list --agent {agent_name}' (yours) · "
+        "'agictl memory system list' (team-wide) · 'agictl memory system get <key>'."
+    )
+    return "\n".join([header, *shown, footer])
+
+
 @memory_system.command("list")
 @_memory_agent_option
-def memory_system_list(target_agent):
+@click.option("--prompt", "as_prompt", is_flag=True,
+              help="Render the bounded OPERATIONAL MEMORY spawn block (needs --agent)")
+def memory_system_list(target_agent, as_prompt):
     """List all system memory entries for this agent."""
+    if as_prompt and not (target_agent or "").strip():
+        json_response(False, error="--prompt needs --agent <name>")
+        sys.exit(1)
     try:
         agent_name, scoped = _resolve_memory_target(target_agent)
         conn = db_connect.connect_compat(tasks_db, timeout=5)
@@ -12778,6 +13189,11 @@ def memory_system_list(target_agent):
                 "SELECT * FROM agent_memory_system ORDER BY key ASC"
             ).fetchall()
         conn.close()
+        if as_prompt:
+            block = render_operational_memory(agent_name, [dict(r) for r in rows])
+            if block:
+                print(block)
+            return
         print(json.dumps([dict(r) for r in rows], indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))

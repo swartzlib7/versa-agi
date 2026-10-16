@@ -603,8 +603,8 @@ def agictl_message(command: str) -> str:
 class CycleInput(BaseModel):
     command: str = Field(description=(
         "The full agictl cycle subcommand. "
-        "Examples: 'cycle end Summary of work done', 'cycle recent agent-name', "
-        "'cycle count agent-name'."
+        "Examples: 'cycle end \"Summary of work done\" --handoff \"Open: … | Next: …\"', "
+        "'cycle recent agent-name', 'cycle count agent-name'."
     ))
 
 @tool("agictl_cycle", args_schema=CycleInput)
@@ -613,7 +613,8 @@ def agictl_cycle(command: str) -> str:
     CRITICAL: You MUST call 'cycle end <summary>' before your budget runs out.
     To respawn on a new model: snooze or create a due task, then 'cycle end'.
     Examples:
-      - 'cycle end Completed Docker setup for mysmartyard' — end cycle with summary
+      - 'cycle end "Completed Docker setup for mysmartyard" --handoff "Open: TLS cert | Next: verify renewal"'
+        — end cycle; the handoff is shown at your next spawn
       - 'cycle recent coa' — view recent cycle summaries
       - 'cycle count coa' — total cycles executed
     """
@@ -1433,8 +1434,8 @@ def budget_end_off_message(step_count: int, max_steps: int) -> str:
         f"⏱️ Step budget: {step_count} of {max_steps} used ({remaining} remaining). "
         "Please end off now: journal progress with "
         "agictl task progress <id> 'DONE: ... NEXT: ... BLOCKERS: ...', then "
-        "agictl cycle end 'Summary of what was done and what remains'. "
-        "Your progress entry is injected into the next wake — "
+        "agictl cycle end 'Summary of what was done' --handoff 'Open: … | Next: …'. "
+        "Your progress entry and handoff are injected into the next wake — "
         "you will be respawned on the next tick to continue."
     )
 
@@ -1451,7 +1452,7 @@ def _finalize_cycle_step_budget(agent_name: str, step_count: int, max_steps: int
     )
     try:
         proc = subprocess.run(
-            ["agictl", "cycle", "end", summary, "--agent", agent_name],
+            ["agictl", "cycle", "end", summary, "--no-handoff", "--agent", agent_name],
             capture_output=True, text=True, timeout=15,
         )
         if proc.returncode != 0:

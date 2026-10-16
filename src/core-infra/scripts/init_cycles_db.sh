@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS cycles (
   json_output_path TEXT,
   session_start_ts DATETIME,
   last_awareness_ts DATETIME,
-  errors        TEXT
+  errors        TEXT,
+  wake_reason   TEXT,
+  handoff       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS config (
@@ -65,6 +67,10 @@ sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN routing_work_modality TEXT;"
 # Cost estimates (TD-COST-001)
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN cost_usd_estimated REAL;" 2>/dev/null || true
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN pricing_source TEXT;" 2>/dev/null || true
+
+# Spawn handoff (state_spawn_context.md §1.12)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN wake_reason TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN handoff TEXT;" 2>/dev/null || true
 
 sqlite3 "${DB_PATH}" <<'SQL'
 CREATE TABLE IF NOT EXISTS frames (

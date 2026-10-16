@@ -335,7 +335,7 @@ class TestCycleCloseout(unittest.TestCase):
             ):
                 result = CliRunner().invoke(
                     agictl_cli.cli,
-                    ["cycle", "end", "clean", "closeout", "--agent", "coa"],
+                    ["cycle", "end", "clean", "closeout", "--no-handoff", "--agent", "coa"],
                 )
 
             self.assertEqual(result.exit_code, 0, result.output)

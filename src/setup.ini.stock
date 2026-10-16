@@ -235,6 +235,11 @@ task_max_spawn_attempts=3
 # a new outbound message. Override via VERSA_FLOOD_GUARD_TIMEOUT_HOURS env var.
 flood_guard_timeout_hours=3
 
+# Outage notice: when Lifeline has not run for more than N minutes, the next
+# spawn of each agent is told the system was offline and for how long.
+# Override via VERSA_OUTAGE_THRESHOLD_MINUTES env var.
+outage_threshold_minutes=30
+
 # Auto model routing default for newly registered agents (agents.db column is authoritative per agent)
 model_routing_enabled=false
 # pool = triage picks from router-eligible candidates; preferred = triage classifies work_modality only

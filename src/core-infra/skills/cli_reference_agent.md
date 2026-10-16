@@ -19,7 +19,7 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 | `agent` | `agictl_agent` | `agent list` |
 | `task` | `agictl_task` | `task snooze 43 1440` |
 | `message` | `agictl_message` | `message send UID "Hello" --mode typed` |
-| `cycle` | `agictl_cycle` | `cycle end "Summary of work"` |
+| `cycle` | `agictl_cycle` | `cycle end "Summary of work" --handoff "Open: … | Next: …"` |
 | `project` | `agictl_project` | `project list` |
 | `connection` | `agictl_connection` | `connection list-primary-user` |
 | `memory` | `agictl_memory` | `memory system list` |
@@ -38,12 +38,12 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 | Shell (documentation) | Harness call |
 |---|---|
 | `agictl task list` | tool **`agictl_task`**, argument **`task list`** |
-| `agictl cycle end "Done"` | tool **`agictl_cycle`**, argument **`cycle end "Done"`** |
+| `agictl cycle end "Done" --handoff "Next: …"` | tool **`agictl_cycle`**, argument **`cycle end "Done" --handoff "Next: …"`** |
 | `agictl message get UID --unread` | tool **`agictl_message`**, argument **`message get UID --unread`** |
 
 **Do not** prefix the `command` argument with `agictl` — the harness adds it. Passing `agictl cycle end …` runs `agictl agictl cycle end …` and fails.
 
-**Cycle end:** call tool **`agictl_cycle`** alone in the final step (no parallel tool calls). Argument: `cycle end "your summary"`.
+**Cycle end:** call tool **`agictl_cycle`** alone in the final step (no parallel tool calls). Argument: `cycle end "your summary" --handoff "Open: … | Watch: … | Next: … | Carry: #id"`.
 
 ---
 
@@ -176,8 +176,9 @@ agictl message calls show <call_id>                          # Transcript + what
 ## 5. cycle
 
 ```bash
-agictl cycle end "Summary" [--agent NAME]             # End cycle with summary
+agictl cycle end "Summary" [--handoff "Open: … | Watch: … | Next: … | Carry: #id"] [--agent NAME]  # End cycle; handoff is shown at your next spawn
 agictl cycle recent <agent>                           # Recent cycle summaries for context
+agictl cycle get <cycle_id>                           # Full cycle row (summary, handoff, wake reason)
 agictl cycle frames list [--thread] [--status]            # Your compaction frames
 agictl cycle frames search <text>                         # Search your frame summaries. COA may add --agent <name>
 ```
@@ -269,12 +270,14 @@ agictl awareness add action --subject <type> [--subject-id ID] --content "<text>
 agictl awareness revise <entry_id> --content "<updated text>"
 agictl awareness supersede <entry_id>
 agictl awareness complete <entry_id>
+agictl awareness pin <entry_id>                       # Standing rule shown every spawn (conclusions, max 10)
+agictl awareness unpin <entry_id>
 agictl awareness list [--type conclusion|action] [--subject <type>] [--subject-id ID] [--status active|revised|superseded|completed]
-agictl awareness table [--status ...] [--type ...] [--agent NAME | --all] [--limit N]
+agictl awareness table [--status ...] [--type ...] [--agent NAME | --all] [--limit N] [--pinned | --unpinned] [--dated]
 agictl awareness get <entry_id>
 ```
 
-`awareness table` defaults to **your** board. `--all` is the fleet view. Never batch-supersede from a fleet dump.
+`awareness table` defaults to **your** board. `--all` is the fleet view. Never batch-supersede from a fleet dump. `revise` keeps a pin on the new entry; `supersede` retires it.
 
 **Subject types**: `connection`, `project`, `game`, `system`, `self`
 
