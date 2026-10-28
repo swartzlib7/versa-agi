@@ -25,6 +25,13 @@ class TestFreezeNotice(unittest.TestCase):
         self.assertIn("--from-lifeline", text)
         self.assertIn("Lifeline auto-froze task", text)
 
+    def test_frozen_tasks_skip_only_an_idle_wake(self):
+        with open(LIFELINE, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertEqual(text.count("task count-frozen"), 1)
+        self.assertIn("frozen task(s) — skipping spawn (Lifeline active, inbox sync continues)", text)
+        self.assertNotIn("has pending task work but", text)
+
     def test_from_lifeline_is_inbox_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             messages = os.path.join(tmp, "messages.db")

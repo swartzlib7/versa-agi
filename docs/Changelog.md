@@ -4,6 +4,67 @@
 
 All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
 
+From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
+
+## [3.6.0] — 2026-10-26
+
+### Versa Desktop
+
+#### Added
+- **Versa Desktop** — A desktop built around the Perceptron: one center that shows what you are looking at. What it does sits above; what it has sits below. You load something into the center, then tap the center to run it. A stray click does not start anything.
+- **Computer use** — On that desktop, the Chief Orchestrator Agent can look, and can take the same steps you take. Each kind of access asks you on screen. You choose 15, 30, or 60 minutes, or always, and you can revoke it while it is on. Looking and controlling are separate.
+
+## [3.5.24] — 2026-10-16
+
+### Continuity between cycles
+
+Includes 3.5.23 (the same day).
+
+#### Added
+- **Handoff between cycles** — An agent ends each cycle with a short handoff: what is open, what to watch, what comes next, and which awareness entries to carry. The next wake opens with **Since your last cycle**: when the agent last worked, what woke it, any downtime since, and that handoff.
+- **Pinned conclusions** — Up to 10 standing rules per agent, shown at every wake until the agent revises, supersedes, or unpins them (`agictl awareness pin` / `unpin`).
+- **Downtime awareness** — Lifeline records any stretch longer than 30 minutes when it did not run (`[agent] outage_threshold_minutes` in `setup.ini`). After downtime, agents check dated plans against today's date. The Chief Orchestrator Agent asks you before acting on anything that may be out of date; sub-agents ask the Chief Orchestrator Agent.
+- **Wake reason in recent activity** — Each recent-cycle line shows what woke the agent.
+
+#### Changed
+- **`agictl cycle end` asks for a handoff** — Without `--handoff`, the cycle stays open and the agent is told what to add. `--no-handoff` confirms ending without one.
+
+#### Fixed
+- **Operational memory** — The block was missing from every wake. It now shows the agent's own entries, standing rules first, with a size limit and a pointer to the full list.
+
+## [3.3.x – 3.5.22] — 2026-08-11 to 2026-10-15
+
+### Catch-up: live calls, IDE mode, Eleven v4 voices
+
+One entry for the releases between 0.15.0 and 3.5.23.
+
+#### Added
+- **Live voice calls** — The Chief Orchestrator Agent can call you in the VersaVoice app (OpenAI GPT-Live). Follow-ons: either side can hang up, a limit on calls per cycle, the call screen, your account profile at call start, a greeting by your first name, and call summaries that tell your calls apart from calls with a Connection.
+- **IDE mode** — Run the Chief Orchestrator Agent inside a VS Code, Cursor, or Antigravity session over Remote-SSH (`sudo versa-agi-ide`). Lifeline does not spawn a cycle while the mode is on.
+- **Emotion in agent voice replies** — Agent voice replies move to ElevenLabs Eleven v4 (Enhanced) and v4 Turbo (Standard), with richer emotional delivery.
+- **Grok 4.7** — Added to the model catalog beside Grok 4.6.
+- **Primary User manual** — Hosted at [versavoice.ai/manual/versa-agi.html](https://versavoice.ai/manual/versa-agi.html), with a print booklet.
+- **Sentinel install flavor** — A remote client install, with promote and handover (rolling out).
+- **Versa Business Admin** — Opt-in project the Chief Orchestrator Agent can set up for you once you approve.
+- **Mid-cycle mail** — A message that arrives while an agent is working reaches that agent in the same cycle.
+- **Context compaction** — Long conversations are summarized into frames instead of being cut.
+- **Upcoming tasks** — The wake prompt lists tasks due in the next few minutes.
+- **Profile** — Country of residence and state or province reach agents; profile sync can run daily, weekly, or monthly.
+- **Workspace housekeeping skill** — Keeps shared folders tidy, with a manifest of decisions.
+- **Local AI** — Inspect a Hugging Face model before import; chat-only Intel ARC (SYCL) import.
+
+#### Changed
+- **Chief Orchestrator Agent** — The new name for the Chief of Agents across the product and docs.
+- **Autonomous mode** — Only you can turn the Chief Orchestrator Agent's sudo access on; it can turn it off itself.
+- **Frozen tasks** — When a task freezes after repeated wakes, the assigned agent is told as well as you. The last wake before a freeze says so.
+
+#### Fixed
+- **Inbox after an outage** — Sync resumes from the newest stored message, so messages are not skipped.
+- **Setup during a VersaVoice outage** — Setup keeps your token and identity.
+- **Triage** — Malformed triage output no longer stops a cycle.
+- **Updates** — An update no longer resets ownership of agent workspaces.
+- **Sub-agent mailbox** — A sub-agent no longer crashes reading mail at the start of a cycle.
+
 ## [0.15.0] — 2026-08-10
 
 ### Model Drivers — exact multimodal support

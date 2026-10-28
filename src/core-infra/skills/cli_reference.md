@@ -34,6 +34,7 @@ agictl is organized into 20 data-model-driven command groups:
 | `view` | Local image perception for multimodal models |
 | `skill` | Skill management (create, distribute, override) |
 | `browser` | Headless browser automation (Playwright) |
+| `desktop` | Read and operate the Primary User's desktop in HeteroSphere (COA only) |
 | `pkg` | System package registry (request, approve, install) |
 
 ## Harness tool invocation (agents)
@@ -664,6 +665,29 @@ sudo agictl browser disable <agent_name>              # Set browser_enabled=0 + 
 ```
 
 **Harness Integration**: The harness conditionally registers the `agictl_browser` tool at startup based on `_is_browser_enabled()`. When `enabled=false`, agents cannot use browser.
+
+## 17b. desktop — Primary User's desktop (COA only)
+
+```bash
+agictl desktop look pu                                # Read the PU's desktop tree
+agictl desktop open pu                                # Move the computer into the sphere (Do and Have appear)
+agictl desktop open pu user                           # Move User into the sphere instead (the computer must be out)
+agictl desktop load pu <element>                      # Load a shown item into the center; nothing runs
+agictl desktop unload pu <element>                    # Take a loaded item back out
+agictl desktop activate pu                            # Activate the load; confirming items arm first, activate again to confirm
+agictl desktop close pu                               # Move the computer (or User) back out; Do and Have hide, the center clears
+agictl desktop expand pu                              # Open interface: most of the screen
+agictl desktop fullscreen pu                          # Open interface: the whole screen
+agictl desktop restore pu                             # Open interface: back down a size
+agictl desktop back pu                                # As Escape: close the interface, return from an opened part, or clear the load
+agictl desktop press pu <key>                         # Calculator key: 0-9, dot, plus, minus, times, divide, equals, clear, back
+```
+
+The Primary User's desktop must be HeteroSphere and running. Looking and operating are allowed separately: on screen for each request, or for 15, 30, or 60 minutes, or always. A command waits up to 40 s. Steps work once Versa Desktop is installed and running as the login desktop.
+
+**Returns JSON**: `{success: true, grant: {agent, expires_at, always}, tree: {id, role, name, state, bounds, children}}`, or `{success: false, error, message}` with `error` one of `not_running`, `rejected`, `timeout`, `busy`, `unsafe`, `refused` (a step the Primary User could not take either; `message` says why, and `tree` is included).
+
+**Harness Integration**: tool `agictl_desktop`, for COA only, offered once `/tmp/heterosphere/` exists. Skill: `computer_use.md`.
 
 ## 18. pkg — System Package Registry
 

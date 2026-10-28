@@ -31,6 +31,7 @@ During a work cycle you do **not** run shell commands. The LangGraph harness exp
 | `organization` | `agictl_organization` | `organization org list` (only when Organization feature is ON) |
 | `search` | `agictl_search` | typed args: `query`, `count` (not a command string) |
 | `view` | `agictl_view_image` / `agictl_view_video` | typed arg: `path` (not a command string) |
+| `desktop` *(COA)* | `agictl_desktop` | `desktop look pu`; steps `desktop open|load|unload|activate|close|expand|fullscreen|restore|minimize|back|press pu [element]` (see `computer_use.md`) |
 | *(live call — COA)* | `agictl_call_pu` | typed arg: `reason` (not a command string; no CLI equivalent — see §4 Live call) |
 
 **Convention:** Examples in this reference use **shell notation** (`agictl group subcommand …`) so they match `--help` and operator docs. Translate when calling a tool:

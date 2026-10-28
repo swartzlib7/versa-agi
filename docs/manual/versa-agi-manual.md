@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.5.24 · October 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.6.0 · October 2026</p>
 </div>
 
 ## At a glance
@@ -765,5 +765,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.5.24, October 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.6.0, October 2026.</p>
 </div>

@@ -1195,17 +1195,11 @@ To resume:
     continue
   fi
 
-  # Also check frozen tasks BEFORE spawning (even with work to do)
-  # Exception: new unprocessed messages override freeze (user wants to communicate)
-  # IDE generate skips frozen / budget / concurrency / breaker — no harness spawn.
+  # Frozen tasks are already outside the wake checks above, so a wake here is
+  # for other work and runs while those tasks stay frozen.
+  # IDE generate skips budget / concurrency / breaker — no harness spawn.
   IS_LOCAL_MODEL=false
   if [ "${IDE_GENERATE}" != "true" ]; then
-  FROZEN_COUNT=$(/usr/local/bin/agictl task count-frozen "${AGENT_NAME}" 2>/dev/null || echo "0")
-  if [ "${FROZEN_COUNT:-0}" -gt 0 ] && [ "${UNPROCESSED:-0}" -eq 0 ]; then
-    log "FROZEN: ${AGENT_NAME} has pending task work but ${FROZEN_COUNT} frozen task(s) and no new messages — skipping spawn"
-    flock -u 200
-    continue
-  fi
 
   # ─── Token Budget Gate ────────────────────────────
   # Check if agent has exceeded monthly token budget before spawning

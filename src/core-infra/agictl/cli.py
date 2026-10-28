@@ -13502,6 +13502,17 @@ def search_web(query, count, categories):
             "engine": item.get("engine", ""),
         })
 
+    if not results:
+        unresponsive = [
+            {"engine": entry[0], "reason": entry[1]}
+            for entry in data.get("unresponsive_engines", [])
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2
+        ]
+        if unresponsive:
+            json_response(True, query=query, results=results, count=0,
+                          unresponsive_engines=unresponsive)
+            return
+
     json_response(True, query=query, results=results, count=len(results))
 
 
@@ -14856,6 +14867,12 @@ try:
     )
 except ImportError:
     pass  # organization commands unavailable on server-only topology
+
+try:
+    from agictl import desktop_cli
+    desktop_cli.register(cli, json_response=json_response, get_config=get_config)
+except ImportError:
+    pass
 
 try:
     from agictl import live_call_cli

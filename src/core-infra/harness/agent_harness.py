@@ -1033,6 +1033,37 @@ if _LIVE_CALL_GATE is not None and _LIVE_CALL_GATE.ok:
     ALL_TOOLS.append(agictl_call_pu)
 
 
+# ═══════════════════════════════════════════════════════
+# DESKTOP — Observe and operate the PU's HeteroSphere desktop (COA only)
+# ═══════════════════════════════════════════════════════
+
+HETEROSPHERE_SOCKET_DIR = "/tmp/heterosphere"
+
+
+class DesktopInput(BaseModel):
+    command: str = Field(description=(
+        "'desktop look pu', or one Perceptron step: 'desktop open pu', 'desktop load pu <element>', "
+        "'desktop unload pu <element>', 'desktop activate pu', 'desktop close pu'."))
+
+
+@tool("agictl_desktop", args_schema=DesktopInput)
+def agictl_desktop(command: str) -> str:
+    """Read the Primary User's desktop as a tree of named elements, or operate it one
+    Perceptron step at a time, the way they do (COA only). Looking and operating are
+    allowed separately on their screen unless they granted a period already, so a call
+    can wait up to about 40 seconds. A refusal is final for this request.
+    Load computer_use.md before the first look or step.
+    Examples: 'desktop look pu', 'desktop load pu reboot', 'desktop activate pu'
+    """
+    return _run_agictl(command, timeout=60)
+
+
+# Offered only once the PU's HeteroSphere has created its socket directory.
+if (os.environ.get("VERSA_AGENT_NAME", "").strip().lower() == "coa"
+        and os.path.isdir(HETEROSPHERE_SOCKET_DIR)):
+    ALL_TOOLS.append(agictl_desktop)
+
+
 _REASONING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
