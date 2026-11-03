@@ -324,6 +324,98 @@ install_acceptance_sentinel_name_prompt() {
   install_acceptance_coa_name_prompt sentinel
 }
 
+# male (X) / female (Y) / reflective. Empty string when the reply is none of those.
+# The voice line stores the words, the same values identity provision reads.
+_install_acceptance_normalize_gender() {
+  local raw
+  raw="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "${raw}" in
+    m|male|x) printf '%s' "male" ;;
+    f|female|y) printf '%s' "female" ;;
+    r|reflective) printf '%s' "reflective" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+# Shown default: the saved voice when it is already set, otherwise female.
+_install_acceptance_gender_default() {
+  local saved
+  saved="$(_install_acceptance_normalize_gender "${INI_AGENT_VOICE:-}")"
+  if [ -n "${saved}" ]; then
+    printf '%s' "${saved}"
+  else
+    printf '%s' "female"
+  fi
+}
+
+# Write [agent] voice to deployed + source setup.ini.
+_install_acceptance_persist_voice() {
+  local voice="${INI_AGENT_VOICE:-female}"
+  local f
+  [ -n "${voice}" ] || return 0
+  for f in /etc/versa-agi/setup.ini "${SCRIPT_DIR:-}/setup.ini" "${INSTALL_ACCEPTANCE_SOURCE_INI:-}"; do
+    [ -n "${f}" ] && [ -f "${f}" ] || continue
+    _install_acceptance_upsert_agent_key "${f}" "voice" "${voice}"
+  done
+}
+
+# Gender → [agent] voice. Fresh client only, right after the COA name prompt.
+# Enter keeps female unless [agent] voice is already male, female, or reflective.
+install_acceptance_coa_gender_prompt() {
+  local reply="" done=false shown=false choice="" default=""
+  default="$(_install_acceptance_gender_default)"
+
+  case "$(printf '%s' "${VERSA_INSTALL_ACCEPT:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y)
+      choice="$(_install_acceptance_normalize_gender "${INSTALL_ACCEPTANCE_VOICE:-}")"
+      if [ -z "${choice}" ]; then
+        if [ -n "${INSTALL_ACCEPTANCE_VOICE:-}" ]; then
+          echo "ERROR: Gender must be male, female, or reflective. Set INSTALL_ACCEPTANCE_VOICE for non-interactive setup." >&2
+          exit 1
+        fi
+        choice="${default}"
+      fi
+      INI_AGENT_VOICE="${choice}"
+      export INI_AGENT_VOICE
+      _install_acceptance_persist_voice
+      return
+      ;;
+  esac
+
+  while [ "${done}" = false ]; do
+    if [ "${shown}" = false ]; then
+      if declare -F text_box >/dev/null 2>&1; then
+        text_box "COA GENDER" \
+          "Choose male (X), female (Y), or reflective (the Primary User's voice)." \
+          "Press Enter to keep the default, or type male, female, or reflective." \
+          "" \
+          "Saved as voice."
+      else
+        echo ""
+        echo "Choose male (X), female (Y), or reflective (the Primary User's voice)."
+        echo "Saved as voice."
+      fi
+      shown=true
+    fi
+    _install_acceptance_input_line "Gender" "${default}"
+    _install_acceptance_read_line "" reply
+    case "${reply}" in
+      "") choice="${default}" ;;
+      *) choice="$(_install_acceptance_normalize_gender "${reply}")" ;;
+    esac
+    if [ -z "${choice}" ]; then
+      warn "Type male, female, or reflective."
+    else
+      done=true
+    fi
+  done
+
+  INI_AGENT_VOICE="${choice}"
+  export INI_AGENT_VOICE
+  _install_acceptance_persist_voice
+  echo ""
+}
+
 # Write call_sign + last_name to deployed + source setup.ini immediately so
 # --update reconcile-config carries them forward (Step 13 also persists on update).
 _install_acceptance_persist_call_sign() {

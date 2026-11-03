@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.6.0 · October 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.6.1 · October 2026</p>
 </div>
 
 ## At a glance
@@ -127,12 +127,16 @@ A common split: the server type on the machine with the GPU, and a client on the
 
 ### Normal and Sentinel
 
-Client installs then ask a second question.
+Client installs then ask a second question. They then ask for the Chief Orchestrator Agent's name and gender.
 
 <div class="choices choices-two">
 <div class="choice"><strong>Normal</strong><span>Home. Your Chief Orchestrator Agent is introduced as your partner in production on this machine. The default name offered is Versa.</span></div>
 <div class="choice"><strong>Sentinel</strong><span>A remote member of a team you already have. A full install, sub-agents allowed, working the duties you assign on that other machine.</span></div>
 </div>
+
+Gender is male (X), female (Y), or reflective. Reflective uses your voice and is saved as the word reflective. Press Enter to keep female, unless one of the three is already saved.
+
+On a Normal install, your home folder links to that agent's workspace and attachments: `~/agi-workspace` and `~/agi-attachments`.
 
 A Sentinel:
 
@@ -765,5 +769,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.6.0, October 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.6.1, October 2026.</p>
 </div>

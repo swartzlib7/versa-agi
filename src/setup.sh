@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.6.0"
+PRODUCT_VERSION="3.6.1"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -1288,6 +1288,12 @@ if [ "${UPDATE_MODE}" = false ]; then
     fi
     info "Install flavor: Sentinel — name ${INI_AGENT_FIRST_NAME}"
   fi
+  if declare -F install_acceptance_coa_gender_prompt >/dev/null 2>&1; then
+    install_acceptance_coa_gender_prompt
+  else
+    error "install_acceptance_coa_gender_prompt missing — cannot collect COA gender"
+  fi
+  info "COA gender: ${INI_AGENT_VOICE:-female}"
   for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
     if [ -f "${_ini_file}" ]; then
       if grep -q "^install_role=" "${_ini_file}" 2>/dev/null; then
@@ -2594,6 +2600,9 @@ for _dir in attachments archive; do
 done
 
 # Create workspace symlink for Primary User visibility (always configured)
+if [ -z "${INI_WORKSPACE_LINK}" ] && [ -n "${SUDO_USER:-}" ]; then
+  INI_WORKSPACE_LINK="$(eval echo "~${SUDO_USER}")/agi-workspace"
+fi
 if [ -n "${INI_WORKSPACE_LINK}" ]; then
   if [ -L "${INI_WORKSPACE_LINK}" ]; then
     # Update symlink target if it points to old location

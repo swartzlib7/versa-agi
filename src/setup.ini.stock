@@ -262,6 +262,8 @@ language=en
 country=United States
 # Voice: agent voice identity for VersaVoice spoken modes.
 #   male (X) · female (Y) · reflective (clones the Primary User's voice)
+# Fresh setup asks male (X), female (Y), or reflective right after the COA name.
+# Enter keeps female unless this line is already male, female, or reflective.
 # Unrelated to [audio_processing] — that section is multimodal TTS packaging.
 voice=female
 # Role: Agent primary role (seeded as first ability)

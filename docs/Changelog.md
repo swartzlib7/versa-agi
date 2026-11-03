@@ -6,6 +6,16 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [3.6.1] — 2026-11-02
+
+### Setup
+
+#### Added
+- **COA gender at setup** — After the name, a fresh install asks male (X), female (Y), or reflective (the Primary User's voice). Enter keeps female unless a choice is already saved. The choice is the agent's voice.
+
+#### Fixed
+- **Home folder links** — A fresh install creates `~/agi-workspace` and `~/agi-attachments` when the workspace path was left blank. The path is saved as that user's home plus `/agi-workspace`.
+
 ## [3.6.0] — 2026-10-26
 
 ### Versa Desktop

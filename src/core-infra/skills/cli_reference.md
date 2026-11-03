@@ -685,7 +685,7 @@ agictl desktop press pu <key>                         # Calculator key: 0-9, dot
 
 The Primary User's desktop must be HeteroSphere and running. Looking and operating are allowed separately: on screen for each request, or for 15, 30, or 60 minutes, or always. A command waits up to 40 s. Steps work once Versa Desktop is installed and running as the login desktop.
 
-**Returns JSON**: `{success: true, grant: {agent, expires_at, always}, tree: {id, role, name, state, bounds, children}}`, or `{success: false, error, message}` with `error` one of `not_running`, `rejected`, `timeout`, `busy`, `unsafe`, `refused` (a step the Primary User could not take either; `message` says why, and `tree` is included).
+**Returns JSON**: `{success: true, grant: {agent, expires_at, always}, tree: {id, role, name, state, bounds, children}}`, or `{success: false, error, message}` with `error` one of `not_running`, `rejected`, `timeout`, `busy`, `unsafe`, `refused` (a step the Primary User could not take either; `message` says why, and `tree` is included). A hosted `window` may list that app's own controls as children. `state.interior` is `atspi`, `partial`, or `none`. `none` means the app published nothing, not that the app is empty. What those children are is in `computer_use.md`. Typing into the app is not a step.
 
 **Harness Integration**: tool `agictl_desktop`, for COA only, offered once `/tmp/heterosphere/` exists. Skill: `computer_use.md`.
 
