@@ -1386,7 +1386,7 @@ with open(out, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${INSTALL_ACCEPTANCE_JSON}" 2>/dev/null || true
+  chown "${WATCHDOG_USER}:agi_agents" "${INSTALL_ACCEPTANCE_JSON}" 2>/dev/null || true
   chmod 640 "${INSTALL_ACCEPTANCE_JSON}"
 }
 

@@ -4171,7 +4171,7 @@ apply_system_permissions() {
   [ -f "/etc/versa-agi/coa_config.json" ] && chown "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/coa_config.json && chmod 640 /etc/versa-agi/coa_config.json
   [ -f "/etc/versa-agi/setup.ini" ]       && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/setup.ini && chmod 640 /etc/versa-agi/setup.ini
   [ -f "/etc/versa-agi/models.ini" ]      && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/models.ini && chmod 640 /etc/versa-agi/models.ini
-  [ -f "/etc/versa-agi/install-acceptance.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/install-acceptance.json && chmod 640 /etc/versa-agi/install-acceptance.json
+  [ -f "/etc/versa-agi/install-acceptance.json" ] && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/install-acceptance.json && chmod 640 /etc/versa-agi/install-acceptance.json
   [ -f "/etc/versa-agi/registration.conf" ]     && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/registration.conf && chmod 640 /etc/versa-agi/registration.conf
   [ -f "/etc/versa-agi/provider_keys.env" ]       && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/provider_keys.env && chmod 600 /etc/versa-agi/provider_keys.env
   # paths.env: watchdog:coa 644 (readable by all — sourced by lifeline, agitop, sentinel)
