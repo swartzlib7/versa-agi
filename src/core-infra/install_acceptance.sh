@@ -712,6 +712,14 @@ _install_acceptance_norm_bool() {
   esac
 }
 
+# Echo true/false and return 0 when the installer already set this variable.
+_install_acceptance_feature_supplied() {
+  local var="$1" value
+  value="${!var:-}"
+  [ -n "${value}" ] || return 1
+  _install_acceptance_norm_bool "${value}"
+}
+
 # Prompt [y/N] (or [Y/n] when current is enabled). Echoes true/false.
 _install_acceptance_feature_ask() {
   local prompt="$1" current="$2" reply hint default_yes=false
@@ -810,42 +818,69 @@ install_acceptance_feature_prompts() {
   fi
 
   # Organization — disclaimer first, then the gated prompt.
-  _install_acceptance_org_disclaimer
-  export VERSA_FEATURE_ORGANIZATION_UI="$(_install_acceptance_feature_ask \
-    "Would you like to enable the Organization surface?" "${org_current}")"
+  # A value already on the command is the answer. A manual run still asks.
+  local supplied=""
+  if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_ORGANIZATION_UI)"; then
+    export VERSA_FEATURE_ORGANIZATION_UI="${supplied}"
+    info "Organization supplied by the installer: ${supplied}"
+  else
+    _install_acceptance_org_disclaimer
+    export VERSA_FEATURE_ORGANIZATION_UI="$(_install_acceptance_feature_ask \
+      "Would you like to enable the Organization surface?" "${org_current}")"
+  fi
 
   echo ""
-  _install_acceptance_feature_note \
-    "Versa - Business Admin — a shipped GitHub project (versa-business-admin) assigned to COA."
-  _install_acceptance_feature_cont \
-    "COA will ask whether you want it installed and configured. Change anytime via setup."
-  export VERSA_FEATURE_BUSINESS_ADMIN="$(_install_acceptance_feature_ask \
-    "Enable Versa - Business Admin?" "${as_current}")"
+  if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_BUSINESS_ADMIN)"; then
+    export VERSA_FEATURE_BUSINESS_ADMIN="${supplied}"
+    info "Versa - Business Admin supplied by the installer: ${supplied}"
+  else
+    _install_acceptance_feature_note \
+      "Versa - Business Admin — a shipped GitHub project (versa-business-admin) assigned to COA."
+    _install_acceptance_feature_cont \
+      "COA will ask whether you want it installed and configured. Change anytime via setup."
+    export VERSA_FEATURE_BUSINESS_ADMIN="$(_install_acceptance_feature_ask \
+      "Enable Versa - Business Admin?" "${as_current}")"
+  fi
 
   # Plain features — a short note explaining each, then the prompt.
   echo ""
-  _install_acceptance_feature_note \
-    "Utility Models — run fixed-prompt AI models that produce artifacts (text,"
-  _install_acceptance_feature_cont \
-    "image, audio) on a schedule or on demand, without a full agent cycle."
-  export VERSA_FEATURE_UTILITY_MODELS_UI="$(_install_acceptance_feature_ask \
-    "Enable Utility Models UI?" "${util_current}")"
+  if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_UTILITY_MODELS_UI)"; then
+    export VERSA_FEATURE_UTILITY_MODELS_UI="${supplied}"
+    info "Utility Models supplied by the installer: ${supplied}"
+  else
+    _install_acceptance_feature_note \
+      "Utility Models — run fixed-prompt AI models that produce artifacts (text,"
+    _install_acceptance_feature_cont \
+      "image, audio) on a schedule or on demand, without a full agent cycle."
+    export VERSA_FEATURE_UTILITY_MODELS_UI="$(_install_acceptance_feature_ask \
+      "Enable Utility Models UI?" "${util_current}")"
+  fi
 
   echo ""
-  _install_acceptance_feature_note \
-    "Script Tasks — schedule deterministic shell scripts from your AGi-Tools"
-  _install_acceptance_feature_cont \
-    "repo, run by lifeline on a cadence (no agent spawn, no LLM)."
-  export VERSA_FEATURE_SCRIPT_TASKS_UI="$(_install_acceptance_feature_ask \
-    "Enable Script Tasks UI?" "${script_current}")"
+  if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_SCRIPT_TASKS_UI)"; then
+    export VERSA_FEATURE_SCRIPT_TASKS_UI="${supplied}"
+    info "Script Tasks supplied by the installer: ${supplied}"
+  else
+    _install_acceptance_feature_note \
+      "Script Tasks — schedule deterministic shell scripts from your AGi-Tools"
+    _install_acceptance_feature_cont \
+      "repo, run by lifeline on a cadence (no agent spawn, no LLM)."
+    export VERSA_FEATURE_SCRIPT_TASKS_UI="$(_install_acceptance_feature_ask \
+      "Enable Script Tasks UI?" "${script_current}")"
+  fi
 
   echo ""
-  _install_acceptance_feature_note \
-    "Output Routing — route an agent's output generation (e.g. image/audio) to"
-  _install_acceptance_feature_cont \
-    "a chosen model per cycle (the Output Routing tab in Model Routing)."
-  export VERSA_FEATURE_OUTPUT_ROUTING_UI="$(_install_acceptance_feature_ask \
-    "Enable Output Routing UI?" "${output_current}")"
+  if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_OUTPUT_ROUTING_UI)"; then
+    export VERSA_FEATURE_OUTPUT_ROUTING_UI="${supplied}"
+    info "Output Routing supplied by the installer: ${supplied}"
+  else
+    _install_acceptance_feature_note \
+      "Output Routing — route an agent's output generation (e.g. image/audio) to"
+    _install_acceptance_feature_cont \
+      "a chosen model per cycle (the Output Routing tab in Model Routing)."
+    export VERSA_FEATURE_OUTPUT_ROUTING_UI="$(_install_acceptance_feature_ask \
+      "Enable Output Routing UI?" "${output_current}")"
+  fi
 
   local live_current live_model_current
   if [ "${UPDATE_MODE:-false}" = true ]; then
@@ -856,16 +891,27 @@ install_acceptance_feature_prompts() {
     live_model_current=""
   fi
   echo ""
-  _install_acceptance_feature_note \
-    "Live Call — COA can call you in the VersaVoice app when talking settles"
-  _install_acceptance_feature_cont \
-    "something faster than chat. Needs an OpenAI API key with GPT-Live access."
-  export VERSA_FEATURE_LIVE_CALL="$(_install_acceptance_feature_ask \
-    "Enable Live Call?" "${live_current}")"
-  export VERSA_LIVE_CALL_MODEL="${live_model_current}"
+  if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_LIVE_CALL)"; then
+    export VERSA_FEATURE_LIVE_CALL="${supplied}"
+    info "Live Call supplied by the installer: ${supplied}"
+  else
+    _install_acceptance_feature_note \
+      "Live Call — COA can call you in the VersaVoice app when talking settles"
+    _install_acceptance_feature_cont \
+      "something faster than chat. Needs an OpenAI API key with GPT-Live access."
+    export VERSA_FEATURE_LIVE_CALL="$(_install_acceptance_feature_ask \
+      "Enable Live Call?" "${live_current}")"
+  fi
   if [ "${VERSA_FEATURE_LIVE_CALL}" = "true" ]; then
-    VERSA_LIVE_CALL_MODEL="$(_install_acceptance_live_call_model_pick "${live_model_current}")"
-    export VERSA_LIVE_CALL_MODEL
+    if [ -n "${VERSA_LIVE_CALL_MODEL:-}" ]; then
+      export VERSA_LIVE_CALL_MODEL
+      info "Live Call model supplied by the installer: ${VERSA_LIVE_CALL_MODEL}"
+    else
+      VERSA_LIVE_CALL_MODEL="$(_install_acceptance_live_call_model_pick "${live_model_current}")"
+      export VERSA_LIVE_CALL_MODEL
+    fi
+  else
+    export VERSA_LIVE_CALL_MODEL=""
   fi
 }
 

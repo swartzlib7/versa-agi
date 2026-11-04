@@ -420,9 +420,10 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
 
 .controls-btn-row > .ctrl-inline-btn {
     width: 1fr;
-    min-width: 0;
+    min-width: 8;
     height: 3;
     margin: 0 1 0 0;
+    text-wrap: nowrap;
 }
 
 .controls-btn-row > .ctrl-inline-btn:last-child {
@@ -432,9 +433,10 @@ Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
 /* Full width of both inner columns (= 2× one button). */
 .controls-refresh-row > .ctrl-refresh-span {
     width: 1fr;
-    min-width: 0;
+    min-width: 8;
     height: 3;
     margin: 0;
+    text-wrap: nowrap;
 }
 
 .col-header {

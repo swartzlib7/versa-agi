@@ -88,6 +88,13 @@ if [ "$(id -u)" -ne 0 ]; then
   error "This script must be run as root (sudo ./setup.sh)"
 fi
 
+# sudo -E keeps the SSH user's HOME, so pip refuses that user's cache and warns.
+# A root-owned cache is used instead. The packages still install.
+if [ -z "${PIP_CACHE_DIR:-}" ]; then
+  export PIP_CACHE_DIR=/var/tmp/versa-agi-pip-cache
+fi
+mkdir -p "${PIP_CACHE_DIR}"
+
 # Reattach stdin to the controlling TTY when it is not already a terminal.
 # Second installs under OrbStack / curl|bash often leave stdin as a non-keyboard
 # fd; acceptance `read` then blocks with no prompt and Ctrl+C may not work.
@@ -479,8 +486,8 @@ INI_SA_KEY_PATH="$(ini_get gcp service_account_key)"
 INI_AGENT_FIRST_NAME="$(ini_get agent first_name Versa)"
 INI_AGENT_CALL_SIGN="$(ini_get agent call_sign '')"
 INI_AGENT_LAST_NAME="$(ini_get agent last_name '(COA)')"
-INI_AGENT_LANGUAGE="$(ini_get agent language en)"
-INI_AGENT_COUNTRY="$(ini_get agent country)"
+INI_AGENT_LANGUAGE="${INSTALL_ACCEPTANCE_LANGUAGE:-$(ini_get agent language en)}"
+INI_AGENT_COUNTRY="${INSTALL_ACCEPTANCE_COUNTRY:-$(ini_get agent country)}"
 INI_AGENT_VOICE="$(ini_get agent voice female)"
 INI_AGENT_ROLE="$(ini_get agent role)"
 INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 45)"
@@ -1030,31 +1037,42 @@ echo ""
 INSTALL_TYPE=""  # 1=client-cloud, 2=client-localai, 3=server
 
 if [ "${UPDATE_MODE}" = false ]; then
-  echo ""
-  echo "  ┌─────────────────────────────────────────────┐"
-  echo "  │  INSTALLATION TYPE                          │"
-  echo "  │                                             │"
-  echo "  │  1) Client — Cloud AI only                  │"
-  echo "  │  2) Client — Cloud + Local AI               │"
-  echo "  │  3) Server — Local AI inference engine only │"
-  echo "  └─────────────────────────────────────────────┘"
-  echo ""
+  # The installer passes 1, 2, or 3. A manual run with the variable unset still asks.
+  case "${VERSA_INSTALL_TYPE:-}" in
+    1|2|3)
+      INSTALL_TYPE="${VERSA_INSTALL_TYPE}"
+      info "Installation type ${INSTALL_TYPE} supplied by the installer"
+      ;;
+    "")
+      echo ""
+      echo "  ┌─────────────────────────────────────────────┐"
+      echo "  │  INSTALLATION TYPE                          │"
+      echo "  │                                             │"
+      echo "  │  1) Client — Cloud AI only                  │"
+      echo "  │  2) Client — Cloud + Local AI               │"
+      echo "  │  3) Server — Local AI inference engine only │"
+      echo "  └─────────────────────────────────────────────┘"
+      echo ""
 
-  # Auto-select from setup.ini topology value
-  case "${INI_TOPOLOGY}" in
-    server) INSTALL_DEFAULT=3 ;;
-    client) INSTALL_DEFAULT=2 ;;
-    *)      INSTALL_DEFAULT=1 ;;
+      # Auto-select from setup.ini topology value
+      case "${INI_TOPOLOGY}" in
+        server) INSTALL_DEFAULT=3 ;;
+        client) INSTALL_DEFAULT=2 ;;
+        *)      INSTALL_DEFAULT=1 ;;
+      esac
+      # If local_ai is enabled in INI, default to option 2
+      if [ "${INI_LOCAL_AI_ENABLED}" = "true" ] && [ "${INSTALL_DEFAULT}" -eq 1 ]; then
+        INSTALL_DEFAULT=2
+      fi
+
+      read -p "  Select installation type [${INSTALL_DEFAULT}]: " INSTALL_TYPE_CHOICE
+      INSTALL_TYPE="${INSTALL_TYPE_CHOICE:-${INSTALL_DEFAULT}}"
+      echo ""
+      ;;
+    *)
+      error "VERSA_INSTALL_TYPE must be 1 (cloud only), 2 (cloud + local AI), or 3 (local AI server)."
+      ;;
   esac
-  # If local_ai is enabled in INI, default to option 2
-  if [ "${INI_LOCAL_AI_ENABLED}" = "true" ] && [ "${INSTALL_DEFAULT}" -eq 1 ]; then
-    INSTALL_DEFAULT=2
-  fi
-
-  read -p "  Select installation type [${INSTALL_DEFAULT}]: " INSTALL_TYPE_CHOICE
-  INSTALL_TYPE="${INSTALL_TYPE_CHOICE:-${INSTALL_DEFAULT}}"
-
-  echo ""
 
   # ── Server Mode: delegate to setup_local.sh and exit ──
   if [ "${INSTALL_TYPE}" = "3" ]; then
@@ -1260,33 +1278,46 @@ if [ "${UPDATE_MODE}" = false ]; then
 
   # ── Install flavor: normal (default) or Sentinel (remote team COA) ──
   # Not a topology. Full client stack either way. Server type already exited.
-  echo ""
-  echo "  ┌─────────────────────────────────────────────┐"
-  echo "  │  INSTALL FLAVOR                             │"
-  echo "  │                                             │"
-  echo "  │  Normal  — this machine's home COA          │"
-  echo "  │  Sentinel — remote agent on the team,       │"
-  echo "  │             carrying operational duties     │"
-  echo "  │             defined by the Primary User     │"
-  echo "  └─────────────────────────────────────────────┘"
-  echo ""
-  if confirm "Normal install?" "y"; then
-    INI_INSTALL_ROLE="normal"
-    if declare -F install_acceptance_coa_name_prompt >/dev/null 2>&1; then
-      install_acceptance_coa_name_prompt normal
-    else
-      error "install_acceptance_coa_name_prompt missing — cannot collect COA name"
-    fi
-    info "Install flavor: normal — name ${INI_AGENT_FIRST_NAME}"
+  # The installer passes normal or sentinel. A manual run still asks.
+  case "${VERSA_INSTALL_FLAVOR:-}" in
+    normal|sentinel)
+      INI_INSTALL_ROLE="${VERSA_INSTALL_FLAVOR}"
+      if [ "${INI_INSTALL_ROLE}" = "sentinel" ]; then
+        INI_AGENT_ROLE="Remote Sentinel"
+      fi
+      info "Install flavor: ${INI_INSTALL_ROLE} supplied by the installer"
+      ;;
+    "")
+      echo ""
+      echo "  ┌─────────────────────────────────────────────┐"
+      echo "  │  INSTALL FLAVOR                             │"
+      echo "  │                                             │"
+      echo "  │  Normal  — this machine's home COA          │"
+      echo "  │  Sentinel — remote agent on the team,       │"
+      echo "  │             carrying operational duties     │"
+      echo "  │             defined by the Primary User     │"
+      echo "  └─────────────────────────────────────────────┘"
+      echo ""
+      if confirm "Normal install?" "y"; then
+        INI_INSTALL_ROLE="normal"
+      else
+        INI_INSTALL_ROLE="sentinel"
+        INI_AGENT_ROLE="Remote Sentinel"
+      fi
+      ;;
+    *)
+      error "VERSA_INSTALL_FLAVOR must be normal or sentinel."
+      ;;
+  esac
+  if declare -F install_acceptance_coa_name_prompt >/dev/null 2>&1; then
+    install_acceptance_coa_name_prompt "${INI_INSTALL_ROLE}"
   else
-    INI_INSTALL_ROLE="sentinel"
-    INI_AGENT_ROLE="Remote Sentinel"
-    if declare -F install_acceptance_coa_name_prompt >/dev/null 2>&1; then
-      install_acceptance_coa_name_prompt sentinel
-    else
-      error "install_acceptance_coa_name_prompt missing — cannot collect Sentinel name"
-    fi
+    error "install_acceptance_coa_name_prompt missing — cannot collect COA name"
+  fi
+  if [ "${INI_INSTALL_ROLE}" = "sentinel" ]; then
     info "Install flavor: Sentinel — name ${INI_AGENT_FIRST_NAME}"
+  else
+    info "Install flavor: normal — name ${INI_AGENT_FIRST_NAME}"
   fi
   if declare -F install_acceptance_coa_gender_prompt >/dev/null 2>&1; then
     install_acceptance_coa_gender_prompt
@@ -4409,15 +4440,35 @@ fi
 # U4b: Sync Skills (--update only, with prompt)
 # Poise is NOT gated here — sync_poise.py already ran unconditionally.
 # ═══════════════════════════════════════════════════════
+# Installer answers: yes syncs, no skips, anything else asks.
+_versa_installer_yes() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y) return 0 ;;
+    0|false|no|n) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 if [ "${UPDATE_MODE}" = true ]; then
   section "Update — Sync Skills"
   if [ "${DRY_RUN}" = true ]; then
     dry "Would prompt to sync updated skills to active agents"
   else
-    if confirm_accent "Do you want to sync updated skills to active agents?"; then
+    _versa_installer_yes "${VERSA_UPDATE_SYNC_SKILLS:-}" && _sync_choice=0 || _sync_choice=$?
+    if [ "${_sync_choice}" -eq 2 ]; then
+      if confirm_accent "Do you want to sync updated skills to active agents?"; then
+        _sync_choice=0
+      else
+        _sync_choice=1
+      fi
+    fi
+    if [ "${_sync_choice}" -eq 0 ]; then
+      info "Syncing updated skills to active agents"
       step_arrow "Running: python3 ${DEPLOYED_CORE_INFRA}/scripts/sync_skills.py"
       python3 "${DEPLOYED_CORE_INFRA}/scripts/sync_skills.py" || warn "sync_skills encountered an issue."
       apply_system_permissions
+    else
+      info "Skill sync skipped"
     fi
   fi
 fi
@@ -4432,7 +4483,16 @@ if [ "${UPDATE_MODE}" = true ]; then
   section "Update — Resume CRON"
   if [ "${DRY_RUN}" = true ]; then
     dry "Would prompt to resume CRON"
-  elif confirm_accent "Resume CRON (lifeline scheduler)?"; then
+  else
+    _versa_installer_yes "${VERSA_UPDATE_RESUME_CRON:-}" && _cron_choice=0 || _cron_choice=$?
+    if [ "${_cron_choice}" -eq 2 ]; then
+      if confirm_accent "Resume CRON (lifeline scheduler)?"; then
+        _cron_choice=0
+      else
+        _cron_choice=1
+      fi
+    fi
+    if [ "${_cron_choice}" -eq 0 ]; then
     ensure_watchdog_lifeline_cron
     ok "CRON resumed (lifeline.disabled cleared)"
   else
@@ -4448,6 +4508,7 @@ if [ "${UPDATE_MODE}" = true ]; then
       /var/lib/versa-agi/lifeline.disabled 2>/dev/null || true
     warn "CRON NOT resumed — agents will not spawn until you re-enable it"
     echo -e "  ${DIM:-}To resume: sudo agitop → Controls → LIFELINE ON${RESET:-}"
+    fi
   fi
   echo ""
 fi
@@ -4765,7 +4826,15 @@ echo ""
 # Offer to auto-launch agitop
 if [ -x /usr/local/bin/agitop ]; then
   echo -e "  ${DIM:-}Tip: if you have not already accepted the VersaVoice connection request, do that before opening agitop.${NC:-}"
-  if confirm_accent "Launch agitop now?"; then
+  _versa_installer_yes "${VERSA_LAUNCH_AGITOP:-}" && _launch_choice=0 || _launch_choice=$?
+  if [ "${_launch_choice}" -eq 2 ]; then
+    if confirm_accent "Launch agitop now?"; then
+      _launch_choice=0
+    else
+      _launch_choice=1
+    fi
+  fi
+  if [ "${_launch_choice}" -eq 0 ]; then
     echo ""
     step_info "Starting agitop..."
     echo -e "  ${DIM:-}(Press 'q' to quit, '?' for help)${RESET:-}"
