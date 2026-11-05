@@ -1036,6 +1036,41 @@ echo ""
 # ═══════════════════════════════════════════════════════
 INSTALL_TYPE=""  # 1=client-cloud, 2=client-localai, 3=server
 
+# The installer passes normal or sentinel. Apply it on a fresh install and on
+# --update. A manual --update with the variable unset keeps the saved role.
+_write_install_role_files() {
+  if [ "${INI_INSTALL_ROLE}" = "sentinel" ]; then
+    INI_AGENT_ROLE="Remote Sentinel"
+  else
+    INI_AGENT_ROLE="Chief Orchestrator Agent"
+  fi
+  local _ini_file
+  for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+    [ -f "${_ini_file}" ] || continue
+    if grep -q "^install_role=" "${_ini_file}" 2>/dev/null; then
+      sed -i '/^\[system\]/,/^\[/{s/^install_role=.*/install_role='"${INI_INSTALL_ROLE}"'/}' "${_ini_file}"
+    else
+      sed -i '/^\[system\]/a install_role='"${INI_INSTALL_ROLE}" "${_ini_file}"
+    fi
+    if grep -q "^role=" "${_ini_file}" 2>/dev/null; then
+      sed -i "s|^role=.*|role=${INI_AGENT_ROLE}|" "${_ini_file}"
+    fi
+  done
+}
+
+case "${VERSA_INSTALL_FLAVOR:-}" in
+  normal|sentinel)
+    INI_INSTALL_ROLE="${VERSA_INSTALL_FLAVOR}"
+    _write_install_role_files
+    info "Install flavor: ${INI_INSTALL_ROLE} supplied by the installer"
+    ;;
+  "")
+    ;;
+  *)
+    error "VERSA_INSTALL_FLAVOR must be normal or sentinel."
+    ;;
+esac
+
 if [ "${UPDATE_MODE}" = false ]; then
   # The installer passes 1, 2, or 3. A manual run with the variable unset still asks.
   case "${VERSA_INSTALL_TYPE:-}" in
@@ -1281,11 +1316,6 @@ if [ "${UPDATE_MODE}" = false ]; then
   # The installer passes normal or sentinel. A manual run still asks.
   case "${VERSA_INSTALL_FLAVOR:-}" in
     normal|sentinel)
-      INI_INSTALL_ROLE="${VERSA_INSTALL_FLAVOR}"
-      if [ "${INI_INSTALL_ROLE}" = "sentinel" ]; then
-        INI_AGENT_ROLE="Remote Sentinel"
-      fi
-      info "Install flavor: ${INI_INSTALL_ROLE} supplied by the installer"
       ;;
     "")
       echo ""
@@ -1302,8 +1332,8 @@ if [ "${UPDATE_MODE}" = false ]; then
         INI_INSTALL_ROLE="normal"
       else
         INI_INSTALL_ROLE="sentinel"
-        INI_AGENT_ROLE="Remote Sentinel"
       fi
+      _write_install_role_files
       ;;
     *)
       error "VERSA_INSTALL_FLAVOR must be normal or sentinel."
@@ -1325,18 +1355,7 @@ if [ "${UPDATE_MODE}" = false ]; then
     error "install_acceptance_coa_gender_prompt missing — cannot collect COA gender"
   fi
   info "COA gender: ${INI_AGENT_VOICE:-female}"
-  for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
-    if [ -f "${_ini_file}" ]; then
-      if grep -q "^install_role=" "${_ini_file}" 2>/dev/null; then
-        sed -i '/^\[system\]/,/^\[/{s/^install_role=.*/install_role='"${INI_INSTALL_ROLE}"'/}' "${_ini_file}"
-      else
-        sed -i '/^\[system\]/a install_role='"${INI_INSTALL_ROLE}" "${_ini_file}"
-      fi
-      if [ "${INI_INSTALL_ROLE}" = "sentinel" ] && grep -q "^role=" "${_ini_file}" 2>/dev/null; then
-        sed -i "s|^role=.*|role=${INI_AGENT_ROLE}|" "${_ini_file}"
-      fi
-    fi
-  done
+  _write_install_role_files
 fi
 
 # ─── Feature Flags Prompt (D34) — after topology selection ─
