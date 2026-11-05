@@ -1066,6 +1066,10 @@ install_acceptance_persist_features() {
     || warn "Failed to set live_call (non-fatal)"
   _install_acceptance_section_set live_call call_model "${VERSA_LIVE_CALL_MODEL:-}" \
     || warn "Failed to set live_call call_model (non-fatal)"
+  if [ "${VERSA_BROWSER_ENABLED:-}" = "true" ] || [ "${VERSA_BROWSER_ENABLED:-}" = "false" ]; then
+    _install_acceptance_section_set browser enabled "${VERSA_BROWSER_ENABLED}" \
+      || warn "Failed to set browser enabled (non-fatal)"
+  fi
   _install_acceptance_sync_source_ini || true
   ok "Feature flags saved to setup.ini [features]"
   return 0

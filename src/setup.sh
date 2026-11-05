@@ -3311,32 +3311,35 @@ if [ -d "${PROVIDERS_DIR}" ]; then
     fi
   fi
 
-  # Playwright (Headless Browser) — gated by [browser] enabled=true
+  # Playwright (Headless Browser). The installer flag wins over the stock file.
   if [ -f "${PROVIDERS_DIR}/playwright.sh" ]; then
-    INI_BROWSER_ENABLED="$(ini_get browser enabled false)"
+    if [ "${VERSA_BROWSER_ENABLED:-}" = "true" ] || [ "${VERSA_BROWSER_ENABLED:-}" = "false" ]; then
+      INI_BROWSER_ENABLED="${VERSA_BROWSER_ENABLED}"
+    else
+      INI_BROWSER_ENABLED="$(ini_get browser enabled false)"
+    fi
     INI_BROWSER_TIMEOUT="$(ini_get browser timeout 30)"
     if [ "${INI_BROWSER_ENABLED}" = "true" ]; then
       chmod +x "${PROVIDERS_DIR}/playwright.sh"
       bash "${PROVIDERS_DIR}/playwright.sh" --timeout "${INI_BROWSER_TIMEOUT}"
       _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
-    else
-      # Prompt for it if it's NOT enabled but we are in interactive mode (not UPDATE_MODE or UPDATE_MODE is false)
-      if [ "${UPDATE_MODE:-false}" = "false" ]; then
-        echo ""
-        echo "  ── Playwright (Headless Browser) ──"
-        echo "  Playwright enables agents to view, navigate, and extract content from websites."
-        read -p "  Enable Playwright browser automation? [y/N]: " -n 1 -r ans
-        echo ""
-        if [[ "${ans}" =~ ^[Yy]$ ]]; then
-          chmod +x "${PROVIDERS_DIR}/playwright.sh"
-          bash "${PROVIDERS_DIR}/playwright.sh"
-          _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
-        else
-          info "Playwright provider skipped ([browser] enabled=false)"
-        fi
+    elif [ -n "${VERSA_BROWSER_ENABLED:-}" ]; then
+      info "Playwright provider skipped (VERSA_BROWSER_ENABLED=false)"
+    elif [ "${UPDATE_MODE:-false}" = "false" ]; then
+      echo ""
+      echo "  ── Playwright (Headless Browser) ──"
+      echo "  Playwright enables agents to view, navigate, and extract content from websites."
+      read -p "  Enable Playwright browser automation? [y/N]: " -n 1 -r ans
+      echo ""
+      if [[ "${ans}" =~ ^[Yy]$ ]]; then
+        chmod +x "${PROVIDERS_DIR}/playwright.sh"
+        bash "${PROVIDERS_DIR}/playwright.sh"
+        _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
       else
         info "Playwright provider skipped ([browser] enabled=false)"
       fi
+    else
+      info "Playwright provider skipped ([browser] enabled=false)"
     fi
   fi
 
