@@ -669,7 +669,9 @@ sudo agictl browser disable <agent_name>              # Set browser_enabled=0 + 
 ## 17b. desktop — Primary User's desktop (COA only)
 
 ```bash
-agictl desktop look pu                                # Read the PU's desktop tree
+agictl desktop look pu                                # Read the PU's desktop tree, every screen
+agictl desktop see pu                                 # A PNG picture of every screen; prints each path
+agictl desktop see pu --screen 1                      # A picture of screen 1 only (screen-1 in the tree); repeat --screen for several
 agictl desktop open pu                                # Move the computer into the sphere (Do and Have appear)
 agictl desktop open pu user                           # Move User into the sphere instead (the computer must be out)
 agictl desktop load pu <element>                      # Load a shown item into the center; nothing runs
@@ -683,7 +685,7 @@ agictl desktop back pu                                # As Escape: close the int
 agictl desktop press pu <key>                         # Calculator key: 0-9, dot, plus, minus, times, divide, equals, clear, back
 ```
 
-The Primary User's desktop must be HeteroSphere and running. Looking and operating are allowed separately: on screen for each request, or for 15, 30, or 60 minutes, or always. A command waits up to 40 s. Steps work once Versa Desktop is installed and running as the login desktop.
+The Primary User's desktop must be HeteroSphere and running. Looking, operating, and pictures are allowed separately: on screen for each request, or for 15, 30, or 60 minutes, or always. Pictures are asked and allowed on each screen. Steps act on the primary screen. Read a picture with `agictl_view_image <path>`; that needs a model that reads images. A command waits up to 40 s. Steps work once Versa Desktop is installed and running as the login desktop.
 
 **Returns JSON**: `{success: true, grant: {agent, expires_at, always}, tree: {id, role, name, state, bounds, children}}`, or `{success: false, error, message}` with `error` one of `not_running`, `rejected`, `timeout`, `busy`, `unsafe`, `refused` (a step the Primary User could not take either; `message` says why, and `tree` is included). A hosted `window` may list that app's own controls as children. `state.interior` is `atspi`, `partial`, or `none`. `none` means the app published nothing, not that the app is empty. What those children are is in `computer_use.md`. Typing into the app is not a step.
 

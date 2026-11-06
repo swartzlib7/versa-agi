@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [3.6.2] — 2026-11-05
+
+### Setup
+
+#### Changed
+- **Installer choices stick** — When the Versa AGI installer already chose a feature (Organization, Business Admin, Utility Models, Script Tasks, Output Routing, Live Call) or the browser, setup keeps that choice and does not ask again.
+- **Normal and Sentinel** — An update keeps the install flavor the installer set. A manual update that does not pass a flavor leaves the saved role in place. A Normal install records the Chief Orchestrator Agent role; a Sentinel install records Remote Sentinel.
+
+#### Fixed
+- **Install acceptance record** — The acceptance file is owned so agents can read it.
+
 ## [3.6.1] — 2026-11-02
 
 ### Setup

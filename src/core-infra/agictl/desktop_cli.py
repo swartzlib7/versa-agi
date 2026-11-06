@@ -1,11 +1,12 @@
 """`agictl desktop` — COA observes and operates the Primary User's desktop (HeteroSphere).
 
-`desktop look pu` reads the tree. `desktop <step> pu [element]` takes one Perceptron
-step, the same steps the Primary User takes: open, load, unload, activate, close,
-expand, fullscreen, restore for an open interface, minimize for an open app, and back (Escape).
-HeteroSphere asks the Primary User to allow looking and operating separately, unless
-a standing grant is active. Contract: design/spec/state/state_computer_use.md §1 and
-state_versa_desktop.md §1.8.
+`desktop look pu` reads the tree of every screen. `desktop <step> pu [element]` takes one
+Perceptron step on the primary screen, the same steps the Primary User takes: open, load,
+unload, activate, close, expand, fullscreen, restore for an open interface, minimize for an
+open app, and back (Escape). `desktop see pu [--screen N]` takes a picture of screens.
+HeteroSphere asks the Primary User to allow looking, operating, and pictures separately
+(pictures on each screen), unless a standing grant is active. Contract:
+design/spec/state/state_computer_use.md §1, §2.4 and state_versa_desktop.md §1.8.
 """
 
 from __future__ import annotations
@@ -48,6 +49,9 @@ ERROR_TEXT = {
     "bad_request": "HeteroSphere did not accept the request.",
     "not_ready": "HeteroSphere is still starting.",
     "no_reply": "HeteroSphere closed the connection without a reply.",
+    "locked": "The Primary User's desktop is locked.",
+    "no_screen": "No such screen. `desktop look pu` lists them as screen-<n>.",
+    "capture_failed": "HeteroSphere could not take the picture.",
 }
 
 
@@ -81,6 +85,16 @@ def request_act(agent: str, display_name: str, step: str, element: str = "",
     request = {"op": "act", "target": "pu", "agent": agent, "display_name": display_name, "step": step}
     if element:
         request["id"] = element
+    return _request(request, path)
+
+
+def request_see(agent: str, display_name: str, screens: list[int] | None = None,
+                path: str = SOCKET_PATH) -> dict:
+    """Ask for a picture of each screen (all when `screens` is empty). Each screen asks the
+    Primary User on that screen unless it already may be seen."""
+    request = {"op": "see", "target": "pu", "agent": agent, "display_name": display_name}
+    if screens:
+        request["screens"] = list(screens)
     return _request(request, path)
 
 
@@ -137,13 +151,13 @@ def register(cli, *, json_response, get_config):
             sys.exit(1)
 
     def respond(reply: dict) -> None:
+        result = {key: reply[key] for key in ("tree", "pictures") if key in reply}
         if reply.get("ok"):
-            json_response(True, grant=reply.get("grant"), tree=reply.get("tree"))
+            json_response(True, grant=reply.get("grant"), **result)
             return
         code = str(reply.get("error") or "no_reply")
         message = reply.get("reason") if code == "refused" else ERROR_TEXT.get(code, code)
-        extra = {"tree": reply["tree"]} if "tree" in reply else {}
-        json_response(False, error=code, message=message, **extra)
+        json_response(False, error=code, message=message, **result)
         sys.exit(1)
 
     @cli.group("desktop")
@@ -158,10 +172,25 @@ def register(cli, *, json_response, get_config):
 
     @look.command("pu")
     def look_pu():
-        """Read the Primary User's desktop tree. They allow or reject each look
+        """Read the Primary User's desktop tree, every screen. They allow or reject each look
         unless they already granted one for a while."""
         only_coa("observe")
         respond(request_look("coa", _display_name(get_config)))
+
+    @desktop.group("see")
+    def see():
+        """Take a picture of desktop screens."""
+        pass
+
+    @see.command("pu")
+    @click.option("--screen", "screens", type=click.IntRange(0, 15), multiple=True,
+                  help="Screen index from `desktop look pu` (screen-<n>); repeat for several. Default: every screen.")
+    def see_pu(screens):
+        """Take a PNG picture of the Primary User's screens. Each screen asks them on that
+        screen unless it may already be seen. Prints each picture's path; read it with
+        agictl_view_image."""
+        only_coa("see")
+        respond(request_see("coa", _display_name(get_config), list(screens)))
 
     def add_step(step: str, help_text: str, takes_element: bool | str) -> None:
         group = desktop.group(step, help=f"{help_text} (Perceptron step)")(lambda: None)

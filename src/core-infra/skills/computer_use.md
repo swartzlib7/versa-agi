@@ -2,7 +2,8 @@
 
 > **Scope:** COA only (`coa_only`). **Tool:** `agictl_desktop`. It exists only when the Primary User runs the Versa desktop (HeteroSphere) on this machine.
 >
-> - **Look:** `desktop look pu` reads the desktop.
+> - **Look:** `desktop look pu` reads the desktop, every screen.
+> - **Picture:** `desktop see pu [--screen N]` takes a PNG picture of screens (§4a).
 > - **Steps:** `desktop open pu [user]`, `desktop load pu <element>`, `desktop unload pu <element>`, `desktop activate pu`, `desktop close pu` operate it the way the Primary User does. `desktop expand pu`, `desktop fullscreen pu`, `desktop restore pu` resize an open interface. `desktop minimize pu` minimizes an open app; it keeps running. `desktop back pu` goes back one step, as Escape does. `desktop press pu <key>` presses one calculator key.
 
 ## 1. What a look returns
@@ -13,10 +14,17 @@ The Primary User's desktop describes itself as a tree. Each element has:
 - `role`: what it is (`desktop`, `surface`, `perceptron`, `subject`, `do`, `have`, `guide`, …).
 - `name`: what the Primary User sees it called.
 - `state`: its current values, for example `{"available": true, "loaded": false}` on a `do` item.
-- `bounds`: `[x, y, width, height]` on their screen.
+- `bounds`: `[x, y, width, height]` across their screens, as the screens sit side by side.
 - `children`
 
 Read the state from `state`. Do not guess it from names or positions.
+
+### Screens
+
+The tree's root `desktop` has one `screen-<n>` child per screen (role `screen`), left to right. `name` is the screen's connector (for example `HDMI1`); `state.index` is `n`, `state.primary` is true for `screen-0`, `state.size` its pixels. Each screen's elements are under it.
+
+- `screen-0` is the primary screen: the desktop, the Computer and User, and everything in §2. **Steps act on the primary only**, and an element id in a step means the element under `screen-0`.
+- Every other screen has its own Perceptron (`phase: "screen"`), its own box, and the windows of apps the Primary User moved there. The same ids appear there; read them, but you cannot operate them.
 
 ### The Perceptron
 
@@ -48,6 +56,7 @@ The center of the Versa desktop is the **Perceptron**: whatever the Primary User
 - `window` (role `window`): while a hosted program (Terminal, VS Code) is open, its window. `state.app_id` is the program; `state.fullscreen` whether its box is full screen. `state.interior` is `atspi` when the app's own controls are listed under this node, `partial` when that list was cut short, and `none` when the app published nothing. An empty window is not an empty app. You open and close it with `load`, `activate`, and `back`. Typing into it is not a step. A minimized program's window is not in the tree.
 - Under a `window`, when `interior` is `atspi` or `partial`: `push button`, `text`, `menu item`, `check box`, `list item`, and `label`. Each has `name`, `state.focused`, `state.checked`, `state.enabled`, and bounds on the screen. A password is `text` with `state.password` and the name `Password`. Its contents are never in the tree. Some apps publish a thin tree, so a control can be missing.
 - `window-dialog` (role `window`): the program's own second window over it, such as Terminal's Preferences, while the Primary User has it open. `state.title` names it. You cannot open or close it.
+- `popups` (role `button`): shown when a program opened a window nobody in the desktop asked for; `state.count` how many wait. `popup-lightbox` (role `window`): the one the Primary User is looking at over the dimmed desktop; `name` is the app, `state.title` the window's title, and its controls are under it like any `window`. Only the Primary User opens and closes these.
 - When a dialog opens over another dialog, `window-dialog` is the top one, which has the keys. The one under it is `window-dialog-2`, then `window-dialog-3`.
 - Before Versa Desktop is installed, the Perceptron is the introduction (`phase: "zero"`). You can look then, but not take steps.
 
@@ -72,15 +81,22 @@ Nothing runs from one step. Every action is two deliberate steps, exactly as for
 
 ## 3. Consent
 
-- Looking and operating are allowed separately. Each asks the Primary User on their screen unless they already allowed it for a while (15, 30, or 60 minutes, or always).
-- The reply's `grant` says how long you may still look or control (`expires_at`, or `always: true`).
-- They can revoke either at any time. The next request then asks again.
+- Looking, operating, and pictures are allowed separately. Looking and operating ask the Primary User on their primary screen; a picture asks on each screen it is of. Each holds for a while once allowed (15, 30, or 60 minutes, or always).
+- The reply's `grant` says how long you may still look or control (`expires_at`, or `always: true`); for a picture, one entry per screen.
+- They can revoke any of them at any time, a picture grant per screen. The next request then asks again.
 
 ## 4. When to look
 
 - Only when a task needs what is on their desktop right now, or they asked you to look.
 - One look per question. Do not poll.
 - Tell them what you saw in plain words, not as a tree.
+
+## 4a. Pictures
+
+- **Prefer the tree.** Take a picture only when the tree cannot answer: what a document, an image, or a web page shows, a layout, or the Primary User asked you to see it. A picture shows everything on that screen, so ask for the screens you need (`--screen N`).
+- The reply's `pictures` lists each screen: `path`, `size`, or `error` (`rejected`, `timeout`, `capture_failed`) for a screen not taken. Read a picture with `agictl_view_image <path>`; that needs a model that reads images.
+- A new picture request deletes the earlier pictures. Do not copy them elsewhere.
+- While the desktop is locked, pictures are refused (`locked`).
 
 ## 5. Errors
 
@@ -92,3 +108,6 @@ Nothing runs from one step. Every action is two deliberate steps, exactly as for
 | `refused` | The step is not possible right now; `message` says why and `tree` shows the desktop. Adjust, or tell them. |
 | `not_running` | Their Versa desktop is not running. Say so if it matters to the task. |
 | `unsafe` | The desktop socket looks wrong. Do not work around it. Tell the Primary User. |
+| `locked` | Their desktop is locked. Wait until they are back; do not retry in a loop. |
+| `no_screen` | No such screen. `desktop look pu` lists them. |
+| `capture_failed` | The picture could not be taken. Use the tree, or tell them. |

@@ -1042,18 +1042,20 @@ HETEROSPHERE_SOCKET_DIR = "/tmp/heterosphere"
 
 class DesktopInput(BaseModel):
     command: str = Field(description=(
-        "'desktop look pu', or one Perceptron step: 'desktop open pu', 'desktop load pu <element>', "
-        "'desktop unload pu <element>', 'desktop activate pu', 'desktop close pu'."))
+        "'desktop look pu', 'desktop see pu [--screen N]', or one Perceptron step: 'desktop open pu', "
+        "'desktop load pu <element>', 'desktop unload pu <element>', 'desktop activate pu', "
+        "'desktop close pu'."))
 
 
 @tool("agictl_desktop", args_schema=DesktopInput)
 def agictl_desktop(command: str) -> str:
-    """Read the Primary User's desktop as a tree of named elements, or operate it one
-    Perceptron step at a time, the way they do (COA only). Looking and operating are
-    allowed separately on their screen unless they granted a period already, so a call
-    can wait up to about 40 seconds. A refusal is final for this request.
-    Load computer_use.md before the first look or step.
-    Examples: 'desktop look pu', 'desktop load pu reboot', 'desktop activate pu'
+    """Read the Primary User's desktop as a tree of named elements (every screen), operate
+    the primary screen one Perceptron step at a time, the way they do, or take a picture
+    of a screen (COA only). Looking, operating, and pictures are allowed separately on
+    their screen unless they granted a period already, so a call can wait up to about 40
+    seconds. A refusal is final for this request. A picture's path is read with
+    agictl_view_image. Load computer_use.md before the first look, step, or picture.
+    Examples: 'desktop look pu', 'desktop load pu reboot', 'desktop see pu --screen 1'
     """
     return _run_agictl(command, timeout=60)
 
