@@ -433,6 +433,7 @@ ok "System binaries captured"
 info "3h: Systemd units..."
 capture "/etc/systemd/system/versa-agi-sentinel.service" "Sentinel service unit"
 capture "/etc/systemd/system/versa-agi-tunnel.service" "SSH tunnel service unit"
+capture "/etc/logrotate.d/versa-agi" "Lifeline / Sentinel log rotation"
 
 # ── 3i: Sudoers ──
 info "3i: Sudoers..."

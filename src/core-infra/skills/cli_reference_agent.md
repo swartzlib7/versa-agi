@@ -109,7 +109,7 @@ agictl task unfreeze-all <your_agent_name>              # Resume all your frozen
 agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 ```
 
-> **Frozen tasks**: Lifeline auto-freezes overdue tasks after the configured retry budget. If the Primary User asks you to resume, use `agictl task unfreeze <id>` (or `unfreeze-all` with your agent name). You can only unfreeze tasks assigned to you — COA and the Primary User can unfreeze any agent's tasks.
+> **Frozen tasks**: Lifeline auto-freezes overdue tasks after the configured retry budget. When the work is still needed, or the Primary User asks you to resume, use `agictl task unfreeze <id>` (or `unfreeze-all` with your agent name), then snooze or reschedule it in the same cycle. You can only unfreeze tasks assigned to you — COA and the Primary User can unfreeze any agent's tasks.
 
 **task add options**: `--desc`, `--priority low|normal|high|urgent`, `--assignee`, `--project <id>`, `--callback notify_sponsor|notify_connection|await_reply|check_connection|none`, `--source-msg <id>`, `--requested-by <uid>`, `--due-date "YYYY-MM-DD HH:MM:SS"`
 

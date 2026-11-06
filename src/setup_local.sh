@@ -980,31 +980,10 @@ if [ "${TOPOLOGY}" != "server" ]; then
 
     # Step 4: Create systemd tunnel service
     info "Creating SSH tunnel service..."
-    cat > "/etc/systemd/system/${_TUNNEL_SERVICE}.service" <<TUNNELEOF
-[Unit]
-Description=Versa AGi Inference SSH Tunnel (${_TUNNEL_HOST}:${_TUNNEL_PORT})
-After=network-online.target
-Wants=network-online.target
+    # shellcheck source=core-infra/scripts/tunnel_service.sh
+    source "${SCRIPT_DIR}/core-infra/scripts/tunnel_service.sh"
+    install_tunnel_service "${SCRIPT_DIR}/core-infra" "${_TUNNEL_HOST}" "${_TUNNEL_PORT}" "${_SSH_KEY}" "${WATCHDOG_USER}" || true
 
-[Service]
-Type=simple
-User=${WATCHDOG_USER}
-ExecStart=/usr/bin/ssh -N -L ${_TUNNEL_PORT}:localhost:${_TUNNEL_PORT} \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
-  -o ConnectTimeout=10 \
-  -o StrictHostKeyChecking=accept-new \
-  -o ExitOnForwardFailure=yes \
-  -i ${_SSH_KEY} \
-  ${WATCHDOG_USER}@${_TUNNEL_HOST}
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-TUNNELEOF
-
-    systemctl daemon-reload 2>/dev/null || true
     systemctl enable "${_TUNNEL_SERVICE}" --quiet 2>/dev/null || true
     systemctl restart "${_TUNNEL_SERVICE}" 2>/dev/null || true
     # Wait long enough for ssh to either establish or fail (avoid false "active")

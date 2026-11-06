@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.6.2"
+PRODUCT_VERSION="3.6.3"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -449,9 +449,10 @@ WATCHDOG_USER="${VERSA_WATCHDOG_USER:-$(ini_get users watchdog watchdog)}"
 COA_USER="${VERSA_COA_USER:-$(ini_get users coa coa)}"
 CRON_INTERVAL="${VERSA_CRON_INTERVAL:-$(ini_get agent cron_interval 1)}"  # minutes
 
-# Install or refresh watchdog Lifeline crontab (heartbeat + weekly log rotate).
-# Fresh Step 10 always installs. --update calls this when the PU re-enables CRON
-# so a box with no lifeline line (typical after a Sentinel patch) still gets one.
+# Install or refresh watchdog Lifeline crontab (heartbeat). Log rotation is
+# logrotate's job (ensure_log_rotation). Fresh Step 10 always installs. --update
+# calls this when the PU re-enables CRON so a box with no lifeline line
+# (typical after a Sentinel patch) still gets one.
 ensure_watchdog_lifeline_cron() {
   local lifeline_path="${DEPLOYED_CORE_INFRA}/lifeline.sh"
   local system_tz
@@ -460,18 +461,63 @@ ensure_watchdog_lifeline_cron() {
   local cron_schedule="*/${CRON_INTERVAL} * * * * ${lifeline_path} > /dev/null 2>&1"
   local log_file="/var/log/versa-agi-lifeline.log"
   local log_archive_dir="/var/log/versa-agi-archive"
-  local log_rotation="0 0 * * 0 mkdir -p ${log_archive_dir} && [ -f ${log_file} ] && mv ${log_file} ${log_archive_dir}/lifeline-\$(date +\%Y\%m\%d-\%H\%M\%S).log && touch ${log_file} && chown ${WATCHDOG_USER}:${WATCHDOG_USER} ${log_file}"
 
   (crontab -u "${WATCHDOG_USER}" -l 2>/dev/null | grep -v "lifeline.sh" | grep -v "^TZ=" | grep -v "versa-agi-archive" || true
    echo "${cron_tz_line}"
-   echo "${cron_schedule}"
-   echo "${log_rotation}") | crontab -u "${WATCHDOG_USER}" -
+   echo "${cron_schedule}") | crontab -u "${WATCHDOG_USER}" -
 
   mkdir -p /var/lib/versa-agi
   rm -f /var/lib/versa-agi/lifeline.disabled
   mkdir -p "${log_archive_dir}"
   touch "${log_file}"
   chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${log_file}" "${log_archive_dir}" 2>/dev/null || true
+}
+
+# Lifeline + Sentinel log rotation from [logging] rotate / keep (fresh + --update).
+# logrotate runs as root from logrotate.timer. maxsize also rotates an oversized
+# log on the next daily run (logrotate does not rotate a file it sees first). `su` + copytruncate mean it never
+# writes in /var/log itself (root:syslog 775): the old watchdog `mv` cron line
+# could not, so it is removed here.
+ensure_log_rotation() {
+  local period keep current
+  local archive_dir="/var/log/versa-agi-archive"
+  local conf="/etc/logrotate.d/versa-agi"
+  period="$(ini_get logging rotate monthly)"
+  keep="$(ini_get logging keep 2)"
+  case "${period}" in
+    weekly|monthly) ;;
+    *) warn "[logging] rotate=${period} is not weekly or monthly — using monthly"; period="monthly" ;;
+  esac
+  if ! [[ "${keep}" =~ ^[0-9]+$ ]] || [ "${keep}" -lt 1 ]; then
+    warn "[logging] keep=${keep} is not a whole number of 1 or more — using 2"
+    keep=2
+  fi
+  if ! command -v logrotate &>/dev/null; then
+    warn "logrotate is not installed — Lifeline log will not rotate (sudo apt install logrotate)"
+  fi
+
+  mkdir -p "${archive_dir}" /etc/logrotate.d
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${archive_dir}" 2>/dev/null || true
+  cat > "${conf}" <<LOGROTATEEOF
+/var/log/versa-agi-lifeline.log /var/log/versa-agi-sentinel.log {
+    ${period}
+    maxsize 200M
+    rotate ${keep}
+    olddir ${archive_dir}
+    compress
+    dateext
+    missingok
+    notifempty
+    copytruncate
+    su ${WATCHDOG_USER} ${WATCHDOG_USER}
+}
+LOGROTATEEOF
+  chmod 644 "${conf}"
+
+  current=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
+  if printf '%s\n' "${current}" | grep -q "versa-agi-archive"; then
+    printf '%s\n' "${current}" | grep -v "versa-agi-archive" | crontab -u "${WATCHDOG_USER}" -
+  fi
 }
 
 # Pre-loaded values from INI (used by prompts later)
@@ -3430,22 +3476,20 @@ CRON_TZ_LINE="TZ=${SYSTEM_TZ}"
 # Consolidated logging: lifeline.sh handles its own log file internally.
 # CRON stdout/stderr redirects to /dev/null to avoid duplicate output.
 CRON_SCHEDULE="*/${CRON_INTERVAL} * * * * ${LIFELINE_PATH} > /dev/null 2>&1"
-# Weekly log rotation: archive lifeline log every Sunday at 00:00
-LOG_FILE="/var/log/versa-agi-lifeline.log"
 LOG_ARCHIVE_DIR="/var/log/versa-agi-archive"
-LOG_ROTATION="0 0 * * 0 mkdir -p ${LOG_ARCHIVE_DIR} && [ -f ${LOG_FILE} ] && mv ${LOG_FILE} ${LOG_ARCHIVE_DIR}/lifeline-\$(date +\%Y\%m\%d-\%H\%M\%S).log && touch ${LOG_FILE} && chown ${WATCHDOG_USER}:${WATCHDOG_USER} ${LOG_FILE}"
 ok "Timezone detected: ${SYSTEM_TZ} — CRON and agent logs will use this timezone"
 
 echo ""
-echo "Installing CRON entries (heartbeat every ${CRON_INTERVAL} min + weekly log rotation):"
+echo "Installing CRON entries (heartbeat every ${CRON_INTERVAL} min):"
 echo "  ${CRON_TZ_LINE}"
 echo "  ${CRON_SCHEDULE}"
-echo "  (weekly) ${LOG_ROTATION}"
 echo ""
 
 # Lifeline is the product heartbeat — always install on fresh setup (do not ask).
 ensure_watchdog_lifeline_cron
 ok "CRON entries installed for ${WATCHDOG_USER} (lifeline heartbeat)"
+ensure_log_rotation
+ok "Log rotation: $(ini_get logging rotate monthly), keep $(ini_get logging keep 2) (/etc/logrotate.d/versa-agi)"
 
 touch /var/log/versa-agi-lifeline.log
 chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/log/versa-agi-lifeline.log
@@ -3842,6 +3886,31 @@ REPAIRCFG
     fi
 
     echo ""
+  fi
+
+  # ─── Host services (state_host_services.md) ─────────
+  section "Update — Host Services"
+  if [ "${DRY_RUN}" = true ]; then
+    dry "Would write /etc/logrotate.d/versa-agi from [logging] and drop the old archive cron line"
+    dry "Would refresh versa-agi-tunnel.service to the retrying runner (client topology only)"
+  else
+    ensure_log_rotation
+    ok "Log rotation: $(ini_get logging rotate monthly), keep $(ini_get logging keep 2) (/etc/logrotate.d/versa-agi)"
+
+    # shellcheck source=core-infra/scripts/tunnel_service.sh
+    source "${SRC_CORE_INFRA}/scripts/tunnel_service.sh"
+    _TUNNEL_FIELDS="$(read_tunnel_service)"
+    if [ -n "${_TUNNEL_FIELDS}" ]; then
+      read -r _TS_HOST _TS_PORT _TS_KEY _TS_USER <<< "${_TUNNEL_FIELDS}"
+      if install_tunnel_service "${SRC_CORE_INFRA}" "${_TS_HOST}" "${_TS_PORT}" "${_TS_KEY}" "${_TS_USER}"; then
+        systemctl restart versa-agi-tunnel 2>/dev/null || true
+        ok "SSH tunnel service refreshed (retries every minute for 30 min, then every 30 min)"
+      else
+        ok "SSH tunnel service already current"
+      fi
+    elif [ -f "${TUNNEL_UNIT_FILE}" ]; then
+      warn "Could not read host / port / key from ${TUNNEL_UNIT_FILE} — tunnel unit left unchanged"
+    fi
   fi
 
 fi  # end UPDATE_MODE post-deploy steps

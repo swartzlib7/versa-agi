@@ -240,6 +240,12 @@ flood_guard_timeout_hours=3
 # Override via VERSA_OUTAGE_THRESHOLD_MINUTES env var.
 outage_threshold_minutes=30
 
+# Startup settle: after the machine boots or comes back from an outage (sleep,
+# power off), Lifeline waits N minutes before it starts agents or script /
+# utility tasks. Inbox sync still runs. 0 = off.
+# Override via VERSA_STARTUP_SETTLE_MINUTES env var.
+startup_settle_minutes=5
+
 # Auto model routing default for newly registered agents (agents.db column is authoritative per agent)
 model_routing_enabled=false
 # pool = triage picks from router-eligible candidates; preferred = triage classifies work_modality only
@@ -290,6 +296,10 @@ video=
 [logging]
 # Lifeline log output: true = write to /var/log/versa-agi-lifeline.log, false = silent (/dev/null)
 enabled=true
+# Lifeline + Sentinel log rotation into /var/log/versa-agi-archive (compressed).
+# rotate = weekly | monthly. keep = how many archives to keep before the oldest is deleted.
+rotate=monthly
+keep=2
 
 [users]
 watchdog=watchdog

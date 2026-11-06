@@ -320,6 +320,10 @@ if [ -d /var/log/versa-agi-archive ]; then
   rm -rf /var/log/versa-agi-archive
   ok "Removed /var/log/versa-agi-archive/"
 fi
+if [ -f /etc/logrotate.d/versa-agi ]; then
+  rm -f /etc/logrotate.d/versa-agi
+  ok "Removed /etc/logrotate.d/versa-agi"
+fi
 if [ ! -f /var/log/versa-agi-lifeline.log ] && [ ! -f /var/log/versa-agi-sentinel.log ] && [ ! -d /var/log/versa-agi-archive ]; then
   ok "No log files found"
 fi

@@ -6,6 +6,26 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [3.6.3] — 2026-11-06
+
+### Tasks
+
+#### Changed
+- **Clearer freeze alerts** — When tasks are frozen you get one message that lists each task by name with its number in brackets, explains what frozen means, and says how to restart one. Frozen tasks stay on the list with their history; they just stop reminding the agent.
+- **Agents may restart frozen work** — An agent can unfreeze its own task when the work is still needed. It then snoozes or reschedules the task in the same cycle so it does not come straight back.
+
+#### Fixed
+- **Rescheduled tasks no longer freeze on arrival** — Moving a task to a new time after its last reminder now gives it a fresh set of reminders. Before, it could freeze the moment the new time arrived without the agent seeing it again.
+
+### Setup
+
+#### Added
+- **Startup pause after a restart** — For 5 minutes after the machine starts or wakes from sleep, Lifeline waits before starting agents or script tasks, so a restart right after power-on does not cut their work short. Messages still come in during the pause. Change it with `startup_settle_minutes` under `[agent]` in `setup.ini` (`0` turns it off). **RUN NOW** in agitop still starts work straight away.
+
+#### Fixed
+- **Lifeline log rotation** — The Lifeline and Sentinel logs now rotate into `/var/log/versa-agi-archive/`, compressed. The old weekly rotation never ran. Set the schedule and how many archives to keep in `setup.ini` under `[logging]` (`rotate=monthly`, `keep=2` by default). A log over 200 MB rotates at the next daily run.
+- **Remote inference tunnel** — When the GPU server is away, the tunnel now retries every minute for 30 minutes, then every 30 minutes, instead of restarting every 5 seconds. It reconnects on its own when the server is back. `setup.sh --update` applies this to existing installs.
+
 ## [3.6.2] — 2026-11-05
 
 ### Setup

@@ -250,4 +250,4 @@ If tasks are frozen after runaway or overdue retry exhaustion:
 4. Unfreeze still-relevant tasks:
    - **Assigned to you**: `agictl task unfreeze <id>` or `agictl task unfreeze-all <your_agent_name>`
    - **Primary User / COA** may ask you to unfreeze when they message you directly
-5. Roll forward any past-due dates after unfreezing
+5. In the same cycle, snooze or reschedule each task you unfroze. Unfreeze keeps the old due date, so a past-due task wakes you again on the next tick

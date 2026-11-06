@@ -351,6 +351,37 @@ if [ -n "${_tick_gap}" ]; then
   log "OUTAGE: Lifeline did not run from ${_tick_gap} (threshold ${OUTAGE_THRESHOLD_MINUTES}m) — agents are told on their next wake"
 fi
 
+# ─── Startup settle window (state_host_services.md HS-S1) ───
+# After a boot, or a detected outage (suspend / resume, host off), hold agent
+# spawns and utility / script runs for N minutes so a reboot right after the
+# machine comes back does not cut a fresh cycle short. Inbox sync continues.
+# Boot is read from uptime each run; an outage gap is only seen on the first
+# run after it, so its end time is kept in SETTLE_FILE. 0 = off.
+STARTUP_SETTLE_MINUTES="${VERSA_STARTUP_SETTLE_MINUTES:-5}"
+if [ -f "${SETUP_INI}" ]; then
+  _ss=$(grep -Po '^\s*startup_settle_minutes\s*=\s*\K[0-9]+' "${SETUP_INI}" 2>/dev/null || true)
+  [ -n "${_ss}" ] && STARTUP_SETTLE_MINUTES="${_ss}"
+fi
+SETTLE_FILE="${VERSA_SETTLE_FILE:-/var/lib/versa-agi/settle_until}"
+SETTLING=false
+if [ "${STARTUP_SETTLE_MINUTES}" -gt 0 ]; then
+  _now_epoch=$(date +%s)
+  _settle_seconds=$(( STARTUP_SETTLE_MINUTES * 60 ))
+  _uptime_seconds=$(cut -d. -f1 "${VERSA_UPTIME_FILE:-/proc/uptime}" 2>/dev/null || echo "${_settle_seconds}")
+  SETTLE_UNTIL=$(cat "${SETTLE_FILE}" 2>/dev/null || echo 0)
+  [[ "${SETTLE_UNTIL}" =~ ^[0-9]+$ ]] || SETTLE_UNTIL=0
+  _boot_until=$(( _now_epoch - _uptime_seconds + _settle_seconds ))
+  [ "${_boot_until}" -gt "${SETTLE_UNTIL}" ] && SETTLE_UNTIL="${_boot_until}"
+  if [ -n "${_tick_gap}" ] && [ $(( _now_epoch + _settle_seconds )) -gt "${SETTLE_UNTIL}" ]; then
+    SETTLE_UNTIL=$(( _now_epoch + _settle_seconds ))
+    echo "${SETTLE_UNTIL}" > "${SETTLE_FILE}" 2>/dev/null || true
+  fi
+  if [ "${_now_epoch}" -lt "${SETTLE_UNTIL}" ]; then
+    SETTLING=true
+    log "SETTLE: machine just started or came back — holding agent spawns and script / utility runs until $(date -d "@${SETTLE_UNTIL}" '+%H:%M:%S') (startup_settle_minutes=${STARTUP_SETTLE_MINUTES}); inbox sync continues"
+  fi
+fi
+
 # Pinned conclusions block (agictl AWARENESS_PIN_MAX is the same 10).
 AW_PIN_MAX=10
 AW_PIN_TRUNC=1200
@@ -363,6 +394,8 @@ AW_PIN_TRUNC=1200
 _VV_INSTANCE_SYNCED_THIS_TICK=false
 _run_due_utility_and_scripts() {
   # Deterministic jobs — safe while a harness lock is held (no second spawn).
+  # Held during the startup settle window (agitop RUN NOW still runs them).
+  [ "${SETTLING:-false}" = true ] && [ "${FORCE_RUN}" != "true" ] && return 0
   local _sys_cfg="${1}"
   local _agent_user="${2}"
   local _agent_name="${3}"
@@ -951,6 +984,13 @@ ${AGENT_REGISTRY_CONTENT}
     fi
   fi
 
+  # ─── Startup settle — before work detection, so no retry budget is spent ───
+  if [ "${SETTLING}" = true ] && [ "${FORCE_RUN}" != "true" ] && [ "${IDE_GENERATE}" != "true" ]; then
+    log "SETTLE: ${AGENT_NAME} — spawn held until $(date -d "@${SETTLE_UNTIL}" '+%H:%M:%S')"
+    flock -u 200
+    continue
+  fi
+
   # ─── Spawn hold — no LLM cycle ─────────────────────
   # COA is protected, so it cannot be deactivated. Fresh install leaves it
   # without a model until first-login assign. Skip overdue spawn_attempts
@@ -1100,60 +1140,69 @@ ${AGENT_REGISTRY_CONTENT}
     OVERDUE_SPAWN_SQL+=" AND (wake_after IS NULL OR wake_after <= datetime('now')))"
     OVERDUE_SPAWN_SQL+=")"
 
+    # Step 0: A future due date ends the overdue streak. The budget counts
+    # consecutive overdue wakes, so a task moved forward after its last wake
+    # (task update, agitop edit, any writer) must not freeze on arrival — the
+    # last-wake warning promises that moving the due time saves it.
+    BUDGET_RESET_SQL="UPDATE tasks SET spawn_attempts = 0, updated_at = datetime('now') WHERE assigned_to='${AGENT_NAME}' AND (task_kind IS NULL OR task_kind NOT IN ('utility','script')) AND status IN ('planned','waiting') AND spawn_attempts > 0 AND due_date IS NOT NULL AND due_date > datetime('now');"
+    BUDGET_RESET_COUNT=$(sqlite3 "${TASKS_DB}" "${BUDGET_RESET_SQL} SELECT changes();" 2>/dev/null || echo "0")
+    if [ "${BUDGET_RESET_COUNT:-0}" -gt 0 ]; then
+      log "BUDGET RESET: ${AGENT_NAME} — ${BUDGET_RESET_COUNT} task(s) no longer overdue; spawn_attempts cleared"
+    fi
+
     # Step 1: Auto-freeze tasks that have exhausted their retry budget
     EXHAUSTED_TASKS=$(sqlite3 "${TASKS_DB}" \
       "SELECT id, title, status FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts >= ${MAX_SPAWN_ATTEMPTS};" 2>/dev/null || true)
 
     if [ -n "${EXHAUSTED_TASKS}" ]; then
+      FROZEN_LIST=""
+      FROZEN_IDS=""
       while IFS='|' read -r TASK_ID TASK_TITLE TASK_STATUS; do
         [ -z "${TASK_ID}" ] && continue
         sqlite3 "${TASKS_DB}" \
           "UPDATE tasks SET status='frozen', pre_freeze_status='${TASK_STATUS}', updated_at=datetime('now') WHERE id=${TASK_ID};" 2>/dev/null || true
         log "AUTOFREEZE: Task #${TASK_ID} '${TASK_TITLE}' (${TASK_STATUS}) — spawn_attempts exhausted (${MAX_SPAWN_ATTEMPTS}/${MAX_SPAWN_ATTEMPTS})"
+        FROZEN_LIST+="
+• ${TASK_TITLE} (#${TASK_ID})"
+        FROZEN_IDS+="${FROZEN_IDS:+ }#${TASK_ID}"
+      done <<< "${EXHAUSTED_TASKS}"
 
-        if [ "${TASK_STATUS}" = "waiting" ]; then
-          FREEZE_REASON="kept waking without snoozing or resolving"
-          RESTORE_STATUS="waiting"
-        else
-          FREEZE_REASON="was unable to complete"
-          RESTORE_STATUS="planned"
-        fi
-        # The assignee learns on their next wake. An unprocessed internal row
-        # is what lets that wake happen while other tasks stay frozen.
-        AGENT_FREEZE_MSG="Lifeline auto-froze task #${TASK_ID} \"${TASK_TITLE}\".
-Reason: ${FREEZE_REASON} after ${MAX_SPAWN_ATTEMPTS} wakes without resolving or snoozing.
-It will not wake you until it is unfrozen. To resume: agictl task unfreeze ${TASK_ID}"
+      if [ -n "${FROZEN_LIST}" ]; then
+        # One notice per tick, all tasks listed. The assignee learns on their
+        # next wake: an unprocessed internal row lets that wake happen while
+        # the listed tasks stay frozen.
+        AGENT_FREEZE_MSG="Lifeline auto-froze these tasks after ${MAX_SPAWN_ATTEMPTS} wakes without finishing, snoozing, or rescheduling them:${FROZEN_LIST}
+
+Frozen tasks do not wake you. If one is still needed, unfreeze it and snooze or reschedule it in the same cycle (agictl task unfreeze <id>, then agictl task snooze <id> <minutes>). Otherwise leave it frozen or cancel it."
         if AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_AGENTS_DB="${AGENTS_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
           /usr/local/bin/agictl message internal "${AGENT_NAME}" "${AGENT_FREEZE_MSG}" --from-lifeline 2>/dev/null; then
-          log "NOTIFY: Auto-freeze notice sent to ${AGENT_NAME} for task #${TASK_ID}"
+          log "NOTIFY: Auto-freeze notice sent to ${AGENT_NAME} for ${FROZEN_IDS}"
         else
-          log "WARN: Failed to send auto-freeze notice to ${AGENT_NAME} for task #${TASK_ID}"
+          log "WARN: Failed to send auto-freeze notice to ${AGENT_NAME} for ${FROZEN_IDS}"
         fi
 
-        # Send professional notification to Primary User via VersaVoice
         if [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${API_TOKEN}" ]; then
           SPONSOR_UID=$(jq -r '.primary_user.uid // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
+          AGENT_LABEL=$(jq -r '.identity.first_name // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
+          AGENT_LABEL="${AGENT_LABEL:-${AGENT_NAME}}"
           if [ -n "${SPONSOR_UID}" ]; then
-            FREEZE_MSG="⚠️ Task auto-frozen
+            FREEZE_MSG="⏸️ ${AGENT_LABEL}'s tasks frozen (paused)
+${FROZEN_LIST}
 
-Agent: ${AGENT_NAME}
-Task #${TASK_ID}: \"${TASK_TITLE}\"
-Reason: ${FREEZE_REASON} after ${MAX_SPAWN_ATTEMPTS} lifeline wake cycles without resolving or snoozing.
+Each one came due ${MAX_SPAWN_ATTEMPTS} times in a row without being finished or moved to a new time, so Versa AGi froze it to stop the repeat reminders.
 
-The task is paused (status=frozen) — Lifeline will not schedule it until you unfreeze it. You can still message ${AGENT_NAME} directly; new messages will wake them.
+Frozen means the task stays on the list with everything recorded so far, but it no longer reminds ${AGENT_LABEL} on its own. Nothing is deleted, and ${AGENT_LABEL} still answers your messages.
 
-To resume:
-• Message ${AGENT_NAME}: \"Please unfreeze task #${TASK_ID}\" — they can run: agictl task unfreeze ${TASK_ID}
-• agitop → ${AGENT_NAME} → Unfreeze Tasks
-• CLI: agictl task unfreeze ${TASK_ID}  or  agictl task unfreeze-all ${AGENT_NAME}
-• Manual: agictl task update ${TASK_ID} --status ${RESTORE_STATUS}"
+${AGENT_LABEL} may pick one back up when the work is still needed. To restart one yourself:
+• Message ${AGENT_LABEL}: \"Please unfreeze <task name>\"
+• agitop → ${AGENT_NAME} → Unfreeze Tasks"
             AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
               /usr/local/bin/agictl message send "${SPONSOR_UID}" "${FREEZE_MSG}" --mode typed 2>/dev/null \
               || log "WARN: Failed to send auto-freeze notification to Primary User"
-            log "NOTIFY: Auto-freeze notification sent to Primary User for task #${TASK_ID}"
+            log "NOTIFY: Auto-freeze notification sent to Primary User for ${FROZEN_IDS}"
           fi
         fi
-      done <<< "${EXHAUSTED_TASKS}"
+      fi
     fi
 
     # Step 2: Detect retryable overdue tasks (spawn_attempts < MAX)

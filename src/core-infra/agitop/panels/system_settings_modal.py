@@ -1236,7 +1236,8 @@ class SystemSettingsModal(ModalScreen):
                                             yield Static(
                                                 "[dim]Overdue planned and repeatedly-waking waiting tasks retry "
                                                 "this many lifeline wake cycles before auto-freeze. Primary User "
-                                                "is notified; spawn_attempts resets on snooze, done, or cancelled.[/]"
+                                                "is notified. The count starts over when a task is snoozed, "
+                                                "rescheduled, unfrozen, done, or cancelled.[/]"
                                             )
 
                                     yield Static("")
