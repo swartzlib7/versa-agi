@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [3.6.4] — 2026-11-06
+
+### Setup
+
+#### Fixed
+- **Updates keep your settings** — Running the installer again on a machine that already has Versa AGi, or updating from the Versa AGI installer, now starts from the machine's own settings. Before, the update started from blank defaults: it asked for the VersaVoice token again, the COA lost the name of its Primary User, and a Local AI Server could take the normal update path. On a machine that uses a Local AI server on the network, that update also switched the system to cloud only and turned local AI off. Run the update again on 3.6.4 to put those settings back.
+
 ## [3.6.3] — 2026-11-06
 
 ### Tasks

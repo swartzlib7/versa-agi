@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.6.3"
+PRODUCT_VERSION="3.6.4"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -181,6 +181,17 @@ if [ -f "${SCRIPT_DIR}/setup.ini" ]; then
   if [ -f "/etc/versa-agi/setup.ini" ]; then
     INI_FILE_FALLBACK="/etc/versa-agi/setup.ini"
   fi
+elif [ -f "/etc/versa-agi/setup.ini" ]; then
+  # Fresh clone on an installed machine (install.sh re-run, Versa AGI installer).
+  # Seed from the deployed file, never stock: stock values (topology=local,
+  # blank api_token, blank model) would win over the real ones in ini_get.
+  # Step 13 copies /etc back over this file at the end of every run anyway;
+  # reconcile still adds keys new in stock.
+  INI_FILE="${SCRIPT_DIR}/setup.ini"
+  INI_FILE_FALLBACK="/etc/versa-agi/setup.ini"
+  cp -f "/etc/versa-agi/setup.ini" "${INI_FILE}"
+  chown_repo_config "${INI_FILE}" 600
+  info "setup.ini seeded from deployed /etc/versa-agi/setup.ini"
 else
   # No source setup.ini — scaffold from the stock template (same file --update
   # reconcile uses). Keeps fresh install and update model lists in lockstep.
