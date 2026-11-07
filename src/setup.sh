@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.6.4"
+PRODUCT_VERSION="3.6.5"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -2546,7 +2546,12 @@ info "VersaVoice agent key: ${VV_AGENT_KEY} (install_role=${INI_INSTALL_ROLE:-no
 
 if [ -n "${VV_TOKEN:-}" ]; then
   info "Agent identity: ${INI_AGENT_FIRST_NAME} ${INI_AGENT_LAST_NAME} (${INI_AGENT_LANGUAGE})"
-  
+
+  # --update: never register a replacement when the bound sub-account is gone
+  # (wrong token owner looks the same as a deleted account to the API).
+  IDENTITY_UPDATE_FLAG=""
+  if [ "${UPDATE_MODE}" = true ]; then IDENTITY_UPDATE_FLAG="--update"; fi
+
   # Run identity resolution natively through the Python data gateway
   if sudo -u "${WATCHDOG_USER}" \
     AGICTL_CONFIG="/etc/versa-agi/${COA_USER}_config.json" \
@@ -2558,10 +2563,11 @@ if [ -n "${VV_TOKEN:-}" ]; then
     --country "${INI_AGENT_COUNTRY:-}" \
     --voice "${INI_AGENT_VOICE:-}" \
     --install-email "${INSTALL_ACCEPTANCE_EMAIL:-}" \
-    --agent-key "${VV_AGENT_KEY}"; then
-    ok "VersaVoice identity registered natively via agictl"
+    --agent-key "${VV_AGENT_KEY}" \
+    ${IDENTITY_UPDATE_FLAG}; then
+    ok "VersaVoice identity resolved via agictl"
   else
-    warn "VersaVoice REST registration failed check VersaVoice logs"
+    warn "VersaVoice identity not resolved — see the messages above"
   fi
 else
   warn "No VV_TOKEN found in setup.ini — agent identity provision skipped"

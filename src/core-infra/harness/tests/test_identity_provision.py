@@ -236,6 +236,120 @@ class TestProvisionApiStatus(unittest.TestCase):
         for code in (200, 401, 403, 404):
             self.assertFalse(_api_unavailable(code), code)
 
+    def _provision_update(self) -> bool:
+        return provision_identity(
+            "coa", "tok", "Versa", "(abc123)", "en", "", "female",
+            "/fake/agents.db", install_email="pu@example.com", agent_key="coa",
+            update=True,
+        )
+
+    def test_update_does_not_replace_gone_bound_id(self) -> None:
+        """Wrong token owner: bound id 404s, scan empty — stop, keep config."""
+        self.responses[("GET", "/account")] = (
+            {"uid": "other", "displayName": "Other Sponsor", "subAccounts": []}, 200,
+        )
+        self.responses[("POST", "/accounts/register")] = ({"subAccountId": "new-uid"}, 201)
+        self.assertFalse(self._provision_update())
+        self.assertFalse(self._registered())
+        self.assertEqual(self.written, [])
+
+    def test_update_reuses_scan_match_when_bound_id_gone(self) -> None:
+        self.responses[("GET", "/account")] = ({"subAccounts": [HOME]}, 200)
+        self.assertTrue(self._provision_update())
+        self.assertFalse(self._registered())
+        self.assertEqual(self.written, ["home-uid"])
+
+    def test_update_keeps_live_bound_id(self) -> None:
+        self.responses[("GET", f"/accounts/{self.BOUND}")] = (
+            {"firstName": "Versa", "lastName": "(abc123)"}, 200,
+        )
+        self.assertTrue(self._provision_update())
+        self.assertEqual(self.written, [self.BOUND])
+
+    def test_pending_bound_id_is_kept_not_refused(self) -> None:
+        self.responses[("GET", f"/accounts/{self.BOUND}")] = (None, 403)
+        self.responses[("GET", "/account")] = (
+            {"displayName": "Owner", "subAccounts": [{"subAccountId": self.BOUND}]}, 200,
+        )
+        with mock.patch.object(identity, "last_error_code", return_value="api_account_pending"):
+            self.assertTrue(self._provision_update())
+        self.assertEqual(self.written, [self.BOUND])
+        self.assertFalse(self._registered())
+
+    def test_other_403_still_refuses(self) -> None:
+        self.responses[("GET", f"/accounts/{self.BOUND}")] = (None, 403)
+        with mock.patch.object(identity, "last_error_code", return_value="forbidden"):
+            self.assertFalse(self._provision())
+        self.assertFalse(self._registered())
+        self.assertEqual(self.written, [])
+
+
+class TestTokenOwner(unittest.TestCase):
+    def test_api_request_records_error_code(self) -> None:
+        import io
+        import urllib.error
+
+        err = urllib.error.HTTPError(
+            "u", 403, "Forbidden", {},
+            io.BytesIO(b'{"error": "api_account_pending", "message": "x"}'),
+        )
+        with mock.patch.object(identity.urllib.request, "urlopen", side_effect=err):
+            body, status = identity.api_request("/accounts/x", "tok", with_status=True)
+        self.assertIsNone(body)
+        self.assertEqual(status, 403)
+        self.assertEqual(identity.last_error_code(), "api_account_pending")
+        with mock.patch.object(identity.urllib.request, "urlopen", side_effect=OSError("down")):
+            identity.api_request("/account", "tok", with_status=True)
+        self.assertEqual(identity.last_error_code(), "")
+
+    def test_name_and_email(self) -> None:
+        self.assertEqual(
+            identity._token_owner({"displayName": "Pat", "email": "p@x.com", "uid": "u"}),
+            "Pat (p@x.com)",
+        )
+
+    def test_falls_back_to_uid(self) -> None:
+        self.assertEqual(identity._token_owner({"uid": "u1"}), "u1")
+        self.assertEqual(identity._token_owner(None), "unknown")
+
+
+class TestUpdateWithoutBind(unittest.TestCase):
+    """No bound id (fresh, or the user cleared it on purpose): update may register."""
+
+    def test_update_registers_when_config_has_no_id(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE agents (name TEXT, os_user TEXT)")
+        conn.execute("INSERT INTO agents VALUES ('coa', 'coa')")
+        calls: list[tuple[str, str]] = []
+        written: list[str] = []
+        responses = {
+            ("GET", "/account"): ({"subAccounts": []}, 200),
+            ("POST", "/accounts/register"): ({"subAccountId": "new-uid"}, 201),
+        }
+
+        def api(endpoint, token, method="GET", body=None, with_status=False):
+            calls.append((method, endpoint))
+            result, status = responses.get((method, endpoint), (None, 404))
+            return (result, status) if with_status else result
+
+        config = json.dumps({"versavoice": {"sub_account_id": None}})
+        with mock.patch.object(identity.os.path, "exists", return_value=True), \
+                mock.patch.object(identity.db_connect, "connect_compat", return_value=conn), \
+                mock.patch("builtins.open", mock.mock_open(read_data=config)), \
+                mock.patch.object(identity, "api_request", side_effect=api), \
+                mock.patch.object(
+                    identity, "_write_identity",
+                    side_effect=lambda sub_id, *a, **k: written.append(sub_id),
+                ):
+            ok = provision_identity(
+                "coa", "tok", "Versa", "(abc123)", "en", "", "female",
+                "/fake/agents.db", install_email="pu@example.com", agent_key="coa",
+                update=True,
+            )
+        self.assertTrue(ok)
+        self.assertIn(("POST", "/accounts/register"), calls)
+        self.assertEqual(written, ["new-uid"])
+
 
 if __name__ == "__main__":
     unittest.main()

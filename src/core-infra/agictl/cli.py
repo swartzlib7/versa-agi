@@ -12821,8 +12821,13 @@ def identity():
     help="VersaVoice agiAgentKey. Normal COA: coa (same-email reuse). "
          "Sentinel: host-stable coa-s-<12 hex>. Default: resolve from agents.db.",
 )
+@click.option(
+    "--update", "update_run", is_flag=True,
+    help="Update run: if the bound sub-account is gone and no match is found, "
+         "stop instead of registering a new identity.",
+)
 def provision(agent_user, token, first_name, last_name, language, country, voice,
-              install_email, agent_key):
+              install_email, agent_key, update_run):
     """Resolve or create a VersaVoice Sub-Account.
 
     Only protected agents (COA, watchdog) can register VersaVoice identities.
@@ -12844,6 +12849,7 @@ def provision(agent_user, token, first_name, last_name, language, country, voice
         agent_user, token, first_name, last_name, language, country, voice, agents_db,
         install_email=install_email or None,
         agent_key=agent_key or None,
+        update=update_run,
     )
     if not success:
         sys.exit(1)

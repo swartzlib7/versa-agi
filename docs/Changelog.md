@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [3.6.5] — 2026-11-07
+
+### Setup
+
+#### Fixed
+- **Updates no longer create a second VersaVoice account** — If an update ran with another person's VersaVoice token, it could not see this machine's account. It then registered a new one under that person and sent them a connection request. Now an update stops instead and explains what to check. The machine keeps its existing account.
+- **Waiting connection requests** — If this machine's account is still waiting for the Primary User to accept it, setup now says so and keeps the account. Before, it said the token was refused.
+
+#### Changed
+- **Setup shows whose token it uses** — Identity setup prints the name and email of the VersaVoice account that owns the API token. A connection request message names who received it.
+
 ## [3.6.4] — 2026-11-06
 
 ### Setup

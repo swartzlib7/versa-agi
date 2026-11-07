@@ -56,9 +56,19 @@ def read_host_material(machine_id_path: str = "/etc/machine-id") -> str:
     return os.urandom(16).hex()
 
 
+_last_error_code = ""
+
+
+def last_error_code() -> str:
+    """``error`` field of the last HTTP error body (e.g. ``api_account_pending``)."""
+    return _last_error_code
+
+
 def api_request(endpoint, token, method="GET", body=None, with_status=False):
     """JSON body or None. ``with_status=True`` returns ``(body, http_status)``;
     status 0 = network error or unreadable body."""
+    global _last_error_code
+    _last_error_code = ""
     url = VV_API_BASE + endpoint
     headers = {
         "Authorization": f"Bearer {token}",
@@ -74,7 +84,12 @@ def api_request(endpoint, token, method="GET", body=None, with_status=False):
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         status = e.code
-        console.print(f"[bold red]HTTP Error {e.code}:[/bold red] {e.read().decode('utf-8')}")
+        raw = e.read().decode("utf-8", errors="replace")
+        try:
+            _last_error_code = str(json.loads(raw).get("error") or "")
+        except Exception:
+            pass
+        console.print(f"[bold red]HTTP Error {e.code}:[/bold red] {raw}")
     except Exception as e:
         console.print(f"[bold red]Network Error:[/bold red] {str(e)}")
         if status == 200:
@@ -182,6 +197,17 @@ def _sync_display_name(token: str, sub_id: str, first_name: str, last_name: str)
         )
 
 
+def _token_owner(account_data: dict | None) -> str:
+    """``Name (email)`` of the VersaVoice account that owns the API token."""
+    if not account_data:
+        return "unknown"
+    name = (account_data.get("displayName") or "").strip()
+    email = (account_data.get("email") or "").strip()
+    uid = (account_data.get("uid") or "").strip()
+    label = name or uid or "unknown"
+    return f"{label} ({email})" if email else label
+
+
 def _report_unresolved(status: int, bound_id: str | None) -> None:
     """Explain why provision stopped without scanning or registering."""
     keep = f"; keeping sub_account_id {bound_id}" if bound_id else ""
@@ -208,6 +234,7 @@ def provision_identity(
     agents_db,
     install_email: str | None = None,
     agent_key: str | None = None,
+    update: bool = False,
 ):
     """
     Provisions a VersaVoice sub-account for the given agent and synchronizes the registry.
@@ -216,6 +243,11 @@ def provision_identity(
     (agiInstallEmail + agiAgentKey) before creating a duplicate. Normal COA
     uses agiAgentKey=coa (email reuse is intended). Sentinel uses a host-stable
     key so a second box does not bind the home identity.
+
+    ``update=True`` (setup ``--update``): when the bound ``sub_account_id`` is
+    gone and no match is found, stop instead of registering a replacement. The
+    API returns 404 both for a deleted account and for one owned by another
+    sponsor, so a wrong token must not silently create a new identity.
     """
     # ── Username Format Guard ────────────────────────────
     if not re.match(r'^[a-z][a-z0-9_-]{0,31}$', agent_user):
@@ -261,23 +293,28 @@ def provision_identity(
             except Exception as e:
                 console.print(f"[bold yellow]WARN: Failed to parse existing config ({str(e)})[/bold yellow]")
 
+    gone_id = None
     if existing_id:
         console.print(f"Found existing sub_account_id in config: {existing_id}")
         verify, verify_status = api_request(
             f"/accounts/{existing_id}", token, with_status=True
         )
-        if verify_status != 404 and not (verify_status == 200 and verify):
+        pending = verify_status == 403 and last_error_code() == "api_account_pending"
+        live = verify_status == 200 and bool(verify)
+        if verify_status != 404 and not (live or pending):
             _report_unresolved(verify_status, existing_id)
             return False
-        if verify:
+        if live or pending:
             bound_key = None
-            if not _is_shared_coa_agent_key(resolved_key):
+            account_data = None
+            if pending or not _is_shared_coa_agent_key(resolved_key):
                 account_data, account_status = api_request(
                     "/account", token, with_status=True
                 )
                 if account_status != 200 or not account_data:
                     _report_unresolved(account_status, existing_id)
                     return False
+                console.print(f"API token owner: {_token_owner(account_data)}")
                 bound_key = _bound_agent_key(account_data, existing_id)
             if not _should_reuse_config_id(resolved_key, bound_key):
                 console.print(
@@ -288,6 +325,18 @@ def provision_identity(
                 if "versavoice" in config_data:
                     config_data["versavoice"]["sub_account_id"] = None
                     config_data["versavoice"]["status"] = None
+            elif pending:
+                console.print(
+                    f"[bold yellow]Sub-account {existing_id} is waiting for "
+                    f"{_token_owner(account_data)} to accept its connection request "
+                    f"in VersaVoice AI.[/bold yellow] Keeping it. The agent cannot "
+                    f"interact externally until the request is accepted."
+                )
+                _write_identity(
+                    existing_id, "registered", config_data, config_file, agents_db,
+                    first_name, last_name, language, country, voice, agent_user,
+                )
+                return True
             else:
                 console.print(f"Identity resolved: {existing_id} (from config)")
                 cur_fn = (verify.get("firstName") or "").strip()
@@ -300,7 +349,11 @@ def provision_identity(
                 )
                 return True
         else:
-            console.print(f"Sub-account {existing_id} no longer exists on VersaVoice — clearing stale config")
+            console.print(
+                f"Sub-account {existing_id} not found under this API token's account "
+                f"(deleted, or owned by another VersaVoice account)."
+            )
+            gone_id = existing_id
             if "versavoice" in config_data:
                 config_data["versavoice"]["sub_account_id"] = None
                 config_data["versavoice"]["status"] = None
@@ -314,6 +367,8 @@ def provision_identity(
     if account_status != 200 or not account_data:
         _report_unresolved(account_status, None)
         return False
+    owner = _token_owner(account_data)
+    console.print(f"API token owner: {owner}")
     match_id = _find_sub_account(
         account_data, first_name, last_name, norm_email, resolved_key
     )
@@ -326,6 +381,19 @@ def provision_identity(
             first_name, last_name, language, country, voice, agent_user,
         )
         return True
+
+    if update and gone_id:
+        console.print(
+            f"[bold red]Not registering a new VersaVoice identity during an update.[/bold red]\n"
+            f"This install is bound to sub-account {gone_id}, but the API token's account "
+            f"({owner}) cannot see it, and no matching sub-account was found.\n"
+            f"Most likely [versavoice] api_token in /etc/versa-agi/setup.ini belongs to "
+            f"the wrong Primary User. Fix the token and run the update again.\n"
+            f"If {gone_id} was deleted on purpose, clear versavoice.sub_account_id in "
+            f"{config_file} and run the update again to register a new identity.\n"
+            f"The config was not changed."
+        )
+        return False
 
     # Map voice preference to VersaVoice API fields
     chromosome_map = {"female": "Y", "male": "X", "reflective": "Reflective"}
@@ -370,10 +438,11 @@ def provision_identity(
     else:
         console.print(f"Registered new sub-account: {new_id}")
         status = "registered"
+        recipient = owner if owner != "unknown" else "the API token's owner"
         console.print(
-            f"\n[bold yellow]Attention Primary User:[/bold yellow] You must open the VersaVoice App "
-            f"and verify the outstanding '{first_name} {last_name}' connection request before this "
-            f"agent can interact externally.\n"
+            f"\n[bold yellow]Attention Primary User:[/bold yellow] A new connection request "
+            f"for '{first_name} {last_name}' was sent to {recipient}. Open the VersaVoice AI app "
+            f"as that user and accept it before this agent can interact externally.\n"
         )
 
     _write_identity(
