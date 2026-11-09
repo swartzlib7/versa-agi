@@ -92,7 +92,7 @@ agictl agent kill <name>                              # COA-only: terminate runn
 agictl agent request-remove <name> [--reason TEXT]    # Flag for removal (sets removal_requested, deactivates, notifies PU)
 agictl agent cancel-remove <name>                     # Cancel pending removal (reactivates agent)
 agictl agent remove <name>                            # Context-aware: non-root → request-remove, root → confirm-remove
-agictl agent set-timeout <name> <minutes>             # Set max execution timeout
+agictl agent set-timeout <name> <minutes>             # Set max execution timeout (30–60)
 sudo agictl agent set-model <name> <model>            # Assign catalog model to agent (COA or Primary User only)
 sudo agictl agent set-model <name> --clear            # Clear assignment → inherit system default
 agictl agent status show                              # Read your current status from DB
@@ -311,6 +311,8 @@ agictl message sync-outbox <agent_uid> [file]              # Bulk-import outbox 
 ```bash
 agictl cycle start [--agent NAME] [--wake-reason TEXT]  # INSERT cycle row, returns JSON {cycle_id} (Lifeline)
 agictl cycle end "Summary" --handoff TEXT [--agent NAME]  # Mark end + stop; handoff appears in your next wake block
+#   During a live chat (listening window open) this saves summary + handoff and the chat stays open;
+#   the harness asks for cycle end again when the chat goes quiet.
                                                          # Without --handoff the cycle stays open; --no-handoff confirms ending without one
 agictl cycle tokens <agent> <in> <out> <think> <total> [--exit-code N]  # Log token metrics + exit code
 agictl cycle recent <agent>                           # Chronological summaries for context
@@ -669,7 +671,13 @@ sudo agictl browser disable <agent_name>              # Set browser_enabled=0 + 
 ## 17b. desktop — Primary User's desktop (COA only)
 
 ```bash
-agictl desktop look pu                                # Read the PU's desktop tree, every screen
+agictl desktop look pu                                # Read the PU's desktop tree, every screen; app windows summed up
+agictl desktop look pu --window <id> [--screen N]     # One window's controls (and its app's open menu)
+agictl desktop click pu <atspi-id>                    # Click an app control from your last look
+agictl desktop right-click pu <atspi-id>              # Right-click it; its menu is a `menu` node in the reply
+agictl desktop double-click pu <atspi-id>             # Double-click it (open a file or folder)
+agictl desktop type pu <atspi-id> "<text>"            # Type into a field (never a password), max 2000 characters
+agictl desktop key pu <keys>                          # Keys in the app that has them: enter, escape, tab, ctrl+a, ctrl+shift+n
 agictl desktop see pu                                 # A PNG picture of every screen; prints each path
 agictl desktop see pu --screen 1                      # A picture of screen 1 only (screen-1 in the tree); repeat --screen for several
 agictl desktop open pu                                # Move the computer into the sphere (Do and Have appear)
@@ -687,7 +695,7 @@ agictl desktop press pu <key>                         # Calculator key: 0-9, dot
 
 The Primary User's desktop must be HeteroSphere and running. Looking, operating, and pictures are allowed separately: on screen for each request, or for 15, 30, or 60 minutes, or always. Pictures are asked and allowed on each screen. Steps act on the primary screen. Read a picture with `agictl_view_image <path>`; that needs a model that reads images. A command waits up to 40 s. Steps work once Versa Desktop is installed and running as the login desktop.
 
-**Returns JSON**: `{success: true, grant: {agent, expires_at, always}, tree: {id, role, name, state, bounds, children}}`, or `{success: false, error, message}` with `error` one of `not_running`, `rejected`, `timeout`, `busy`, `unsafe`, `refused` (a step the Primary User could not take either; `message` says why, and `tree` is included). A hosted `window` may list that app's own controls as children. `state.interior` is `atspi`, `partial`, or `none`. `none` means the app published nothing, not that the app is empty. What those children are is in `computer_use.md`. Typing into the app is not a step.
+**Returns JSON**: `{success: true, grant: {agent, expires_at, always}, tree: {id, role, name, state, bounds, children}}`, or `{success: false, error, message}` with `error` one of `not_running`, `rejected`, `timeout`, `busy`, `unsafe`, `refused` (a step the Primary User could not take either; `message` says why, and `tree` is included). A hosted `window` may list that app's own controls as children. `state.interior` is `atspi`, `partial`, or `none`. `none` means the app published nothing, not that the app is empty. What those children are is in `computer_use.md`. A look lists the controls only for the window that has the keys and for open menus; every window has `state.controls` and, when it publishes none, `state.advice`. `--window` returns `{window, menus}` instead of `tree`, or `no_window`. Output is compact JSON, and the `agictl_desktop` tool's limit is 20 000 characters. `type` refuses password fields and characters the layout cannot type; `key` refuses Super and Ctrl+Alt with Backspace, Delete or F-keys, and keys while the desktop itself has them.
 
 **Harness Integration**: tool `agictl_desktop`, for COA only, offered once `/tmp/heterosphere/` exists. Skill: `computer_use.md`.
 

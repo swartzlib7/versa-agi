@@ -2,9 +2,10 @@
 
 > **Scope:** COA only (`coa_only`). **Tool:** `agictl_desktop`. It exists only when the Primary User runs the Versa desktop (HeteroSphere) on this machine.
 >
-> - **Look:** `desktop look pu` reads the desktop, every screen.
+> - **Look:** `desktop look pu` reads the desktop, every screen, with each app window summed up. `desktop look pu --window <id> [--screen N]` reads one window's controls (§1b).
 > - **Picture:** `desktop see pu [--screen N]` takes a PNG picture of screens (§4a).
-> - **Steps:** `desktop open pu [user]`, `desktop load pu <element>`, `desktop unload pu <element>`, `desktop activate pu`, `desktop close pu` operate it the way the Primary User does. `desktop expand pu`, `desktop fullscreen pu`, `desktop restore pu` resize an open interface. `desktop minimize pu` minimizes an open app; it keeps running. `desktop back pu` goes back one step, as Escape does. `desktop press pu <key>` presses one calculator key.
+> - **In an app:** `desktop click pu <id>`, `desktop right-click pu <id>` and `desktop double-click pu <id>` press one of an app's controls; `desktop type pu <id> "<text>"` types into a field; `desktop key pu <keys>` presses keys (§2b).
+> - **Steps:** `desktop open pu [user]`, `desktop load pu <element>`, `desktop unload pu <element>`, `desktop activate pu`, `desktop close pu` operate it the way the Primary User does. `desktop expand pu`, `desktop fullscreen pu`, `desktop restore pu` resize an open interface. `desktop minimize pu` minimizes an open app; it keeps running. `desktop back pu` goes back one step, as Escape does. `desktop press pu <key>` presses one calculator key. `desktop clip-use pu <n>`, `desktop clip-remove pu <n>`, `desktop clip-clear pu` pick, remove, or clear clipboard copies.
 
 ## 1. What a look returns
 
@@ -48,17 +49,29 @@ The center of the Versa desktop is the **Perceptron**: whatever the Primary User
 - `do` items sit above it: what the observed element can do. `have` items sit below: what it is made of (for the computer: `cpu`, `storage`, `ram`, `gpu`, `screen`, `keyboard`, `mouse`, `apps`).
 - `do-row` and `have-row` (role `row`): `state.items` lists every item in the row, `state.shown` the ones on screen now, left to right. A row shows at most 9 and scrolls; only shown items appear as their own `do` or `have` element. You can still load an item that is not shown: it scrolls into view first. While an interface is expanded, the rows hold that interface's own items instead, usually none.
 - `corner-context` (role `corner`): `state.context` is what the Primary User is in (for example Computer), `state.person` who is signed in. `corner-activity`: `state.time` and `state.activity`, what is open, loaded, or running. Both are absent in full screen.
-- An item with `available: false` is shown but cannot run yet. An item with `background: true` is a minimized app that is still running, or the collection that holds one (Apps). A hosted app (Terminal, VS Code, Cursor, AntiGravity) may have `installed: true` or `false` after the first load; it is listed either way. The first load says "Analysing"; if the program is missing the sphere turns red and the prompt is "Tap to install". Activate then is refused. Installing is not a step yet.
+- An item with `available: false` is shown but cannot run yet. An item with `background: true` is an app that is running but not in this screen's element box (minimized, in a layout's slot, or on another screen), or the collection that holds one (Apps). A hosted app (Terminal, VS Code, Cursor, AntiGravity) may have `installed: true` or `false` after the first load; it is listed either way. The first load says "Analysing"; if the program is missing the sphere turns red and the prompt is "Tap to install". Activate then is refused. Installing is not a step yet.
 - `parent-computer` (role `parent`): the computer, on the bottom line, while anything else is in the sphere (an item loaded, an interface open, or one of its parts opened). Only one element is in the sphere at a time. It is not a control.
 - `path` (role `path`): `state.crumbs` lists where the Primary User is, oldest first, for example `["computer", "apps"]` while Calculator is loaded from Apps. Empty when the computer itself is in the sphere with nothing loaded.
 - `facts` (role `facts`): an opened part's facts, `state.facts` as `[{label, value}]`, the same values the Primary User reads on the card. They refresh every 2 seconds; a fact the machine does not have is left out.
 - `calculator-display` (role `calculator`): while the calculator is open, `state.display` is the line the Primary User sees, including the operation (`2 + 3 = 5`). `desktop press pu <key>` presses one key: `0` to `9`, `dot`, `plus`, `minus`, `times`, `divide`, `equals`, `clear`, or `back`. It refuses when the calculator is not open.
-- `window` (role `window`): while a hosted program (Terminal, VS Code) is open, its window. `state.app_id` is the program; `state.fullscreen` whether its box is full screen. `state.interior` is `atspi` when the app's own controls are listed under this node, `partial` when that list was cut short, and `none` when the app published nothing. An empty window is not an empty app. You open and close it with `load`, `activate`, and `back`. Typing into it is not a step. A minimized program's window is not in the tree.
+- `clipboard` (role `note`): the clipboard at the top center of the primary screen. `state.count` is how many copies it keeps (up to 25, newest first, in memory only); `state.entries` lists them as `{number, text, image, size, current}`, where `current` is the one Ctrl+V pastes in every app (always number 1, unless a password manager's copy is the paste: then none is current). `state.text` is the current copy's text. A password manager's copy is never listed. `desktop clip-use pu <n>` makes copy `n` current (it moves to the top as 1); `desktop clip-remove pu <n>` removes it (removing the current one makes the next current); `desktop clip-clear pu` empties the clipboard. To see an image copy, take a picture while the Primary User has the clipboard's Images tab open. While the Primary User has the clipboard open, `clip-<n>` (role `list item`) and `clip-<n>-remove` are its rows.
+- `window` (role `window`): while a hosted program (Terminal, VS Code) is open, its window. `state.app_id` is the program; `state.fullscreen` whether its box is full screen. `state.interior` is `atspi` when the app's own controls are listed under this node, `partial` when that list was cut short, and `none` when the app published nothing. An empty window is not an empty app. You open and close it with `load`, `activate`, and `back`; you click in it with `click`, `right-click` and `double-click` (§2b), and type with `type` and `key` (§2c). A minimized program's window is not in the tree.
 - Under a `window`, when `interior` is `atspi` or `partial`: `push button`, `text`, `menu item`, `check box`, `radio button`, `toggle button`, `list item`, `label`, `link`, `heading`, `combo box`, `tab`, `tree item`, `cell`, `slider`, `spin button`, and `image`. Each has `name`, `state.focused`, `state.checked`, `state.enabled`, and bounds on the screen. Only names are in the tree, never what a field or a document says; take a picture (`see`) to read that. A password is `text` with `state.password` and the name `Password`. Some apps publish a thin tree, so a control can be missing. Some apps publish none (`interior: none`, for example Blender); a picture is the only way to see them.
+- `cpu-graph`, `ram-graph` (role `meter`): beside the date, CPU and memory use. `state.percent` is now, `state.history` the last minute, one value a second, oldest first. `storage-graph`: how full the system disk is, `state.percent`. In an open CPU or RAM element box, `facts-history` is the same minute (`state.lines`: one per core for the CPU).
+- `super-button` (role `button`): on the top bar, the Super key as a button. `state.open` says whether the running apps overlay is open. In that overlay (`running-box`): `running-<id>` for each running app (`state.own` for Versa's own, such as Calculator), `running-<id>-quit`, its ×, and in the Windows view `running-<id>-pick`, the pickup claw (`state.enabled`). The overlay shows above the apps; they stay on screen. With nothing on screen, Apps' Have items sit in a straight line below it. While the Primary User carries a picked-up window, `picked` names it. These are the Primary User's controls; your own ways in stay `load` and `activate`.
+- `box-quit` (role `button`): on a hosted app's element box, beside ⏻ (`box-close`). It asks the app to close as its own close button would; ⏻ ends it.
+- Layouts on a screen: `layout-<n>` (role `layout`, `state.layout`, `state.slots`: the app in each slot). While the Primary User carries an app: `layout-bar`, `layout-<name>` (`state.active`, `state.allowed`), and `preview-slot-<i>`. An app placed in a slot is in an element box of its own: `slot-<i>` (role `slot`, `state.app`), with `slot-<i>-title`, `slot-<i>-minimize` (takes it out of the slot; it keeps running), `slot-<i>-quit`, `slot-<i>-end`. Its `window` node is still the app's window. You do not place apps yet.
+- `menu` (role `menu`): a right-click menu or another app menu that is open. `state.pid` is its app. Its `menu item`s are under it, at their place on screen.
 - `window-dialog` (role `window`): the program's own second window over it, such as Terminal's Preferences, while the Primary User has it open. `state.title` names it. You cannot open or close it.
 - `popups` (role `button`): shown when a program opened a window nobody in the desktop asked for; `state.count` how many wait. `popup-lightbox` (role `window`): the one the Primary User is looking at over the dimmed desktop; `name` is the app, `state.title` the window's title, and its controls are under it like any `window`. Only the Primary User opens and closes these.
 - When a dialog opens over another dialog, `window-dialog` is the top one, which has the keys. The one under it is `window-dialog-2`, then `window-dialog-3`.
 - Before Versa Desktop is installed, the Perceptron is the introduction (`phase: "zero"`). You can look then, but not take steps.
+
+## 1b. App windows: summary and one window
+
+- A look sums up every app window. Each `window` keeps its `state`, plus `state.controls`, the number of controls it publishes. Only the window that has the keys (`state.activated: true`) lists its controls; an open `menu` always lists its items.
+- To read another window's controls, `desktop look pu --window <id> [--screen N]`, with the window's `id` (`window`, `window-dialog`, `popup-lightbox`) and its screen (default 0). The reply has `window` (that node with its controls) and `menus` (its app's open menus), not `tree`. Use this instead of reading the whole desktop again while you work in one app.
+- A window with `interior: none` carries `state.advice`: the app publishes no controls. Ask the Primary User whether you may take a picture, then `desktop see pu --screen N`; the picture asks them on screen too.
 
 ## 2. Operating the desktop
 
@@ -76,6 +89,24 @@ Nothing runs from one step. Every action is two deliberate steps, exactly as for
 - **Changed course:** `desktop unload pu <element>` takes it back out; `desktop close pu` moves the computer (or User) back out and clears everything.
 - **Each step returns the tree after the step,** so you see what changed. Read it before the next step.
 - **Refusals** (`error: "refused"`) are the same ones the Primary User would get: the item is not shown, not available, cannot be loaded together with what is loaded, or the confirmation is not ready yet. `message` says why. Do not retry the same step blindly.
+
+## 2b. Clicking in an app
+
+- `desktop click pu <id>` clicks the centre of an app control, an `atspi-…` id from your last look or step reply, on any screen. `desktop right-click pu <id>` right-clicks it: an app opens its menu, which is the `menu` node in the reply.
+- To pick from a menu, `desktop click pu <menu item id>` from that reply. Escape-like closing is not a step yet; clicking elsewhere in the app closes a menu.
+- `desktop double-click pu <id>` double-clicks it: opens a file or a folder in Files, for example.
+- The reply comes 0.6 s after the click, with the summed-up tree.
+- Ids of app controls are numbered on each read. A click is refused when that id now names a different control, or one you have not seen: look again (`--window`) and use the new id.
+- Clicks are operating: they use the same permission as steps and appear on their screen as you make them.
+
+## 2c. Typing and keys in an app
+
+- `desktop type pu <id> "<text>"` types into a field (role `text`, `combo box` or `spin button`), at most 2000 characters. If the field does not have the keys, it is clicked first. The text goes in at the field's cursor; you cannot read what the field already holds. To replace it: `desktop key pu ctrl+a`, then `type` (a field that has the keys is not clicked again, so the selection stays).
+- **Never a password field** (`state.password`): it is refused. Only the Primary User types passwords; ask them in chat.
+- A character the keyboard layout cannot type is refused, and the message names it.
+- `desktop key pu <keys>` presses keys in the app window that has the keys: `enter`, `escape`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f12`, with `ctrl+`, `alt+`, `shift+` (for example `ctrl+c`, `ctrl+l`, `ctrl+shift+n`). A letter or digit needs `ctrl` or `alt`; plain text is `type`.
+- Refused: keys while the desktop itself has the keys (use the Perceptron's steps), anything with Super, Alt+Tab (it picks an app's page; click its tab in `pages` instead), and Ctrl+Alt with Backspace, Delete or an F-key.
+- Everything you type appears on their screen as you type it. Type only what the task needs.
 
 **When to take steps:** only when the Primary User asked for that outcome. Never reboot, shut down, log out, or switch their next start on your own judgment. Your steps appear on their screen as you take them.
 
@@ -110,4 +141,5 @@ Nothing runs from one step. Every action is two deliberate steps, exactly as for
 | `unsafe` | The desktop socket looks wrong. Do not work around it. Tell the Primary User. |
 | `locked` | Their desktop is locked. Wait until they are back; do not retry in a loop. |
 | `no_screen` | No such screen. `desktop look pu` lists them. |
+| `no_window` | No window with that id on that screen. Look again without `--window`. |
 | `capture_failed` | The picture could not be taken. Use the tree, or tell them. |

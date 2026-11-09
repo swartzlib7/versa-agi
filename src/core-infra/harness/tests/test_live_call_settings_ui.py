@@ -68,7 +68,9 @@ class TestLiveCallTab(unittest.TestCase):
                     screen.query_one("#chk-live-call-narrate", Checkbox).value = False
                     screen.query_one("#chk-live-call-enabled", Checkbox).value = True
                     screen.query_one("#select-live-call-model", Select).value = "gemini-3.7-flash"
-                    screen.query_one("#input-live-call-max-minutes", Input).value = "20"
+                    minutes = screen.query_one("#select-live-call-max-minutes", Select)
+                    self.assertEqual(minutes.value, "15")
+                    minutes.value = "25"
                     per_cycle = screen.query_one("#input-live-call-per-cycle", Input)
                     self.assertEqual(per_cycle.value, "1")
                     per_cycle.value = "2"
@@ -77,7 +79,7 @@ class TestLiveCallTab(unittest.TestCase):
         asyncio.run(run())
         self.assertEqual(writes, [
             ("live_call", "call_model", "gemini-3.7-flash"),
-            ("live_call", "max_minutes", "20"),
+            ("live_call", "max_minutes", "25"),
             ("live_call", "join_timeout_seconds", "45"),
             ("live_call", "calls_per_cycle", "2"),
             ("live_call", "narrate_progress", "false"),

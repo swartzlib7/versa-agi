@@ -22,6 +22,7 @@ from rich.table import Table
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import db_connect  # noqa: E402
+import agent_limits  # noqa: E402
 
 # These modules are only available on full (client/local) installs.
 # Server-only topology deploys a minimal agictl subset (model commands only).
@@ -357,6 +358,14 @@ def system_config_set_ini(section, key, value):
         if value_s.lower() not in ("pool", "preferred"):
             json_response(False, error="model_routing_mode must be 'pool' or 'preferred'")
             sys.exit(1)
+    elif section_l == "agent" and key_l == "timeout_minutes":
+        import agent_limits
+        err = agent_limits.timeout_error(value_s)
+        if err:
+            json_response(False, error=err)
+            sys.exit(1)
+        value_s = str(int(value_s.strip()))
+        value = value_s
     elif section_l == "model_routing" and key_l in WORK_MODALITIES and value_s:
         ok, err = validate_preferred_model_key(value_s, key_l)
         if not ok:
@@ -390,6 +399,17 @@ def system_config_set_ini(section, key, value):
             if not entry.get("enabled", True):
                 json_response(False, error=f"'{value_s}' is not an enabled catalog model")
                 sys.exit(1)
+    elif section_l == "live_chat" and key_l == "idle_minutes":
+        if os.getenv("AGICTL_AGENT_USER"):
+            json_response(False, error="Live Chat settings are Primary User only "
+                                       "(agitop → System Settings → Live Chat).")
+            sys.exit(1)
+        err = agent_limits.listen_minutes_error(value_s)
+        if err:
+            json_response(False, error=err)
+            sys.exit(1)
+        value_s = str(int(value_s.strip()))
+        value = value_s
     elif section_l == "live_call" or (section_l == "features" and key_l == "live_call"):
         if os.getenv("AGICTL_AGENT_USER"):
             json_response(False, error="Live Call settings are Primary User only "
@@ -1488,6 +1508,119 @@ def _apply_remote_package_decision(name, status):
     conn.commit()
     conn.close()
     return status
+
+
+ACTIVITY_OUTCOMES = ("ok", "timeout", "runaway", "step_limit", "crash")
+
+
+@system.command("activity", hidden=True)
+@click.argument("event", type=click.Choice(["start", "end"]))
+@click.option("--sub-account", "sub_account", required=True, help="Agent VersaVoice sub-account id")
+@click.option("--token", required=True, help="VersaVoice API token")
+@click.option("--cycle-id", "cycle_id", required=True, help="cycles.db id of this spawn")
+@click.option("--wake", type=click.Choice(["messages", "tasks", "forced"]), default="messages")
+@click.option("--listen-minutes", "listen_minutes", type=int, default=0,
+              help="Listening minutes the setting asks for (0 = Off)")
+@click.option("--hard-cap-epoch", "hard_cap_epoch", type=int, default=0,
+              help="Epoch seconds when Lifeline's timeout stops this run")
+@click.option("--outcome", type=click.Choice(ACTIVITY_OUTCOMES), default=None)
+@click.option("--duration-seconds", "duration_seconds", type=int, default=0)
+@click.option("--cycles-total", "cycles_total", type=int, default=0)
+@click.option("--channel-id", "channel_ids", multiple=True,
+              help="Channel of a waking message (repeatable); presence for the chat strip")
+def system_activity(event, sub_account, token, cycle_id, wake, listen_minutes, hard_cap_epoch,
+                    outcome, duration_seconds, cycles_total, channel_ids):
+    """Report one agent spawn's start or end to VersaVoice (Lifeline only).
+
+    POST /agi/activity (state_live_chat.md §1.8). The app shows it in the chat
+    status strip and on the agent card. Prints {success, idleMinutes}: the
+    listening minutes VersaVoice granted (0 on any failure).
+    """
+    from datetime import datetime, timezone
+
+    from comms import api_request
+
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="agictl system activity is Lifeline only.", idleMinutes=0)
+        sys.exit(1)
+    body = {
+        "subAccountId": sub_account,
+        "event": event,
+        "cycleId": cycle_id,
+        "cyclesTotal": max(0, cycles_total),
+    }
+    if event == "start":
+        body["wake"] = wake
+        body["listenMinutes"] = max(0, listen_minutes)
+        body["channelIds"] = [c for c in dict.fromkeys(channel_ids) if c][:20]
+        if hard_cap_epoch > 0:
+            body["hardCapAt"] = datetime.fromtimestamp(hard_cap_epoch, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+    else:
+        body["outcome"] = outcome or "crash"
+        body["durationSeconds"] = max(0, duration_seconds)
+    resp = api_request("/agi/activity", token, method="POST", body=body, timeout=15)
+    if isinstance(resp, dict) and resp.get("success"):
+        data = resp.get("data") or {}
+        try:
+            granted = max(0, int(data.get("idleMinutes") or 0))
+        except (TypeError, ValueError):
+            granted = 0
+        json_response(True, event=event, idleMinutes=granted, applied=data.get("applied"))
+        return
+    message = resp.get("message") or resp.get("error") if isinstance(resp, dict) else None
+    json_response(False, error=str(message or "no response from VersaVoice"), idleMinutes=0)
+    sys.exit(1)
+
+
+@system.command("activity-backfill", hidden=True)
+@click.option("--sub-account", "sub_account", required=True, help="Agent VersaVoice sub-account id")
+@click.option("--token", required=True, help="VersaVoice API token")
+@click.option("--agent", "agent_name", required=True, help="Agent name (cycles.db id prefix)")
+def system_activity_backfill(sub_account, token, agent_name):
+    """Send this agent's cycle history to VersaVoice once (Lifeline only).
+
+    Builds the agent card stats (last 20 cycles, outcome counts, last 48 h busy
+    time, all-time count) from cycles.db and posts event "backfill"; VersaVoice
+    replaces its stats doc (state_live_chat.md LCH-24).
+    """
+    from activity_backfill import build_stats
+    from comms import api_request
+
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="agictl system activity-backfill is Lifeline only.")
+        sys.exit(1)
+    agent_name = (agent_name or "").strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_-]*$", agent_name):
+        json_response(False, error=f"Invalid agent name '{agent_name}'.")
+        sys.exit(1)
+    rows = []
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        pattern = (f"{agent_name}-[0-9]*",)
+        try:
+            cur = conn.execute("SELECT id, started_at, ended_at, exit_code, wake_reason FROM cycles "
+                               "WHERE id GLOB ?", pattern)
+        except sqlite3.OperationalError:  # older table without wake_reason
+            cur = conn.execute("SELECT id, started_at, ended_at, exit_code FROM cycles WHERE id GLOB ?",
+                               pattern)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"cycles.db unreadable: {e}")
+        sys.exit(1)
+    stats = build_stats(rows)
+    resp = api_request("/agi/activity", token, method="POST", timeout=30, body={
+        "subAccountId": sub_account, "event": "backfill", "stats": stats,
+    })
+    if isinstance(resp, dict) and resp.get("success"):
+        json_response(True, agent=agent_name, cycles=stats["cyclesTotal"],
+                      recent=len(stats["recent"]), hours=len(stats["hourly"]))
+        return
+    message = resp.get("message") or resp.get("error") if isinstance(resp, dict) else None
+    json_response(False, error=str(message or "no response from VersaVoice"))
+    sys.exit(1)
 
 
 @system.command("sync-instance")
@@ -7542,8 +7675,9 @@ def agent_add(name, role):
                 pass
 
         # ── Read defaults from setup.ini (stock harness defaults when absent) ──
-        default_timeout = 45
-        default_runaway = 2500
+        import agent_limits
+        default_timeout = agent_limits.DEFAULT_TIMEOUT_MINUTES
+        default_runaway = agent_limits.DEFAULT_RUNAWAY_LINES
         default_max_turns = 500
         default_tool_budget = 5000
         default_resume_enabled = 1
@@ -7559,7 +7693,7 @@ def agent_add(name, role):
             try:
                 _ini.read(setup_ini)
                 if _ini.has_option("agent", "timeout_minutes"):
-                    default_timeout = int(_ini.get("agent", "timeout_minutes"))
+                    default_timeout = agent_limits.clamp_timeout(_ini.get("agent", "timeout_minutes"))
                 if _ini.has_option("agent", "runaway_threshold"):
                     default_runaway = int(_ini.get("agent", "runaway_threshold"))
             except Exception:
@@ -8380,6 +8514,65 @@ def agent_deactivate(name):
         json_response(False, error=str(e))
         sys.exit(1)
 
+CHAT_CLOSE_DIR = os.getenv("VERSA_STATE_DIR", "/var/lib/versa-agi")
+
+
+def _open_cycle_id(agent_name: str) -> str:
+    """The agent's running cycle (cycles.db row with no ended_at), or ''."""
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        row = conn.execute(
+            "SELECT id FROM cycles WHERE id GLOB ? AND ended_at IS NULL "
+            "ORDER BY started_at DESC LIMIT 1",
+            (f"{agent_name}-[0-9]*",),
+        ).fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+@agent.command("chat-close")
+@click.argument("name")
+@click.option("--reason", type=click.Choice(["requested", "shutdown"]), default="requested",
+              help="Why the chat closes (the agent is told)")
+def agent_chat_close(name, reason):
+    """Close an agent's live chat gracefully (Primary User only).
+
+    The agent finishes its current reply, then gets a closing message and ends
+    its cycle with a handoff (state_live_chat.md LCH-23). Unlike `agent kill`,
+    nothing is halted; the next message wakes the agent as usual.
+    """
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="Permission denied. Only the Primary User can close an agent's chat "
+                                   "(agitop → agent → End chat).")
+        sys.exit(1)
+    name = (name or "").strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_-]*$", name):
+        json_response(False, error=f"Invalid agent name '{name}'.")
+        sys.exit(1)
+    cycle_id = _open_cycle_id(name)
+    if not cycle_id:
+        json_response(True, agent=name, closing=False,
+                      message=f"'{name}' has no cycle running — nothing to close.")
+        return
+    agent_dir = os.path.join(CHAT_CLOSE_DIR, name)
+    path = os.path.join(agent_dir, "chat_close")
+    try:
+        if not os.path.isdir(agent_dir):
+            raise FileNotFoundError(agent_dir)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(f"{cycle_id} {reason}\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception as e:
+        json_response(False, error=f"Could not request the close: {e}")
+        sys.exit(1)
+    json_response(True, agent=name, closing=True, cycleId=cycle_id, reason=reason,
+                  message=f"'{name}' will finish its current reply, hand off, and end its cycle.")
+
+
 @agent.command("kill")
 @click.argument("name")
 def agent_kill(name):
@@ -8681,7 +8874,12 @@ def agent_remove(name, archive):
 @click.argument("name")
 @click.argument("minutes", type=int)
 def agent_set_timeout(name, minutes):
-    """Set the maximum execution timeout for an agent in minutes."""
+    """Set the maximum execution timeout for an agent in minutes (30–60)."""
+    import agent_limits
+    err = agent_limits.timeout_error(minutes)
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
     try:
         conn = db_connect.connect_compat(agents_db, timeout=5)
         conn.execute("UPDATE agents SET timeout_minutes=?, updated_at=datetime('now') WHERE name=?", (minutes, name))
@@ -8940,9 +9138,9 @@ def agent_get_active():
         pass
     for a in agents:
         model = a.get("model") or ""
-        timeout = a.get("timeout_minutes", 60)
-        runaway = a.get("runaway_threshold", 300)
-        runaway_size = a.get("runaway_size_threshold", 512)
+        timeout = a.get("timeout_minutes", agent_limits.DEFAULT_TIMEOUT_MINUTES)
+        runaway = a.get("runaway_threshold", agent_limits.DEFAULT_RUNAWAY_LINES)
+        runaway_size = a.get("runaway_size_threshold", agent_limits.DEFAULT_RUNAWAY_SIZE_KB)
         injection_mode = a.get("context_injection_mode") or "relevant"
         token_budget = a.get("token_budget", 0)
         max_turns = a.get("max_session_turns", 500)
@@ -10191,7 +10389,11 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         dob = prof.get("date_of_birth")
         voice_attrs = []
         if chrom:
-            voice_label = {"X": "male", "Y": "female", "None": "reflective"}.get(chrom, chrom)
+            voice_label = {
+                "XY": "male", "XX": "female", "Reflective": "reflective",
+                # Legacy values cached from older syncs
+                "X": "male", "Y": "female", "None": "reflective",
+            }.get(chrom, chrom)
             voice_attrs.append(f"Voice: {voice_label} ({chrom})")
         if dob:
             voice_attrs.append(f"DOB: {dob}")
@@ -10659,6 +10861,30 @@ def cycle_end(summary, handoff, no_handoff, agent_name):
         conn.close()
     except Exception:
         pass
+
+    # ── Listening window open (state_live_chat.md §1.4.7) ──
+    # The harness keeps the cycle open for the chat. Save the summary and
+    # handoff, leave ended_at / status alone, and answer positively without the
+    # "🛑 Cycle ended:" marker so the harness keeps listening.
+    if os.getenv("VERSA_LISTENING") == "open":
+        try:
+            conn = db_connect.connect_compat(cycles_db, timeout=5)
+            conn.execute(
+                "UPDATE cycles SET summary=? WHERE id LIKE ? AND ended_at IS NULL",
+                (sum_text, f"{agent_name}-%")
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        minutes = (os.getenv("VERSA_LISTEN_MINUTES") or "").strip() or "a few"
+        console.print(
+            "✅ Thank you, your summary and handoff are saved. This is a live chat: your cycle "
+            f"stays open and closes on its own after {minutes} minutes with no new messages. "
+            "The person you are chatting with may still send you another message. "
+            "Nothing else is needed right now."
+        )
+        sys.exit(0)
 
     try:
         conn = db_connect.connect_compat(cycles_db, timeout=5)
@@ -12811,7 +13037,7 @@ def identity():
 @click.option("--language", default="en")
 @click.option("--country", default="")
 @click.option("--voice", type=click.Choice(["female", "male", "reflective"], case_sensitive=False), default="female",
-              help="Voice type: female (Y), male (X), reflective (Primary User's voice)")
+              help="Voice type: female (XX), male (XY), reflective (Primary User's voice)")
 @click.option(
     "--install-email", default="",
     help="Siloed install-acceptance email for COA reuse (agiInstallEmail); not the VV sponsor email",

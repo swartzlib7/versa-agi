@@ -19,6 +19,13 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from harness.live_call import CALL_TURN_STEP_CAP, step_cap_message as live_step_cap_message
+from harness.deadline import FIVE_MINUTES, DeadlineWarnings
+from harness.listening import (
+    ListeningWindow,
+    agent_ids_from_env,
+    conversations_block,
+    wait_for_mail,
+)
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -408,8 +415,9 @@ AGICTL_TOOL_TIMEOUT_SECONDS = 120
 UTILITY_TOOL_TIMEOUT_SECONDS = 900
 
 
-def _run_agictl(args_str: str, timeout: int = AGICTL_TOOL_TIMEOUT_SECONDS) -> str:
-    """Internal helper: execute an agictl command and return output."""
+def _run_agictl(args_str: str, timeout: int = AGICTL_TOOL_TIMEOUT_SECONDS, limit: int | None = None) -> str:
+    """Internal helper: execute an agictl command and return output. `limit` replaces the
+    agent's tool output limit for this call when it is larger."""
     try:
         cmd = ["agictl"] + shlex.split(args_str)
     except ValueError as ve:
@@ -423,8 +431,9 @@ def _run_agictl(args_str: str, timeout: int = AGICTL_TOOL_TIMEOUT_SECONDS) -> st
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
-        if TOOL_OUTPUT_LIMIT > 0 and len(output) > TOOL_OUTPUT_LIMIT:
-            output = output[:TOOL_OUTPUT_LIMIT] + f"\n\n[OUTPUT TRUNCATED: Exceeded {TOOL_OUTPUT_LIMIT} chars. Refine your query or paginate.]"
+        cap = max(TOOL_OUTPUT_LIMIT, limit or 0) if TOOL_OUTPUT_LIMIT > 0 else 0
+        if cap > 0 and len(output) > cap:
+            output = output[:cap] + f"\n\n[OUTPUT TRUNCATED: Exceeded {cap} chars. Refine your query or paginate.]"
         return output if output else "Command executed successfully with no output."
     except subprocess.TimeoutExpired:
         return f"ERROR: Command timed out after {timeout} seconds."
@@ -990,6 +999,10 @@ class CallPuInput(BaseModel):
 
 
 _LIVE_CALL_RUNTIME = None  # harness.live_call.LiveCallRuntime, set in main()
+_HARNESS_DEADLINE_EPOCH = None  # Lifeline --deadline-epoch, set in main()
+# A call must leave this much time before the hard stop (state_live_chat.md §1.7).
+CALL_DEADLINE_MARGIN_SECONDS = 180
+CALL_MIN_MINUTES = 5
 
 
 @tool("agictl_call_pu", args_schema=CallPuInput)
@@ -1009,8 +1022,20 @@ def agictl_call_pu(reason: str, brief: str = "", last_call_summary: str = "",
     if runtime is None or gate is None or not gate.ok:
         return json.dumps({"success": False, "status": "unavailable",
                            "error": "Live Call is not available in this cycle. Send a chat message instead."})
+    settings = gate.settings
+    if _HARNESS_DEADLINE_EPOCH:
+        # A call placed late in a cycle gets only the time left (§1.7 rule 3).
+        left_min = int((_HARNESS_DEADLINE_EPOCH - time.time() - CALL_DEADLINE_MARGIN_SECONDS) // 60)
+        if left_min < CALL_MIN_MINUTES:
+            return json.dumps({"success": False, "status": "no_time",
+                               "error": "Not enough time left in this cycle for a call. Send a chat "
+                                        "message now and offer the call after your next wake."})
+        if left_min < settings.max_minutes:
+            import dataclasses
+            settings = dataclasses.replace(settings, max_minutes=left_min)
+            tlog(f"LIVE CALL: cap cut to {left_min} min (time left in this cycle)")
     try:
-        return json.dumps(runtime.place(reason, gate.settings, last_call_summary=last_call_summary,
+        return json.dumps(runtime.place(reason, settings, last_call_summary=last_call_summary,
                                         brief=brief, recipient_id=recipient_id))
     except Exception as e:
         runtime.shutdown("failed")
@@ -1038,26 +1063,35 @@ if _LIVE_CALL_GATE is not None and _LIVE_CALL_GATE.ok:
 # ═══════════════════════════════════════════════════════
 
 HETEROSPHERE_SOCKET_DIR = "/tmp/heterosphere"
+# A look with an app's controls is larger than an agent's general tool limit
+# (state_versa_desktop.md §4.35 L4).
+DESKTOP_OUTPUT_LIMIT = 20000
 
 
 class DesktopInput(BaseModel):
     command: str = Field(description=(
-        "'desktop look pu', 'desktop see pu [--screen N]', or one Perceptron step: 'desktop open pu', "
-        "'desktop load pu <element>', 'desktop unload pu <element>', 'desktop activate pu', "
-        "'desktop close pu'."))
+        "'desktop look pu', 'desktop look pu --window <id> [--screen N]', 'desktop see pu [--screen N]', "
+        "'desktop click pu <atspi-id>', 'desktop right-click pu <atspi-id>', 'desktop double-click pu <atspi-id>', "
+        "'desktop type pu <atspi-id> \"<text>\"', 'desktop key pu <keys>' (enter, ctrl+a), or one Perceptron step: "
+        "'desktop open pu', 'desktop load pu <element>', 'desktop unload pu <element>', "
+        "'desktop activate pu', 'desktop close pu', 'desktop clip-use pu <n>'."))
 
 
 @tool("agictl_desktop", args_schema=DesktopInput)
 def agictl_desktop(command: str) -> str:
     """Read the Primary User's desktop as a tree of named elements (every screen), operate
     the primary screen one Perceptron step at a time, the way they do, or take a picture
-    of a screen (COA only). Looking, operating, and pictures are allowed separately on
-    their screen unless they granted a period already, so a call can wait up to about 40
-    seconds. A refusal is final for this request. A picture's path is read with
+    of a screen (COA only). A look sums up each app window; the one with the keys comes in
+    full, and `--window <id>` reads one window's controls. `click`, `right-click` and
+    `double-click` press an app's control by its id from your last look; `type` types into a
+    field (never a password), `key` presses keys in the app that has them. Looking, operating, and pictures are allowed
+    separately on their screen unless they granted a period already, so a call can wait up to
+    about 40 seconds. A refusal is final for this request. A picture's path is read with
     agictl_view_image. Load computer_use.md before the first look, step, or picture.
-    Examples: 'desktop look pu', 'desktop load pu reboot', 'desktop see pu --screen 1'
+    Examples: 'desktop look pu', 'desktop look pu --window window', 'desktop right-click pu atspi-4242-17',
+    'desktop load pu reboot', 'desktop see pu --screen 1'
     """
-    return _run_agictl(command, timeout=60)
+    return _run_agictl(command, timeout=60, limit=DESKTOP_OUTPUT_LIMIT)
 
 
 # Offered only once the PU's HeteroSphere has created its socket directory.
@@ -1557,7 +1591,12 @@ def main():
     parser.add_argument("--routing-file", default=None, help="Path to ephemeral model routing JSON from lifeline")
     parser.add_argument("--resume-max-messages", type=int, default=0, help="Trim checkpoint to last N messages on resume (0 = unlimited)")
     parser.add_argument("--skill-mode", default="hybrid", choices=["full", "lazy", "hybrid"], help="Skill injection mode: full (inject all), lazy (manifest only), hybrid (core injected + lazy manifest)")
+    parser.add_argument("--deadline-epoch", type=float, default=None, help="Epoch seconds when Lifeline's timeout stops this run (time warnings at 10 and 5 minutes left)")
+    parser.add_argument("--listen-minutes", type=int, default=0, help="Live Chat listening window granted by VersaVoice (0 = one-shot cycle)")
     args = parser.parse_args()
+    harness_started_epoch = time.time()
+    global _HARNESS_DEADLINE_EPOCH
+    _HARNESS_DEADLINE_EPOCH = args.deadline_epoch
 
     TOOL_OUTPUT_LIMIT = args.tool_budget
 
@@ -1864,6 +1903,17 @@ def main():
     enhanced_prompt = system_prompt
     if skill_content:
         enhanced_prompt = system_prompt + "\n" + skill_content
+
+    # ── Live Chat: CONVERSATIONS rules (state_live_chat.md §1.6) ──
+    listen_pu_ids: set[str] = set()
+    if args.listen_minutes > 0:
+        pu = _agictl_config_value("primary_user")
+        pu_uid = str(pu.get("uid") or "").strip()
+        if pu_uid:
+            listen_pu_ids.add(pu_uid)
+        from harness.live_call import pu_call_name
+        enhanced_prompt += conversations_block(pu_call_name(pu) if pu else "")
+        tlog(f"LISTEN: {args.listen_minutes} min window granted; conversations block added")
 
     # ── Live Call status + last call (COA, feature on) — dynamic tail, cache-safe ──
     if _LIVE_CALL_GATE is not None and _LIVE_CALL_GATE.settings and _LIVE_CALL_GATE.settings.enabled:
@@ -2431,6 +2481,8 @@ def main():
     end_off_remaining = end_off_remaining_threshold(max_steps)
     warned_80 = False
     warned_end_off = False
+    # Time warnings at 10 and 5 minutes left (state_live_chat.md §1.5.3). None without a deadline.
+    deadline_warnings = DeadlineWarnings(args.deadline_epoch, started_epoch=harness_started_epoch)
     cycle_ended = False
     budget_hard_stop = False
     input_messages = messages  # Initial input for first stream invocation
@@ -2456,6 +2508,17 @@ def main():
     midcycle_inbox = MidcycleInbox.from_env(
         args.agent, f"{enhanced_prompt}\n{enhanced_wake}", log=tlog,
     )
+    midcycle_inbox.pu_ids = set(listen_pu_ids)
+
+    # ── Live Chat listening window (state_live_chat.md §1.4) ──
+    listening = ListeningWindow(
+        args.listen_minutes, args.deadline_epoch, pu_ids=listen_pu_ids,
+        agent_ids=agent_ids_from_env(), marker_path=os.environ.get("VERSA_TURN_MARKER"),
+        close_file=os.environ.get("VERSA_CHAT_CLOSE_FILE"), cycle_id=os.environ.get("VERSA_CYCLE_ID"),
+    )
+    turn_base = 0  # steps spent before the current chat turn (per-turn budget)
+    if listening.enabled and listening.note_rows(midcycle_inbox.unread_rows()):
+        tlog(f"LISTEN: window open — a person woke this cycle ({listening.minutes} min idle)")
 
     def _inject_midcycle_mail() -> bool:
         """Fold unread mail that arrived after the wake prompt into this cycle.
@@ -2476,6 +2539,13 @@ def main():
             tlog("MID-CYCLE MAIL: skipping inject — checkpoint not safe")
             return False
         midcycle_inbox.commit(new_ids)
+        nonlocal turn_base, warned_80, warned_end_off
+        was_open = listening.opened
+        if listening.note_rows(midcycle_inbox.last_rows):
+            # A person wrote: fresh step allowance for this chat turn (§1.5.5).
+            turn_base = step_count - call_steps
+            warned_80 = warned_end_off = False
+            tlog("LISTEN: " + ("new chat turn" if was_open else "window open — a person wrote mid-cycle"))
         digest = hashlib.sha256(",".join(sorted(new_ids)).encode()).hexdigest()[:16]
         injected = HumanMessage(content=text, id=f"midcycle-{digest}")
         input_messages = [injected]
@@ -2487,8 +2557,8 @@ def main():
         return True
 
     try:
-        while (step_count - call_steps) < max_steps and not cycle_ended:
-            _HARNESS_VIEW_CTX["steps_remaining"] = max_steps - (step_count - call_steps)
+        while (step_count - call_steps - turn_base) < max_steps and not cycle_ended:
+            _HARNESS_VIEW_CTX["steps_remaining"] = max_steps - (step_count - call_steps - turn_base)
             # Each stream invocation processes until a budget threshold or completion.
             # With checkpointing, the graph state persists between invocations —
             # we only need to pass NEW messages (e.g., the budget warning).
@@ -2511,6 +2581,11 @@ def main():
                             # Call turns log one line per request (runtime); the call log keeps detail.
                             if hasattr(msg, "tool_calls") and msg.tool_calls:
                                 tool_names = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
+                                # Agent sends keep a listening window alive (§1.4 rule 5).
+                                for tc in msg.tool_calls:
+                                    cmd = str((tc.get("args") or {}).get("command") or "").strip()
+                                    if tc.get("name") == "agictl_message" and cmd.startswith("send"):
+                                        listening.note_activity()
                                 if _in_call_turn():
                                     live_runtime.note_tool_calls(
                                         [tc.get("name", "?") for tc in msg.tool_calls], msg.content,
@@ -2614,7 +2689,7 @@ def main():
                         # agent chunk. Breaking mid-batch checkpoints dangling tool_calls
                         # and the re-invoke raises INVALID_CHAT_HISTORY.
                         pending_tool_calls = bool(_unresolved_tool_call_ids(messages))
-                        remaining = max_steps - (step_count - call_steps)
+                        remaining = max_steps - (step_count - call_steps - turn_base)
                         warning = None
 
                         # Unread mail fetched while this cycle holds the lock.
@@ -2642,26 +2717,42 @@ def main():
                         elif remaining <= end_off_remaining and not warned_end_off:
                             warned_end_off = True
                             warned_80 = True  # suppress a stale 80% warning after this one
-                            warning = budget_end_off_message(step_count - call_steps, max_steps)
-                        elif (step_count - call_steps) >= budget_80 and not warned_80:
+                            warning = budget_end_off_message(step_count - call_steps - turn_base, max_steps)
+                        elif (step_count - call_steps - turn_base) >= budget_80 and not warned_80:
                             warned_80 = True
-                            warning = budget_wrap_message(step_count - call_steps, max_steps)
+                            warning = budget_wrap_message(step_count - call_steps - turn_base, max_steps)
+
+                        # Time left before Lifeline's hard stop. Same gate as the budget
+                        # warnings; a budget warning in this chunk goes first.
+                        time_stage = None
+                        warn_tag = "[BUDGET]"
+                        if not warning and not pending_tool_calls and not _in_call_turn():
+                            time_due = deadline_warnings.due(listening=listening.should_wait())
+                            if time_due:
+                                time_stage, warning = time_due
+                                warn_tag = "[DEADLINE]"
+                                if time_stage == FIVE_MINUTES and listening.should_wait():
+                                    # The window closes with the 5-minute warning (§1.5.3).
+                                    warning = listening.begin_closing("deadline")
+                                    tlog("LISTEN: window closed — 5 minutes before the hard stop")
 
                         if warning:
-                            tlog(f"[BUDGET] Injecting warning into agent conversation (step {step_count})")
-                            tlog(f"[BUDGET] {warning}")
+                            tlog(f"{warn_tag} Injecting warning into agent conversation (step {step_count})")
+                            tlog(f"{warn_tag} {warning}")
                             # Flush streamed ToolMessages before break-and-reinvoke —
                             # same pending-writes hazard as VIEW RE-INVOKE.
                             flush_note = _flush_stream_messages_to_checkpoint(
                                 agent, config, messages,
                             )
-                            tlog(f"[BUDGET] checkpoint {flush_note}")
+                            tlog(f"{warn_tag} checkpoint {flush_note}")
                             if flush_note.startswith("flush-failed"):
                                 tlog(
-                                    "[BUDGET] Skipping warning inject — "
+                                    f"{warn_tag} Skipping warning inject — "
                                     "checkpoint flush failed"
                                 )
                             else:
+                                if time_stage is not None:
+                                    deadline_warnings.mark(time_stage)
                                 # Break this stream — re-invoke with warning as the only new input.
                                 input_messages = [HumanMessage(content=warning, id=str(uuid.uuid4()))]
                                 messages.append(input_messages[0])
@@ -2670,7 +2761,7 @@ def main():
                         # ── Hard Budget Enforcement ──
                         # Same safety gate: wait until every parallel tool_call in the
                         # current batch has its ToolMessage before terminating.
-                        if (step_count - call_steps) >= max_steps and not pending_tool_calls:
+                        if (step_count - call_steps - turn_base) >= max_steps and not pending_tool_calls:
                             tlog(f"\n[BUDGET EXCEEDED] Hard limit reached ({step_count}/{max_steps}). Terminating cycle.")
                             cycle_ended = True
                             budget_hard_stop = True
@@ -2709,6 +2800,22 @@ def main():
                         continue
                 if _inject_midcycle_mail():
                     continue
+                # ── Live Chat: wait for the next message instead of ending (§1.4) ──
+                if live_runtime is not None and (live_runtime.live or live_runtime.awaiting_summary):
+                    listening.note_activity()  # a call counts as activity (§1.7 rule 2)
+                if listening.should_wait():
+                    tlog(f"LISTEN: waiting for messages ({listening.minutes} min idle window)")
+                    close_reason = wait_for_mail(listening, _inject_midcycle_mail)
+                    if close_reason == "mail":
+                        continue
+                    closing = listening.begin_closing(close_reason)
+                    tlog(f"LISTEN: window closed ({close_reason}) — asking the agent to end the cycle")
+                    flush_note = _flush_stream_messages_to_checkpoint(agent, config, messages)
+                    if not flush_note.startswith("flush-failed"):
+                        closing_msg = HumanMessage(content=closing, id=str(uuid.uuid4()))
+                        input_messages = [closing_msg]
+                        messages.append(closing_msg)
+                        continue
                 break
 
         final_message = messages[-1].content

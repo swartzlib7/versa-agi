@@ -3,7 +3,12 @@
 import calendar
 import json
 import os
+import sys
 import time
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import agent_limits  # noqa: E402
 from typing import Optional
 from textual import on
 from textual.app import ComposeResult
@@ -775,9 +780,9 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
     current_turns = str(agent.get("max_session_turns", 500))
     current_tool_budget = str(agent.get("tool_output_token_budget", 5000))
     current_budget = str(agent.get("token_budget", 0))
-    current_timeout = str(agent.get("timeout_minutes", 45))
-    current_threshold = str(agent.get("runaway_threshold", 2500))
-    current_size_threshold = str(agent.get("runaway_size_threshold", 2048))
+    current_timeout = str(agent.get("timeout_minutes", agent_limits.DEFAULT_TIMEOUT_MINUTES))
+    current_threshold = str(agent.get("runaway_threshold", agent_limits.DEFAULT_RUNAWAY_LINES))
+    current_size_threshold = str(agent.get("runaway_size_threshold", agent_limits.DEFAULT_RUNAWAY_SIZE_KB))
     current_num_ctx = agent.get("num_ctx", 0)
     current_model = agent.get("model") or ""
     gen_ctx = _agent_model_gen_context(agents_panel, agent_name)
@@ -833,14 +838,14 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
                 yield Static("[cyan]Token Budget (monthly)[/] — max tokens per month (0 = unlimited)")
                 yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
-                yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
+                yield Static("[cyan]Timeout (minutes, 30–60)[/] — max runtime before agent is killed")
+                yield Input(value=current_timeout, placeholder="e.g. 45", id="input-timeout", type="integer")
 
     if not is_cloud and ctx_options:
         with Horizontal(classes="setup-form-row"):
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Timeout (minutes)[/] — max runtime before agent is killed")
-                yield Input(value=current_timeout, placeholder="e.g. 30", id="input-timeout", type="integer")
+                yield Static("[cyan]Timeout (minutes, 30–60)[/] — max runtime before agent is killed")
+                yield Input(value=current_timeout, placeholder="e.g. 45", id="input-timeout", type="integer")
             with Vertical(classes="setup-form-col"):
                 yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
                 yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
@@ -992,6 +997,10 @@ class TechnicalSetupModal(ModalScreen):
                     tool_budget = int(root.query_one("#input-tool-budget", Input).value)
                     budget_val = int(root.query_one("#input-budget", Input).value)
                     timeout_val = int(root.query_one("#input-timeout", Input).value)
+                    timeout_err = agent_limits.timeout_error(timeout_val)
+                    if timeout_err:
+                        app.notify(timeout_err, title="Error", severity="error")
+                        return
                     threshold_val = int(root.query_one("#input-threshold", Input).value)
                     size_threshold_val = int(root.query_one("#input-size-threshold", Input).value)
 

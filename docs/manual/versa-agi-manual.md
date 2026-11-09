@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.6.5 · October 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.7.0 · October 2026</p>
 </div>
 
 ## At a glance
@@ -134,7 +134,7 @@ Client installs then ask a second question. They then ask for the Chief Orchestr
 <div class="choice"><strong>Sentinel</strong><span>A remote member of a team you already have. A full install, sub-agents allowed, working the duties you assign on that other machine.</span></div>
 </div>
 
-Gender is male (X), female (Y), or reflective. Reflective uses your voice and is saved as the word reflective. Press Enter to keep female, unless one of the three is already saved.
+Gender is male (XY), female (XX), or reflective. Reflective uses your voice. Setup saves your choice as male, female, or reflective, and the agent's VersaVoice account gets the matching voice setting: XY, XX, or Reflective. Press Enter to keep female, unless one of the three is already saved.
 
 On a Normal install, your home folder links to that agent's workspace and attachments: `~/agi-workspace` and `~/agi-attachments`.
 
@@ -193,6 +193,32 @@ Every install belongs to its Primary User's VersaVoice account. Agents share one
 - **Attachments**: a message can carry the project or task it is about.
 - **Emotion**: when a person speaks, the app reads how they feel, not only the words. Agents see that signal whichever model is thinking, and you can read the same thread. When an agent replies by voice, its voice carries emotion too.
 
+### Live Chat
+
+When you write to an agent in VersaVoice AI, it does not answer once and go back to sleep. After it replies, its cycle stays open, and your next messages are answered within seconds. When nobody has written for a while — 15 minutes unless you change it — the agent writes its handoff and rests. Your next message wakes it again.
+
+In a chat with an agent, one line above the recording box shows where it is:
+
+<table>
+<thead><tr><th>State</th><th>What you see</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><th>Resting</th><td>A robot with Zs</td><td>No cycle is running. A message wakes it.</td></tr>
+<tr><th>Waking</th><td>Six moving dots</td><td>You just sent a message. If nothing starts within three minutes, the line says the agent will pick it up soon.</td></tr>
+<tr><th>Working</th><td>A robot at work</td><td>The agent is in a cycle, busy with other work.</td></tr>
+<tr><th>Here</th><td>A blinking green robot</td><td>The agent is in the chat with you and answers within seconds.</td></tr>
+</tbody>
+</table>
+
+- **You come first.** If the agent is chatting with someone else when you write, it tells them it will be right back, answers you, then returns to them.
+- **More than one person.** Several people can chat with the same agent at once. Each sees the status line in their own chat with the agent. You can ask the agent to bring someone in; their replies reach the same session. The agent keeps each conversation separate and shares one person's matters with another only when that serves your purpose.
+- **Tasks wait.** Tasks that fall due during a chat wait until it ends. The agent is woken for them afterwards.
+- **The time limit still holds.** Every cycle has a Timeout (Part 5). At 10 minutes left the agent is told to keep chatting; at 5 minutes left the chat closes and the agent hands off. Your next message starts a new cycle.
+- **Five at a time.** At most 5 of your agents listen at once. Any others answer once per cycle, as before.
+
+On each agent's card in the app, a small icon shows the same state: resting, working, or here. The card's **ACTIVITY** section shows how many cycles the agent has run, a busy graph for the last 48 hours, its last 20 cycles (the newest is selected; tap another to see when it ran, how long, what woke it and how it ended), how its cycles ended (ok, timeout, runaway, step limit, crash), what woke it (messages, tasks, or a forced run), and how long its cycles take (average, longest, and how they spread). After an update, past cycles from the machine's history are filled in once, so the charts start with history, not empty.
+
+Change the listening time in agitop under **Settings → Live Chat**. To end a chat early, use **💤 End chat** on the agent's window (Part 5).
+
 ### Live Calling
 
 Your Chief Orchestrator Agent can call you in the VersaVoice app when talking settles something faster than chat, or when you ask it to call. Calls work on the web app today. Call screens on Android and iPhone are **rolling out**.
@@ -203,6 +229,8 @@ Your Chief Orchestrator Agent can call you in the VersaVoice app when talking se
 <li>The arrow at the top left minimizes the call so you can keep using the app. Pick a floating box or a bar under <strong>Agents → Live Call Minimize Style</strong>.</li>
 <li>If you do not join in time, the agent sends a chat message instead.</li>
 </ol>
+
+A call lasts at most the length you set: 5, 10, 15, or 25 minutes. On a call longer than 5 minutes, the voice tells you when about five minutes are left, then carries on; near the end it wraps up. A call placed late in an agent's work cycle is limited to the time left before that cycle's Timeout (less a 3-minute margin); with under 5 minutes left the agent offers to call after its next wake instead.
 
 A call never approves anything. Approvals stay on the app's buttons and in agitop.
 
@@ -361,7 +389,7 @@ Versa AGi runs under your VersaVoice AI account. All your agents share your API 
 
 <ol class="day">
 <li>Install VersaVoice AI and sign in. See the VersaVoice AI manual if you are new.</li>
-<li>Open <strong>Settings → Personal → Versa AGi &amp; API</strong> and turn on <strong>Enable</strong>.</li>
+<li>Open the <strong>Versa AGi</strong> tab → <strong>Setup</strong> and turn on <strong>Enable</strong>.</li>
 <li>Read <strong>Enable API Access</strong> and accept it. Messages through the API use your Neural Time, and you are responsible for what your token does.</li>
 <li>Tap <strong>Generate Token</strong>, then <strong>Copy Token</strong>, and keep it somewhere safe. It is shown only once. <strong>Status</strong> then reads <strong>Active</strong>.</li>
 </ol>
@@ -533,6 +561,14 @@ Choose **Save** to keep a change.
 <figcaption>The Chief Orchestrator Agent's window. The tabs along the top hold its logs, prompt, and pairing.</figcaption>
 </figure>
 
+On **Technical**, **Timeout** is the longest one cycle may run: 30 to 60 minutes, 45 by default. Other values are refused. At 10 minutes and at 5 minutes before it, the agent is told to wrap up and hand off. An update moves any older value outside the range to the nearest end of it.
+
+**💤 End chat**, on **General** beside **Halt Agent**, closes the agent's live chat. It finishes its current reply, hands off, and rests until the next message. Nothing is halted. From the command line:
+
+```bash
+sudo agictl agent chat-close <name>
+```
+
 Agents come and go with your approval:
 
 - **New sub-agent.** The Chief Orchestrator Agent proposes one, and it appears as pending. Open it and choose **Approve &amp; Provision**. There is no "new agent" button; the Chief Orchestrator Agent proposes and you approve.
@@ -576,7 +612,7 @@ Agents never get blanket root. The one exception is **COA Autonomous Mode**: pas
 </table>
 
 - **Grant in agitop:** **Settings → General → COA Autonomous Mode → Enable sudo access**, then **Save**. Save writes the sudoers file, and the grant starts on the Chief Orchestrator Agent's next cycle.
-- **Grant in the app:** **Settings → Personal → Versa AGi &amp; API → Agents**, open the Chief Orchestrator Agent, and turn on **Grant sudo Access**. It reaches the machine at the next instance sync.
+- **Grant in the app:** **Versa AGi → Agents**, open the Chief Orchestrator Agent, and turn on **Grant sudo Access**. It reaches the machine at the next instance sync.
 - **Lift:** turn the same switch off. The Chief Orchestrator Agent can also lift the grant itself once the job that needed it is done. It can never give the grant back to itself.
 
 <figure class="wide">
@@ -594,7 +630,7 @@ Agents never get blanket root. The one exception is **COA Autonomous Mode**: pas
 
 - **Enabled** and **Speak progress** (a short line such as "let me pull that up" while it checks).
 - **Call model**: only call-capable models with a key are listed.
-- The longest call, how long it rings, and calls per cycle.
+- The longest call (5, 10, 15, or 25 minutes; 15 by default), how long it rings, and calls per cycle.
 - **Last call** and its **Transcript**.
 
 The voice runs on GPT-Live, so Live Call needs an OpenAI key and a call model. Until both are set, the tab says **Not ready**.
@@ -603,6 +639,8 @@ The voice runs on GPT-Live, so Live Call needs an OpenAI key and a call model. U
 <img src="assets/screens/settings-live-call.png" alt="System Settings, Live Call tab">
 <figcaption>Settings → Live Call.</figcaption>
 </figure>
+
+**Live Chat** holds one setting, **Chat listening (minutes)**: how long an agent stays in a chat after the last message. Off, 5, 10, 15, or 30; 15 by default. Off means the agent answers once per cycle, as before.
 
 The other tabs: **Skills Registry**, **System Memory**, **Image Processing**, **Audio Processing**, and **Utility Models**.
 
@@ -614,12 +652,12 @@ The other tabs: **Skills Registry**, **System Memory**, **Image Processing**, **
 
 ### From the VersaVoice app {.page-top}
 
-**Settings → Personal → Versa AGi &amp; API** is the app's side of the same system:
+The **Versa AGi** tab (Setup / My Info / Agents) is the app's side of the same system:
 
 - **Enable** turns the section on.
 - **Token**: generate, regenerate, or revoke it (Part 4).
 - **My Information** (optional): birthday, country, and what you can do. Your agents use it to talk with you.
-- **Agents**: each agent's **Voice**, **Inbox**, **Projects**, and **Packages &amp; Requests**. The Chief Orchestrator Agent also has **Grant sudo Access**.
+- **Agents**: each agent's **Voice**, **Inbox**, **Activity**, **Projects**, and **Packages &amp; Requests**, with a status icon on its card (Part 2, Live Chat). The Chief Orchestrator Agent also has **Grant sudo Access**.
 
 ## Everyday use {#part-6 data-part="6"}
 
@@ -702,12 +740,14 @@ The agent is the hammer, not the carpenter. What you build with it, and the cred
 <dt>Ledger</dt><dd>Tasks, messages, memory, and cycles, kept in databases outside the model.</dd>
 <dt id="gloss-life">Life</dt><dd>A property of an inanimate substance or object resembling the animate quality of a living being.</dd>
 <dt>Lifeline</dt><dd>The scheduler that decides a cycle should run.</dd>
+<dt>Live Chat</dt><dd>An agent's cycle stays open after a person writes, so new messages are answered within seconds until the chat goes quiet.</dd>
 <dt>Organization</dt><dd>The founder's business records inside agitop.</dd>
 <dt>Poise</dt><dd>The file an agent is spawned from: its purpose, rules, boundaries, and work cycle. It defines an instrument, not a personality.</dd>
 <dt>Primary User (PU)</dt><dd>The human sponsor of this install.</dd>
 <dt>Script task</dt><dd>A scheduled program run with no agent and no tokens.</dd>
 <dt>Sentinel</dt><dd>A remote client install that joins a team you already have.</dd>
 <dt>Skill</dt><dd>A markdown playbook loaded when the work needs it.</dd>
+<dt>Timeout</dt><dd>The longest one cycle may run, 30 to 60 minutes per agent. The agent is warned at 10 and 5 minutes before it.</dd>
 <dt>uGPN</dt><dd>Unified Global Production Network.</dd>
 <dt>Utility model</dt><dd>A one-shot generation, not an agent session.</dd>
 <dt>VBA</dt><dd>Versa Business Admin.</dd>
@@ -756,6 +796,7 @@ versa-agi-backup
 <div><span>agitop keys</span><p><code>b</code> API Keys, <code>g</code> Registration, <code>r</code> Refresh, <code>q</code> Quit</p></div>
 <div><span>Approvals</span><p>agitop Settings → Packages &amp; Requests</p></div>
 <div><span>sudo for COA</span><p>Settings → General → Enable sudo access</p></div>
+<div><span>Live Chat</span><p>Settings → Live Chat. End one: <code>agictl agent chat-close</code></p></div>
 <div><span>Local model, NVIDIA or AMD</span><p><code>agictl model add</code></p></div>
 <div><span>Local model, Intel ARC</span><p><code>model hf inspect</code>, <code>sycl import</code>, <code>activate</code></p></div>
 <div><span>Laptop client</span><p><code>agictl model refresh</code></p></div>
@@ -769,5 +810,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.6.5, October 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.7.0, October 2026.</p>
 </div>

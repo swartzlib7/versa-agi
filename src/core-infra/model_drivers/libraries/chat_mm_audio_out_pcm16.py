@@ -7,7 +7,7 @@ ModelDriver config supplies it and a Utility Profile ``config_json`` overrides
 it. There is no default: a binding that omits it is a binding error.
 
 This is unrelated to the Versa AGi **agent voice** (`[agent] voice` /
-``agictl identity provision --voice``: male (X), female (Y), reflective =
+``agictl identity provision --voice``: male (XY), female (XX), reflective =
 the PU's cloned voice). That is a separate product capability for spoken
 modes, not a ModelDriver concern.
 

@@ -40,6 +40,9 @@ LONG_POLL_SECONDS = 25
 # GPT-Live append limit is 500 tokens; stay well inside it by characters.
 APPEND_MAX_CHARS = 1600
 WRAP_UP_LEAD_SECONDS = 60
+# The voice tells the person how long is left (state_live_chat.md D22). Only for
+# calls longer than this, so a 5-minute call does not open with it.
+TIME_LEFT_NOTICE_SECONDS = 300
 # Spoken progress lines (narrate_progress): not for quick answers, not back to back.
 NARRATE_MIN_DELAY_SECONDS = 3
 NARRATE_MIN_GAP_SECONDS = 8
@@ -299,8 +302,12 @@ POSTURE_TONE = {
 PROFILE_MAX_CHARS = 600
 GAMES_MAX = 3
 ABILITIES_MAX = 10
-# VersaVoice chromosome is the PU's voice setting (X male, Y female).
-_VOICE_SETTING = {"x": "male voice", "y": "female voice", "reflective": "your voice"}
+# VersaVoice chromosome is the PU's voice setting (XY male, XX female).
+# Legacy "X" / "Y" may still be cached in primary_user from older syncs.
+_VOICE_SETTING = {
+    "xy": "male voice", "xx": "female voice", "reflective": "your voice",
+    "x": "male voice", "y": "female voice",
+}
 
 
 def _born_phrase(raw: str) -> str:
@@ -762,6 +769,7 @@ class LiveSession:
         self.errors: list[str] = []
         self._close_sent = False
         self._wrap_sent = False
+        self._time_left_notice_sent = max_minutes * 60 <= TIME_LEFT_NOTICE_SECONDS
         self._close_reason_override = ""
         self.last_output_at: float | None = None
         # Times the PU spoke while the voice was mid-sentence (delivery check, G25).
@@ -887,8 +895,18 @@ class LiveSession:
                 pass
 
     def enforce_duration(self) -> None:
-        """Spoken wrap-up a minute before the cap, then close at the cap (rule 9)."""
+        """5-minute notice, spoken wrap-up a minute before the cap, then close at the cap (rule 9)."""
         now = self._clock()
+        if not self._time_left_notice_sent and now >= self.deadline - TIME_LEFT_NOTICE_SECONDS:
+            self._time_left_notice_sent = True
+            # First check landed inside the last minute (a long COA turn): the
+            # wrap-up below covers it; two time messages back to back would jar.
+            if now < self.deadline - WRAP_UP_LEAD_SECONDS:
+                self.instructions(
+                    "About five minutes are left on this call. At the next natural pause, tell them "
+                    "briefly, in your own words, that there are about five minutes left, then carry "
+                    "on with the conversation."
+                )
         if not self._wrap_sent and now >= self.deadline - WRAP_UP_LEAD_SECONDS:
             self._wrap_sent = True
             self.instructions(

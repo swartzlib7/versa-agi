@@ -50,13 +50,17 @@ def received_unread(db_path: str, ids: list[str]) -> list[dict]:
     )
     conn = db_connect.connect(db_path, timeout=5, row_factory=True)
     try:
-        try:
-            rows = conn.execute(f"SELECT {_MESSAGE_COLS} FROM messages {where}", tuple(wanted)).fetchall()
-        except sqlite3.OperationalError:
-            rows = conn.execute(
-                f"SELECT {_MESSAGE_COLS_NO_PAYLOAD} FROM messages {where}", tuple(wanted)
-            ).fetchall()
-        return [dict(row) for row in rows]
+        # `channel` (vv / internal) lets the listening window tell people from
+        # agents (state_live_chat.md §1.4.1); older tables may lack it or raw_payload.
+        attempts = (f"{_MESSAGE_COLS}, channel", _MESSAGE_COLS, _MESSAGE_COLS_NO_PAYLOAD)
+        for i, cols in enumerate(attempts):
+            try:
+                rows = conn.execute(f"SELECT {cols} FROM messages {where}", tuple(wanted)).fetchall()
+                return [dict(row) for row in rows]
+            except sqlite3.OperationalError:
+                if i == len(attempts) - 1:
+                    raise
+        return []
     finally:
         conn.close()
 

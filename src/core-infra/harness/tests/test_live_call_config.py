@@ -58,7 +58,7 @@ class TestSettings(_Files):
         self.assertTrue(s.enabled)
         self.assertEqual(s.call_model, "gemini-3.7-flash")
         self.assertEqual(s.voice_model, "gpt-live-1")
-        self.assertEqual(s.max_minutes, lcc.MAX_MINUTES_RANGE[1])
+        self.assertEqual(s.max_minutes, 25)  # old 90 snaps to the largest choice
         self.assertEqual(s.join_timeout_seconds, lcc.DEFAULT_JOIN_TIMEOUT_SECONDS)
         self.assertEqual(s.calls_per_cycle, lcc.CALLS_PER_CYCLE_RANGE[1])
 
@@ -170,8 +170,10 @@ class TestValidateSetting(_Files):
         self.assertIn("not an enabled model", self._v("live_call", "call_model", "gemma4:e4b")[1])
 
     def test_numbers_and_unknown_keys(self):
-        self.assertEqual(self._v("live_call", "max_minutes", " 20 "), (True, "", "20"))
-        self.assertFalse(self._v("live_call", "max_minutes", "90")[0])
+        self.assertEqual(self._v("live_call", "max_minutes", " 25 "), (True, "", "25"))
+        self.assertFalse(self._v("live_call", "max_minutes", "20")[0])
+        self.assertIn("one of 5, 10, 15, 25", self._v("live_call", "max_minutes", "90")[1])
+        self.assertFalse(self._v("live_call", "max_minutes", "abc")[0])
         self.assertFalse(self._v("live_call", "join_timeout_seconds", "abc")[0])
         self.assertEqual(self._v("live_call", "calls_per_cycle", "3"), (True, "", "3"))
         self.assertFalse(self._v("live_call", "calls_per_cycle", "0")[0])
@@ -203,6 +205,20 @@ class TestShippedStock(unittest.TestCase):
         self.assertEqual(s.call_model, "")
         self.assertEqual((s.voice_model, s.max_minutes, s.join_timeout_seconds), ("gpt-live-1", 15, 45))
         self.assertTrue(s.narrate_progress)
+
+
+class TestMaxMinutesChoices(unittest.TestCase):
+    """state_live_chat.md D7: 5 / 10 / 15 / 25; old 1–55 values snap on read."""
+
+    def test_choices(self):
+        self.assertEqual(lcc.MAX_MINUTES_CHOICES, (5, 10, 15, 25))
+        self.assertIn(lcc.DEFAULT_MAX_MINUTES, lcc.MAX_MINUTES_CHOICES)
+
+    def test_snap(self):
+        cases = {"1": 5, "5": 5, "7": 5, "8": 10, "12": 10, "13": 15, "15": 15,
+                 "20": 15, "21": 25, "55": 25, "": 15, "x": 15}
+        for raw, want in cases.items():
+            self.assertEqual(lcc.snap_max_minutes(raw), want, raw)
 
 
 if __name__ == "__main__":

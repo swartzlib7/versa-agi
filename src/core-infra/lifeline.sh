@@ -84,11 +84,18 @@ monitor_runaway() {
   local agent_user="$2"
   local agent_name="$3"
   local line_threshold="$4"
-  local size_threshold_kb="${5:-512}"
+  local size_threshold_kb="${5:-2048}"
   local session_dir="$6"
   local baseline_session_size="${7:-0}"
+  # Listening window (state_live_chat.md §1.5.4): the harness touches this file
+  # at each new chat turn; thresholds then count from that turn, not the run.
+  local turn_marker="${8:-}"
   local sentinel="/tmp/versa-agi-runaway-${agent_name}"
   local size_threshold_bytes=$((size_threshold_kb * 1024))
+  local line_base=0 size_base=0 marker_seen=""
+  if [ -n "${turn_marker}" ] && [ -f "${turn_marker}" ]; then
+    marker_seen=$(stat -c %Y "${turn_marker}" 2>/dev/null || echo "")
+  fi
 
   rm -f "${sentinel}" 2>/dev/null
   while true; do
@@ -96,10 +103,28 @@ monitor_runaway() {
     local trigger=""
     local diagnostics=""
 
+    if [ -n "${turn_marker}" ] && [ -f "${turn_marker}" ]; then
+      local marker_now
+      marker_now=$(stat -c %Y "${turn_marker}" 2>/dev/null || echo "")
+      if [ -n "${marker_now}" ] && [ "${marker_now}" != "${marker_seen}" ]; then
+        marker_seen="${marker_now}"
+        line_base=$(wc -l < "${result_file}" 2>/dev/null || echo 0)
+        size_base=$(stat -c%s "${result_file}" 2>/dev/null || echo 0)
+        if [ -n "${session_dir}" ] && [ -d "${session_dir}" ]; then
+          local turn_session
+          turn_session=$(ls -t "${session_dir}"/session-*.jsonl "${session_dir}"/session-*.json 2>/dev/null | head -1)
+          if [ -n "${turn_session}" ]; then
+            baseline_session_size=$(stat -c%s "${turn_session}" 2>/dev/null || echo "${baseline_session_size}")
+          fi
+        fi
+      fi
+    fi
+
     # Check 1: Result file line count (existing)
     if [ -f "${result_file}" ]; then
       local line_count
       line_count=$(wc -l < "${result_file}" 2>/dev/null || echo "0")
+      line_count=$(( line_count - line_base ))
       if [ "${line_count}" -gt "${line_threshold}" ] 2>/dev/null; then
         trigger="result_lines"
         diagnostics="lines=${line_count}/${line_threshold}"
@@ -109,6 +134,7 @@ monitor_runaway() {
       if [ -z "${trigger}" ]; then
         local result_size
         result_size=$(stat -c%s "${result_file}" 2>/dev/null || echo "0")
+        result_size=$(( result_size - size_base ))
         if [ "${result_size}" -gt "${size_threshold_bytes}" ] 2>/dev/null; then
           trigger="result_size"
           local result_kb=$((result_size / 1024))
@@ -467,6 +493,58 @@ _vv_sync_agent_inbox() {
   fi
 }
 
+# Agent activity for the VersaVoice chat status strip and agent card
+# (state_live_chat.md §1.8). One start before the spawn, one end after the
+# harness exits, whatever the exit code. Best effort: a failure is logged and
+# never blocks the spawn. Prints the listening minutes VersaVoice granted
+# (0 on any failure). Uses the spawn's SUB_ACCOUNT_ID / API_TOKEN / CURRENT_CYCLE_ID.
+_vv_activity() {
+  local event="$1"
+  shift
+  local vv_enabled out
+  vv_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
+  if [ "${vv_enabled:-true}" != "true" ] || [ -z "${SUB_ACCOUNT_ID:-}" ] || [ -z "${API_TOKEN:-}" ] || [ -z "${CURRENT_CYCLE_ID:-}" ]; then
+    echo 0
+    return 0
+  fi
+  if ! out=$(timeout 20 /usr/local/bin/agictl system activity "${event}" \
+      --sub-account "${SUB_ACCOUNT_ID}" --token "${API_TOKEN}" --cycle-id "${CURRENT_CYCLE_ID}" "$@" 2>&1); then
+    log "WARN: activity ${event} not sent for ${AGENT_NAME}: $(printf '%s' "${out}" | tail -n 1 | cut -c1-200)"
+    echo 0
+    return 0
+  fi
+  printf '%s\n' "${out}" | tail -n 1 | jq -r '.idleMinutes // 0' 2>/dev/null || echo 0
+}
+
+# Activity history for the VersaVoice agent card (state_live_chat.md LCH-24):
+# send this agent's cycles.db history once. A failure retries at most hourly.
+# Delete .activity_backfill_done to send it again.
+_vv_activity_backfill_once() {
+  local agent_dir="/var/lib/versa-agi/${AGENT_NAME}"
+  local done_marker="${agent_dir}/.activity_backfill_done"
+  local fail_marker="${agent_dir}/.activity_backfill_failed"
+  local vv_enabled out
+  [ -f "${done_marker}" ] && return 0
+  [ -d "${agent_dir}" ] || return 0
+  if [ -z "${SUB_ACCOUNT_ID:-}" ] || [ -z "${API_TOKEN:-}" ]; then
+    return 0
+  fi
+  vv_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
+  [ "${vv_enabled:-true}" = "true" ] || return 0
+  if [ -f "${fail_marker}" ] && [ -n "$(find "${fail_marker}" -mmin -60 2>/dev/null)" ]; then
+    return 0
+  fi
+  if out=$(timeout 45 /usr/local/bin/agictl system activity-backfill \
+      --sub-account "${SUB_ACCOUNT_ID}" --token "${API_TOKEN}" --agent "${AGENT_NAME}" 2>&1); then
+    touch "${done_marker}" 2>/dev/null || true
+    rm -f "${fail_marker}" 2>/dev/null || true
+    log "ACTIVITY: ${AGENT_NAME} — history sent to VersaVoice ($(printf '%s' "${out}" | tail -n 1 | cut -c1-120))"
+  else
+    touch "${fail_marker}" 2>/dev/null || true
+    log "WARN: activity history not sent for ${AGENT_NAME}: $(printf '%s' "${out}" | tail -n 1 | cut -c1-200)"
+  fi
+}
+
 # Inbox poll for the life of one spawn. Sleeps first because the free-lock
 # sync already ran. The caller kills this when the harness returns.
 # Each pass clears the once-per-tick instance-sync flag so an insert can
@@ -591,6 +669,7 @@ while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT
   API_TOKEN=""
   SUB_ACCOUNT_ID=$(jq -r '.versavoice.sub_account_id // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
   API_TOKEN=$(jq -r '.versavoice.api_token // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
+  _vv_activity_backfill_once
 
   # ─── System Prompt Generation (poise merge) ──
   # Canonical poise location — deployed by setup.sh from repo templates.
@@ -1373,9 +1452,18 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
   fi  # IDE_GENERATE skip of frozen/budget/concurrency/breaker
 
   # ─── Execute — Spawn Agent with Safety Net ───────
-  TIMEOUT_DURATION="${AGENT_TIMEOUT:-60}m"
-  RUNAWAY_LIMIT="${AGENT_RUNAWAY_THRESHOLD:-300}"
-  RUNAWAY_SIZE_LIMIT="${AGENT_RUNAWAY_SIZE_THRESHOLD:-512}"
+  # Defaults and the 30–60 Timeout range match agent_limits.py and
+  # init_agents_db.sh (state_live_chat.md §1.5). A row outside the range
+  # (hand-edited DB) runs at the nearest bound.
+  AGENT_TIMEOUT_MIN="${AGENT_TIMEOUT:-45}"
+  case "${AGENT_TIMEOUT_MIN}" in
+    ''|*[!0-9]*) AGENT_TIMEOUT_MIN=45 ;;
+  esac
+  if [ "${AGENT_TIMEOUT_MIN}" -lt 30 ]; then AGENT_TIMEOUT_MIN=30; fi
+  if [ "${AGENT_TIMEOUT_MIN}" -gt 60 ]; then AGENT_TIMEOUT_MIN=60; fi
+  TIMEOUT_DURATION="${AGENT_TIMEOUT_MIN}m"
+  RUNAWAY_LIMIT="${AGENT_RUNAWAY_THRESHOLD:-2500}"
+  RUNAWAY_SIZE_LIMIT="${AGENT_RUNAWAY_SIZE_THRESHOLD:-2048}"
   CYCLES_DIR="/var/lib/versa-agi/${AGENT_NAME}/cycles"
   RESULT_FILE="${CYCLES_DIR}/result_$(date +%s).json"
   RUNAWAY_SENTINEL="/tmp/versa-agi-runaway-${AGENT_NAME}"
@@ -1559,10 +1647,7 @@ ${_LAST_CHANCE}
   if [ -f "${TASKS_DB}" ]; then
     # Script/utility jobs due in this session window (agitop Timeout minutes).
     # They run on Lifeline ticks outside the harness — omit if none.
-    _SESSION_MINS="${AGENT_TIMEOUT:-60}"
-    case "${_SESSION_MINS}" in
-      ''|*[!0-9]*) _SESSION_MINS=60 ;;
-    esac
+    _SESSION_MINS="${AGENT_TIMEOUT_MIN:-45}"
     EXECUTING_ROWS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
       "SELECT '#' || id, title, task_kind, COALESCE(due_date, ''), COALESCE(script_path, '') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND task_kind IN ('script','utility') AND status NOT IN ('done', 'cancelled', 'frozen') AND due_date IS NOT NULL AND due_date <= datetime('now', '+${_SESSION_MINS} minutes') ORDER BY due_date ASC LIMIT 15;" 2>/dev/null || true)
     if [ -n "${EXECUTING_ROWS}" ]; then
@@ -2310,6 +2395,13 @@ ${IDE_RESUME_CONTEXT}"
   # Build a temp env script that injects credentials + AGICTL_CONFIG
   ENV_FILE="/etc/versa-agi/${AGENT_NAME}.env"
   ENV_SCRIPT="/tmp/versa_agi_${AGENT_NAME}_env.sh"
+  INSTANCE_AGENT_IDS=$( {
+      for _cfg in /etc/versa-agi/*_config.json; do
+        jq -r '.versavoice.sub_account_id // empty' "${_cfg}" 2>/dev/null
+      done
+      sqlite3 "${AGENTS_DB}" "SELECT name FROM agents;" 2>/dev/null
+    } | grep -v '^$' | sort -u | paste -sd, - )
+  TURN_MARKER="${CYCLES_DIR}/live_turn_marker"
   {
     echo "export AGICTL_CONFIG='${SYSTEM_CONFIG}'"
     echo "export AGICTL_AGENTS_DB='${AGENTS_DB}'"
@@ -2318,6 +2410,13 @@ ${IDE_RESUME_CONTEXT}"
     echo "export AGICTL_CYCLES_DB='${CYCLES_DB}'"
     echo "export AGICTL_AGENT_DIR='${AGENT_PATH}/.agent'"
     echo "export VERSA_AGENT_NAME='${AGENT_NAME}'"
+    # Live Chat (state_live_chat.md §5): who counts as an agent on this instance
+    # (a message from anyone else opens the listening window), and the file the
+    # harness touches at each chat turn for the runaway monitor.
+    echo "export VERSA_AGENT_IDS='${INSTANCE_AGENT_IDS}'"
+    echo "export VERSA_TURN_MARKER='${TURN_MARKER}'"
+    # `agictl agent chat-close` writes "<cycleId> <reason>" here (state_live_chat.md LCH-23).
+    echo "export VERSA_CHAT_CLOSE_FILE='/var/lib/versa-agi/${AGENT_NAME}/chat_close'"
     [ -n "${VERSA_FIRST_CONTACT:-}" ] && echo "export VERSA_FIRST_CONTACT='${VERSA_FIRST_CONTACT}'"
     [ -n "${VERSA_COA_AUTONOMOUS:-}" ] && echo "export VERSA_COA_AUTONOMOUS='${VERSA_COA_AUTONOMOUS}'"
     echo "export NODE_OPTIONS='--no-deprecation'"
@@ -2457,7 +2556,7 @@ ${IDE_RESUME_CONTEXT}"
   fi
 
   # Start runaway monitor BEFORE agent runs (with baseline for delta check)
-  monitor_runaway "${RESULT_FILE}" "${AGENT_USER}" "${AGENT_NAME}" "${RUNAWAY_LIMIT}" "${RUNAWAY_SIZE_LIMIT}" "${SESSION_DIR}" "${BASELINE_SESSION_SIZE}" &
+  monitor_runaway "${RESULT_FILE}" "${AGENT_USER}" "${AGENT_NAME}" "${RUNAWAY_LIMIT}" "${RUNAWAY_SIZE_LIMIT}" "${SESSION_DIR}" "${BASELINE_SESSION_SIZE}" "${TURN_MARKER}" &
   MONITOR_PID=$!
 
   # Set agent status to 'active' in DB so dashboard reflects running state
@@ -2580,9 +2679,48 @@ ${IDE_RESUME_CONTEXT}"
     INBOX_POLL_PID=$!
     trap 'kill "${INBOX_POLL_PID}" 2>/dev/null || true' EXIT
   fi
+  # Same instant `timeout` starts counting from; the harness warns at 10 and
+  # 5 minutes left (state_live_chat.md §1.5.3).
+  SPAWN_EPOCH=$(date +%s)
+  DEADLINE_EPOCH=$(( SPAWN_EPOCH + AGENT_TIMEOUT_MIN * 60 ))
+  # Activity start (VersaVoice chat strip: agent working). Listening minutes
+  # stay 0 until the listening window ships (state_live_chat.md P3).
+  if [ "${FORCE_RUN}" = "true" ]; then
+    ACTIVITY_WAKE="forced"
+  elif [ "${UNPROCESSED:-0}" -gt 0 ] 2>/dev/null; then
+    ACTIVITY_WAKE="messages"
+  else
+    ACTIVITY_WAKE="tasks"
+  fi
+  ACTIVITY_CYCLES_TOTAL=$(sqlite3 "${CYCLES_DB}" "SELECT COUNT(*) FROM cycles WHERE id LIKE '${AGENT_NAME}-%';" 2>/dev/null || echo 0)
+  # Listening window (state_live_chat.md P3): ask for the [live_chat]
+  # setting; VersaVoice grants it, or 0 when 5 of the PU's agents listen.
+  LISTEN_SETTING=$(sed -n '/^\[live_chat\]/,/^\[/{s/^idle_minutes=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
+  case "${LISTEN_SETTING}" in
+    0|5|10|15|30) ;;
+    *) LISTEN_SETTING=15 ;;
+  esac
+  # Channels of the waking messages (id = sorted uids joined by "_", as VersaVoice builds it).
+  ACTIVITY_CHANNEL_ARGS=()
+  if [ -n "${SUB_ACCOUNT_ID}" ]; then
+    while IFS= read -r _ch; do
+      [ -n "${_ch}" ] && ACTIVITY_CHANNEL_ARGS+=(--channel-id "${_ch}")
+    done < <(sqlite3 "${MESSAGES_DB}" "SELECT DISTINCT CASE WHEN from_user_id < '${SUB_ACCOUNT_ID}' THEN from_user_id || '_' || '${SUB_ACCOUNT_ID}' ELSE '${SUB_ACCOUNT_ID}' || '_' || from_user_id END FROM messages WHERE status='unprocessed' AND direction='received' AND channel='vv' AND to_user_id='${SUB_ACCOUNT_ID}' AND from_user_id != '' LIMIT 20;" 2>/dev/null)
+  fi
+  LISTEN_MINUTES=$(_vv_activity start --wake "${ACTIVITY_WAKE}" --listen-minutes "${LISTEN_SETTING}" \
+    --hard-cap-epoch "${DEADLINE_EPOCH}" --cycles-total "${ACTIVITY_CYCLES_TOTAL:-0}" \
+    ${ACTIVITY_CHANNEL_ARGS[@]+"${ACTIVITY_CHANNEL_ARGS[@]}"})
+  case "${LISTEN_MINUTES}" in
+    ''|*[!0-9]*) LISTEN_MINUTES=0 ;;
+  esac
+  if [ "${LISTEN_MINUTES}" -gt 0 ]; then
+    log "LISTEN: ${AGENT_NAME} — listening window ${LISTEN_MINUTES} min granted"
+  elif [ "${LISTEN_SETTING}" -gt 0 ] && [ "${ACTIVITY_WAKE}" = "messages" ]; then
+    log "LISTEN: ${AGENT_NAME} — no listening window (setting ${LISTEN_SETTING} min; not granted)"
+  fi
   sudo -u "${AGENT_USER}" \
     timeout "${TIMEOUT_DURATION}" \
-      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --games-file '${GAMES_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} ${ROUTING_ARGS} > '${RESULT_FILE}' 2>&1"
+      bash -c "source '${ENV_SCRIPT}' && cd '${AGENT_PATH}' && PYTHONUNBUFFERED=1 PYTHONPATH='/usr/local/lib/versa-agi' /usr/local/lib/versa-agi/venv/bin/python -m harness.agent_harness --agent '${AGENT_NAME}' --system-file '${SYSTEM_FILE}' --wake-file '${WAKE_FILE}' --model '${AGENT_MODEL}' --max-steps '${AGENT_MAX_TURNS:-50}' --tool-budget '${AGENT_TOOL_BUDGET:-6000}' --num-ctx '${AGENT_NUM_CTX:-0}' --deadline-epoch '${DEADLINE_EPOCH}' --listen-minutes '${LISTEN_MINUTES:-0}' --thread-id '${THREAD_ID}' --tasks-file '${TASKS_FILE}' --convo-file '${CONVO_FILE}' --games-file '${GAMES_FILE}' --resume-max-messages '${AGENT_RESUME_MAX_MSGS:-0}' --skill-mode '${AGENT_SKILL_MODE:-hybrid}' ${RESUME_FLAG} ${TRIAGE_ARGS} ${MODEL_PARAM_ARGS} ${ROUTING_ARGS} > '${RESULT_FILE}' 2>&1"
   EXIT_CODE=$?
   # NOTE: Do NOT re-enable set -e here. The subshell runs with set +e
   # (line 631) intentionally — post-spawn commands like kill/wait may fail
@@ -2638,6 +2776,18 @@ ${IDE_RESUME_CONTEXT}"
       fi
     fi
   fi
+
+  # ─── Activity end (VersaVoice chat strip: agent asleep) ─────
+  case ${EXIT_CODE} in
+    0)   ACTIVITY_OUTCOME="ok" ;;
+    124) ACTIVITY_OUTCOME="timeout" ;;
+    99)  ACTIVITY_OUTCOME="runaway" ;;
+    53)  ACTIVITY_OUTCOME="step_limit" ;;
+    *)   ACTIVITY_OUTCOME="crash" ;;
+  esac
+  _vv_activity end --outcome "${ACTIVITY_OUTCOME}" \
+    --duration-seconds "$(( $(date +%s) - ${SPAWN_EPOCH:-$(date +%s)} ))" \
+    --cycles-total "${ACTIVITY_CYCLES_TOTAL:-0}" >/dev/null
 
   # ─── Log Exit Code ───────────────────────────────
   case ${EXIT_CODE} in

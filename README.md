@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.6.5-FF9800" alt="Versa AGi version 3.6.5">
+    <img src="https://img.shields.io/badge/version-3.7.0-FF9800" alt="Versa AGi version 3.7.0">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -77,6 +77,7 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 | 🧠 | **Deterministic cognitive ledger** | The LLM is the cognitive engine. Databases own the state ledger — no hallucinated “I already finished that.” |
 | 🔧 | **Real-world execution** | Agents write scripts, compile, run servers, manage git, and use venvs in their workspace. |
 | 💬 | **Human communication** | Over the VersaVoice AI REST API. Every exchange has an audit trail. A VersaVoice account and API token are required to install. |
+| 🗨️ | **Live chat** | After a person writes to an agent in VersaVoice, the agent stays in the conversation and answers new messages within seconds until the chat goes quiet. The app shows whether the agent is resting, waking, working, or here. |
 | 📞 | **Live voice calls** | Your COA can call you in the VersaVoice app when talking is faster than chat. OpenAI GPT-Live is the voice; your agent's full tools and judgment answer behind it. Transcript and summary stay on your machine. Optional. |
 | 🤝 | **Agent–human collaboration** | A two-player game of life. The human stays sovereign; the agent is a relentless partner. |
 | ❤️ | **Native emotional intelligence** | VersaVoice emotion detection is on the communication layer — independent of which model powers the agent. Agent voice replies carry emotion too. |
@@ -158,6 +159,16 @@ OrbStack / WSL: `~/.versa-agi/` is the **Linux** home (`/home/<you>`), not macOS
 
 Details: [Models](docs/models.md).
 
+### Live chat
+
+When a person writes to an agent in the VersaVoice app, the agent's cycle stays open after it replies and answers new messages within seconds. When nobody has written for the listening time, the agent hands off and rests; the next message wakes it again. Your messages come first: if the agent is chatting with someone else, it tells them it will be right back. Several people can chat with one agent at once.
+
+**Setting:** `sudo agitop` → System Settings → **Live Chat** → **Chat listening (minutes)**: Off, 5, 10, 15 or 30 (default 15). Off answers once per cycle, as before.
+
+**In the app:** a status line above the recording box in each agent chat (resting, waking, working, here); a status icon and an **ACTIVITY** section on each agent card (all-time cycles, 48-hour busy graph, last 20 cycles with details, outcomes, what woke it, cycle lengths).
+
+**End a chat early:** agitop → agent → General → **💤 End chat**, or `sudo agictl agent chat-close <name>`. The agent finishes its reply, hands off, and rests until the next message. Nothing is halted.
+
 ### Optional: live voice calls
 
 COA calls you in the **VersaVoice app** (Android, iOS, web) to settle a decision, report progress, or talk through a question. You answer, talk naturally, and COA looks things up and acts with its normal tools while you speak. Afterwards it sends a chat summary and files tasks for anything left open.
@@ -209,9 +220,12 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 | **Concurrent spawns** | 3 per Lifeline tick | Configurable; excess queued |
 | **Local AI concurrency** | `sycl_parallel` slots | Prevents inference OOM |
 | **Active agents** | Unlimited | Soft gate — warns |
+| **Agent cycle time (Timeout)** | 30–60 min (default 45) | Warnings at 10 and 5 min left, then hard stop |
+| **Live chat listening** | Off, 5, 10, 15 or 30 min since the last message (default 15) | Chat closes 5 min before the Timeout |
+| **Listening agents** | 5 per Primary User at once | Server-side; others answer once per cycle |
 | **Message text** | 2048 characters | Server-side hard block |
 | **Attachments** | 10 per message, 50MB per file | Client + server |
-| **Live call length** | 1–55 min (default 15) | Spoken wrap-up, then close |
+| **Live call length** | 5, 10, 15 or 25 min (default 15) | 5-minute notice, spoken wrap-up, then close |
 | **Live calls per cycle** | 1–5 (default 1), one at a time | Harness |
 
 ## Engine & model support timeline

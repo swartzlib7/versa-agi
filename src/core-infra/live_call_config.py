@@ -30,7 +30,9 @@ DEFAULT_VOICE_MODEL = "gpt-live-1"
 DEFAULT_MAX_MINUTES = 15
 DEFAULT_JOIN_TIMEOUT_SECONDS = 45
 DEFAULT_CALLS_PER_CYCLE = 1
-MAX_MINUTES_RANGE = (1, 55)
+# Longest call (minutes). A choice, not a range: the largest (25) fits inside the
+# shortest agent Timeout (30, agent_limits.py). state_live_chat.md D7.
+MAX_MINUTES_CHOICES = (5, 10, 15, 25)
 JOIN_TIMEOUT_RANGE = (15, 120)
 CALLS_PER_CYCLE_RANGE = (1, 5)
 
@@ -60,6 +62,18 @@ def _setup_value(section: str, key: str, default: str, setup_ini: str | None) ->
     return default
 
 
+def snap_max_minutes(raw) -> int:
+    """Nearest allowed call length (ties go to the shorter one); default when not a number.
+
+    An older install may still carry a value from the former 1–55 range.
+    """
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_MINUTES
+    return min(MAX_MINUTES_CHOICES, key=lambda c: (abs(c - value), c))
+
+
 def _clamp_int(raw: str, default: int, bounds: tuple[int, int]) -> int:
     try:
         value = int(str(raw).strip())
@@ -87,10 +101,8 @@ def read_settings(setup_ini: str | None = None) -> LiveCallSettings:
         call_model=_setup_value(LIVE_CALL_SECTION, "call_model", "", setup_ini),
         voice_model=_setup_value(LIVE_CALL_SECTION, "voice_model", DEFAULT_VOICE_MODEL, setup_ini)
         or DEFAULT_VOICE_MODEL,
-        max_minutes=_clamp_int(
+        max_minutes=snap_max_minutes(
             _setup_value(LIVE_CALL_SECTION, "max_minutes", str(DEFAULT_MAX_MINUTES), setup_ini),
-            DEFAULT_MAX_MINUTES,
-            MAX_MINUTES_RANGE,
         ),
         join_timeout_seconds=_clamp_int(
             _setup_value(
@@ -295,7 +307,16 @@ def validate_setting(section: str, key: str, value: str, *, models_ini: str | No
         if value.lower() not in ("true", "false"):
             return False, "narrate_progress must be 'true' or 'false'", value
         return True, "", value.lower()
-    bounds = {"max_minutes": MAX_MINUTES_RANGE, "join_timeout_seconds": JOIN_TIMEOUT_RANGE,
+    if key == "max_minutes":
+        allowed = ", ".join(str(c) for c in MAX_MINUTES_CHOICES)
+        try:
+            number = int(value)
+        except ValueError:
+            return False, f"max_minutes must be one of {allowed}", value
+        if number not in MAX_MINUTES_CHOICES:
+            return False, f"max_minutes must be one of {allowed}", value
+        return True, "", str(number)
+    bounds = {"join_timeout_seconds": JOIN_TIMEOUT_RANGE,
               "calls_per_cycle": CALLS_PER_CYCLE_RANGE}.get(key)
     if bounds:
         try:

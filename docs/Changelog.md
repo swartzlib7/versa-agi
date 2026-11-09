@@ -6,6 +6,46 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [3.7.0] — 2026-11-09
+
+### Live Chat
+
+#### Added
+- **Agents stay in the chat** — After a person writes to an agent in VersaVoice, the agent's cycle stays open once it has replied and answers new messages within seconds. When nobody has written for the listening time, the agent writes its handoff and rests; the next message wakes it again.
+- **Chat listening setting** — agitop System Settings → **Live Chat** → **Chat listening (minutes)**: Off, 5, 10, 15 or 30 (default 15). Off answers once per cycle, as before.
+- **The Primary User comes first** — When you write to an agent that is chatting with someone else, it tells them it will be right back, answers you, then returns to them.
+- **Several people at once** — More than one person can chat with the same agent in one session. You can ask an agent to bring someone in, and their replies reach the same session.
+- **End chat** — agitop → agent → General → **💤 End chat**, or `agictl agent chat-close <name>`, closes an agent's live chat. The agent finishes its reply, hands off, and rests until the next message. Nothing is halted.
+
+#### Changed
+- **Due tasks wait for the chat** — Tasks that fall due while an agent is chatting wait until the chat ends; Lifeline wakes the agent for them afterwards.
+- **Chats end before the time limit** — At 10 minutes before an agent's Timeout it is told to keep chatting; at 5 minutes before, the chat closes and the agent hands off. A chat turn that reaches the agent's hard step limit ends the cycle; the next message starts a new one.
+- **At most 5 listening agents** — Up to 5 of a Primary User's agents can listen at once. Any others answer once per cycle.
+- **Calls near the time limit** — A live call placed late in a work cycle (including during a chat) is limited to the time left before the Timeout, less 3 minutes; with under 5 minutes left the agent offers to call later.
+
+### Agent status in VersaVoice
+
+#### Added
+- **Every cycle reports its start and end** — Lifeline tells VersaVoice when each agent's cycle starts and ends, and how it ended. No message text or summaries are sent.
+- **Status line in agent chats** — Above the recording box: resting, waking (six moving dots, right after you send), working, or "{Agent} is here" while the agent is listening. Every person who chats with the agent sees it in their own chat.
+- **Status icon on agent cards** — Each card on the Versa AGi screen shows resting, working, or here.
+- **ACTIVITY on agent cards** — Above Projects: all-time cycle count, a 48-hour busy graph, the last 20 cycles (tap one to see when it ran, how long, what woke it and how it ended), how cycles ended (ok, timeout, runaway, step limit, crash), what woke the agent (messages, tasks, forced), and cycle lengths (average, longest, spread).
+- **Agent colours** — The ACTIVITY section takes the agent's colour and mark: gold with the star for the Chief Orchestrator Agent, silver for sub-agents. In the agents list, that mark now replaces the name's first letter, so agents look different from contacts and their names have more room.
+- **Past activity filled in** — After the update, each agent's past cycles on the machine are sent once, so the charts show history and not only new cycles.
+
+### Agent limits
+
+#### Changed
+- **Timeout is 30–60 minutes** — An agent's Timeout must be between 30 and 60 minutes (default 45). agitop and `agictl agent set-timeout` refuse other values; the update moves values outside the range to the nearest end of it.
+- **Time warnings** — An agent is told at 10 minutes and at 5 minutes before its Timeout to wrap up and hand off. Nothing is said earlier.
+- **Live call length** — The longest call is 5, 10, 15 or 25 minutes (default 15). An older setting is moved to the nearest choice.
+
+#### Added
+- **Five-minute notice on calls** — On calls longer than 5 minutes, the voice tells the person when about five minutes are left, then carries on.
+
+#### Fixed
+- **Limit defaults** — When an agent had no limits set, Lifeline used old defaults (60 minutes, 300 lines, 512 KB). It now uses the shipped defaults: 45 minutes, 2500 lines, 2048 KB.
+
 ## [3.6.5] — 2026-11-07
 
 ### Setup

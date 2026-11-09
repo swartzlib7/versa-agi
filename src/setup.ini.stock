@@ -207,7 +207,8 @@ cron_interval=1
 # the post-cycle linger check instead (simpler, avoids race conditions).
 file_mon_enabled=false
 
-# Maximum allowed runtime for an agent work cycle (in minutes).
+# Maximum allowed runtime for an agent work cycle (in minutes, 30–60).
+# Safety kill for a stuck run; the harness warns the agent at 10 and 5 minutes left.
 # Stock default 45 — also seeds COA/new agents via agents.db column defaults.
 timeout_minutes=45
 
@@ -267,8 +268,8 @@ language=en
 # Examples: United States, Mexico, Japan, Germany, Brazil, South Africa
 country=United States
 # Voice: agent voice identity for VersaVoice spoken modes.
-#   male (X) · female (Y) · reflective (clones the Primary User's voice)
-# Fresh setup asks male (X), female (Y), or reflective right after the COA name.
+#   male (XY) · female (XX) · reflective (clones the Primary User's voice)
+# Fresh setup asks male (XY), female (XX), or reflective right after the COA name.
 # Enter keeps female unless this line is already male, female, or reflective.
 # Unrelated to [audio_processing] — that section is multimodal TTS packaging.
 voice=female
@@ -407,7 +408,8 @@ live_call=false
 # call_model — catalog key from models.ini [catalog_live_call] (call-capable),
 #   whose provider is keyed. Empty = no call tool.
 # voice_model — GPT-Live voice model id on the OpenAI provider.
-# max_minutes — spoken wrap-up, then close (1–55).
+# max_minutes — longest call: 5, 10, 15 or 25. The voice says when 5 minutes are
+#   left (calls over 5 minutes), wraps up a minute before, then closes.
 # join_timeout_seconds — how long the call rings before it is missed (15–120).
 # narrate_progress — while COA works on a request, speak its short progress lines.
 # calls_per_cycle — calls COA may place in one cycle (1–5).
@@ -417,6 +419,13 @@ max_minutes=15
 join_timeout_seconds=45
 narrate_progress=true
 calls_per_cycle=1
+
+[live_chat]
+# Live Chat listening window (state_live_chat.md). After a person writes to an agent,
+# its cycle stays open and answers new messages within seconds until nobody has written
+# for this many minutes. 0 = Off (one-shot cycles, as before), 5, 10, 15 or 30.
+# Edit via agitop → System Settings → Live Chat.
+idle_minutes=15
 
 [compaction]
 # Model that writes compaction frames (TD-CTX-FRAME-001). agitop → System

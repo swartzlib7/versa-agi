@@ -261,6 +261,12 @@ class AgentPromptMenu(ModalScreen):
                                 classes="panel-btn",
                             )
                             yield Button(
+                                "💤 End chat", id="btn-end-chat", variant="warning",
+                                classes="panel-btn",
+                                tooltip="Close this agent's live chat: it finishes its reply, "
+                                        "hands off, and rests until the next message.",
+                            )
+                            yield Button(
                                 "✋ Halt Agent", id="btn-halt-agent", variant="error",
                                 classes="panel-btn", disabled=halt_disabled,
                             )
@@ -1067,6 +1073,16 @@ class AgentPromptMenu(ModalScreen):
             result = subprocess.run(["agictl", "agent", "activate", name], capture_output=True, text=True, timeout=15)
             self.app.pop_screen()
             self._notify_agictl_result(result, f"Agent '{name}' activated")
+        elif bid == "btn-end-chat":
+            result = subprocess.run(["agictl", "agent", "chat-close", name],
+                                    capture_output=True, text=True, timeout=15)
+            msg = f"'{name}' will hand off and end its chat"
+            try:
+                import json as _json
+                msg = _json.loads(result.stdout).get("message") or msg
+            except Exception:
+                pass
+            self._notify_agictl_result(result, msg)
         elif bid == "btn-halt-agent":
             result = subprocess.run(["agictl", "agent", "kill", name], capture_output=True, text=True, timeout=15)
             self.app.pop_screen()

@@ -396,9 +396,10 @@ def provision_identity(
         return False
 
     # Map voice preference to VersaVoice API fields
-    chromosome_map = {"female": "Y", "male": "X", "reflective": "Reflective"}
+    # VersaVoice chromosome: XY = male, XX = female (legacy X / Y still accepted by the API).
+    chromosome_map = {"female": "XX", "male": "XY", "reflective": "Reflective"}
     voice_selection_map = {"female": "female", "male": "male", "reflective": None}
-    chromosome = chromosome_map.get(voice, "Y")
+    chromosome = chromosome_map.get(voice, "XX")
     voice_selection = voice_selection_map.get(voice, "female")
 
     console.print(f"Registering new sub-account: {first_name} {last_name} (chromosome: {chromosome})...")

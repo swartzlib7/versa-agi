@@ -1931,7 +1931,8 @@ SystemSettingsModal {
 #settings-packages-pane,
 #settings-system-memory-pane,
 #settings-utility-models-pane,
-#settings-live-call-pane {
+#settings-live-call-pane,
+#settings-live-chat-pane {
     height: 100%;
     layout: vertical;
 }
@@ -1939,7 +1940,8 @@ SystemSettingsModal {
 #settings-general-scroll,
 #settings-audio-processing-scroll,
 #settings-image-processing-scroll,
-#settings-live-call-scroll {
+#settings-live-call-scroll,
+#settings-live-chat-scroll {
     height: 1fr;
     min-height: 0;
 }

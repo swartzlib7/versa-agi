@@ -305,6 +305,51 @@ class TestTurns(unittest.TestCase):
         self.assertIn("LIVE CALL ENDED (close_requested", text)
         self.assertIn("session.close", sock.sent_types())
 
+    def test_five_minute_notice_once_before_wrap_up(self):
+        clock = FakeClock()
+        bridge, sock = FakeBridge(), FakeSocket()
+        rt, _ = _runtime(bridge, sock, clock=clock)
+        rt.place("x", SETTINGS)  # 15-minute cap
+        appends = lambda: [e for e in sock.sent if e["type"] == "session.instructions.append"]
+        before = len(appends())
+        clock.now += SETTINGS.max_minutes * 60 - lc.TIME_LEFT_NOTICE_SECONDS - 5
+        rt.session.enforce_duration()
+        self.assertEqual(len(appends()), before)
+        clock.now += 10
+        rt.session.enforce_duration()
+        rt.session.enforce_duration()
+        notices = appends()[before:]
+        self.assertEqual(len(notices), 1)
+        self.assertIn("five minutes", notices[0]["content"])
+        clock.now += lc.TIME_LEFT_NOTICE_SECONDS - lc.WRAP_UP_LEAD_SECONDS
+        rt.session.enforce_duration()
+        self.assertIn("Wrap up now", appends()[-1]["content"])
+        self.assertEqual(len(appends()[before:]), 2)
+        rt.shutdown()
+
+    def test_late_first_check_gives_wrap_up_only(self):
+        clock = FakeClock()
+        sock = FakeSocket()
+        session = lc.LiveSession("sess_late", sock, max_minutes=15, clock=clock)
+        clock.now += 15 * 60 - 30
+        session.enforce_duration()
+        contents = [e["content"] for e in sock.sent if e["type"] == "session.instructions.append"]
+        self.assertEqual(len(contents), 1)
+        self.assertIn("Wrap up now", contents[0])
+        session.closed.set()
+
+    def test_no_five_minute_notice_on_a_five_minute_call(self):
+        clock = FakeClock()
+        sock = FakeSocket()
+        session = lc.LiveSession("sess_5", sock, max_minutes=5, clock=clock)
+        session.enforce_duration()
+        clock.now += 5 * 60 - lc.WRAP_UP_LEAD_SECONDS
+        session.enforce_duration()
+        contents = [e["content"] for e in sock.sent if e["type"] == "session.instructions.append"]
+        self.assertEqual(len(contents), 1)
+        self.assertIn("Wrap up now", contents[0])
+        session.closed.set()
+
     def test_phone_hangup_without_sideband_close_ends_call(self):
         clock = FakeClock()
         bridge, sock = FakeBridge(), FakeSocket()
@@ -482,20 +527,23 @@ class TestVoiceCardAndSummary(unittest.TestCase):
             "nearestCity": "Austin",
             "stateOrProvince": "Texas",
             "countryOfResidence": "United States",
-            "chromosome": "X",
+            "chromosome": "XY",
             "abilities": abilities,
         })
         self.assertIn("born 12 May 1980 in South Africa", line)
         self.assertIn("lives in Austin, Texas, United States", line)
         self.assertIn("voice setting: male voice", line)
         self.assertNotIn("chromosome", line.lower())
-        self.assertNotRegex(line, r"\bX\b")
+        self.assertNotRegex(line, r"\bXY?\b")
         shown = line.split("abilities: ", 1)[1].split(", ")
         self.assertEqual(len(shown), 10)
         self.assertEqual(shown[0], "Skill 10 (strong)")
         self.assertIn("Cooking (strong)", shown)
         self.assertNotIn("Skill 1 (some)", line)
         self.assertNotIn("Skill 11", line)
+        self.assertEqual(lc.account_profile_line({"chromosome": "XX"}), "voice setting: female voice")
+        # Legacy values cached from older syncs still map
+        self.assertEqual(lc.account_profile_line({"chromosome": "X"}), "voice setting: male voice")
         self.assertEqual(lc.account_profile_line({"chromosome": "Y"}), "voice setting: female voice")
         self.assertEqual(lc.account_profile_line({"chromosome": "Reflective"}), "voice setting: your voice")
         self.assertEqual(lc.account_profile_line({}), "")

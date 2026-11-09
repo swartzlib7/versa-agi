@@ -324,7 +324,7 @@ install_acceptance_sentinel_name_prompt() {
   install_acceptance_coa_name_prompt sentinel
 }
 
-# male (X) / female (Y) / reflective. Empty string when the reply is none of those.
+# male (XY) / female (XX) / reflective. Empty string when the reply is none of those.
 # The voice line stores the words, the same values identity provision reads.
 _install_acceptance_normalize_gender() {
   local raw
@@ -386,13 +386,13 @@ install_acceptance_coa_gender_prompt() {
     if [ "${shown}" = false ]; then
       if declare -F text_box >/dev/null 2>&1; then
         text_box "COA GENDER" \
-          "Choose male (X), female (Y), or reflective (the Primary User's voice)." \
+          "Choose male (XY), female (XX), or reflective (the Primary User's voice)." \
           "Press Enter to keep the default, or type male, female, or reflective." \
           "" \
           "Saved as voice."
       else
         echo ""
-        echo "Choose male (X), female (Y), or reflective (the Primary User's voice)."
+        echo "Choose male (XY), female (XX), or reflective (the Primary User's voice)."
         echo "Saved as voice."
       fi
       shown=true

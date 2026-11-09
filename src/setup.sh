@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.6.5"
+PRODUCT_VERSION="3.7.0"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -548,6 +548,12 @@ INI_AGENT_COUNTRY="${INSTALL_ACCEPTANCE_COUNTRY:-$(ini_get agent country)}"
 INI_AGENT_VOICE="$(ini_get agent voice female)"
 INI_AGENT_ROLE="$(ini_get agent role)"
 INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 45)"
+# Timeout range 30–60 (agent_limits.py; state_live_chat.md §1.5.1).
+case "${INI_AGENT_TIMEOUT}" in
+  ''|*[!0-9]*) INI_AGENT_TIMEOUT=45 ;;
+esac
+if [ "${INI_AGENT_TIMEOUT}" -lt 30 ]; then INI_AGENT_TIMEOUT=30; fi
+if [ "${INI_AGENT_TIMEOUT}" -gt 60 ]; then INI_AGENT_TIMEOUT=60; fi
 INI_RUNAWAY_THRESHOLD="$(ini_get agent runaway_threshold 2500)"
 INI_GIT_PLATFORMS="$(ini_get git platforms none)"
 INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
@@ -952,6 +958,7 @@ _VERSA_LIB_SHARED_PY=(
   catalog_compat.py
   privilege_guard.py
   live_call_config.py
+  agent_limits.py
 )
 
 _deploy_server_agictl_shared_py() {

@@ -24,6 +24,13 @@ from agitop.widgets.clear_checkbox import ClearCheckbox
 from agitop.widgets import PaginatedDataTable
 from agitop.feature_flags import UTILITY_MODELS_UI_VISIBLE
 
+import agent_limits  # noqa: E402
+
+try:
+    from live_call_config import MAX_MINUTES_CHOICES as LIVE_CALL_MINUTES_CHOICES  # noqa: E402
+except Exception:  # keep the tab usable if the shared module cannot load
+    LIVE_CALL_MINUTES_CHOICES = (5, 10, 15, 25)
+
 
 _SETUP_INI_PATHS = [
     "/etc/versa-agi/setup.ini",
@@ -155,6 +162,12 @@ def _live_call_transcript(row: dict | None) -> str:
         return call_log_store.transcript_text(call.get("transcript") or [], "You", "COA") or "No transcript."
     except Exception:
         return "No transcript."
+
+
+def _live_chat_minutes() -> int:
+    """[live_chat] idle_minutes snapped to an allowed choice (default 15)."""
+    return agent_limits.snap_listen_minutes(
+        _read_ini_value("live_chat", "idle_minutes", str(agent_limits.DEFAULT_LISTEN_MINUTES)))
 
 
 def _live_call_view() -> dict:
@@ -1614,10 +1627,12 @@ class SystemSettingsModal(ModalScreen):
                             yield Static("")
                             with Horizontal(classes="task-field-row"):
                                 with Vertical(classes="task-field-col"):
-                                    yield Static("[#f87171]Longest call (minutes, 1–55)[/]")
-                                    yield Input(
-                                        value=str(live_call_view["max_minutes"]), placeholder="15",
-                                        id="input-live-call-max-minutes", type="integer",
+                                    yield Static("[#f87171]Longest call (minutes)[/]")
+                                    yield Select(
+                                        [(f"{m} min", str(m)) for m in LIVE_CALL_MINUTES_CHOICES],
+                                        value=str(live_call_view["max_minutes"]),
+                                        id="select-live-call-max-minutes",
+                                        allow_blank=False,
                                     )
                                 with Vertical(classes="task-field-col"):
                                     yield Static("[#f87171]Ring for (seconds, 15–120)[/]")
@@ -1632,7 +1647,8 @@ class SystemSettingsModal(ModalScreen):
                                         id="input-live-call-per-cycle", type="integer",
                                     )
                             yield Static(
-                                "[dim]A minute before the limit COA wraps up and says goodbye. If you don't "
+                                "[dim]With 5 minutes left COA tells you so; a minute before the limit it wraps "
+                                "up and says goodbye. If you don't "
                                 "join in time, COA sends a chat message instead. Calls per cycle: how many "
                                 "times COA may call you in one work cycle.[/]"
                             )
@@ -1649,6 +1665,35 @@ class SystemSettingsModal(ModalScreen):
                             yield Button("Save", variant="success", id="btn-save-settings-live-call")
                             yield Button(
                                 "Close", variant="default", id="btn-settings-close-live-call",
+                                classes="dismiss-btn",
+                            )
+
+                with TabPane("Live Chat", id="settings-live-chat-tab"):
+                    with Vertical(id="settings-live-chat-pane"):
+                        with VerticalScroll(id="settings-live-chat-scroll"):
+                            yield Static("", classes="modal-tab-spacer")
+                            yield Static("[bold #f87171]Live Chat[/]")
+                            yield Static(
+                                "[dim]After someone writes to an agent, its cycle stays open and "
+                                "answers new messages within seconds, until nobody has written for "
+                                "the time below. Off: the agent answers once per cycle, as before. "
+                                "At most 5 of your agents listen at once; any others answer once.[/]"
+                            )
+                            yield Static("")
+                            with Horizontal(classes="task-field-row"):
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Chat listening (minutes)[/]")
+                                    yield Select(
+                                        [("Off" if m == 0 else f"{m} min", str(m))
+                                         for m in agent_limits.LISTEN_MINUTES_CHOICES],
+                                        value=str(_live_chat_minutes()),
+                                        id="select-live-chat-minutes",
+                                        allow_blank=False,
+                                    )
+                        with Horizontal(classes="settings-tab-actions"):
+                            yield Button("Save", variant="success", id="btn-save-settings-live-chat")
+                            yield Button(
+                                "Close", variant="default", id="btn-settings-close-live-chat",
                                 classes="dismiss-btn",
                             )
 
@@ -1881,11 +1926,23 @@ class SystemSettingsModal(ModalScreen):
         else:
             self.app.notify("Failed to save audio_processing settings", severity="error")
 
+    def _save_live_chat(self) -> bool:
+        """Persist [live_chat] idle_minutes (own Save button)."""
+        minutes = str(self.query_one("#select-live-chat-minutes", Select).value or "15")
+        ok, err = _write_ini_value_err("live_chat", "idle_minutes", minutes)
+        if not ok:
+            self.app.notify(err or "Failed to save live_chat.idle_minutes", severity="error",
+                            title="Live Chat")
+            return False
+        label = "Off" if minutes == "0" else f"{minutes} minutes"
+        self.app.notify(f"Chat listening: {label}", title="Settings Saved")
+        return True
+
     def _save_live_call(self) -> bool:
         """Persist [features] live_call + [live_call] (own Save button)."""
         enabled = self.query_one("#chk-live-call-enabled", Checkbox).value
         call_model = self.query_one("#select-live-call-model", Select).value or ""
-        max_minutes = self.query_one("#input-live-call-max-minutes", Input).value.strip() or "15"
+        max_minutes = str(self.query_one("#select-live-call-max-minutes", Select).value or "15")
         join_timeout = self.query_one("#input-live-call-join-timeout", Input).value.strip() or "45"
         per_cycle = self.query_one("#input-live-call-per-cycle", Input).value.strip() or "1"
         narrate = self.query_one("#chk-live-call-narrate", Checkbox).value
@@ -2083,6 +2140,11 @@ class SystemSettingsModal(ModalScreen):
             if self._save_live_call():
                 self.app.pop_screen()
         elif event.button.id == "btn-settings-close-live-call":
+            self.app.pop_screen()
+        elif event.button.id == "btn-save-settings-live-chat":
+            if self._save_live_chat():
+                self.app.pop_screen()
+        elif event.button.id == "btn-settings-close-live-chat":
             self.app.pop_screen()
         elif event.button.id in (
             "btn-save-settings-general",

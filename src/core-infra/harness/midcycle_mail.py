@@ -20,11 +20,15 @@ def shown_message_ids(prompt_text: str) -> set[str]:
     return set(_SHOWN_RE.findall(prompt_text or ""))
 
 
-def format_arrival_block(rows: list[dict], already: set[str]) -> tuple[str | None, set[str]]:
+def format_arrival_block(rows: list[dict], already: set[str],
+                         pu_ids: set[str] | None = None) -> tuple[str | None, set[str]]:
     """One NEW MESSAGES body for rows whose ids are not in ``already``.
 
-    Returns (text, new ids). text is None when nothing new remains.
+    Rows from the Primary User (``pu_ids``) are flagged to be answered first
+    (state_live_chat.md §1.6). Returns (text, new ids). text is None when
+    nothing new remains.
     """
+    pu_ids = {p for p in (pu_ids or set()) if p}
     fresh = []
     new_ids: set[str] = set()
     for row in rows:
@@ -49,7 +53,8 @@ def format_arrival_block(rows: list[dict], already: set[str]) -> tuple[str | Non
         dt = msg.get("created_at") or ""
         uid = msg.get("from_user_id") or ""
         mid = (msg.get("message_id") or "").strip()
-        lines.append(f"  [!] [{dt}] FROM {sender} ({uid}): {text}")
+        flag = " [PRIMARY USER — answer first]" if uid in pu_ids else ""
+        lines.append(f"  [!] [{dt}] FROM {sender} ({uid}){flag}: {text}")
         project_ids, task_ids = _agi_tag_ids(msg.get("raw_payload"))
         if project_ids:
             lines.append(f"     → TAGGED PROJECT IDS: {', '.join(project_ids)}")
@@ -75,6 +80,9 @@ class MidcycleInbox:
         self.runner = runner
         self.log = log
         self._logged_failure = False
+        self.pu_ids: set[str] = set()
+        # Rows behind the last poll's block (the listening window reads them).
+        self.last_rows: list[dict] = []
 
     @classmethod
     def from_env(cls, agent_name: str, prompt_text: str, log=None) -> "MidcycleInbox":
@@ -99,10 +107,17 @@ class MidcycleInbox:
                 )
                 self._logged_failure = True
             return None
-        text, new_ids = format_arrival_block(rows_for_agent(rows, self.ids), self.shown)
+        mine = rows_for_agent(rows, self.ids)
+        text, new_ids = format_arrival_block(mine, self.shown, self.pu_ids)
         if not text:
             return None
+        self.last_rows = [r for r in mine if (r.get("message_id") or "").strip() in new_ids]
         return text, new_ids
+
+    def unread_rows(self) -> list[dict]:
+        """This agent's unread rows right now (wake rows included). [] on a failed read."""
+        rows = load_received_unread(self.agent_name, runner=self.runner)
+        return rows_for_agent(rows or [], self.ids)
 
     def commit(self, new_ids: set[str]) -> None:
         self.shown |= set(new_ids)
