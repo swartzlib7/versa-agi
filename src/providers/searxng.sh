@@ -9,6 +9,10 @@
 # Requirements: Docker Engine (auto-installed on Ubuntu/Debian if missing)
 # Listens on: http://127.0.0.1:8888 (local only)
 #
+# Runs on install and on every `setup.sh --update`: writes settings.yml again,
+# pulls the image, and recreates the container when either changed.
+# Optional keyed engines: [search] brave_api_key / exa_api_key in setup.ini.
+#
 # Usage:
 #   sudo ./searxng.sh              # Install
 #   sudo ./searxng.sh --uninstall  # Remove
@@ -16,6 +20,7 @@
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/searxng_settings.sh"
 provider_require_root
 
 # ─── Constants ──────────────────────────────────────
@@ -45,6 +50,8 @@ if [ "${1:-}" = "--uninstall" ]; then
   else
     info "Container '${CONTAINER_NAME}' not found — already removed"
   fi
+
+  docker rm -f "searxng-redis" > /dev/null 2>&1 || true
 
   # Remove config directory
   if [ -d "${SEARXNG_CONFIG_DIR}" ]; then
@@ -84,90 +91,92 @@ fi
 # ─── Ensure Docker (same auto-install path as setup_local Intel SYCL) ─
 provider_ensure_docker
 
-# ─── Check if already running ─────────────────────
+# ─── Step 1: settings.yml (managed; written on every run) ─────────
+# The engine set and the keyed engines come from this script and [search] in
+# setup.ini (state_web_access.md §1.2). The secret key of an existing install
+# is kept. A changed file or a newer image recreates the container below.
+mkdir -p "${SEARXNG_CONFIG_DIR}"
+SETTINGS_FILE="${SEARXNG_CONFIG_DIR}/settings.yml"
+
+SECRET_KEY="$(searxng_existing_secret "${SETTINGS_FILE}")"
+[ -n "${SECRET_KEY}" ] || SECRET_KEY="$(openssl rand -hex 32)"
+
+BRAVE_API_KEY="$(provider_ini_get search brave_api_key)"
+EXA_API_KEY="$(provider_ini_get search exa_api_key)"
+SEARCH_CONTACT_URL="$(provider_ini_get search contact_url)"
+if ! searxng_safe_value "${BRAVE_API_KEY}"; then
+  warn "[search] brave_api_key has characters a key cannot have — ignored"
+  BRAVE_API_KEY=""
+fi
+if ! searxng_safe_value "${EXA_API_KEY}"; then
+  warn "[search] exa_api_key has characters a key cannot have — ignored"
+  EXA_API_KEY=""
+fi
+if ! searxng_safe_value "${SEARCH_CONTACT_URL}"; then
+  warn "[search] contact_url is not a plain URL or mailto: address — ignored"
+  SEARCH_CONTACT_URL=""
+fi
+
+SETTINGS_NEW="$(mktemp)"
+searxng_settings_yaml "${SECRET_KEY}" "${BRAVE_API_KEY}" "${EXA_API_KEY}" "${SEARCH_CONTACT_URL}" > "${SETTINGS_NEW}"
+SETTINGS_CHANGED=false
+if ! cmp -s "${SETTINGS_NEW}" "${SETTINGS_FILE}" 2>/dev/null; then
+  SETTINGS_CHANGED=true
+  if [ -f "${SETTINGS_FILE}" ] && ! grep -q "^# Managed by Versa AGi" "${SETTINGS_FILE}"; then
+    cp -p "${SETTINGS_FILE}" "${SETTINGS_FILE}.before-managed"
+    info "Earlier settings.yml kept as settings.yml.before-managed"
+  fi
+  cp "${SETTINGS_NEW}" "${SETTINGS_FILE}"
+  ok "settings.yml written (engines: google, bing, qwant, yahoo added to the defaults)"
+else
+  ok "settings.yml unchanged"
+fi
+rm -f "${SETTINGS_NEW}"
+# The file can hold API keys. The container runs as searxng (uid 977).
+chown 977:977 "${SETTINGS_FILE}" 2>/dev/null || true
+chmod 640 "${SETTINGS_FILE}" 2>/dev/null || true
+[ -n "${BRAVE_API_KEY}" ] && ok "Brave Search API engine on (key from setup.ini); Brave page engine off"
+[ -n "${EXA_API_KEY}" ] && ok "Exa API engine on (key from setup.ini)"
+[ -z "${SEARCH_CONTACT_URL}" ] && info "Wikipedia and Wikidata need [search] contact_url in setup.ini to load"
+
+# ─── Step 2: image (pulled on every run so updates reach the engines) ─
+info "Pulling SearXNG image..."
+docker pull "${SEARXNG_IMAGE}" 2>&1 | tail -3 || warn "Image pull failed — using the image already on this machine"
+IMAGE_NEW="$(docker image inspect --format '{{.Id}}' "${SEARXNG_IMAGE}" 2>/dev/null || echo "")"
+IMAGE_RUNNING="$(docker inspect --format '{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || echo "")"
+
+# ─── Step 3: keep a healthy, current container; otherwise recreate ─
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
-  # Verify it responds
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     "http://127.0.0.1:${SEARXNG_PORT}/search?q=test&format=json" 2>/dev/null || echo "000")
-  if [ "${HTTP_CODE}" = "200" ]; then
-    ok "SearXNG already running on port ${SEARXNG_PORT}"
+  if [ "${HTTP_CODE}" = "200" ] && [ "${SETTINGS_CHANGED}" = false ] \
+     && [ -n "${IMAGE_NEW}" ] && [ "${IMAGE_NEW}" = "${IMAGE_RUNNING}" ]; then
+    ok "SearXNG already running on port ${SEARXNG_PORT} (settings and image current)"
     provider_ini_set search enabled true
     provider_ini_set search searxng_url "http://localhost:${SEARXNG_PORT}"
     ok "setup.ini [search] enabled=true"
     exit 0
-  else
-    warn "Container exists but not responding — recreating..."
-    docker stop "${CONTAINER_NAME}" 2>/dev/null || true
-    docker rm "${CONTAINER_NAME}" 2>/dev/null || true
   fi
+  if [ "${HTTP_CODE}" != "200" ]; then
+    warn "Container exists but not responding — recreating..."
+  elif [ "${SETTINGS_CHANGED}" = true ]; then
+    info "Settings changed — recreating the container..."
+  else
+    info "Newer image — recreating the container..."
+  fi
+  docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+  docker rm "${CONTAINER_NAME}" 2>/dev/null || true
 elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
   info "Stopped container found — removing and recreating..."
   docker rm "${CONTAINER_NAME}" 2>/dev/null || true
 fi
 
-# ─── Step 1: Create config directory ──────────────
-mkdir -p "${SEARXNG_CONFIG_DIR}"
-
-# ─── Step 2: Generate settings.yml ────────────────
-if [ ! -f "${SEARXNG_CONFIG_DIR}/settings.yml" ]; then
-  info "Generating settings.yml..."
-  SECRET_KEY="$(openssl rand -hex 32)"
-  cat > "${SEARXNG_CONFIG_DIR}/settings.yml" << SETTINGS_EOF
-use_default_settings: true
-
-general:
-  instance_name: "Versa AGi Search"
-  debug: false
-  contact_url: false
-  enable_metrics: false
-
-search:
-  safe_search: 0
-  autocomplete: ""
-  default_lang: "en"
-  formats:
-    - html
-    - json
-
-server:
-  secret_key: "${SECRET_KEY}"
-  bind_address: "0.0.0.0"
-  port: 8080
-  limiter: false
-  public_instance: false
-
-ui:
-  static_use_hash: true
-  default_theme: simple
-
-redis:
-  url: "redis://redis:6379/0"
-SETTINGS_EOF
-  ok "settings.yml generated (JSON API enabled, secret key randomized)"
-else
-  ok "settings.yml already exists — preserved"
-fi
-
-# ─── Step 3: Create docker-compose or run directly ─
-info "Pulling SearXNG image..."
-docker pull "${SEARXNG_IMAGE}" 2>&1 | tail -3
-
-# Create a Redis container for SearXNG (if not exists)
+# The rate limiter is off (local, single user), so no Redis/Valkey is needed.
+# Remove the Redis container earlier versions started.
 REDIS_CONTAINER="searxng-redis"
-if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${REDIS_CONTAINER}$"; then
-  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${REDIS_CONTAINER}$"; then
-    docker rm "${REDIS_CONTAINER}" 2>/dev/null || true
-  fi
-  info "Starting Redis for SearXNG..."
-  docker run -d \
-    --name "${REDIS_CONTAINER}" \
-    --restart unless-stopped \
-    redis:alpine \
-    redis-server --save "" --appendonly no \
-    > /dev/null 2>&1
-  ok "Redis container started"
-else
-  ok "Redis container already running"
+if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${REDIS_CONTAINER}$"; then
+  docker rm -f "${REDIS_CONTAINER}" > /dev/null 2>&1 || true
+  ok "Redis container removed (no longer used)"
 fi
 
 # ─── Step 4: Start SearXNG container ─────────────
@@ -175,7 +184,6 @@ info "Starting SearXNG container..."
 docker run -d \
   --name "${CONTAINER_NAME}" \
   --restart unless-stopped \
-  --link "${REDIS_CONTAINER}":redis \
   -p "127.0.0.1:${SEARXNG_PORT}:8080" \
   -v "${SEARXNG_CONFIG_DIR}:/etc/searxng:rw" \
   -e "SEARXNG_BASE_URL=http://localhost:${SEARXNG_PORT}/" \
@@ -206,6 +214,18 @@ done
 if [ ${RETRIES} -ge ${MAX_RETRIES} ]; then
   warn "SearXNG may not be responding yet (HTTP ${HTTP_CODE})"
   warn "Check: docker logs ${CONTAINER_NAME}"
+elif command -v jq > /dev/null 2>&1; then
+  # One real query: how many results, and which engines did not answer.
+  PROBE="$(curl -s --max-time 20 "http://127.0.0.1:${SEARXNG_PORT}/search?q=weather&format=json" 2>/dev/null || echo "{}")"
+  PROBE_RESULTS="$(echo "${PROBE}" | jq -r '(.results // []) | length' 2>/dev/null || echo "?")"
+  PROBE_ENGINES="$(echo "${PROBE}" | jq -r '[(.results // [])[].engine] | unique | join(", ")' 2>/dev/null || echo "")"
+  PROBE_BLOCKED="$(echo "${PROBE}" | jq -r '[(.unresponsive_engines // [])[] | "\(.[0]) (\(.[1]))"] | join(", ")' 2>/dev/null || echo "")"
+  if [ "${PROBE_RESULTS}" = "0" ] || [ "${PROBE_RESULTS}" = "?" ]; then
+    warn "Test search returned no results"
+  else
+    ok "Test search: ${PROBE_RESULTS} results from ${PROBE_ENGINES:-unknown engines}"
+  fi
+  [ -n "${PROBE_BLOCKED}" ] && warn "Engines that did not answer: ${PROBE_BLOCKED}"
 fi
 
 # ─── Step 6: Update setup.ini ────────────────────

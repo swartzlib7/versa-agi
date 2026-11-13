@@ -221,5 +221,80 @@ class TestViewReinvokeFlushHelpers(unittest.TestCase):
         self.assertEqual(pending, {"c1", "c2"})
 
 
+class TestResumeWithFrames(unittest.TestCase):
+    """SPWN-45: covered messages leave the checkpoint on resume, and the tail
+    that is left may start at an AI message because the frames block leads."""
+
+    def _tail(self, n):
+        out = []
+        for i in range(n):
+            out.append(_ai_tool_call(f"work {i}", f"c{i}"))
+            out.append(ToolMessage(content=f"result {i}", tool_call_id=f"c{i}", id=f"tool-c{i}"))
+        return out
+
+    def test_without_frames_a_tail_with_no_human_is_dropped(self):
+        clean, changed, _ = _canonicalize_messages(self._tail(10), max_msgs=6)
+        self.assertEqual(clean, [])
+        self.assertTrue(changed)
+
+    def test_with_frames_the_tail_is_kept_from_an_ai_message(self):
+        clean, changed, stats = _canonicalize_messages(self._tail(10), max_msgs=6, anchor_ai=True)
+        self.assertTrue(changed)
+        self.assertIsInstance(clean[0], AIMessage)
+        self.assertEqual(clean[-1].id, "tool-c9")
+        self.assertLessEqual(len(clean), 7)
+        self.assertEqual(stats["orphans"], 0)
+        self.assertEqual(_unresolved_tool_call_ids(clean), set())
+
+    def test_removing_framed_messages_leaves_a_valid_tail(self):
+        from harness.compaction import framed_ids, split_verbatim
+        wake = HumanMessage(content="wake", id="wake")
+        history = [wake] + self._tail(8)
+        rows = [
+            {"status": "rolled", "message_ids": "wake,ai-c0,tool-c0,ai-c1,tool-c1"},
+            {"status": "active", "message_ids": "ai-c2,tool-c2,ai-c3,tool-c3"},
+        ]
+        unframed = split_verbatim(history, framed_ids(rows))
+        clean, changed, stats = _canonicalize_messages(unframed, max_msgs=12, anchor_ai=True)
+        self.assertEqual([m.id for m in clean][:2], ["ai-c4", "tool-c4"])
+        self.assertEqual(len(clean), 8)
+        self.assertFalse(changed)  # relative to the unframed list; the caller adds "framed removed"
+        self.assertEqual(stats["placeholders"], 0)
+
+
+class TestRunningTelemetry(unittest.TestCase):
+    """SPWN-47: token counts carry the cycle id and exist before the cycle ends."""
+
+    def test_written_with_cycle_id_and_provider_counts(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        from harness.agent_harness import usage_totals, write_running_telemetry
+
+        msgs = [
+            HumanMessage(content="wake", id="h"),
+            AIMessage(content="a", id="a1",
+                      usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}),
+            AIMessage(content="b", id="a2",
+                      response_metadata={"prompt_eval_count": 50, "eval_count": 5}),
+        ]
+        self.assertEqual(usage_totals(msgs), (175, 150, 25))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "cycles", "cycle_telemetry.json")
+            with patch.dict(os.environ, {"VERSA_CYCLE_ID": "researcher-123"}):
+                write_running_telemetry("researcher", msgs, telemetry_file=path)
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        self.assertEqual(data["cycle_id"], "researcher-123")
+        self.assertEqual(data["total_tokens"], 175)
+        self.assertEqual(data["prompt_tokens"], 150)
+        self.assertEqual(data["completion_tokens"], 25)
+
+    def test_unwritable_path_does_not_raise(self):
+        from harness.agent_harness import write_running_telemetry
+        write_running_telemetry("researcher", [], telemetry_file="/proc/nope/cycle_telemetry.json")
+
+
 if __name__ == "__main__":
     unittest.main()

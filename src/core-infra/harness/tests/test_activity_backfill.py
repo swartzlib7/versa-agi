@@ -31,6 +31,10 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(outcome_for(99, None), "runaway")
         self.assertEqual(outcome_for(53, "x"), "step_limit")
         self.assertEqual(outcome_for(143, None), "crash")
+        # state_long_cycles.md §1.8: new stops map onto the five outcomes.
+        self.assertEqual(outcome_for(54, "x"), "timeout")
+        self.assertEqual(outcome_for(55, "x"), "loop")
+        self.assertEqual(outcome_for(97, "x"), "stall")
         self.assertEqual(outcome_for(None, "2026-11-09 08:00:00"), "ok")
         self.assertIsNone(outcome_for(None, None))  # still running
 

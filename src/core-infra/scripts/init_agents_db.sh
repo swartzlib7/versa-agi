@@ -173,8 +173,8 @@ sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN model_params_extra TEXT;" 2>
 # REMOVED (Iteration 23): the unconditional `UPDATE agents SET resume_enabled=0
 # WHERE resume_enabled=1` ran on EVERY setup --update, silently resetting any
 # agent the Primary User had deliberately switched ON via the dashboard.
-# The Iteration 19 legacy-default migration has long since been applied; new
-# agents get 0 via the schema default.
+# New agents get 1 (rolling chat history on) from the schema default and from
+# `agictl agent add`.
 
 # ─── Schema Migration: model routing (modality routing plan) ───
 sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN model_routing_enabled INTEGER DEFAULT 0;" 2>/dev/null || true
@@ -182,13 +182,13 @@ sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN model_routing_enabled INTEGE
 # Drop deprecated multimodal_inline_enabled (gate is execution model catalog only)
 sqlite3 "${DB_PATH}" "ALTER TABLE agents DROP COLUMN multimodal_inline_enabled;" 2>/dev/null || true
 
-# ─── Timeout range 30–60 minutes (state_live_chat.md §1.5.1; agent_limits.py) ───
+# ─── Time limit range 30–240 minutes (state_long_cycles.md §1.1; agent_limits.py) ───
 # Rows outside the range move to the nearest bound; an empty value gets the default 45.
-_TIMEOUT_OUT_OF_RANGE="timeout_minutes IS NULL OR timeout_minutes < 30 OR timeout_minutes > 60"
+_TIMEOUT_OUT_OF_RANGE="timeout_minutes IS NULL OR timeout_minutes < 30 OR timeout_minutes > 240"
 _timeout_fix_count="$(sqlite3 "${DB_PATH}" "SELECT COUNT(*) FROM agents WHERE ${_TIMEOUT_OUT_OF_RANGE};" 2>/dev/null || echo 0)"
 if [ "${_timeout_fix_count:-0}" -gt 0 ] 2>/dev/null; then
-  sqlite3 "${DB_PATH}" "UPDATE agents SET timeout_minutes = CASE WHEN timeout_minutes IS NULL THEN 45 WHEN timeout_minutes < 30 THEN 30 ELSE 60 END, updated_at = datetime('now') WHERE ${_TIMEOUT_OUT_OF_RANGE};"
-  echo "Timeout moved into the 30–60 minute range for ${_timeout_fix_count} agent(s)"
+  sqlite3 "${DB_PATH}" "UPDATE agents SET timeout_minutes = CASE WHEN timeout_minutes IS NULL THEN 45 WHEN timeout_minutes < 30 THEN 30 ELSE 240 END, updated_at = datetime('now') WHERE ${_TIMEOUT_OUT_OF_RANGE};"
+  echo "Time limit moved into the 30–240 minute range for ${_timeout_fix_count} agent(s)"
 fi
 
 sqlite3 "${DB_PATH}" <<'FEEDBACK'

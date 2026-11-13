@@ -22,6 +22,91 @@ import agictl.cli as agictl_cli  # noqa: E402
 from agitop.data.message_reader import MessageReader  # noqa: E402
 
 
+class TestConversationContextMemory(unittest.TestCase):
+    """SPWN-51: `conversation-context` puts memory and profiles in the spawn prompt.
+
+    The tasks.db connection used a name that did not exist; the error was
+    swallowed and the blob carried no memory at all.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        d = self.tempdir.name
+        self.messages_db = os.path.join(d, "messages.db")
+        self.tasks_db = os.path.join(d, "tasks.db")
+        scripts = os.path.join(CORE_INFRA, "scripts")
+        os.system(f"bash {scripts}/init_messages_db.sh {self.messages_db} >/dev/null 2>&1")
+        os.system(f"bash {scripts}/init_tasks_db.sh {self.tasks_db} >/dev/null 2>&1")
+        with sqlite3.connect(self.messages_db) as conn:
+            conn.execute(
+                "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, message_id, "
+                "text, mode, status, created_at, channel) VALUES ('received', 'steve-uid', 'vv-coa', "
+                "'S.', 'm-1', 'hello there', 'typed', 'unprocessed', datetime('now'), 'vv')"
+            )
+            # An earlier, handled message: a contact's profile and memory come with its history.
+            conn.execute(
+                "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, message_id, "
+                "text, mode, status, created_at, channel) VALUES ('received', 'steve-uid', 'vv-coa', "
+                "'S.', 'm-0', 'earlier note', 'typed', 'processed', datetime('now', '-1 day'), 'vv')"
+            )
+        with sqlite3.connect(self.tasks_db) as conn:
+            conn.execute(
+                "INSERT INTO connections (uid, display_name, spoken_lang, country) "
+                "VALUES ('steve-uid', 'Steve Marsh', 'af', 'South Africa')"
+            )
+            conn.execute(
+                "INSERT INTO agent_memory_connection (agent_name, contact_uid, preferences, rapport_level) "
+                "VALUES ('coa', 'steve-uid', 'prefers short replies', 'building')"
+            )
+            conn.execute(
+                "INSERT INTO projects (id, name, workspace_path, status) VALUES (7, 'Atlas', '/tmp/atlas', 'active')"
+            )
+            conn.execute(
+                "INSERT INTO agent_memory_project (agent_name, project_id, current_phase, next_steps) "
+                "VALUES ('coa', 7, 'testing', 'ship the report')"
+            )
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def _blob(self) -> str:
+        with (
+            patch.object(agictl_cli, "message_reader", MessageReader(self.messages_db)),
+            patch.object(agictl_cli, "tasks_db", self.tasks_db),
+            patch.object(agictl_cli, "get_config", return_value={"primary_user": {"uid": "primary"}}),
+        ):
+            result = CliRunner().invoke(
+                agictl_cli.cli,
+                ["message", "conversation-context", "vv-coa", "primary",
+                 "--injection-mode", "relevant", "--agent-name", "coa"],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        return result.output
+
+    def test_project_memory_is_in_the_blob(self) -> None:
+        blob = self._blob()
+        self.assertIn("--- PROJECT MEMORY ---", blob)
+        self.assertIn("[Project #7]", blob)
+        self.assertIn("Phase: testing", blob)
+        self.assertIn("Next: ship the report", blob)
+
+    def test_connection_memory_and_profile_are_in_the_blob(self) -> None:
+        blob = self._blob()
+        self.assertIn("[PROFILE: Steve Marsh (CONNECTION)]", blob)
+        self.assertIn("Language: af", blob)
+        self.assertIn("[MEMORY for Steve Marsh]", blob)
+        self.assertIn("Preferences: prefers short replies", blob)
+
+    def test_name_comes_from_the_connections_table_not_the_message(self) -> None:
+        blob = self._blob()
+        self.assertIn("Steve Marsh", blob)
+        self.assertNotIn("first cycle with the memory system", blob)
+
+    def test_no_undefined_database_name_is_left_in_the_cli(self) -> None:
+        with open(agictl_cli.__file__, encoding="utf-8") as fh:
+            self.assertNotIn("_db_connect", fh.read())
+
+
 class _RecordingConsole:
     def __init__(self) -> None:
         self.lines: list[str] = []

@@ -393,14 +393,14 @@ def _autonomous_gap():
         since = _last_off_sql(last_off)
         count = int(
             conn.execute(
-                "SELECT COUNT(*) FROM cycles WHERE id LIKE 'coa-%' AND started_at > ?",
+                "SELECT COUNT(*) FROM cycles WHERE id GLOB 'coa-[0-9]*' AND started_at > ?",
                 (since,),
             ).fetchone()[0]
             or 0
         )
         last = conn.execute(
             "SELECT started_at, summary FROM cycles "
-            "WHERE id LIKE 'coa-%' AND started_at > ? "
+            "WHERE id GLOB 'coa-[0-9]*' AND started_at > ? "
             "ORDER BY started_at DESC LIMIT 1",
             (since,),
         ).fetchone()

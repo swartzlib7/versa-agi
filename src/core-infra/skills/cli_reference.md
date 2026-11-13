@@ -73,6 +73,8 @@ sudo agictl system set-key gemini <key>               # Update Gemini API key �
 sudo agictl system set-key versavoice <token>         # Update VersaVoice API token → all *_config.json, setup.ini
 sudo agictl system set-key xai <key>                  # Update xAI API key → provider_keys.env, setup.ini
 sudo agictl system set-key openrouter <key>           # Update OpenRouter API key → provider_keys.env, setup.ini
+sudo agictl system set-key brave_search <key>         # Brave Search API key → setup.ini [search], SearXNG refreshed (`off` removes)
+sudo agictl system set-key exa <key>                  # Exa API key → setup.ini [search], SearXNG refreshed (`off` removes)
 ```
 
 > **Alternative**: The `agitop` dashboard provides a **🔑 API KEYS** button (purple, in System Controls) for GUI-based credential management. Re-running `setup.sh` after editing `setup.ini` is also a valid workaround.
@@ -92,7 +94,7 @@ agictl agent kill <name>                              # COA-only: terminate runn
 agictl agent request-remove <name> [--reason TEXT]    # Flag for removal (sets removal_requested, deactivates, notifies PU)
 agictl agent cancel-remove <name>                     # Cancel pending removal (reactivates agent)
 agictl agent remove <name>                            # Context-aware: non-root → request-remove, root → confirm-remove
-agictl agent set-timeout <name> <minutes>             # Set max execution timeout (30–60)
+agictl agent set-timeout <name> <minutes>             # Set the cycle time limit (30–240)
 sudo agictl agent set-model <name> <model>            # Assign catalog model to agent (COA or Primary User only)
 sudo agictl agent set-model <name> --clear            # Clear assignment → inherit system default
 agictl agent status show                              # Read your current status from DB
@@ -439,17 +441,39 @@ agictl awareness get <entry_id>                                  # Single entry 
 
 ---
 
-## 11. search — Web Search
+## 11. search — Web Search and Page Reading
 
 ```bash
-agictl search web "<query>"                           # Search the web via local SearXNG
+agictl search web "<query>"                           # Find pages: title, URL, snippet, engine
 agictl search web "<query>" --count 10                # Return up to 10 results (default: 5)
 agictl search web "<query>" --categories science      # Filter by search category (default: general)
+agictl search read "<url>"                            # Read one page as text, no browser (first 8000 characters)
+agictl search read "<url>" --offset <next_offset>     # Read on from where the last reply stopped
+agictl search read "<url>" --max-chars 20000          # Return more per call (limit 20000)
+agictl search read "<url>" --links                    # Also list the page's links
+agictl search status                                  # Which engines answer a test search, and which API keys are set
+```
+
+Order of use: `search web` to find, `search read` to read, `browser goto` only when a page needs scripts, a click or a form (the `read` reply then carries a `hint`). Full guidance: the `web_research` skill.
+
+COA only:
+
+```bash
+agictl search set-key brave <key>                     # Save a Brave Search API key the Primary User gave you, refresh search
+agictl search set-key exa <key>                       # Same for Exa
+agictl search set-key brave off                       # Remove a key (also: exa off)
 ```
 
 > **Availability**: Requires SearXNG installed and `setup.ini [search] enabled=true`. Install via `providers/searxng.sh`.
 
-**Returns JSON**: `{success: true, query: "...", results: [{title, url, snippet, engine}], count: N}`
+**Returns JSON**:
+
+| Command | Reply |
+|---|---|
+| `search web` | `{success, query, results: [{title, url, snippet, engine}], count}`. With no results: `unresponsive_engines: [{engine, reason}]` |
+| `search read` | `{success, url, title, source: "fetch", content, content_chars, offset}`, plus `truncated` and `next_offset` when more follows, `links` with `--links`, `hint` when the page needs the browser |
+| `search status` | `{success, enabled, searxng_url, api_keys_set: {brave, exa}, results, engines: {name: count}, unresponsive_engines}` |
+| `search set-key` | `{success, service, key_set, applied, note}`. The key is never printed |
 
 **Harness Integration**: The harness conditionally registers the `agictl_search` tool at startup based on `_is_search_enabled()`. When `enabled=false`, agents cannot use search.
 
@@ -640,7 +664,8 @@ agictl view video <path> --execution-model <key>      # Test video-input ModelDr
 ## 17. browser — Headless Browser Automation
 
 ```bash
-agictl browser goto "<url>"                           # Load page, return text content
+agictl browser goto "<url>"                           # Load page, return text content (first 8000 characters)
+agictl browser goto "<url>" --offset <next_offset>    # Read on when the reply says "truncated": true
 agictl browser goto "<url>" --screenshot              # Load page + save screenshot
 agictl browser click "<url>" "<selector>"             # Navigate then click an element
 agictl browser fill "<url>" "<selector>" "<value>"    # Navigate then fill a form field

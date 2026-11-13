@@ -19,7 +19,15 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from harness.live_call import CALL_TURN_STEP_CAP, step_cap_message as live_step_cap_message
-from harness.deadline import FIVE_MINUTES, DeadlineWarnings
+from harness.deadline import CLOSE_NOW, DeadlineWarnings
+from harness.checkin import CheckIns, checkin_line, checkin_message
+from harness.cycle_close import (
+    EXIT_LOOP, EXIT_STEP_BUDGET, EXIT_TIME_LIMIT, harness_handoff, last_plain_reply,
+    time_limit_summary,
+)
+from harness.heartbeat import Heartbeat
+from harness.repeat_guard import RepeatGuard, call_label
+from harness.step_clock import StepClock
 from harness.listening import (
     ListeningWindow,
     agent_ids_from_env,
@@ -157,7 +165,7 @@ def _log_llm_resolution(role: str, model_name: str, num_ctx: int, agent_override
 _PLACEHOLDER_TOOL_CONTENT = "[Result unavailable — the cycle ended before this tool call completed.]"
 
 
-def _canonicalize_messages(msgs, max_msgs=0):
+def _canonicalize_messages(msgs, max_msgs=0, anchor_ai=False):
     """Produce a provider-valid message list from a checkpoint history.
 
     Every major LLM provider rejects a malformed tool-call transcript
@@ -176,6 +184,8 @@ def _canonicalize_messages(msgs, max_msgs=0):
         so the window begins at a ``HumanMessage`` (the pre_model_hook trims with
         ``start_on="human"``, so a non-human start would be discarded anyway).
         When no ``HumanMessage`` exists the history is dropped entirely.
+        ``anchor_ai``: the thread has compaction frames, so the payload starts
+        at the frames block and the window may also begin at an ``AIMessage``.
 
     Pure function (no I/O). Returns ``(clean, changed, stats)`` where ``changed``
     is ``True`` iff the id-sequence differs from the input — placeholders carry
@@ -193,15 +203,16 @@ def _canonicalize_messages(msgs, max_msgs=0):
         keep_n = (max_msgs - 1) if first_sys else max_msgs
         start = max(len(body) - keep_n, 0)
         anchor = None
+        anchor_types = (HumanMessage, AIMessage) if anchor_ai else (HumanMessage,)
         # Expand backwards toward an earlier HumanMessage (bounded), else
         # shrink forward to the next one.
         for i in range(start, max(start - max_msgs, -1), -1):
-            if isinstance(body[i], HumanMessage):
+            if isinstance(body[i], anchor_types):
                 anchor = i
                 break
         if anchor is None:
             for i in range(start + 1, len(body)):
-                if isinstance(body[i], HumanMessage):
+                if isinstance(body[i], anchor_types):
                     anchor = i
                     break
         kept_body = body[anchor:] if anchor is not None else []
@@ -841,22 +852,49 @@ def agictl_execute(command: str) -> str:
 
 
 class SearchInput(BaseModel):
-    query: str = Field(description=(
-        "The search query to look up on the web. "
-        "Example: 'how to install Node.js 22 on Ubuntu 24.04'"
+    command: str = Field(default="", description=(
+        "The full agictl search subcommand to run. "
+        "Examples: 'search web \"how to install Node.js 22 on Ubuntu 24.04\" --count 5', "
+        "'search read \"https://docs.example.com/guide\"', "
+        "'search read \"https://docs.example.com/guide\" --offset 8000', "
+        "'search read \"https://example.com\" --links', 'search status'."
     ))
-    count: int = Field(default=5, description="Number of results to return (default: 5, max: 10)")
+    query: str = Field(default="", description=(
+        "Short form of 'search web': the query to look up. Use this or `command`, not both."
+    ))
+    count: int = Field(default=5, description="With `query`: number of results (default 5, max 10)")
+
+
+def search_tool_command(command: str = "", query: str = "", count: int = 5) -> str:
+    """The agictl arguments for one `agictl_search` call ("" when nothing usable was given)."""
+    command = (command or "").strip()
+    if command.startswith("agictl "):
+        command = command[len("agictl "):].strip()
+    if command:
+        return command if command.startswith("search ") else ""
+    query = (query or "").strip()
+    if not query:
+        return ""
+    return f"search web {shlex.quote(query)} --count {max(1, min(int(count or 5), 10))}"
+
 
 @tool("agictl_search", args_schema=SearchInput)
-def agictl_search(query: str, count: int = 5) -> str:
-    """Search the web using the local SearXNG instance.
-    Returns top results with title, URL, and snippet.
-    Use this for technical research, version compatibility checks, or documentation lookups.
+def agictl_search(command: str = "", query: str = "", count: int = 5) -> str:
+    """Find and read things on the web. No browser is started.
+    Order of use: search to find pages, read to read one, the browser tool only when a page needs it.
+    Examples:
+      - 'search web "<query>" --count 5' — find pages: title, URL, snippet
+      - 'search read "<url>"' — the readable text of one page (documentation, articles, references)
+      - 'search read "<url>" --offset 8000' — read on when the reply says truncated (use its next_offset)
+      - 'search read "<url>" --links' — also list the page's links
+      - 'search status' — which engines answer; use when a search returns nothing
+    If 'search read' returns a `hint`, the page needs scripts: read it with the browser tool.
     """
-    if not query:
-        return "ERROR: You must provide a search query!"
-    count = min(count, 10)
-    return _run_agictl(f'search web "{query}" --count {count}')
+    args = search_tool_command(command, query, count)
+    if not args:
+        return ("ERROR: pass `command` starting with 'search ' (for example: search web \"<query>\"), "
+                "or a `query`.")
+    return _run_agictl(args)
 
 
 # ═══════════════════════════════════════════════════════
@@ -913,12 +951,14 @@ def agictl_browser(command: str) -> str:
     IMPORTANT: Only http:// and https:// URLs are allowed. file:// is blocked.
     Examples:
       - 'browser goto "https://example.com"' — load page and get text content
+      - 'browser goto "https://example.com" --offset 8000' — read on when the reply says truncated (use its next_offset)
       - 'browser goto "https://example.com" --screenshot' — load + screenshot
       - 'browser click "https://example.com" "button.submit"' — click an element
       - 'browser fill "https://example.com" "#email" "user@test.com"' — fill a form field
       - 'browser screenshot "https://example.com" --full-page' — full-page screenshot
       - 'browser extract "https://example.com" --selector "h1"' — extract text from selector
       - 'browser extract "https://example.com" --selector "a" --attribute "href"' — extract attribute
+    Any command takes --user-agent "<text>" to set the user agent for that call.
     """
     return _run_agictl(command)
 
@@ -1000,6 +1040,8 @@ class CallPuInput(BaseModel):
 
 _LIVE_CALL_RUNTIME = None  # harness.live_call.LiveCallRuntime, set in main()
 _HARNESS_DEADLINE_EPOCH = None  # Lifeline --deadline-epoch, set in main()
+# Stall timer (state_long_cycles.md §1.2). A no-op until main() gives it the file.
+_HEARTBEAT = Heartbeat(None)
 # A call must leave this much time before the hard stop (state_live_chat.md §1.7).
 CALL_DEADLINE_MARGIN_SECONDS = 180
 CALL_MIN_MINUTES = 5
@@ -1443,11 +1485,62 @@ def _apply_view_surgical_trim(agent, config, pending: list[dict]) -> int:
 
 
 
-def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, completion_tokens: int, messages: list):
+def usage_totals(messages: list) -> tuple[int, int, int]:
+    """(total, prompt, completion) tokens the providers reported on these messages."""
+    total_tokens, prompt_tokens, completion_tokens = 0, 0, 0
+    for m in messages:
+        if not isinstance(m, AIMessage):
+            continue
+        # Standard LangChain usage_metadata (Gemini, OpenAI)
+        if hasattr(m, "usage_metadata") and m.usage_metadata:
+            prompt_tokens += m.usage_metadata.get("input_tokens", 0)
+            completion_tokens += m.usage_metadata.get("output_tokens", 0)
+            total_tokens += m.usage_metadata.get("total_tokens", 0)
+            continue
+        # Ollama: token data in response_metadata
+        rm = getattr(m, "response_metadata", None) or {}
+        if rm.get("eval_count") or rm.get("prompt_eval_count"):
+            p = rm.get("prompt_eval_count", 0) or 0
+            c = rm.get("eval_count", 0) or 0
+            prompt_tokens += p
+            completion_tokens += c
+            total_tokens += p + c
+    return total_tokens, prompt_tokens, completion_tokens
+
+
+def telemetry_path(agent_name: str) -> str:
     if agent_name == "coa":
-        telemetry_file = "/var/lib/versa-agi/coa/cycles/cycle_telemetry.json"
-    else:
-        telemetry_file = f"/var/lib/versa-agi/{agent_name}/cycles/cycle_telemetry.json"
+        return "/var/lib/versa-agi/coa/cycles/cycle_telemetry.json"
+    return f"/var/lib/versa-agi/{agent_name}/cycles/cycle_telemetry.json"
+
+
+def write_running_telemetry(agent_name: str, messages: list, telemetry_file: str | None = None) -> None:
+    """Token counts so far, tagged with this cycle's id.
+
+    Written after every model reply so a cycle that is killed still leaves its
+    own numbers, and Lifeline can tell them from an earlier cycle's
+    (state_spawn_context.md §1.5 rule 3). Never raises.
+    """
+    try:
+        total_tokens, prompt_tokens, completion_tokens = usage_totals(messages)
+        path = telemetry_file or telemetry_path(agent_name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as f:
+            json.dump({
+                "cycle_id": os.environ.get("VERSA_CYCLE_ID", ""),
+                "total_tokens": total_tokens,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "partial": True,
+            }, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, completion_tokens: int, messages: list):
+    telemetry_file = telemetry_path(agent_name)
 
     os.makedirs(os.path.dirname(telemetry_file), exist_ok=True)
 
@@ -1460,6 +1553,7 @@ def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, comp
 
     with open(telemetry_file, "w") as f:
         json.dump({
+            "cycle_id": os.environ.get("VERSA_CYCLE_ID", ""),
             "total_tokens": total_tokens,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -1507,6 +1601,45 @@ def budget_end_off_message(step_count: int, max_steps: int) -> str:
     )
 
 
+def _saved_handoff(cycle_id: str) -> str:
+    """Handoff already on this cycle's row ("" when none, or when it cannot be read)."""
+    if not cycle_id:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["agictl", "cycle", "get", cycle_id], capture_output=True, text=True, timeout=15,
+        )
+        row = json.loads(proc.stdout or "{}")
+        return str((row or {}).get("handoff") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _close_cycle_from_harness(agent_name: str, summary: str, tag: str, handoff: str = "") -> bool:
+    """Close the open cycle row the way `agictl cycle end` does.
+
+    Used when the harness ends the cycle itself: step budget (53), time limit
+    (54), repeated call (55). ``handoff`` is written only when given; a handoff
+    the agent saved earlier this cycle stays. Runs without the listening-window
+    flag so the row is closed, not held open for a chat.
+    """
+    cmd = ["agictl", "cycle", "end", summary]
+    cmd += ["--handoff", handoff] if handoff else ["--no-handoff"]
+    cmd += ["--agent", agent_name]
+    env = {k: v for k, v in os.environ.items() if k not in ("VERSA_LISTENING", "VERSA_LISTEN_MINUTES")}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            tlog(f"{tag}: cycle finalize returned {proc.returncode}: {err}")
+            return False
+        tlog(f"{tag}: Cycle closed by the harness — {summary}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        tlog(f"{tag}: Failed to finalize cycle — {e}")
+        return False
+
+
 def _finalize_cycle_step_budget(agent_name: str, step_count: int, max_steps: int) -> None:
     """Close the open cycle row when the harness hits the hard step limit.
 
@@ -1517,18 +1650,31 @@ def _finalize_cycle_step_budget(agent_name: str, step_count: int, max_steps: int
         f"[Harness] Step budget reached ({step_count}/{max_steps}). "
         "Work continues on next spawn — review task progress and recent cycle summaries."
     )
+    _close_cycle_from_harness(agent_name, summary, "STEP BUDGET")
+
+
+def _finalize_cycle_with_handoff(agent_name: str, summary: str, tag: str, messages, last_tool: str) -> None:
+    """Close at the time limit or on a repeated call (state_long_cycles.md §1.3 rule 2).
+
+    Keeps a handoff the agent already saved this cycle; otherwise writes one
+    from its last plain-text reply and its last tool call.
+    """
+    handoff = ""
+    if not _saved_handoff(os.environ.get("VERSA_CYCLE_ID", "")):
+        handoff = harness_handoff(last_plain_reply(messages), last_tool)
+    _close_cycle_from_harness(agent_name, summary, tag, handoff=handoff)
+
+
+def _write_checkin_line(line: str) -> None:
+    """One line on the cycle row's check-in log (state_long_cycles.md §1.6). Best effort."""
+    cmd = ["agictl", "cycle", "checkin", line]
+    cycle_id = os.environ.get("VERSA_CYCLE_ID", "")
+    if cycle_id:
+        cmd += ["--cycle-id", cycle_id]
     try:
-        proc = subprocess.run(
-            ["agictl", "cycle", "end", summary, "--no-handoff", "--agent", agent_name],
-            capture_output=True, text=True, timeout=15,
-        )
-        if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or "").strip()
-            tlog(f"STEP BUDGET: cycle finalize returned {proc.returncode}: {err}")
-        else:
-            tlog(f"STEP BUDGET: Cycle closed for resume ({step_count}/{max_steps})")
+        subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     except Exception as e:  # noqa: BLE001
-        tlog(f"STEP BUDGET: Failed to finalize cycle — {e}")
+        tlog(f"CHECK-IN: line not written — {e}")
 
 
 # ═══════════════════════════════════════════════════════
@@ -1595,8 +1741,10 @@ def main():
     parser.add_argument("--listen-minutes", type=int, default=0, help="Live Chat listening window granted by VersaVoice (0 = one-shot cycle)")
     args = parser.parse_args()
     harness_started_epoch = time.time()
-    global _HARNESS_DEADLINE_EPOCH
+    global _HARNESS_DEADLINE_EPOCH, _HEARTBEAT
     _HARNESS_DEADLINE_EPOCH = args.deadline_epoch
+    _HEARTBEAT = Heartbeat.from_env()
+    _HEARTBEAT.start()
 
     TOOL_OUTPUT_LIMIT = args.tool_budget
 
@@ -2000,6 +2148,8 @@ def main():
     # Compaction frames (TD-CTX-FRAME-001): active frames for this thread, cached per cycle.
     _FRAME_CACHE: dict = {}
     _CYCLE_STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # Message id → when the harness first saw it; frame end times come from here.
+    _MSG_SEEN_AT: dict = {}
     # [compaction] model — blank means the spawned model writes the frames.
     compaction_llm = None
     compaction_model = ""
@@ -2100,9 +2250,11 @@ def main():
         verbatim turns reach 90% of the character budget, the oldest 35% are
         summarized into a frame. Call turns are not compacted.
         """
+        _HEARTBEAT.beat()  # a model call starts (state_long_cycles.md §1.2)
         from harness.compaction import (
-            HARNESS_NOTE, TRIGGER, framed_ids, frame_slots, message_text,
-            select_oldest_span, split_verbatim,
+            HARNESS_NOTE, TRIGGER, active_frames, framed_ids, frame_slots, frame_times,
+            message_text, note_seen, select_oldest_span, split_verbatim,
+            verbatim_start_types,
         )
 
         all_msgs = list(state["messages"])
@@ -2113,7 +2265,7 @@ def main():
             in_call = False
 
         def _frames():
-            """Active frames for this thread. Cached until a compaction changes them."""
+            """Every frame of this thread, active and rolled. Cached until a compaction changes them."""
             import json as _json
             thread = getattr(args, "thread_id", "") or ""
             if not thread:
@@ -2122,7 +2274,7 @@ def main():
                 return _FRAME_CACHE["rows"]
             try:
                 proc = subprocess.run(
-                    ["agictl", "cycle", "frames", "list", "--thread", thread, "--status", "active"],
+                    ["agictl", "cycle", "frames", "list", "--thread", thread, "--harness"],
                     capture_output=True, text=True, timeout=20,
                 )
                 data = _json.loads(proc.stdout or "[]")
@@ -2145,9 +2297,8 @@ def main():
                 lines.append(f"{type(m).__name__}: {text}")
             return "\n".join(lines)[:COMPACTION_SPAN_CHARS]
 
-        def _write_frame(span, frame_start):
+        def _write_frame(span, last_frame_end):
             import json as _json
-            from datetime import datetime, timezone
             prompt = (
                 "Summarize these agent turns as one compaction frame. In order: motivations, "
                 "actions, tool calls with their results, outcomes, conclusions. Plain prose. "
@@ -2156,14 +2307,17 @@ def main():
             reply = (compaction_llm or llm).invoke(
                 [HumanMessage(content=prompt + "\n\n" + _span_text(span))]
             )
+            _HEARTBEAT.beat()  # the summary came back; the cycle model's call is next
             summary = message_text(reply).strip()
             if not summary:
                 return None
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            frame_start, frame_end = frame_times(
+                span, _MSG_SEEN_AT, last_frame_end, _CYCLE_STARTED_AT, _utc_now(),
+            )
             ids = ",".join(str(getattr(m, "id", "") or "") for m in span if getattr(m, "id", None))
             proc = subprocess.run(
                 ["agictl", "cycle", "frames", "add", "--thread", args.thread_id or "",
-                 "--start", frame_start or now, "--end", now, "--ids", ids or "-",
+                 "--start", frame_start, "--end", frame_end, "--ids", ids or "-",
                  "--cycle-id", os.environ.get("VERSA_CYCLE_ID", "")],
                 input=summary, capture_output=True, text=True, timeout=20,
             )
@@ -2182,10 +2336,16 @@ def main():
                 )
             return HumanMessage(content="\n\n".join(parts))
 
+        def _utc_now():
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        note_seen(_MSG_SEEN_AT, all_msgs, _CYCLE_STARTED_AT, _utc_now())
+        # A message is framed once: rolled frames still cover their messages,
+        # only active frames are sent (state_spawn_context.md §1.8).
         frames = [] if in_call else _frames()
         covered = framed_ids(frames)
         verbatim = split_verbatim(all_msgs, covered) if not in_call else all_msgs
-        block = None if in_call else _frames_block(frames)
+        block = None if in_call else _frames_block(active_frames(frames))
         block_chars = _count_message_chars([block]) if block else 0
         if (
             not in_call and args.thread_id
@@ -2203,9 +2363,10 @@ def main():
                 tlog(f"COMPACTION: framed {len(span)} messages as frame {written.get('id')}")
                 _FRAME_CACHE.clear()
                 frames = _frames()
-                size = max(len(str(r.get("summary") or "")) for r in frames) if frames else 1
+                live = active_frames(frames)
+                size = max(len(str(r.get("summary") or "")) for r in live) if live else 1
                 keep = frame_slots(CONTEXT_WINDOW_CHARS, size)
-                extra = frames[:-keep] if len(frames) > keep else []
+                extra = live[:-keep] if len(live) > keep else []
                 for old in extra:
                     subprocess.run(
                         ["agictl", "cycle", "frames", "roll", "--id", str(old.get("id"))],
@@ -2217,7 +2378,7 @@ def main():
                     frames = _frames()
                 covered = covered | framed_ids(frames)
                 verbatim = split_verbatim(all_msgs, covered)
-                block = _frames_block(frames)
+                block = _frames_block(active_frames(frames))
                 block_chars = _count_message_chars([block]) if block else 0
 
         budget = max(CONTEXT_WINDOW_CHARS - block_chars, TRIM_BUDGET_FLOOR // 2)
@@ -2228,8 +2389,12 @@ def main():
             include_system=True,
             allow_partial=False,
         )
-        if any(isinstance(m, HumanMessage) for m in verbatim):
-            trim_kwargs["start_on"] = "human"
+        # After a frame covers the wake, a later human message (time warning,
+        # mid-cycle mail) must not cut the turns before it (§1.8 rule 4).
+        if block is not None:
+            trim_kwargs["start_on"] = verbatim_start_types(True)
+        elif any(isinstance(m, HumanMessage) for m in verbatim):
+            trim_kwargs["start_on"] = verbatim_start_types(False)
         trimmed = trim_messages(verbatim, **trim_kwargs)
         if len(trimmed) < len(verbatim):
             tlog(f"CONTEXT TRIM: {len(verbatim)} → {len(trimmed)} messages "
@@ -2340,27 +2505,38 @@ def main():
                     if window <= 0:
                         _, window = get_model_context(args.model or "")
                     resume_cap = resume_message_cap(window)
-                    # Frames are pinned: messages they already cover do not count
-                    # toward the verbatim resume tail (TD-CTX-FRAME-001).
+                    # A framed message is never sent again, so it leaves the
+                    # checkpoint here and the resume tail is counted over the
+                    # rest (state_spawn_context.md §1.8 rule 5). With frames the
+                    # payload starts at the frames block, so the tail may start
+                    # at an AI message.
+                    _framed = 0
+                    _has_frames = False
+                    unframed = current
                     try:
                         import json as _json
-                        from harness.compaction import framed_ids
+                        from harness.compaction import framed_ids, split_verbatim
                         _proc = subprocess.run(
                             ["agictl", "cycle", "frames", "list", "--thread", args.thread_id,
-                             "--status", "active"],
+                             "--harness"],
                             capture_output=True, text=True, timeout=20,
                         )
                         _rows = _json.loads(_proc.stdout or "[]")
-                        _covered = framed_ids(_rows if isinstance(_rows, list) else [])
-                        _pinned = sum(1 for m in current if str(getattr(m, "id", "") or "") in _covered)
+                        _rows = _rows if isinstance(_rows, list) else []
+                        _has_frames = bool(_rows)
+                        unframed = split_verbatim(current, framed_ids(_rows))
+                        _framed = len(current) - len(unframed)
                     except Exception:
-                        _pinned = 0
+                        unframed = current
                     tlog(
                         f"RESUME CAP: {resume_cap} messages "
                         f"(window {window} tokens; stored max {args.resume_max_messages}; "
-                        f"{_pinned} framed)"
+                        f"{_framed} framed removed)"
                     )
-                    clean, changed, stats = _canonicalize_messages(current, resume_cap + _pinned)
+                    clean, changed, stats = _canonicalize_messages(
+                        unframed, resume_cap, anchor_ai=_has_frames,
+                    )
+                    changed = changed or _framed > 0
                     # A non-empty `next` means the prior cycle was interrupted
                     # mid-superstep (e.g. `agictl cycle end` SIGTERM during a
                     # parallel tool batch, timeout, or runaway kill). The
@@ -2481,10 +2657,20 @@ def main():
     end_off_remaining = end_off_remaining_threshold(max_steps)
     warned_80 = False
     warned_end_off = False
-    # Time warnings at 10 and 5 minutes left (state_live_chat.md §1.5.3). None without a deadline.
-    deadline_warnings = DeadlineWarnings(args.deadline_epoch, started_epoch=harness_started_epoch)
+    # Long-running cycles (state_long_cycles.md). The step clock times this
+    # agent's steps; the time warnings and the close at the limit scale with it.
+    step_clock = StepClock(local=os.environ.get("VERSA_LOCAL_MODEL") == "1")
+    deadline_warnings = DeadlineWarnings(
+        args.deadline_epoch, started_epoch=harness_started_epoch, typical_step=step_clock.typical,
+    )
+    repeat_guard = RepeatGuard()
+    checkins = CheckIns(harness_started_epoch)
+    open_tool_calls: dict = {}   # tool_call id → (tool name, arguments)
+    last_tool_label = ""
     cycle_ended = False
     budget_hard_stop = False
+    limit_stop = False           # time limit: the harness closes the cycle (exit 54)
+    loop_stop = ""               # repeated call: the cycle summary (exit 55)
     input_messages = messages  # Initial input for first stream invocation
     _harness_crashed = False
     pending_view_trims: list[dict] = []
@@ -2513,10 +2699,14 @@ def main():
     # ── Live Chat listening window (state_live_chat.md §1.4) ──
     listening = ListeningWindow(
         args.listen_minutes, args.deadline_epoch, pu_ids=listen_pu_ids,
-        agent_ids=agent_ids_from_env(), marker_path=os.environ.get("VERSA_TURN_MARKER"),
+        agent_ids=agent_ids_from_env(),
         close_file=os.environ.get("VERSA_CHAT_CLOSE_FILE"), cycle_id=os.environ.get("VERSA_CYCLE_ID"),
+        close_lead=deadline_warnings.close_now_lead,
     )
     turn_base = 0  # steps spent before the current chat turn (per-turn budget)
+    # Stall timer: startup is done; a live call in progress keeps the heartbeat going (§1.2).
+    _HEARTBEAT.set_busy(lambda: live_runtime is not None and bool(getattr(live_runtime, "live", False)))
+    _HEARTBEAT.beat()
     if listening.enabled and listening.note_rows(midcycle_inbox.unread_rows()):
         tlog(f"LISTEN: window open — a person woke this cycle ({listening.minutes} min idle)")
 
@@ -2568,6 +2758,17 @@ def main():
             # re-invoke with the SAME input (idempotent by id) to resume.
             transient_attempt = 0
             stream_natural_end = False
+            # No model call the cycle cannot finish (state_long_cycles.md §1.3 rule 1).
+            if (
+                deadline_warnings.close_due()
+                and not _in_call_turn()
+                and not _unresolved_tool_call_ids(messages)
+            ):
+                tlog(f"\n[TIME LIMIT] Not starting another step (step {step_count}). Closing the cycle.")
+                cycle_ended = True
+                limit_stop = True
+                break
+            step_clock.start()
             while True:
                 try:
                     for chunk in active_agent.stream({"messages": input_messages}, config=config):
@@ -2578,6 +2779,15 @@ def main():
                         if "agent" in chunk:
                             msg = chunk["agent"]["messages"][0]
                             messages.append(msg)
+                            write_running_telemetry(args.agent, messages)
+                            # A model reply arrived: stall timer and step clock (§1.2, §1.7).
+                            step_clock.note_reply(counted=not _in_call_turn())
+                            _HEARTBEAT.beat()
+                            _HEARTBEAT.set_hold("tools", bool(getattr(msg, "tool_calls", None)))
+                            if not _in_call_turn():
+                                for tc in (getattr(msg, "tool_calls", None) or []):
+                                    if tc.get("id"):
+                                        open_tool_calls[tc["id"]] = (tc.get("name", "?"), tc.get("args"))
                             # Call turns log one line per request (runtime); the call log keeps detail.
                             if hasattr(msg, "tool_calls") and msg.tool_calls:
                                 tool_names = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
@@ -2609,6 +2819,14 @@ def main():
                             preview = content[:200].replace("\n", " ")
                             if not _in_call_turn():
                                 tlog(f"[STEP {step_count}/{max_steps}] TOOL  ← {preview}")
+                            _HEARTBEAT.set_hold("tools", bool(_unresolved_tool_call_ids(messages)))
+                            # Same call, same result, seen before? (§1.5)
+                            _called = open_tool_calls.pop(getattr(msg, "tool_call_id", None), None)
+                            if _called:
+                                last_tool_label = call_label(*_called)
+                                repeats = repeat_guard.note(_called[0], _called[1], content)
+                                if repeats >= repeat_guard.notice_at:
+                                    tlog(f"[LOOP] Same call and result {repeats} times: {last_tool_label}")
 
                             tool_name = getattr(msg, "name", "") or ""
                             if tool_name in ("agictl_view_image", "agictl_view_video") and isinstance(content, str):
@@ -2712,6 +2930,30 @@ def main():
                                 tlog(f"LIVE CALL: step allowance reached (step {step_count})")
                                 break
 
+                        # ── Repeated call: close the cycle (state_long_cycles.md §1.5 rule 3) ──
+                        if not pending_tool_calls and not _in_call_turn() and repeat_guard.stop_due():
+                            loop_stop = repeat_guard.stop_due()
+                            tlog(f"\n[LOOP] {loop_stop}. Terminating cycle.")
+                            # Leave the thread whole for the next spawn (tool results flushed).
+                            tlog(f"[LOOP] checkpoint {_flush_stream_messages_to_checkpoint(agent, config, messages)}")
+                            cycle_ended = True
+                            break
+
+                        # ── Time limit: no model call the cycle cannot finish (§1.3 rule 1) ──
+                        # A tool batch just closed, so a model call is next.
+                        if (
+                            "tools" in chunk
+                            and not pending_tool_calls
+                            and not _in_call_turn()
+                            and deadline_warnings.close_due()
+                        ):
+                            tlog(f"\n[TIME LIMIT] Not starting another step (step {step_count}). Closing the cycle.")
+                            # Leave the thread whole for the next spawn (tool results flushed).
+                            tlog(f"[TIME LIMIT] checkpoint {_flush_stream_messages_to_checkpoint(agent, config, messages)}")
+                            cycle_ended = True
+                            limit_stop = True
+                            break
+
                         if pending_tool_calls or _in_call_turn():
                             pass  # defer warning to the next chunk; none during call turns
                         elif remaining <= end_off_remaining and not warned_end_off:
@@ -2726,15 +2968,41 @@ def main():
                         # warnings; a budget warning in this chunk goes first.
                         time_stage = None
                         warn_tag = "[BUDGET]"
-                        if not warning and not pending_tool_calls and not _in_call_turn():
+                        on_sent = None  # runs once the message is in the conversation
+                        gate_open = not pending_tool_calls and not _in_call_turn()
+                        if not warning and gate_open:
                             time_due = deadline_warnings.due(listening=listening.should_wait())
                             if time_due:
                                 time_stage, warning = time_due
                                 warn_tag = "[DEADLINE]"
-                                if time_stage == FIVE_MINUTES and listening.should_wait():
-                                    # The window closes with the 5-minute warning (§1.5.3).
+                                if time_stage == CLOSE_NOW and listening.should_wait():
+                                    # The window closes with the last time warning (§1.5.3).
                                     warning = listening.begin_closing("deadline")
-                                    tlog("LISTEN: window closed — 5 minutes before the hard stop")
+                                    tlog("LISTEN: window closed — last time warning before the limit")
+
+                        # Repeated call: told once at 3 (state_long_cycles.md §1.5 rule 2).
+                        if not warning and gate_open:
+                            notice = repeat_guard.notice_due()
+                            if notice:
+                                warning, warn_tag, on_sent = notice, "[LOOP]", repeat_guard.mark_noticed
+
+                        # Check-in every 30 minutes (state_long_cycles.md §1.6). The line is
+                        # always written; the message is held back while a person is chatting
+                        # and once the wrap-up warning's time has started.
+                        if gate_open:
+                            checkin_minutes = checkins.due()
+                            if checkin_minutes:
+                                checkins.mark()
+                                _checkin_text = checkin_line(
+                                    checkin_minutes, step_count - call_steps,
+                                    usage_totals(messages)[0], last_tool_label,
+                                )
+                                _write_checkin_line(_checkin_text)
+                                _left = deadline_warnings.time_left()
+                                _in_wrap_up = _left is not None and _left <= deadline_warnings.wrap_up_lead()
+                                tlog(f"[CHECK-IN] {_checkin_text}")  # shown in agitop's cycle log
+                                if not warning and not listening.should_wait() and not _in_wrap_up:
+                                    warning, warn_tag = checkin_message(checkin_minutes), "[CHECK-IN]"
 
                         if warning:
                             tlog(f"{warn_tag} Injecting warning into agent conversation (step {step_count})")
@@ -2753,6 +3021,8 @@ def main():
                             else:
                                 if time_stage is not None:
                                     deadline_warnings.mark(time_stage)
+                                if on_sent is not None:
+                                    on_sent()
                                 # Break this stream — re-invoke with warning as the only new input.
                                 input_messages = [HumanMessage(content=warning, id=str(uuid.uuid4()))]
                                 messages.append(input_messages[0])
@@ -2779,6 +3049,7 @@ def main():
                             f"TRANSIENT API ERROR (attempt {transient_attempt}/{MAX_TRANSIENT_RETRIES}): "
                             f"{type(e).__name__}: {e}. Resuming from checkpoint in {delay}s."
                         )
+                        _HEARTBEAT.set_hold("tools", False)
                         time.sleep(delay)
                         continue
                     raise  # non-transient, or retry budget exhausted → crash
@@ -2805,7 +3076,9 @@ def main():
                     listening.note_activity()  # a call counts as activity (§1.7 rule 2)
                 if listening.should_wait():
                     tlog(f"LISTEN: waiting for messages ({listening.minutes} min idle window)")
-                    close_reason = wait_for_mail(listening, _inject_midcycle_mail)
+                    step_clock.skip()  # waiting is not step time (§1.7 rule 1)
+                    with _HEARTBEAT.holding("mail"):
+                        close_reason = wait_for_mail(listening, _inject_midcycle_mail)
                     if close_reason == "mail":
                         continue
                     closing = listening.begin_closing(close_reason)
@@ -2826,6 +3099,10 @@ def main():
         tlog(messages[-1].content)
         _harness_crashed = True
 
+    # The cycle's own work is over; keep the heartbeat going while it is closed out.
+    _HEARTBEAT.set_hold("tools", False)
+    _HEARTBEAT.set_hold("closing", True)
+
     if live_runtime is not None:
         try:
             if live_runtime.awaiting_summary:
@@ -2839,24 +3116,7 @@ def main():
 
     result_messages = messages
 
-    total_tokens, prompt_tokens, completion_tokens = 0, 0, 0
-    for m in result_messages:
-        if not isinstance(m, AIMessage):
-            continue
-        # Standard LangChain usage_metadata (Gemini, OpenAI)
-        if hasattr(m, "usage_metadata") and m.usage_metadata:
-            prompt_tokens += m.usage_metadata.get("input_tokens", 0)
-            completion_tokens += m.usage_metadata.get("output_tokens", 0)
-            total_tokens += m.usage_metadata.get("total_tokens", 0)
-            continue
-        # Ollama: token data in response_metadata
-        rm = getattr(m, "response_metadata", None) or {}
-        if rm.get("eval_count") or rm.get("prompt_eval_count"):
-            p = rm.get("prompt_eval_count", 0) or 0
-            c = rm.get("eval_count", 0) or 0
-            prompt_tokens += p
-            completion_tokens += c
-            total_tokens += p + c
+    total_tokens, prompt_tokens, completion_tokens = usage_totals(result_messages)
 
     # Fallback: char-based estimation if no provider reported tokens
     if total_tokens == 0 and result_messages:
@@ -2891,7 +3151,21 @@ def main():
     # Hard step budget: finalize cycle + signal lifeline to respawn (exit 53).
     if budget_hard_stop:
         _finalize_cycle_step_budget(args.agent, step_count - call_steps, max_steps)
-        sys.exit(53)
+        sys.exit(EXIT_STEP_BUDGET)
+
+    # Time limit: the harness closes the cycle; Lifeline respawns on the same thread (exit 54).
+    if limit_stop:
+        minutes_run = max(1, int(round((time.time() - harness_started_epoch) / 60.0)))
+        _finalize_cycle_with_handoff(
+            args.agent, time_limit_summary(minutes_run, step_count - call_steps),
+            "TIME LIMIT", messages, last_tool_label,
+        )
+        sys.exit(EXIT_TIME_LIMIT)
+
+    # Repeated call: closed with what was repeated; counts toward the breaker (exit 55).
+    if loop_stop:
+        _finalize_cycle_with_handoff(args.agent, loop_stop, "LOOP", messages, last_tool_label)
+        sys.exit(EXIT_LOOP)
 
 if __name__ == "__main__":
     main()

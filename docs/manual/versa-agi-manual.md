@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.7.0 · October 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.8.0 · November 2026</p>
 </div>
 
 ## At a glance
@@ -212,10 +212,12 @@ In a chat with an agent, one line above the recording box shows where it is:
 - **You come first.** If the agent is chatting with someone else when you write, it tells them it will be right back, answers you, then returns to them.
 - **More than one person.** Several people can chat with the same agent at once. Each sees the status line in their own chat with the agent. You can ask the agent to bring someone in; their replies reach the same session. The agent keeps each conversation separate and shares one person's matters with another only when that serves your purpose.
 - **Tasks wait.** Tasks that fall due during a chat wait until it ends. The agent is woken for them afterwards.
-- **The time limit still holds.** Every cycle has a Timeout (Part 5). At 10 minutes left the agent is told to keep chatting; at 5 minutes left the chat closes and the agent hands off. Your next message starts a new cycle.
+- **The time limit still holds.** Every cycle has a time limit (Part 5). At about 15 minutes left the agent is told to keep chatting; at about 8 minutes left the chat closes and the agent hands off. A slow model reaches both points earlier. Your next message starts a new cycle.
 - **Five at a time.** At most 5 of your agents listen at once. Any others answer once per cycle, as before.
 
 On each agent's card in the app, a small icon shows the same state: resting, working, or here. The card's **ACTIVITY** section shows how many cycles the agent has run, a busy graph for the last 48 hours, its last 20 cycles (the newest is selected; tap another to see when it ran, how long, what woke it and how it ended), how its cycles ended (ok, timeout, runaway, step limit, crash), what woke it (messages, tasks, or a forced run), and how long its cycles take (average, longest, and how they spread). After an update, past cycles from the machine's history are filled in once, so the charts start with history, not empty.
+
+A cycle closed at its time limit shows as **Timeout**. A cycle stopped by the stall timer shows as **Stall**, and one stopped for repeating the same call shows as **Repeated call** (Part 5).
 
 Change the listening time in agitop under **Settings → Live Chat**. To end a chat early, use **💤 End chat** on the agent's window (Part 5).
 
@@ -230,7 +232,7 @@ Your Chief Orchestrator Agent can call you in the VersaVoice app when talking se
 <li>If you do not join in time, the agent sends a chat message instead.</li>
 </ol>
 
-A call lasts at most the length you set: 5, 10, 15, or 25 minutes. On a call longer than 5 minutes, the voice tells you when about five minutes are left, then carries on; near the end it wraps up. A call placed late in an agent's work cycle is limited to the time left before that cycle's Timeout (less a 3-minute margin); with under 5 minutes left the agent offers to call after its next wake instead.
+A call lasts at most the length you set: 5, 10, 15, or 25 minutes. On a call longer than 5 minutes, the voice tells you when about five minutes are left, then carries on; near the end it wraps up. A call placed late in an agent's work cycle is limited to the time left before that cycle's time limit (less a 3-minute margin); with under 5 minutes left the agent offers to call after its next wake instead.
 
 A call never approves anything. Approvals stay on the app's buttons and in agitop.
 
@@ -561,7 +563,11 @@ Choose **Save** to keep a change.
 <figcaption>The Chief Orchestrator Agent's window. The tabs along the top hold its logs, prompt, and pairing.</figcaption>
 </figure>
 
-On **Technical**, **Timeout** is the longest one cycle may run: 30 to 60 minutes, 45 by default. Other values are refused. At 10 minutes and at 5 minutes before it, the agent is told to wrap up and hand off. An update moves any older value outside the range to the nearest end of it.
+On **Technical**, **Time limit** is the longest one cycle may run: 30 to 240 minutes, 45 by default. Other values are refused. An update moves any older value outside the range to the nearest end of it.
+
+- **Before the limit.** The agent is told to wrap up at 15 minutes left, and to close at 8 minutes left. A slow model is told earlier.
+- **At the limit.** If the agent has not closed its cycle, the system closes it and writes a short summary and a handoff. The agent's next cycle starts on the scheduler's next pass and carries on in the same conversation.
+- **During a long cycle.** Every 30 minutes the system writes a check-in line to the cycle log and asks the agent to record where each task stands.
 
 **💤 End chat**, on **General** beside **Halt Agent**, closes the agent's live chat. It finishes its current reply, hands off, and rests until the next message. Nothing is halted. From the command line:
 
@@ -574,7 +580,30 @@ Agents come and go with your approval:
 - **New sub-agent.** The Chief Orchestrator Agent proposes one, and it appears as pending. Open it and choose **Approve &amp; Provision**. There is no "new agent" button; the Chief Orchestrator Agent proposes and you approve.
 - **Pause.** **Halt Agent** stops it, and **Re-activate Agent** brings it back. If the circuit breaker stopped it, use **Clear Circuit Breaker**.
 - **Remove.** **Request Removal**, then **Confirm Removal** or **Cancel Removal**.
-- **See what happened.** **Cycle Logs** shows each work cycle. **System Prompt** shows exactly what the agent was given.
+- **See what happened.** **Cycle Logs** shows each work cycle, with a check-in line for every 30 minutes it ran. **System Prompt** shows exactly what the agent was given.
+
+Two tabs can delete one agent's history. A thread is the conversation an agent carries from cycle to cycle for one piece of work. A summary frame is the short summary it keeps of an older part of that conversation; the **Summary Frames** tab lists them.
+
+<table>
+<thead><tr><th>Tab</th><th>Button</th><th>Deletes</th><th>Keeps</th></tr></thead>
+<tbody>
+<tr><th>Threads</th><td><strong>Drain Selected</strong></td><td>The selected thread: its saved conversation and its summary frames.</td><td>The agent's other threads, its cycle history, tasks, and memory.</td></tr>
+<tr><th>Threads</th><td><strong>Drain All</strong></td><td>Every thread of this agent, and all of its summary frames.</td><td>Its cycle history, tasks, and memory. Other agents.</td></tr>
+<tr><th>Cycle Logs</th><td><strong>Purge All Logs</strong></td><td>This agent's cycle log files and its cycle history: summaries, handoffs, token counts, and how each cycle ended. A cycle that is running keeps its record.</td><td>Threads, summary frames, tasks, and memory. Other agents' history.</td></tr>
+</tbody>
+</table>
+
+None of these can be undone. After a drain, the agent starts that thread fresh and can no longer look up the deleted frames. After a purge, its token totals restart, and its next cycle starts without a note about its last one.
+
+To give one agent a clean start without losing its lined-up work, wait until it is not in a cycle, then:
+
+<ol class="day">
+<li>On <strong>Threads</strong>, choose <strong>Drain All</strong>.</li>
+<li>On <strong>Cycle Logs</strong>, choose <strong>Purge All Logs</strong>.</li>
+<li>On the <strong>System</strong> tab, choose <strong>VACUUM</strong>. It gives the freed disk space back.</li>
+</ol>
+
+Its tasks, memory, awareness, messages, and instructions stay.
 
 ### Projects and tasks
 
@@ -625,6 +654,23 @@ Agents never get blanket root. The one exception is **COA Autonomous Mode**: pas
 ### Settings worth knowing
 
 **General** also holds the circuit breaker, which stops repeated failed cycles from spending money, plus web search, browser automation, and how often the machine syncs with VersaVoice.
+
+Web search runs on this machine and asks several public search engines at once. It needs no account. Agents search first, then read the page they need as plain text, and open the browser only for pages that need one.
+
+Public engines sometimes block automated searches. If results stop coming, you can add a search key from Brave or Exa, which are official search services with a free monthly credit:
+
+- In **API Keys**, enter it under **Brave Search API Key** or **Exa API Key** and save. Saving refreshes search and can take a minute or two.
+- Or send the key to your COA and ask it to turn on better search. It sets the key and does not keep or repeat it.
+
+Enter `off` in place of a key to remove it.
+
+Three stops end a single cycle that has gone wrong. Each counts as a failed cycle for the circuit breaker:
+
+- **Stall.** If the model gives no reply for 10 minutes (20 on a local model), the cycle is stopped. The agent's tasks stay as they are, and it tries again when work is due.
+- **Repeated call.** If the agent makes the same call and gets the same result three times, it is told to do something different. At six times, the cycle is closed with a summary and a handoff.
+- **Runaway.** If a cycle writes more output in 15 minutes than the agent's limit allows, it is stopped, the agent's tasks are frozen, and you are told.
+
+A cycle closed at its time limit is not a failure and does not count. With the stock settings, five failed cycles in a row, or 20 in an hour, pause the agent and you are told. **Clear Circuit Breaker** on the agent's window brings it back.
 
 **Live Call** sets up calls to you:
 
@@ -747,7 +793,7 @@ The agent is the hammer, not the carpenter. What you build with it, and the cred
 <dt>Script task</dt><dd>A scheduled program run with no agent and no tokens.</dd>
 <dt>Sentinel</dt><dd>A remote client install that joins a team you already have.</dd>
 <dt>Skill</dt><dd>A markdown playbook loaded when the work needs it.</dd>
-<dt>Timeout</dt><dd>The longest one cycle may run, 30 to 60 minutes per agent. The agent is warned at 10 and 5 minutes before it.</dd>
+<dt>Time limit</dt><dd>The longest one cycle may run, 30 to 240 minutes per agent. The agent is warned at 15 and 8 minutes before it. At the limit the system closes the cycle with a summary and a handoff.</dd>
 <dt>uGPN</dt><dd>Unified Global Production Network.</dd>
 <dt>Utility model</dt><dd>A one-shot generation, not an agent session.</dd>
 <dt>VBA</dt><dd>Versa Business Admin.</dd>
@@ -810,5 +856,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.7.0, October 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.8.0, November 2026.</p>
 </div>

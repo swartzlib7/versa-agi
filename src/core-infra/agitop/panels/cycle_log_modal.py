@@ -608,6 +608,48 @@ def purge_agent_cycle_log_files(agent_name: str) -> tuple[int, Optional[str]]:
     return deleted, None
 
 
+def purge_confirm_text(agent_name: str, cycles_dir: str, files: int, rows) -> str:
+    """What Purge All Logs is about to delete for this agent, with the numbers."""
+    rows_text = "its cycle records" if rows is None else f"{rows} cycle record(s)"
+    return (
+        f"[bold red]Purge all cycle logs for {agent_name}?[/]\n\n"
+        "[bold]This will delete:[/]\n"
+        f"  • [bold]{files}[/] cycle log file(s) "
+        f"([bold]result_*.json[/], [bold]result_*.log[/]) under [dim]{cycles_dir}[/]\n"
+        f"  • [bold]{rows_text}[/] of {agent_name} in the cycle log database: "
+        "summaries, handoffs, token counts, exit codes, check-in lines\n\n"
+        "[bold]After this:[/]\n"
+        f"  • {agent_name}'s token totals restart\n"
+        "  • its next wake has no \"since your last cycle\" block\n"
+        "  • a cycle that is running now keeps its record\n\n"
+        "[bold]Not affected:[/] threads ([bold]checkpoints.db[/]), summary frames, tasks, "
+        "memory, and every other agent.\n"
+    )
+
+
+def purge_agent_cycle_rows(reader, agent_name: str):
+    """The agent's rows in cycles.db. None when they could not be deleted."""
+    if reader is None:
+        return None
+    return reader.delete_agent_cycles(agent_name)
+
+
+def purge_result_message(agent_name: str, files: int, rows, err: Optional[str]) -> tuple[str, str]:
+    """(text, severity) for the notice after a purge."""
+    parts = [f"{files} log file(s)"]
+    severity = "information"
+    if rows is None:
+        parts.append("cycle rows NOT deleted (check cycles.db permissions)")
+        severity = "warning"
+    else:
+        parts.append(f"{rows} cycle row(s)")
+    msg = f"Purged for {agent_name}: " + ", ".join(parts)
+    if err:
+        msg += f" ({err})"
+        severity = "warning"
+    return msg, severity
+
+
 class PurgeLogsConfirmModal(ModalScreen):
     """Confirmation before deleting agent cycle text log files."""
 
@@ -643,14 +685,11 @@ class PurgeLogsConfirmModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         cycles_dir = _agent_cycles_dir(self.agent_name)
+        files = len(_list_purgeable_cycle_logs(cycles_dir))
+        reader = getattr(self.app, "agent_reader", None)
+        rows = reader.get_agent_cycles_count(self.agent_name) if reader is not None else None
         with Vertical(id="cycle-log-purge-dialog"):
-            yield Static(
-                f"[bold red]Purge all cycle logs for {self.agent_name}?[/]\n\n"
-                f"Deletes [bold]result_*.json[/] and [bold]result_*.log[/] under:\n"
-                f"[dim]{cycles_dir}[/]\n\n"
-                "Removes all historical cycle log files shown in the picklist. "
-                "Checkpoint threads ([bold]checkpoints.db[/]) are not affected.\n"
-            )
+            yield Static(purge_confirm_text(self.agent_name, cycles_dir, files, rows))
             yield Static("[bold]This cannot be undone.[/]")
             with Horizontal(id="cycle-log-purge-actions"):
                 yield Button("Purge", variant="error", id="btn-confirm-purge-logs")
@@ -666,18 +705,15 @@ class PurgeLogsConfirmModal(ModalScreen):
         if event.button.id != "btn-confirm-purge-logs":
             return
         deleted, err = purge_agent_cycle_log_files(self.agent_name)
+        # The agent's rows in cycles.db go with its log files (state_spawn_context.md §1.5 rule 5).
+        rows = purge_agent_cycle_rows(getattr(self.app, "agent_reader", None), self.agent_name)
         parent = self._parent
         self.app.pop_screen()
-        if err and deleted == 0:
+        if err and deleted == 0 and not rows:
             self.app.notify(err, title="Purge Failed", severity="error")
             return
-        if deleted:
-            msg = f"Purged {deleted} log file(s) for {self.agent_name}"
-            if err:
-                msg += f" ({err})"
-            self.app.notify(msg, title="Cycle Logs", severity="information")
-        else:
-            self.app.notify(f"No cycle log files found for {self.agent_name}", title="Cycle Logs")
+        msg, severity = purge_result_message(self.agent_name, deleted, rows, err)
+        self.app.notify(msg, title="Cycle Logs", severity=severity)
         if parent is not None and hasattr(parent, "refresh_cycle_log_after_purge"):
             parent.refresh_cycle_log_after_purge()
         elif parent is not None and getattr(parent, "_cycle_embed", None):

@@ -50,7 +50,7 @@ Typical PU responsibilities:
 | Models | Prefer models via dashboard / routing prefs; respect COA model allowlist |
 | Budgets | Token budgets and spend awareness in agitop |
 | Connections | VersaVoice contacts / API exposure for agents that need them |
-| Credentials | API keys via agitop **🔑 API KEYS** or `sudo agictl system set-key …` |
+| Credentials | API keys via agitop **🔑 API KEYS** or `sudo agictl system set-key …`. Optional web search keys (Brave Search, Exa) are in the same dialog; COA can also set one you give it (`agictl search set-key`) |
 | Escapes | Install system packages agents request; grant elevated access **deliberately** |
 
 Agents **cannot** `sudo` arbitrary commands (only approved `agictl` paths). They build in their workspace; they do **not** own the monitoring layer.
@@ -169,7 +169,8 @@ Important for PU:
 
 - On a **client** talking to a remote server, `localhost:<port>` is usually the **SSH tunnel to the remote inference server**, not a GPU on the laptop.
 - Config lives under `/etc/versa-agi/` (deployed) and the PU’s `~/.versa-agi/` clone/symlink after install.
-- Rotate keys via agitop or `sudo agictl system set-key <provider> <key>` — avoid pasting keys into chat.
+- Rotate keys via agitop or `sudo agictl system set-key <provider> <key>` — avoid pasting model provider keys into chat.
+- Web search keys (Brave Search, Exa) are optional. Enter them in agitop **API KEYS**, or give one to COA and ask it to set it; COA does not keep or repeat the key.
 - macOS: OrbStack / Lima Ubuntu 24.04 recommended for native Linux isolation.
 
 Do **not** walk the PU through undocumented low-level Docker privilege grants. If an agent needs isolation for workloads, prefer the product’s recommended safe patterns; warn that Docker group membership is effectively root.

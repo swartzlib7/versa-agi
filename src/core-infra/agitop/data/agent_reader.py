@@ -199,6 +199,32 @@ class AgentReader:
         except Exception:
             return []
 
+    def delete_frames(self, agent_name: str, thread_id: str = "") -> Optional[int]:
+        """Delete an agent's frames of every status: one thread, or all when blank.
+
+        Called when the PU drains a thread (state_spawn_context.md §1.8 rule 6).
+        Returns the number deleted, 0 when there is no frames table, None on failure.
+        """
+        query = "DELETE FROM frames WHERE agent_name = ?"
+        args: tuple = (agent_name,)
+        if thread_id:
+            query += " AND thread_id = ?"
+            args = (agent_name, thread_id)
+        try:
+            conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
+            try:
+                deleted = conn.execute(query, args).rowcount
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e):
+                    raise
+                deleted = 0
+            finally:
+                conn.close()
+            return deleted
+        except Exception:
+            return None
+
     def get_last_cycle(self, agent_name: str = "") -> Optional[dict]:
         """Get the most recent cycle from cycles.db, optionally filtered by agent."""
         if agent_name:
@@ -211,8 +237,8 @@ class AgentReader:
                 "COALESCE(tokens_cached, 0) as tokens_cached, "
                 "COALESCE(tokens_total, 0) as tokens_total, "
                 "json_output_path "
-                "FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1",
-                (f"{agent_name}-%",)
+                "FROM cycles WHERE id GLOB ? ORDER BY started_at DESC LIMIT 1",
+                (f"{agent_name}-[0-9]*",)
             )
         else:
             rows = self._query_cycles(
@@ -270,8 +296,8 @@ class AgentReader:
         rows = self._query_cycles(
             "SELECT COALESCE(SUM(tokens_total), 0) as total "
             "FROM cycles "
-            "WHERE id LIKE ? AND started_at >= strftime('%Y-%m-01', 'now')",
-            (f"{agent_name}-%",)
+            "WHERE id GLOB ? AND started_at >= strftime('%Y-%m-01', 'now')",
+            (f"{agent_name}-[0-9]*",)
         )
         return rows[0]["total"] if rows else 0
 
@@ -301,6 +327,48 @@ class AgentReader:
         except Exception:
             return False
 
+    def delete_agent_cycles(self, agent_name: str, keep_running: bool = True) -> Optional[int]:
+        """Delete one agent's cycle rows (state_spawn_context.md §1.5 rule 5).
+
+        ``GLOB '<agent>-[0-9]*'`` so `web` never matches `web-dev`. With
+        ``keep_running`` the newest open row stays when the agent's status is
+        `active`: that row belongs to the cycle running now. Frames are not
+        touched. Returns the number deleted, None on failure.
+        """
+        pattern = f"{agent_name}-[0-9]*"
+        try:
+            keep = None
+            if keep_running:
+                aconn = db_connect.connect_compat(f"file:{self.agents_db_path}?mode=ro", uri=True, timeout=5)
+                try:
+                    row = aconn.execute("SELECT status FROM agents WHERE name = ?", (agent_name,)).fetchone()
+                finally:
+                    aconn.close()
+                running = bool(row) and (row[0] or "") == "active"
+            else:
+                running = False
+            conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
+            try:
+                if running:
+                    found = conn.execute(
+                        "SELECT id FROM cycles WHERE id GLOB ? AND ended_at IS NULL "
+                        "ORDER BY started_at DESC, id DESC LIMIT 1", (pattern,),
+                    ).fetchone()
+                    keep = found[0] if found else None
+                if keep:
+                    deleted = conn.execute(
+                        "DELETE FROM cycles WHERE id GLOB ? AND id != ?", (pattern, keep),
+                    ).rowcount
+                else:
+                    deleted = conn.execute("DELETE FROM cycles WHERE id GLOB ?", (pattern,)).rowcount
+                conn.commit()
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+            return deleted
+        except Exception:
+            return None
+
     def get_total_cycles_count(self) -> int:
         """Count total executions historically."""
         rows = self._query_cycles("SELECT COUNT(id) as count FROM cycles")
@@ -308,7 +376,7 @@ class AgentReader:
 
     def get_agent_cycles_count(self, agent_name: str) -> int:
         """Count total executions historically for a specific agent."""
-        rows = self._query_cycles("SELECT COUNT(id) as count FROM cycles WHERE id LIKE ?", (f"{agent_name}-%",))
+        rows = self._query_cycles("SELECT COUNT(id) as count FROM cycles WHERE id GLOB ?", (f"{agent_name}-[0-9]*",))
         return rows[0]["count"] if rows else 0
 
     def get_recent_cycle_summaries(self, agent_name: str, limit: int = 8) -> list[str]:
@@ -326,9 +394,9 @@ class AgentReader:
             "SELECT summary, wake_reason, ts FROM ("
             "  SELECT COALESCE(summary, '(no summary)') AS summary, wake_reason, "
             "         datetime(started_at, 'localtime') AS ts, started_at "
-            "  FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT ?"
+            "  FROM cycles WHERE id GLOB ? ORDER BY started_at DESC LIMIT ?"
             ") ORDER BY started_at ASC",
-            (f"{agent_name}-%", limit * 3)
+            (f"{agent_name}-[0-9]*", limit * 3)
         )
         collapsed: list[list] = []  # [ts, summary, reason, count]
         for r in rows:
@@ -345,15 +413,37 @@ class AgentReader:
             for ts, summary, reason, count in collapsed
         ]
 
-    def update_last_cycle_tokens(self, agent_name: str, t_in: int, t_out: int, t_think: int, t_total: int, exit_code: int = None, t_cached: int = 0, session_path: str = None) -> bool:
+    # Summary Lifeline writes on a row the agent did not close (state_spawn_context.md §1.5).
+    LIFELINE_CLOSE_NOTES = {
+        "ok": "[Lifeline] The cycle ended without `cycle end`. No summary was written.",
+        "timeout": "[Lifeline] Stopped at the time limit before the cycle was closed. No summary was written.",
+        "runaway": "[Lifeline] Halted by the runaway monitor. No summary was written.",
+        "step_limit": "[Lifeline] Step budget reached before the cycle was closed. No summary was written.",
+        "crash": "[Lifeline] The cycle stopped on an error before it was closed. No summary was written.",
+        "stall": "[Lifeline] Stopped by the stall timer: no model reply within the stall limit. No summary was written.",
+        "loop": "[Lifeline] Stopped: the same tool call was repeated. No summary was written.",
+    }
+
+    def update_last_cycle_tokens(self, agent_name: str, t_in: int, t_out: int, t_think: int, t_total: int, exit_code: int = None, t_cached: int = 0, session_path: str = None, cycle_id: str = None, outcome: str = None) -> bool:
+        """Record tokens and exit code on one cycle row.
+
+        ``cycle_id``: the spawn's own row. Without it, the agent's newest row.
+        ``outcome``: Lifeline's outcome. When given and the row is still open,
+        the row is closed; an empty summary becomes a Lifeline note.
+        """
         try:
             conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT id, execution_model FROM cycles WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1",
-                (f"{agent_name}-%",)
-            )
-            row = cursor.fetchone()
+            row = None
+            if cycle_id:
+                row = conn.execute(
+                    "SELECT id, execution_model FROM cycles WHERE id=?", (cycle_id,)
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT id, execution_model FROM cycles WHERE id GLOB ? ORDER BY started_at DESC LIMIT 1",
+                    (f"{agent_name}-[0-9]*",)
+                ).fetchone()
             if row:
                 cycle_id = row["id"]
                 execution_model = row["execution_model"] or ""
@@ -386,6 +476,14 @@ class AgentReader:
                            cost_usd_estimated=?, pricing_source=? WHERE id=?""",
                         (t_in, t_out, t_think, t_cached, t_total, session_path,
                          cost_usd, pricing_source, cycle_id)
+                    )
+                if outcome:
+                    note = self.LIFELINE_CLOSE_NOTES.get(outcome, self.LIFELINE_CLOSE_NOTES["crash"])
+                    conn.execute(
+                        """UPDATE cycles SET ended_at=datetime('now'),
+                           summary=CASE WHEN summary IS NULL OR TRIM(summary)='' THEN ? ELSE summary END
+                           WHERE id=? AND ended_at IS NULL""",
+                        (note, cycle_id)
                     )
                 conn.commit()
             conn.close()

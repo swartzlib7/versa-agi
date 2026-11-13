@@ -838,28 +838,28 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
                 yield Static("[cyan]Token Budget (monthly)[/] — max tokens per month (0 = unlimited)")
                 yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Timeout (minutes, 30–60)[/] — max runtime before agent is killed")
+                yield Static("[cyan]Time limit (minutes, 30–240)[/] — the cycle is closed at this point and resumes on the next spawn")
                 yield Input(value=current_timeout, placeholder="e.g. 45", id="input-timeout", type="integer")
 
     if not is_cloud and ctx_options:
         with Horizontal(classes="setup-form-row"):
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Timeout (minutes, 30–60)[/] — max runtime before agent is killed")
+                yield Static("[cyan]Time limit (minutes, 30–240)[/] — the cycle is closed at this point and resumes on the next spawn")
                 yield Input(value=current_timeout, placeholder="e.g. 45", id="input-timeout", type="integer")
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
+                yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines in 15 minutes before freeze")
                 yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
         with Horizontal(classes="setup-form-row"):
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
+                yield Static("[cyan]Runaway Size Threshold (KB)[/] — max cycle log growth in 15 minutes before freeze")
                 yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
     else:
         with Horizontal(classes="setup-form-row"):
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines before freeze")
+                yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines in 15 minutes before freeze")
                 yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")
             with Vertical(classes="setup-form-col"):
-                yield Static("[cyan]Runaway Size Threshold (KB)[/] — max result/session file size before freeze")
+                yield Static("[cyan]Runaway Size Threshold (KB)[/] — max cycle log growth in 15 minutes before freeze")
                 yield Input(value=current_size_threshold, placeholder="e.g. 512", id="input-size-threshold", type="integer")
 
     yield Static("")

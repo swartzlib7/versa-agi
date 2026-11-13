@@ -6,6 +6,57 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [3.8.0] — 2026-11-13
+
+### Long-running cycles
+
+#### Added
+- **Time limit up to 4 hours** — An agent's time limit can be set from 30 to 240 minutes (default 45). agitop → agent → Technical, or `agictl agent set-timeout <name> <minutes>`.
+- **Cycles are closed at the limit, not killed** — When an agent reaches its time limit, the harness closes the cycle with a summary and a handoff, and the agent carries on in the same thread on its next spawn. Token counts and the end time are recorded.
+- **Stall timer** — A cycle whose model has not answered for 10 minutes (20 on a local model) is stopped and retried. Repeated stalls trip the circuit breaker.
+- **Repeated calls are caught** — An agent that makes the same tool call with the same result is told at the third time and stopped at the sixth.
+- **Check-in every 30 minutes** — In a long cycle the agent is asked to record where each task stands, and a line with time, steps and tokens is added to the cycle log.
+- **Stall and Repeated call on the agent card** — In the VersaVoice app, a cycle stopped by the stall timer shows as **Stall** and one stopped for repeating a call as **Repeated call**, in place of **Crash**. Needs the matching VersaVoice app and cloud update; until then both show as Crash.
+
+#### Changed
+- **Time warnings fit the agent's speed** — Warnings come at about 15 and 8 minutes before the limit (were 10 and 5), and earlier for an agent whose steps are slow, such as a local model.
+- **Runaway check looks at the last 15 minutes** — The runaway thresholds now measure output in the last 15 minutes, so a long healthy cycle is not halted for its total.
+- **Live chat closes at the last time warning** — About 8 minutes before the limit (was 5).
+
+### Agents
+
+#### Added
+- **Reset one agent's history** — agitop → agent → Threads → **Drain All**, then Cycle Logs → **Purge All Logs**, then System → **VACUUM**. The agent keeps its tasks, memory, messages and instructions.
+
+#### Changed
+- **Drain also deletes summary frames** — Draining a thread deletes its summary frames with it. They cannot be recovered.
+- **Purge All Logs also clears the agent's cycle history** — Besides the log files, it deletes that agent's cycle records: summaries, handoffs, token counts. Other agents are not affected.
+- **Confirmations show what will be deleted** — Drain and Purge All Logs list what goes and what stays, with the number of frames, files and records.
+
+#### Fixed
+- **Agents had lost their project and contact memory at wake** — Project memory, what an agent remembers about each contact, and contact profiles (language, voice) were not being given to agents when they woke. They are again.
+- **Agents with similar names** — An agent whose name begins another agent's name (for example `web` and `web-dev`) could be counted with the other's failed cycles, token totals and last-cycle note. Each agent now only sees its own.
+- **Summaries of long conversations** — An agent's earlier turns were summarized more than once and with the wrong times. Each turn is now summarized once.
+- **Recent turns lost after a time warning** — In a long conversation, a time warning or a new message could leave the model without its recent turns.
+- **Cycle history** — One `cycle end` could overwrite several unfinished cycle records, and a stopped cycle showed the token count of an earlier one.
+
+### Web access
+
+#### Changed
+- **Search uses more engines** — The local SearXNG also asks Google, Bing, Qwant and Yahoo, and is refreshed on every update.
+- **Browser reads the whole page** — `agictl browser goto` returns the full page text, waits for scripts to finish, and reads long pages in parts with `--offset`. Agents can set a user agent with `--user-agent`.
+
+#### Added
+- **Read a page without a browser** — `agictl search read "<url>"` returns a page's readable text in a fraction of a second. Agents search, then read, and open the browser only when a page needs it. A new `web_research` skill teaches the order.
+- **Optional search API keys** — Brave Search and Exa keys add official search APIs inside SearXNG. Enter them in agitop → **API Keys**, or give one to COA and ask it to turn on better search. `[search] contact_url` in `setup.ini` turns on Wikipedia and Wikidata.
+- **Search status** — `agictl search status` shows which engines answer and whether a key is set.
+
+- **New installations: browser on for COA** — With the headless browser turned on at install, COA can use it from its first cycle. Other agents are still switched on one by one.
+
+#### Fixed
+- **Search returned nothing** — With its two default engines blocked, search had no other source.
+- **Browser returned one line** — `browser goto` and `browser click` returned only the first line of a page.
+
 ## [3.7.0] — 2026-11-09
 
 ### Live Chat

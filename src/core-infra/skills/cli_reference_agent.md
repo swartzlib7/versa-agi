@@ -286,13 +286,20 @@ agictl awareness get <entry_id>
 
 ---
 
-## 11. search — Web Search
+## 11. search — Web Search and Page Reading
 
 ```bash
-agictl search web "<query>"                           # Search the web via local SearXNG
+agictl search web "<query>"                           # Find pages: title, URL, snippet, engine
 agictl search web "<query>" --count 10                # Return up to 10 results (default: 5)
 agictl search web "<query>" --categories science      # Filter by search category (default: general)
+agictl search read "<url>"                            # Read one page as text, no browser (first 8000 characters)
+agictl search read "<url>" --offset <next_offset>     # Read on from where the last reply stopped
+agictl search read "<url>" --max-chars 20000          # Return more per call (limit 20000)
+agictl search read "<url>" --links                    # Also list the page's links
+agictl search status                                  # Which engines answer a test search, and which API keys are set
 ```
+
+Order of use: `search web` to find, `search read` to read, `browser goto` only when a page needs scripts, a click or a form (the `read` reply then carries a `hint`). Full guidance: the `web_research` skill.
 
 > **Availability**: Search requires SearXNG to be installed and `setup.ini [search] enabled=true`. If search is disabled, the harness tool `agictl_search` will not be available.
 
@@ -322,7 +329,8 @@ agictl view video workspace/clips/demo.mp4            # Validate a local video
 ## 13. browser — Headless Browser
 
 ```bash
-agictl browser goto "<url>"                           # Load page, return text content
+agictl browser goto "<url>"                           # Load page, return text content (first 8000 characters)
+agictl browser goto "<url>" --offset <next_offset>    # Read on when the reply says "truncated": true
 agictl browser goto "<url>" --screenshot              # Load page + save screenshot
 agictl browser click "<url>" "<selector>"             # Navigate then click an element
 agictl browser fill "<url>" "<selector>" "<value>"    # Navigate then fill a form field

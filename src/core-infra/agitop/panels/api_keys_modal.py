@@ -58,6 +58,29 @@ def _read_env_key(env_var: str) -> str:
     return ""
 
 
+def _read_search_key(ini_key: str, ini_path: str = "/etc/versa-agi/setup.ini") -> str:
+    """Read a search API key from setup.ini [search] (state_web_access.md §1.2 rule 8)."""
+    import configparser
+    try:
+        config = configparser.ConfigParser()
+        config.read(ini_path)
+        return config.get("search", ini_key, fallback="").strip()
+    except Exception:
+        return ""
+
+
+def search_key_status(key: str) -> str:
+    """Status line under a search key field."""
+    if key:
+        return f"[green]✅ Set[/] — {_mask_key(key)}  [dim](type off to remove)[/]"
+    return "[dim]Not set — optional. Search works without it.[/]"
+
+
+# Seconds to wait for set-key. A search key refreshes SearXNG (image pull, container restart).
+SEARCH_KEY_TYPES = ("brave_search", "exa")
+SEARCH_KEY_TIMEOUT = 450
+
+
 def _read_xai_key() -> str:
     return _read_env_key("XAI_API_KEY")
 
@@ -84,6 +107,24 @@ def _is_proxy_enabled() -> bool:
     except Exception:
         pass
     return False
+
+
+def search_key_change(typed: str, current: str):
+    """What to send to set-key for a search key field: the new key, "off", or None for no change."""
+    typed = (typed or "").strip()
+    if not typed:
+        return None
+    if typed.lower() == "off":
+        return "off" if current else None
+    return typed if typed != current else None
+
+
+def search_key_result_line(key_type: str, result: dict) -> str:
+    """Feedback line after a search key was saved."""
+    what = "saved" if result.get("key_set") else "removed"
+    note = str(result.get("note") or "").strip()
+    mark = "[green]✅" if result.get("applied") else "[yellow]⚠"
+    return f"{mark} {key_type}[/] — key {what}. {note}".rstrip()
 
 
 class ApiKeysModal(ModalScreen):
@@ -130,6 +171,13 @@ class ApiKeysModal(ModalScreen):
                             id="input-anthropic-key",
                         )
                         yield Static("", id="status-anthropic")
+                        yield Static("[b]Brave Search API Key[/]  [dim](web search — optional)[/]")
+                        yield Input(
+                            placeholder="Enter Brave Search API Key...",
+                            password=True,
+                            id="input-brave-search-key",
+                        )
+                        yield Static("", id="status-brave-search")
 
                     with Vertical(classes="api-keys-col"):
                         yield Static("[b]VersaVoice API Token[/]  [dim](Sponsor Token)[/]")
@@ -153,7 +201,19 @@ class ApiKeysModal(ModalScreen):
                             id="input-openrouter-key",
                         )
                         yield Static("", id="status-openrouter")
+                        yield Static("[b]Exa API Key[/]  [dim](web search — optional)[/]")
+                        yield Input(
+                            placeholder="Enter Exa API Key...",
+                            password=True,
+                            id="input-exa-key",
+                        )
+                        yield Static("", id="status-exa")
 
+                yield Static(
+                    "[dim]Search keys add an official search API inside the local SearXNG. "
+                    "Saving one refreshes SearXNG and can take a minute or two.[/]",
+                    id="api-keys-search-note",
+                )
                 yield Static("", id="api-keys-feedback")
                 # Bootstrap COA picker mounts here after keys are usable
                 yield Vertical(id="coa-bootstrap-section")
@@ -187,6 +247,8 @@ class ApiKeysModal(ModalScreen):
         openai_key = _read_openai_key()
         anthropic_key = _read_anthropic_key()
         openrouter_key = _read_openrouter_key()
+        brave_search_key = _read_search_key("brave_api_key")
+        exa_key = _read_search_key("exa_api_key")
         proxy_enabled = _is_proxy_enabled()
 
         g_status = (
@@ -216,6 +278,8 @@ class ApiKeysModal(ModalScreen):
         self.query_one("#status-openrouter", Static).update(
             f"   {_provider_status(openrouter_key)}"
         )
+        self.query_one("#status-brave-search", Static).update(f"   {search_key_status(brave_search_key)}")
+        self.query_one("#status-exa", Static).update(f"   {search_key_status(exa_key)}")
 
         if self._bootstrap:
             self.query_one("#api-keys-status", Static).update(
@@ -233,6 +297,8 @@ class ApiKeysModal(ModalScreen):
             "openai": openai_key,
             "anthropic": anthropic_key,
             "openrouter": openrouter_key,
+            "brave_search": brave_search_key,
+            "exa": exa_key,
         }
 
     async def _rebuild_coa_section(self) -> None:
@@ -351,6 +417,12 @@ class ApiKeysModal(ModalScreen):
             changes.append(("anthropic", new_anthropic))
         if new_openrouter and new_openrouter != self._original.get("openrouter", ""):
             changes.append(("openrouter", new_openrouter))
+        # Search keys (state_web_access.md §1.2 rule 8). `off` removes one that is set.
+        for key_type, field in (("brave_search", "input-brave-search-key"), ("exa", "input-exa-key")):
+            typed = self.query_one(f"#{field}", Input).value.strip()
+            change = search_key_change(typed, self._original.get(key_type, ""))
+            if change is not None:
+                changes.append((key_type, change))
         return changes
 
     def _persist_key_changes(
@@ -367,10 +439,12 @@ class ApiKeysModal(ModalScreen):
                     ["sudo", "agictl", "system", "set-key", key_type, value],
                     capture_output=True,
                     text=True,
-                    timeout=timeout,
+                    timeout=SEARCH_KEY_TIMEOUT if key_type in SEARCH_KEY_TYPES else timeout,
                 )
                 result = json.loads(proc.stdout) if proc.stdout else {}
-                if result.get("success"):
+                if result.get("success") and key_type in SEARCH_KEY_TYPES:
+                    results.append(search_key_result_line(key_type, result))
+                elif result.get("success"):
                     count = result.get("files_updated", 0)
                     results.append(f"[green]✅ {key_type}[/] — {count} file(s) updated")
                 else:
@@ -390,6 +464,8 @@ class ApiKeysModal(ModalScreen):
             "input-openai-key",
             "input-anthropic-key",
             "input-openrouter-key",
+            "input-brave-search-key",
+            "input-exa-key",
         ):
             self.query_one(f"#{fid}", Input).value = ""
 

@@ -107,7 +107,12 @@ class TestLifelineWiring(unittest.TestCase):
     def test_outcome_map(self):
         block = self.text[self.text.index("# ─── Activity end"):self.text.index("_vv_activity end")]
         pairs = dict(re.findall(r"(\d+|\*)\)\s+ACTIVITY_OUTCOME=\"(\w+)\"", block))
-        self.assertEqual(pairs, {"0": "ok", "124": "timeout", "99": "runaway", "53": "step_limit", "*": "crash"})
+        self.assertEqual(pairs, {"0": "ok", "124": "timeout", "54": "timeout", "99": "runaway",
+                                 "53": "step_limit", "97": "stall", "55": "loop", "*": "crash"})
+
+    def test_hard_cap_sent_to_versavoice_is_the_backstop_time(self):
+        # state_long_cycles.md §1.8: the cycle may run to the time limit plus the grace.
+        self.assertIn('--hard-cap-epoch "$(( DEADLINE_EPOCH + TIMEOUT_GRACE_MIN * 60 ))"', self.text)
 
 
 class TestLifelineListening(unittest.TestCase):
@@ -127,11 +132,10 @@ class TestLifelineListening(unittest.TestCase):
     def test_setting_values_and_exports(self):
         self.assertIn("0|5|10|15|30) ;;", self.text)
         self.assertIn("export VERSA_AGENT_IDS=", self.text)
-        self.assertIn("export VERSA_TURN_MARKER=", self.text)
 
-    def test_monitor_gets_marker(self):
-        self.assertIn('"${BASELINE_SESSION_SIZE}" "${TURN_MARKER}" &', self.text)
-        self.assertIn("line_count=$(( line_count - line_base ))", self.text)
+    def test_no_turn_marker_since_the_rolling_window(self):
+        # state_long_cycles.md §1.4 rule 4: a rolling window already forgets old output.
+        self.assertNotIn("TURN_MARKER", self.text)
 
 
 if __name__ == "__main__":

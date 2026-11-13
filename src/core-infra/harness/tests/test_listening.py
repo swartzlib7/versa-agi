@@ -13,7 +13,7 @@ from unittest.mock import patch
 CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, CORE_INFRA)
 
-from harness.deadline import FIVE_MINUTES, TEN_MINUTES, DeadlineWarnings  # noqa: E402
+from harness.deadline import CLOSE_NOW, WRAP_UP, DeadlineWarnings  # noqa: E402
 from harness.listening import (  # noqa: E402
     CLOSE_LEAD_SECONDS,
     ListeningWindow,
@@ -62,10 +62,9 @@ class TestWindow(unittest.TestCase):
         env = {}
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        marker = os.path.join(tmp.name, "live_turn_marker")
         w = ListeningWindow(minutes, clock.now + deadline_in, pu_ids={PU}, agent_ids=AGENTS,
-                            clock=clock, env=env, marker_path=marker)
-        return w, clock, env, marker
+                            clock=clock, env=env)
+        return w, clock, env, None
 
     def test_off_never_opens(self):
         w, _, env, _ = self._window(minutes=0)
@@ -74,17 +73,15 @@ class TestWindow(unittest.TestCase):
         self.assertNotIn("VERSA_LISTENING", env)
 
     def test_agent_mail_does_not_open(self):
-        w, _, _, marker = self._window()
+        w, _, _, _ = self._window()
         self.assertFalse(w.note_rows([_row("sub_clerk"), _row("clerk", "internal")]))
         self.assertFalse(w.opened)
-        self.assertFalse(os.path.exists(marker))
 
-    def test_person_opens_sets_env_and_marker(self):
-        w, _, env, marker = self._window()
+    def test_person_opens_and_sets_env(self):
+        w, _, env, _ = self._window()
         self.assertTrue(w.note_rows([_row("sub_clerk"), _row("steve")]))
         self.assertTrue(w.should_wait())
         self.assertEqual(env, {"VERSA_LISTENING": "open", "VERSA_LISTEN_MINUTES": "15"})
-        self.assertTrue(os.path.exists(marker))
 
     def test_idle_closes_and_activity_resets(self):
         w, clock, _, _ = self._window(minutes=5)
@@ -102,6 +99,23 @@ class TestWindow(unittest.TestCase):
         w.note_rows([_row(PU)])
         clock.now += 20 * 60 - CLOSE_LEAD_SECONDS
         self.assertEqual(w.close_reason(), "deadline")
+
+    def test_window_closes_at_the_last_warning_for_slow_steps(self):
+        # state_long_cycles.md §1.1 rule 3: the close follows the warning's real lead.
+        clock = Clock()
+        w = ListeningWindow(30, clock.now + 60 * 60, pu_ids={PU}, agent_ids=AGENTS,
+                            clock=clock, env={}, close_lead=lambda: 12 * 60)
+        w.note_rows([_row(PU)])
+        clock.now += 47 * 60
+        w.note_activity()
+        self.assertIsNone(w.close_reason())
+        clock.now += 61
+        self.assertEqual(w.close_reason(), "deadline")
+
+    def test_close_lead_is_never_shorter_than_eight_minutes(self):
+        w = ListeningWindow(30, 0, close_lead=lambda: 10)
+        self.assertEqual(w.close_lead(), CLOSE_LEAD_SECONDS)
+        self.assertEqual(CLOSE_LEAD_SECONDS, 480)
 
     def test_closing_sets_env_and_stops_waiting(self):
         w, _, env, _ = self._window()
@@ -172,19 +186,19 @@ class TestPromptCopy(unittest.TestCase):
 
 
 class TestDeadlineWhileListening(unittest.TestCase):
-    def test_ten_minute_listening_variant(self):
+    def test_wrap_up_listening_variant(self):
         clock = Clock()
         w = DeadlineWarnings(clock.now + 45 * 60, started_epoch=clock.now, clock=clock)
-        clock.now += 35 * 60
+        clock.now += 30 * 60
         stage, text = w.due(listening=True)
-        self.assertEqual(stage, TEN_MINUTES)
+        self.assertEqual(stage, WRAP_UP)
         self.assertIn("Keep chatting", text)
         self.assertNotIn("cycle end", text)
         stage, text = w.due(listening=False)
         self.assertIn("cycle end", text)
-        w.mark(TEN_MINUTES)
-        clock.now += 5 * 60
-        self.assertEqual(w.due(listening=True)[0], FIVE_MINUTES)
+        w.mark(WRAP_UP)
+        clock.now += 7 * 60
+        self.assertEqual(w.due(listening=True)[0], CLOSE_NOW)
 
 
 try:

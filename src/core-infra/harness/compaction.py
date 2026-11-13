@@ -64,12 +64,56 @@ def frame_slots(char_budget: int, frame_chars: int) -> int:
 
 
 def framed_ids(rows: list[dict]) -> set[str]:
+    """Message ids covered by these frames. Pass every frame of the thread,
+    active and rolled: a message is framed once (state_spawn_context.md §1.8)."""
     found = set()
     for row in rows:
         raw = str(row.get("message_ids") or "")
-        found.update(part for part in raw.split(",") if part)
+        found.update(part for part in raw.split(",") if part and part != "-")
     return found
+
+
+def active_frames(rows: list[dict]) -> list[dict]:
+    """Frames that go in the payload block. Rolled frames stay covered but are not sent."""
+    return [row for row in rows if (row.get("status") or "active") == "active"]
 
 
 def split_verbatim(messages: list, covered: set[str]) -> list:
     return [m for m in messages if str(getattr(m, "id", "") or "") not in covered]
+
+
+def note_seen(seen: dict, messages: list, cycle_started_at: str, now: str) -> None:
+    """Record when each message id was first seen by the harness.
+
+    On the first call of a cycle every message is stamped with the cycle start:
+    the resumed tail is older than that, and the wake arrives with it.
+    """
+    stamp = now if seen else cycle_started_at
+    for m in messages:
+        mid = str(getattr(m, "id", "") or "")
+        if mid and mid not in seen:
+            seen[mid] = stamp
+
+
+def frame_times(span: list, seen: dict, last_frame_end: str | None,
+                cycle_started_at: str, now: str) -> tuple[str, str]:
+    """(frame_start, frame_end) for a span (§1.8 rule 3).
+
+    Start is where the thread's newest frame ended. End is when the last
+    message of the span was first seen, never earlier than the start.
+    """
+    start = last_frame_end or cycle_started_at
+    last_id = str(getattr(span[-1], "id", "") or "") if span else ""
+    end = seen.get(last_id) or now
+    if end < start:
+        end = start
+    return start, end
+
+
+def verbatim_start_types(has_frames_block: bool):
+    """Message types the verbatim turns may start at (§1.8 rule 4).
+
+    The frames block is a human message placed first, so the turns after it
+    may start at an AI message. Never at a tool result.
+    """
+    return ("human", "ai") if has_frames_block else "human"

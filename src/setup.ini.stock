@@ -207,20 +207,23 @@ cron_interval=1
 # the post-cycle linger check instead (simpler, avoids race conditions).
 file_mon_enabled=false
 
-# Maximum allowed runtime for an agent work cycle (in minutes, 30–60).
-# Safety kill for a stuck run; the harness warns the agent at 10 and 5 minutes left.
+# Time limit for an agent work cycle (in minutes, 30–240).
+# The harness warns the agent at about 15 and 8 minutes left (earlier when its
+# steps are slow), closes the cycle at the limit, and the next spawn resumes it.
+# A stuck run is caught by the stall timer (10 minutes; 20 on a local model).
 # Stock default 45 — also seeds COA/new agents via agents.db column defaults.
 timeout_minutes=45
 
-# Maximum allowed output lines before an agent session is killed (runaway detection).
-# If the result file exceeds this threshold during execution, the agent is terminated,
+# Maximum output lines in any 15 minutes before an agent session is killed (runaway detection).
+# If the result file grows by more than this within 15 minutes, the agent is terminated,
 # its tasks are frozen, and the Primary User is notified via VersaVoice.
 # Stock default 2500. Configurable per-agent via dashboard after initial setup.
 runaway_threshold=2500
 
 # Circuit Breaker — auto-freeze agents that repeatedly fail on spawn.
-# Only breaker-eligible exit codes count: 1 (error), 42 (input error), 99 (runaway).
-# Excluded: 0 (success), 53 (turn limit), 124 (timeout).
+# Only breaker-eligible exit codes count: 1 (error), 42 (input error),
+# 55 (repeated tool call), 97 (stall), 99 (runaway).
+# Excluded: 0 (success), 53 (turn limit), 54 (time limit), 124 (backstop kill).
 # Configurable via agitop ⚙ System Settings modal.
 circuit_breaker_consecutive=5
 circuit_breaker_hourly=20
@@ -324,6 +327,20 @@ workspace_link=
 enabled=true
 engine=searxng
 searxng_url=http://localhost:8888
+# SearXNG reads the public pages of Google, Bing, DuckDuckGo, Brave, Qwant and
+# Yahoo. Those sites block automated readers from time to time. The two keys
+# below add engines that use an official API instead, inside the same SearXNG.
+# Leave blank to keep search key-free. Setup does not ask for them. Set one in
+# agitop → API Keys, with `sudo agictl system set-key brave_search|exa <key>`,
+# or by giving it to COA; each of those applies it at once.
+# Brave Search API key (https://brave.com/search/api — free monthly credit, card required).
+brave_api_key=
+# Exa API key (https://exa.ai — free monthly credit).
+exa_api_key=
+# Wikipedia and Wikidata ask every client to say who it is. Give a URL or a
+# mailto: address to turn those two engines on; it is sent to them with each
+# request. Blank: they stay off.
+contact_url=
 
 [browser]
 # Headless browser automation for agents (Playwright + Chromium).
@@ -333,6 +350,12 @@ searxng_url=http://localhost:8888
 enabled=true
 # Page load timeout in seconds (default: 30). Editable via agitop System Settings.
 timeout=30
+# Longest wait, in seconds, for a page's scripts to finish after it loads
+# (network quiet, then text unchanged for one second). 0 = no wait.
+settle_seconds=5
+# User agent the browser sends. Blank = desktop Chrome matching the installed
+# Chromium. An agent can set one per call with --user-agent.
+user_agent=
 
 [image_processing]
 # Harness policy applied before VIEW INJECT (agictl view / agictl_view_image).

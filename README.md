@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.7.0-FF9800" alt="Versa AGi version 3.7.0">
+    <img src="https://img.shields.io/badge/version-3.8.0-FF9800" alt="Versa AGi version 3.8.0">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -206,7 +206,7 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 | [IDE mode](docs/ide-mode.md) | Hold Lifeline spawn; run COA in VSCode / Cursor over Remote-SSH |
 | [Security](docs/security.md) | What agents can and cannot do |
 | [Directories](docs/directories.md) | Deployed paths + COA doc copy |
-| [Troubleshooting](docs/troubleshooting.md) | Spawn, halt, packages, emergency stop |
+| [Troubleshooting](docs/troubleshooting.md) | Spawn, halt, stopped cycles, agent history reset, packages, emergency stop |
 | [Backup and restore](docs/backup-restore.md) | `versa-agi-backup` / `restore.sh` |
 | [WSL server](docs/install-wsl-server.md) | Mirrored networking, firewall, tunnel |
 | [Roadmap](docs/roadmap.md) | Implemented surface + next |
@@ -220,8 +220,11 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 | **Concurrent spawns** | 3 per Lifeline tick | Configurable; excess queued |
 | **Local AI concurrency** | `sycl_parallel` slots | Prevents inference OOM |
 | **Active agents** | Unlimited | Soft gate — warns |
-| **Agent cycle time (Timeout)** | 30–60 min (default 45) | Warnings at 10 and 5 min left, then hard stop |
-| **Live chat listening** | Off, 5, 10, 15 or 30 min since the last message (default 15) | Chat closes 5 min before the Timeout |
+| **Agent cycle time (Time limit)** | 30–240 min per agent (default 45) | Warnings at 15 and 8 min left, earlier for a slow model. At the limit the cycle is closed with a summary and a handoff, and the next cycle carries on in the same thread |
+| **Wait for one model reply** | 10 min (20 on a local model) | Cycle stopped; counts toward the circuit breaker |
+| **Same tool call with the same result** | 6 times within the last 20 tool calls | Agent told at 3, cycle stopped at 6; counts toward the circuit breaker |
+| **Cycle output (runaway)** | 2500 lines or 2048 KB in 15 min, per agent | Cycle stopped, the agent's tasks frozen, Primary User told |
+| **Live chat listening** | Off, 5, 10, 15 or 30 min since the last message (default 15) | Chat closes at the last time warning (8 min before the time limit, earlier for a slow model) |
 | **Listening agents** | 5 per Primary User at once | Server-side; others answer once per cycle |
 | **Message text** | 2048 characters | Server-side hard block |
 | **Attachments** | 10 per message, 50MB per file | Client + server |

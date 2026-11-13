@@ -660,8 +660,48 @@ def _reprovision_after_sponsor_change(token: str, new_uid: str) -> list[str]:
     return touched
 
 
+# Search API keys: set-key type → [search] key in setup.ini (state_web_access.md §1.2 rule 8).
+SEARCH_KEY_INI = {"brave_search": "brave_api_key", "exa": "exa_api_key"}
+# What COA and the dashboard call them → set-key type.
+SEARCH_KEY_ALIASES = {"brave": "brave_search", "brave_search": "brave_search", "exa": "exa"}
+SEARXNG_PROVIDER_SCRIPT = "/usr/local/lib/versa-agi/providers/searxng.sh"
+SEARXNG_APPLY_TIMEOUT_SECONDS = 420
+
+
+def search_key_ok(value: str) -> bool:
+    """Blank (remove) or a plain key: the same characters `searxng_safe_value` accepts."""
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:/@+=-]*", value or "")) and len(value or "") <= 256
+
+
+def _apply_search_settings(script: str = "") -> tuple[bool, str]:
+    """Rewrite SearXNG's settings and recreate its container. Root only.
+
+    Returns (applied, note). Not applied is not an error: the key is saved and
+    the next `setup.sh --update` applies it.
+    """
+    script = script or SEARXNG_PROVIDER_SCRIPT
+    if not os.path.isfile(script):
+        return False, "Key saved. SearXNG will pick it up on the next update (sudo versa-agi-update)."
+    if not _get_search_config()["enabled"]:
+        return False, "Key saved. Web search is turned off, so SearXNG was not changed."
+    env = dict(os.environ, VERSA_SETUP_PARENT="1")
+    try:
+        proc = subprocess.run(["bash", script], capture_output=True, text=True,
+                              timeout=SEARXNG_APPLY_TIMEOUT_SECONDS, env=env)
+    except subprocess.TimeoutExpired:
+        return False, "Key saved. Refreshing SearXNG took too long; run sudo versa-agi-update."
+    except Exception as e:  # noqa: BLE001
+        return False, f"Key saved. SearXNG was not refreshed ({e}); run sudo versa-agi-update."
+    tail = [re.sub(r"\x1b\[[0-9;]*m", "", ln).strip() for ln in (proc.stdout or "").splitlines()]
+    probe = next((ln for ln in reversed(tail) if "Test search" in ln), "")
+    if proc.returncode != 0:
+        return False, "Key saved. SearXNG refresh failed; run sudo versa-agi-update and read its output."
+    return True, probe or "SearXNG refreshed."
+
+
 @system.command("set-key", hidden=True)
-@click.argument("key_type", type=click.Choice(["gemini", "versavoice", "xai", "openai", "anthropic", "openrouter"]))
+@click.argument("key_type", type=click.Choice(
+    ["gemini", "versavoice", "xai", "openai", "anthropic", "openrouter", "brave_search", "exa"]))
 @click.argument("value")
 def system_set_key(key_type, value):
     """Update an API key/token and propagate to all locations. Requires root.
@@ -674,6 +714,9 @@ def system_set_key(key_type, value):
       openai     - OpenAI API Key → provider_keys.env, setup.ini
       anthropic  - Anthropic API Key → provider_keys.env, setup.ini
       openrouter - OpenRouter API Key → provider_keys.env, setup.ini
+      brave_search - Brave Search API key → setup.ini [search], then SearXNG is refreshed
+      exa        - Exa API key → setup.ini [search], then SearXNG is refreshed
+                   (for these two, the value `off` removes the key)
     """
     import glob
     import re
@@ -955,6 +998,22 @@ def system_set_key(key_type, value):
 
         _ini_set("third_party", "openrouter_api_key", value)
         _activate_third_party_on_key("openrouter", updated_files, errors)
+
+    # ════════════════════════════════════════════════
+    # SEARCH API KEYS (state_web_access.md §1.2 rule 8)
+    # ════════════════════════════════════════════════
+    elif key_type in SEARCH_KEY_INI:
+        new_value = "" if value.strip().lower() == "off" else value.strip()
+        if not search_key_ok(new_value):
+            json_response(False, key_type=key_type,
+                          error="That does not look like an API key (letters, digits and . _ - only).")
+            sys.exit(1)
+        _ini_set("search", SEARCH_KEY_INI[key_type], new_value)
+        if not errors:
+            applied, note = _apply_search_settings()
+            json_response(True, key_type=key_type, files_updated=len(updated_files),
+                          updated_files=updated_files, key_set=bool(new_value), applied=applied, note=note)
+            return
 
     # ── Report result ──
     if errors:
@@ -1510,7 +1569,8 @@ def _apply_remote_package_decision(name, status):
     return status
 
 
-ACTIVITY_OUTCOMES = ("ok", "timeout", "runaway", "step_limit", "crash")
+# The seven outcomes the VersaVoice cloud and app know (state_long_cycles.md §1.8).
+ACTIVITY_OUTCOMES = ("ok", "timeout", "runaway", "step_limit", "stall", "loop", "crash")
 
 
 @system.command("activity", hidden=True)
@@ -8131,8 +8191,8 @@ def agent_activate(name):
                 if os.path.exists(cycles_db_path):
                     cconn = db_connect.connect_compat(cycles_db_path, timeout=5)
                     cconn.execute(
-                        "DELETE FROM cycles WHERE id LIKE ? AND exit_code IN (1, 42, 99)",
-                        (f"{name}-%",)
+                        "DELETE FROM cycles WHERE id GLOB ? AND exit_code IN (1, 42, 55, 97, 99)",
+                        (f"{name}-[0-9]*",)
                     )
                     cconn.commit()
                     cconn.close()
@@ -8874,7 +8934,7 @@ def agent_remove(name, archive):
 @click.argument("name")
 @click.argument("minutes", type=int)
 def agent_set_timeout(name, minutes):
-    """Set the maximum execution timeout for an agent in minutes (30–60)."""
+    """Set an agent's time limit in minutes (30–240). The harness closes the cycle there."""
     import agent_limits
     err = agent_limits.timeout_error(minutes)
     if err:
@@ -10191,7 +10251,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         name = fallback
         # 1. Try connections table in tasks.db (canonical)
         try:
-            tconn = _db_connect.connect_compat(tasks_db, timeout=2)
+            tconn = db_connect.connect_compat(tasks_db, timeout=2)
             tconn.row_factory = _sqlite3.Row
             row = tconn.execute("SELECT display_name FROM connections WHERE uid=?", (uid,)).fetchone()
             tconn.close()
@@ -10256,7 +10316,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
     system_memories = []
     project_memories = []
     try:
-        tconn = _db_connect.connect_compat(tasks_db, timeout=5)
+        tconn = db_connect.connect_compat(tasks_db, timeout=5)
         tconn.row_factory = _sqlite3.Row
         # Contact memories for all known contacts
         for uid in all_contacts:
@@ -10742,7 +10802,12 @@ def frames_roll(thread_id, frame_id):
         json_response(False, error=str(e))
         sys.exit(1)
 
-def _frames_rows(agent: str, text: str = "", status: str = ""):
+# Frames the harness reads per thread: enough to cover every message still in a
+# checkpoint (covered messages leave it at the next resume).
+FRAMES_HARNESS_LIMIT = 200
+
+
+def _frames_rows(agent: str, text: str = "", status: str = "", thread_id: str = ""):
     conn = db_connect.connect_compat(cycles_db, timeout=5)
     conn.row_factory = sqlite3.Row
     query = "SELECT * FROM frames WHERE agent_name=?"
@@ -10750,6 +10815,9 @@ def _frames_rows(agent: str, text: str = "", status: str = ""):
     if status:
         query += " AND status=?"
         args.append(status)
+    if thread_id:
+        query += " AND thread_id=?"
+        args.append(thread_id)
     if text:
         query += " AND summary LIKE ?"
         args.append(f"%{text}%")
@@ -10765,12 +10833,19 @@ def _frames_rows(agent: str, text: str = "", status: str = ""):
 @click.option("--agent", "agent_name", default=None)
 @click.option("--thread", "thread_id", default="")
 @click.option("--status", default="", help="active, rolled, or blank for all")
-def frames_list(agent_name, thread_id, status):
+@click.option("--harness", "for_harness", is_flag=True, hidden=True,
+              help="Newest frames of the thread; rolled rows without their summary")
+def frames_list(agent_name, thread_id, status, for_harness):
     """List compaction frames for an agent."""
     agent = _frames_agent(agent_name)
-    rows = _frames_rows(agent, status=status)
-    if thread_id:
-        rows = [r for r in rows if r.get("thread_id") == thread_id]
+    rows = _frames_rows(agent, status=status, thread_id=thread_id)
+    if for_harness:
+        # The harness needs every status to know which messages are covered
+        # (a message is framed once), but only active summaries go in the payload.
+        rows = rows[-FRAMES_HARNESS_LIMIT:]
+        for row in rows:
+            if row.get("status") != "active":
+                row["summary"] = ""
     print(json.dumps(rows, indent=2, default=str))
 
 @cycle_frames.command("search")
@@ -10834,14 +10909,19 @@ def cycle_end(summary, handoff, no_handoff, agent_name):
         )
         sys.exit(1)
 
+    # One cycle, one row (state_spawn_context.md §1.5): everything below writes
+    # to the agent's newest open cycle only. Earlier rows left open by a killed
+    # cycle keep their own data.
+    open_id = _open_cycle_id(agent_name)
+
     # ── Awareness Enforcement Gate ──
     # Check if agent logged any awareness this cycle (advisory, not hard-blocking)
     awareness_warning = False
     try:
         conn = db_connect.connect_compat(cycles_db, timeout=5)
         row = conn.execute(
-            "SELECT session_start_ts, last_awareness_ts FROM cycles WHERE id LIKE ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-            (f"{agent_name}-%",)
+            "SELECT session_start_ts, last_awareness_ts FROM cycles WHERE id=?",
+            (open_id,)
         ).fetchone()
         if row and row[0]:  # session_start_ts exists
             if not row[1] or row[1] <= row[0]:  # no awareness_ts or older than session start
@@ -10854,8 +10934,8 @@ def cycle_end(summary, handoff, no_handoff, agent_name):
         conn = db_connect.connect_compat(cycles_db, timeout=5)
         if handoff_text:
             conn.execute(
-                "UPDATE cycles SET handoff=? WHERE id LIKE ? AND ended_at IS NULL",
-                (handoff_text, f"{agent_name}-%")
+                "UPDATE cycles SET handoff=? WHERE id=? AND ended_at IS NULL",
+                (handoff_text, open_id)
             )
             conn.commit()
         conn.close()
@@ -10870,8 +10950,8 @@ def cycle_end(summary, handoff, no_handoff, agent_name):
         try:
             conn = db_connect.connect_compat(cycles_db, timeout=5)
             conn.execute(
-                "UPDATE cycles SET summary=? WHERE id LIKE ? AND ended_at IS NULL",
-                (sum_text, f"{agent_name}-%")
+                "UPDATE cycles SET summary=? WHERE id=? AND ended_at IS NULL",
+                (sum_text, open_id)
             )
             conn.commit()
             conn.close()
@@ -10889,8 +10969,8 @@ def cycle_end(summary, handoff, no_handoff, agent_name):
     try:
         conn = db_connect.connect_compat(cycles_db, timeout=5)
         conn.execute(
-            "UPDATE cycles SET ended_at=datetime('now'), summary=? WHERE id LIKE ? AND ended_at IS NULL",
-            (sum_text, f"{agent_name}-%")
+            "UPDATE cycles SET ended_at=datetime('now'), summary=? WHERE id=? AND ended_at IS NULL",
+            (sum_text, open_id)
         )
         conn.commit()
         conn.close()
@@ -10933,9 +11013,56 @@ def cycle_end(summary, handoff, no_handoff, agent_name):
 @click.option("--exit-code", type=int, default=None, help="Process exit code from agent spawn")
 @click.option("--cached", type=int, default=0, help="Cached input tokens (context caching)")
 @click.option("--session-path", default=None, help="Path to cycle telemetry file")
-def cycle_tokens(agent_name, t_in, t_out, t_think, t_total, exit_code, cached, session_path):
+@click.option("--cycle-id", default=None, help="The spawn's cycle row (default: the agent's newest row)")
+@click.option("--outcome", default=None,
+              type=click.Choice(list(ACTIVITY_OUTCOMES)),
+              help="Lifeline's outcome; closes the row when the agent did not")
+def cycle_tokens(agent_name, t_in, t_out, t_think, t_total, exit_code, cached, session_path, cycle_id, outcome):
     """Log token utilization metrics to cycles.db."""
-    agent_reader.update_last_cycle_tokens(agent_name, t_in, t_out, t_think, t_total, exit_code=exit_code, t_cached=cached, session_path=session_path)
+    agent_reader.update_last_cycle_tokens(
+        agent_name, t_in, t_out, t_think, t_total, exit_code=exit_code, t_cached=cached,
+        session_path=session_path, cycle_id=cycle_id, outcome=outcome,
+    )
+
+CHECKIN_LINE_MAX_CHARS = 400
+
+
+@cycle.command("checkin", hidden=True)
+@click.argument("line", nargs=-1)
+@click.option("--cycle-id", default=None, help="The spawn's cycle row (default: the agent's open row)")
+@click.option("--agent", "agent_name", default=None)
+def cycle_checkin(line, cycle_id, agent_name):
+    """Append one harness check-in line to a cycle row (state_long_cycles.md §1.6)."""
+    text = " ".join(" ".join(line).split())[:CHECKIN_LINE_MAX_CHARS]
+    if not text:
+        json_response(False, error="A check-in line is required.")
+        sys.exit(1)
+    target = cycle_id or _open_cycle_id(agent_name or get_agent_name())
+    if not target:
+        json_response(False, error="No open cycle.")
+        sys.exit(1)
+    append = ("UPDATE cycles SET checkins = CASE WHEN checkins IS NULL OR checkins = '' "
+              "THEN ? ELSE checkins || char(10) || ? END WHERE id=?")
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        try:
+            cur = conn.execute(append, (text, text, target))
+        except sqlite3.OperationalError as e:
+            # The column comes with setup.sh --update; add it if that refresh was skipped.
+            if "no such column" not in str(e):
+                raise
+            conn.execute("ALTER TABLE cycles ADD COLUMN checkins TEXT")
+            cur = conn.execute(append, (text, text, target))
+        conn.commit()
+        found = cur.rowcount
+        conn.close()
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    if not found:
+        json_response(False, error=f"No cycle row {target}.")
+        sys.exit(1)
+    json_response(True, cycle_id=target)
 
 @cycle.command("get")
 @click.argument("cycle_id")
@@ -10990,9 +11117,9 @@ def cycle_recent(agent_name, as_json):
     if as_json:
         rows = agent_reader._query_cycles(
             "SELECT id, summary, wake_reason, execution_model, routing_mode, routing_work_modality, "
-            "datetime(started_at, 'localtime') AS ts FROM cycles WHERE id LIKE ? "
+            "datetime(started_at, 'localtime') AS ts FROM cycles WHERE id GLOB ? "
             "ORDER BY started_at DESC LIMIT 10",
-            (f"{agent_name}-%",),
+            (f"{agent_name}-[0-9]*",),
         )
         print(json.dumps(rows, default=str))
         return
@@ -11136,6 +11263,16 @@ def _awareness_line(row, now: _dt) -> str:
             f"({_fmt_age(updated, now)} ago): {content}")
 
 
+# What a stop by the harness or Lifeline means, said to the agent on its next
+# wake (state_long_cycles.md §1.8).
+HARNESS_STOP_REASONS = {
+    54: "It reached its time limit and the harness closed it; your thread was kept.",
+    55: "The harness stopped it because the same tool call was repeated with the same result.",
+    97: "It was stopped by the stall timer: a model call did not return.",
+    124: "It was stopped at the time limit before it could be closed.",
+}
+
+
 def render_handoff_block(agent_name: str, now: _dt | None = None) -> str:
     """Wake-prompt block: last cycle, outages since, last handoff, carried awareness."""
     now = now or _utc_now()
@@ -11143,8 +11280,8 @@ def render_handoff_block(agent_name: str, now: _dt | None = None) -> str:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT id, started_at, ended_at, exit_code, wake_reason, handoff FROM cycles "
-        "WHERE id LIKE ? ORDER BY started_at DESC LIMIT ?",
-        (f"{agent_name}-%", HANDOFF_LOOKBACK_CYCLES),
+        "WHERE id GLOB ? ORDER BY started_at DESC LIMIT ?",
+        (f"{agent_name}-[0-9]*", HANDOFF_LOOKBACK_CYCLES),
     ).fetchall()
     gaps = _lifeline_gaps(conn)
     conn.close()
@@ -11164,6 +11301,9 @@ def render_handoff_block(agent_name: str, now: _dt | None = None) -> str:
         when += f" It woke for: {last['wake_reason']}."
     if last["exit_code"] not in (None, 0):
         when += f" Exit code {last['exit_code']}."
+        reason = HARNESS_STOP_REASONS.get(last["exit_code"])
+        if reason:
+            when += f" {reason}"
     lines.append(when)
 
     for g in gaps:
@@ -12837,8 +12977,8 @@ def _update_awareness_timestamp(agent_name):
     try:
         cdb = db_connect.connect_compat(cycles_db, timeout=5)
         cdb.execute(
-            "UPDATE cycles SET last_awareness_ts=datetime('now') WHERE id LIKE ? AND ended_at IS NULL",
-            (f"{agent_name}-%",)
+            "UPDATE cycles SET last_awareness_ts=datetime('now') WHERE id=? AND ended_at IS NULL",
+            (_open_cycle_id(agent_name),)
         )
         cdb.commit()
         cdb.close()
@@ -13748,6 +13888,135 @@ def search_web(query, count, categories):
     json_response(True, query=query, results=results, count=len(results))
 
 
+@search.command("read")
+@click.argument("url")
+@click.option("--offset", default=0, type=int, help="Start at this character of the page text")
+@click.option("--max-chars", default=None, type=int, help="Characters to return (default 8000, limit 20000)")
+@click.option("--links", "with_links", is_flag=True, help="Also list the page's links")
+@click.option("--user-agent", default="", help="User agent for this call")
+def search_read(url, offset, max_chars, with_links, user_agent):
+    """Read one web page as text, without a browser (state_web_access.md §1.3).
+
+    For documentation, articles and references. A page that builds its content
+    with scripts comes back with a hint to use `browser goto`.
+    """
+    from agictl import browser_script, page_text
+
+    if not _get_search_config()["enabled"]:
+        json_response(False, error="Web search is disabled. Enable it in setup.ini [search] enabled=true.")
+        sys.exit(1)
+    problem = browser_script.user_agent_error(user_agent)
+    if problem:
+        json_response(False, error=problem)
+        sys.exit(1)
+    agent = user_agent or _get_browser_config().get("user_agent", "")
+    try:
+        final_url, content_type, body = page_text.fetch(url, user_agent=agent)
+        page = page_text.read_page(body, content_type, final_url)
+    except page_text.FetchError as e:
+        json_response(False, url=url, error=str(e))
+        sys.exit(1)
+    result = {"url": final_url, "title": page["title"], "source": "fetch"}
+    result.update(browser_script.page_slice(
+        browser_script.tidy_text(page["text"]), offset,
+        browser_script.DEFAULT_MAX_CHARS if max_chars is None else max_chars,
+    ))
+    if with_links:
+        result["links"] = page["links"]
+    if page.get("hint"):
+        result["hint"] = page["hint"]
+    json_response(True, **result)
+
+
+def _search_keys_set() -> dict:
+    """Which search API keys are set. Never the keys themselves."""
+    import configparser
+    config = configparser.ConfigParser()
+    config.read("/etc/versa-agi/setup.ini")
+    return {
+        "brave": bool(config.get("search", "brave_api_key", fallback="").strip()),
+        "exa": bool(config.get("search", "exa_api_key", fallback="").strip()),
+    }
+
+
+def search_probe(data: dict) -> dict:
+    """Result count per engine and the engines that did not answer, from one SearXNG reply."""
+    engines: dict = {}
+    for item in data.get("results", []) or []:
+        name = item.get("engine") or "unknown"
+        engines[name] = engines.get(name, 0) + 1
+    unresponsive = [
+        {"engine": entry[0], "reason": entry[1]}
+        for entry in data.get("unresponsive_engines", []) or []
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2
+    ]
+    return {"results": sum(engines.values()), "engines": engines, "unresponsive_engines": unresponsive}
+
+
+@search.command("status")
+@click.option("--query", default="weather", help="Test query (default: weather)")
+def search_status(query):
+    """Is search working? Which API keys are set, and which engines answer one test search."""
+    import urllib.parse
+    import urllib.request
+
+    config = _get_search_config()
+    status = {"enabled": config["enabled"], "searxng_url": config["searxng_url"],
+              "api_keys_set": _search_keys_set()}
+    if not config["enabled"]:
+        json_response(True, **status, note="Web search is turned off ([search] enabled=false).")
+        return
+    url = f"{config['searxng_url'].rstrip('/')}/search?" + urllib.parse.urlencode(
+        {"q": query, "format": "json", "categories": "general"})
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "agictl/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:  # noqa: BLE001
+        json_response(False, **status, error=f"SearXNG did not answer at {config['searxng_url']}: {e}")
+        sys.exit(1)
+    json_response(True, **status, test_query=query, **search_probe(data))
+
+
+@search.command("set-key")
+@click.argument("service", type=click.Choice(sorted(SEARCH_KEY_ALIASES)))
+@click.argument("value")
+def search_set_key(service, value):
+    """COA: set (or remove with `off`) a search API key the Primary User gave you.
+
+    Saves the key and refreshes SearXNG. The key is never printed back.
+    """
+    caller = get_agent_name()
+    if os.geteuid() != 0 and caller not in ("coa", "watchdog"):
+        json_response(False, error="Only COA can set search API keys. Ask COA or the Primary User.")
+        sys.exit(1)
+    key_type = SEARCH_KEY_ALIASES[service]
+    if not search_key_ok("" if value.strip().lower() == "off" else value.strip()):
+        json_response(False, error="That does not look like an API key (letters, digits and . _ - only).")
+        sys.exit(1)
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+    cmd = [_agictl_root_bin(), "system", "set-key", key_type, value.strip()]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n"] + cmd
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=SEARXNG_APPLY_TIMEOUT_SECONDS + 30, env=env)
+    except subprocess.TimeoutExpired:
+        json_response(False, error="Setting the key took too long. Ask the Primary User to run: sudo versa-agi-update")
+        sys.exit(1)
+    try:
+        result = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except ValueError:
+        result = {}
+    if proc.returncode != 0 or not result.get("success"):
+        err = result.get("error") or "; ".join(result.get("errors") or []) or (proc.stderr or "").strip()
+        json_response(False, service=service, error=(
+            f"The key was not set ({err or 'no detail'}). The Primary User can set it in agitop → API KEYS."))
+        sys.exit(1)
+    json_response(True, service=service, key_set=result.get("key_set"), applied=result.get("applied"),
+                  note=result.get("note", ""))
+
+
 # ═══════════════════════════════════════════════════════
 # VIEW — Agent-initiated multimodal input
 # ═══════════════════════════════════════════════════════
@@ -13833,6 +14102,9 @@ def _get_browser_config():
     return {
         "enabled": config.get("browser", "enabled", fallback="false").lower() == "true",
         "timeout": int(config.get("browser", "timeout", fallback="30")) * 1000,  # ms
+        # state_web_access.md §1.1 rules 3–4
+        "settle_seconds": config.get("browser", "settle_seconds", fallback="5"),
+        "user_agent": (config.get("browser", "user_agent", fallback="") or "").strip(),
     }
 
 
@@ -13922,77 +14194,87 @@ def browser():
     pass
 
 
+def _browser_setup(user_agent):
+    """Access check + per-call settings shared by every browser command.
+
+    User agent order: the command's --user-agent, then [browser] user_agent,
+    then the script's default (state_web_access.md §1.1 rule 4).
+    """
+    from agictl import browser_script
+    config = _check_browser_access()
+    chosen = (user_agent or "").strip() or config["user_agent"]
+    problem = browser_script.user_agent_error(chosen)
+    if problem:
+        json_response(False, error=problem)
+        sys.exit(1)
+    config["user_agent"] = chosen
+    config["settle_ms"] = browser_script.settle_ms(config["settle_seconds"], config["timeout"])
+    return config
+
+
+def _browser_run(body: str, config: dict):
+    """Run one command body in the agent's browser. Returns (success, parsed, raw)."""
+    from agictl import browser_script
+    script = browser_script.build_script(
+        body, user_agent=config["user_agent"], timeout_ms=config["timeout"],
+        settle_wait_ms=config["settle_ms"],
+    )
+    success, output = _run_playwright_script(script, config["timeout"] + config["settle_ms"])
+    return success, browser_script.parse_output(output) if success else {}, output
+
+
+_USER_AGENT_HELP = "User agent for this call (default: [browser] user_agent, else desktop Chrome)"
+
+
 @browser.command("goto")
 @click.argument("url")
 @click.option("--screenshot", "take_screenshot", is_flag=True, help="Take a screenshot after loading")
 @click.option("--selector", default=None, help="CSS selector to extract text from (default: full page)")
-def browser_goto(url, take_screenshot, selector):
+@click.option("--offset", default=0, type=int, help="Start of the returned text (use next_offset to read on)")
+@click.option("--max-chars", "max_chars", default=None, type=int,
+              help="Most characters to return (default 8000, limit 20000)")
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_goto(url, take_screenshot, selector, offset, max_chars, user_agent):
     """Navigate to a URL and return page content."""
-    config = _check_browser_access()
+    from agictl import browser_script
+    config = _browser_setup(user_agent)
     _validate_browser_url(url)
-    timeout_ms = config["timeout"]
     agent_name = get_agent_name()
 
-    screenshot_line = ""
+    screenshot_lines = ""
     if take_screenshot:
         ss_dir = _get_screenshot_dir(agent_name)
-        screenshot_line = (
-            f"import os, time\n"
-            f"ss_dir = {repr(ss_dir)}\n"
-            f"os.makedirs(ss_dir, exist_ok=True)\n"
-            f"ss_path = os.path.join(ss_dir, f\"goto_{{int(time.time())}}.png\")\n"
-            f"page.screenshot(path=ss_path, full_page=True)\n"
-            f"print(\"SCREENSHOT:\" + ss_path)"
+        screenshot_lines = (
+            f"    ss_dir = {repr(ss_dir)}\n"
+            "    os.makedirs(ss_dir, exist_ok=True)\n"
+            "    ss_path = os.path.join(ss_dir, f\"goto_{int(time.time())}.png\")\n"
+            "    page.screenshot(path=ss_path, full_page=True)\n"
+            "    emit(\"SCREENSHOT\", ss_path)\n"
         )
 
-    if selector:
-        extract_line = f'text = page.locator({repr(selector)}).inner_text(timeout={timeout_ms})\nprint("CONTENT:" + text)'
-    else:
-        extract_line = f'text = page.locator("body").inner_text(timeout={timeout_ms})\nprint("CONTENT:" + text[:8000])'
-
-    # Build body lines with consistent 4-space indent inside the 'with' block
-    body_lines = [
-        f"browser = p.chromium.launch(headless=True)",
-        f"page = browser.new_page()",
-        f"page.goto({repr(url)}, timeout={timeout_ms})",
-        f'print("TITLE:" + page.title())',
-    ]
-    body_lines.extend(extract_line.split("\n"))
-    if screenshot_line:
-        body_lines.extend(screenshot_line.split("\n"))
-    body_lines.append("browser.close()")
-    body = "\n    ".join(body_lines)
-
-    script = f"""
-import sys
-sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    # Try the venv site-packages directly
-    import glob
-    paths = glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages")
-    for p in paths:
-        sys.path.insert(0, p)
-    from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    {body}
-"""
-    success, output = _run_playwright_script(script, timeout_ms)
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        "    emit(\"TITLE\", page.title())\n"
+        f"    emit(\"CONTENT\", page.locator({repr(selector or 'body')}).inner_text(timeout=TIMEOUT_MS))\n"
+        f"{screenshot_lines}"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
     if not success:
         json_response(False, error=f"Browser error: {output}")
         return
 
-    # Parse structured output
     result = {"url": url}
-    for line in output.splitlines():
-        if line.startswith("TITLE:"):
-            result["title"] = line[6:]
-        elif line.startswith("CONTENT:"):
-            result["content"] = line[8:]
-        elif line.startswith("SCREENSHOT:"):
-            result["screenshot"] = line[11:]
+    if "title" in found:
+        result["title"] = found["title"]
+    if "content" in found:
+        result.update(browser_script.page_slice(
+            browser_script.tidy_text(found["content"]), offset,
+            max_chars if max_chars is not None else browser_script.DEFAULT_MAX_CHARS,
+        ))
+    if "screenshot" in found:
+        result["screenshot"] = found["screenshot"]
 
     json_response(True, **result)
 
@@ -14000,44 +14282,35 @@ with sync_playwright() as p:
 @browser.command("click")
 @click.argument("url")
 @click.argument("selector")
-def browser_click(url, selector):
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_click(url, selector, user_agent):
     """Navigate to URL and click an element."""
-    config = _check_browser_access()
+    from agictl import browser_script
+    config = _browser_setup(user_agent)
     _validate_browser_url(url)
-    timeout_ms = config["timeout"]
 
-    script = f"""
-import sys, glob
-sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
-for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
-    sys.path.insert(0, p)
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_page()
-    page.goto({repr(url)}, timeout={timeout_ms})
-    page.locator({repr(selector)}).click(timeout={timeout_ms})
-    page.wait_for_load_state("networkidle", timeout={timeout_ms})
-    print("TITLE:" + page.title())
-    print("URL:" + page.url)
-    text = page.locator("body").inner_text(timeout={timeout_ms})
-    print("CONTENT:" + text[:8000])
-    browser.close()
-"""
-    success, output = _run_playwright_script(script, timeout_ms)
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    page.locator({repr(selector)}).click(timeout=TIMEOUT_MS)\n"
+        "    settle(page)\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    emit(\"URL\", page.url)\n"
+        "    emit(\"CONTENT\", page.locator(\"body\").inner_text(timeout=TIMEOUT_MS))\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
     if not success:
         json_response(False, error=f"Click failed: {output}")
         return
 
     result = {"url": url, "selector": selector, "action": "click"}
-    for line in output.splitlines():
-        if line.startswith("TITLE:"):
-            result["title"] = line[6:]
-        elif line.startswith("URL:"):
-            result["current_url"] = line[4:]
-        elif line.startswith("CONTENT:"):
-            result["content"] = line[8:]
+    if "title" in found:
+        result["title"] = found["title"]
+    if "url" in found:
+        result["current_url"] = found["url"]
+    if "content" in found:
+        result.update(browser_script.page_slice(browser_script.tidy_text(found["content"])))
     json_response(True, **result)
 
 
@@ -14045,39 +14318,30 @@ with sync_playwright() as p:
 @click.argument("url")
 @click.argument("selector")
 @click.argument("value")
-def browser_fill(url, selector, value):
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_fill(url, selector, value, user_agent):
     """Navigate to URL and fill a form field."""
-    config = _check_browser_access()
+    config = _browser_setup(user_agent)
     _validate_browser_url(url)
-    timeout_ms = config["timeout"]
 
-    script = f"""
-import sys, glob
-sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
-for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
-    sys.path.insert(0, p)
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_page()
-    page.goto({repr(url)}, timeout={timeout_ms})
-    page.locator({repr(selector)}).fill({repr(value)}, timeout={timeout_ms})
-    print("FILLED:true")
-    print("TITLE:" + page.title())
-    browser.close()
-"""
-    success, output = _run_playwright_script(script, timeout_ms)
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    page.locator({repr(selector)}).fill({repr(value)}, timeout=TIMEOUT_MS)\n"
+        "    emit(\"FILLED\", \"true\")\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
     if not success:
         json_response(False, error=f"Fill failed: {output}")
         return
 
     result = {"url": url, "selector": selector, "value": value, "action": "fill"}
-    for line in output.splitlines():
-        if line.startswith("TITLE:"):
-            result["title"] = line[6:]
-        elif line.startswith("FILLED:"):
-            result["filled"] = True
+    if "title" in found:
+        result["title"] = found["title"]
+    if "filled" in found:
+        result["filled"] = True
     json_response(True, **result)
 
 
@@ -14085,52 +14349,43 @@ with sync_playwright() as p:
 @click.argument("url")
 @click.option("--path", "save_path", default=None, help="Save path (default: agent workspace)")
 @click.option("--full-page", "full_page", is_flag=True, help="Capture full page (not just viewport)")
-def browser_screenshot(url, save_path, full_page):
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_screenshot(url, save_path, full_page, user_agent):
     """Navigate to URL and take a screenshot."""
-    config = _check_browser_access()
+    config = _browser_setup(user_agent)
     _validate_browser_url(url)
-    timeout_ms = config["timeout"]
     agent_name = get_agent_name()
 
     if not save_path:
         ss_dir = _get_screenshot_dir(agent_name)
         save_path = f"__AUTO__{ss_dir}"
 
-    script = f"""
-import sys, os, time, glob
-sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
-for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
-    sys.path.insert(0, p)
-from playwright.sync_api import sync_playwright
-
-save_path = {repr(save_path)}
-if save_path.startswith("__AUTO__"):
-    ss_dir = save_path[8:]
-    os.makedirs(ss_dir, exist_ok=True)
-    save_path = os.path.join(ss_dir, f"screenshot_{{int(time.time())}}.png")
-else:
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_page()
-    page.goto({repr(url)}, timeout={timeout_ms})
-    page.screenshot(path=save_path, full_page={repr(full_page)})
-    print("SCREENSHOT:" + save_path)
-    print("TITLE:" + page.title())
-    browser.close()
-"""
-    success, output = _run_playwright_script(script, timeout_ms)
+    body = (
+        f"save_path = {repr(save_path)}\n"
+        "if save_path.startswith(\"__AUTO__\"):\n"
+        "    ss_dir = save_path[8:]\n"
+        "    os.makedirs(ss_dir, exist_ok=True)\n"
+        "    save_path = os.path.join(ss_dir, f\"screenshot_{int(time.time())}.png\")\n"
+        "else:\n"
+        "    os.makedirs(os.path.dirname(save_path), exist_ok=True)\n"
+        "\n"
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    page.screenshot(path=save_path, full_page={repr(bool(full_page))})\n"
+        "    emit(\"SCREENSHOT\", save_path)\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
     if not success:
         json_response(False, error=f"Screenshot failed: {output}")
         return
 
     result = {"url": url, "action": "screenshot", "full_page": full_page}
-    for line in output.splitlines():
-        if line.startswith("SCREENSHOT:"):
-            result["path"] = line[11:]
-        elif line.startswith("TITLE:"):
-            result["title"] = line[6:]
+    if "screenshot" in found:
+        result["path"] = found["screenshot"]
+    if "title" in found:
+        result["title"] = found["title"]
     json_response(True, **result)
 
 
@@ -14138,44 +14393,34 @@ with sync_playwright() as p:
 @click.argument("url")
 @click.option("--selector", default="body", help="CSS selector (default: body)")
 @click.option("--attribute", default=None, help="Element attribute to extract (default: text content)")
-def browser_extract(url, selector, attribute):
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_extract(url, selector, attribute, user_agent):
     """Extract structured content from a page."""
-    config = _check_browser_access()
+    config = _browser_setup(user_agent)
     _validate_browser_url(url)
-    timeout_ms = config["timeout"]
 
     if attribute:
-        extract_expr = f'page.locator({repr(selector)}).get_attribute({repr(attribute)}, timeout={timeout_ms})'
+        extract_expr = f"page.locator({repr(selector)}).get_attribute({repr(attribute)}, timeout=TIMEOUT_MS)"
     else:
-        extract_expr = f'page.locator({repr(selector)}).all_text_contents()'
+        extract_expr = f"page.locator({repr(selector)}).all_text_contents()"
 
-    script = f"""
-import sys, json, glob
-sys.path.insert(0, "/usr/local/lib/versa-agi/venv/lib/python3/dist-packages")
-for p in glob.glob("/usr/local/lib/versa-agi/venv/lib/python3.*/site-packages"):
-    sys.path.insert(0, p)
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_page()
-    page.goto({repr(url)}, timeout={timeout_ms})
-    result = {extract_expr}
-    print("EXTRACT:" + json.dumps(result))
-    print("TITLE:" + page.title())
-    browser.close()
-"""
-    success, output = _run_playwright_script(script, timeout_ms)
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    emit(\"EXTRACT\", {extract_expr})\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
     if not success:
         json_response(False, error=f"Extract failed: {output}")
         return
 
     result = {"url": url, "selector": selector, "action": "extract"}
-    for line in output.splitlines():
-        if line.startswith("EXTRACT:"):
-            result["data"] = json.loads(line[8:])
-        elif line.startswith("TITLE:"):
-            result["title"] = line[6:]
+    if "extract" in found:
+        result["data"] = found["extract"]
+    if "title" in found:
+        result["title"] = found["title"]
     if attribute:
         result["attribute"] = attribute
     json_response(True, **result)

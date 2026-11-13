@@ -55,7 +55,7 @@ Collect specific details about the desired stack:
 - **User/Group**: Which OS user the stack should run under
 
 ### 3. Research Compatibility Paths
-Use `agictl search web` (when available) to:
+Use `agictl search web` to find pages and `agictl search read "<url>"` to read them (when available; see the `web_research` skill) to:
 - Verify version compatibility between stack components
 - Find official installation methods (apt repos, PPAs, official scripts)
 - Check known issues with Ubuntu 24.04 and selected versions

@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS cycles (
   last_awareness_ts DATETIME,
   errors        TEXT,
   wake_reason   TEXT,
-  handoff       TEXT
+  handoff       TEXT,
+  checkins      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS config (
@@ -71,6 +72,9 @@ sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN pricing_source TEXT;" 2>/dev
 # Spawn handoff (state_spawn_context.md §1.12)
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN wake_reason TEXT;" 2>/dev/null || true
 sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN handoff TEXT;" 2>/dev/null || true
+
+# Harness check-in log, one line every 30 minutes (state_long_cycles.md §1.6)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN checkins TEXT;" 2>/dev/null || true
 
 sqlite3 "${DB_PATH}" <<'SQL'
 CREATE TABLE IF NOT EXISTS frames (

@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.7.0"
+PRODUCT_VERSION="3.8.0"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -548,12 +548,12 @@ INI_AGENT_COUNTRY="${INSTALL_ACCEPTANCE_COUNTRY:-$(ini_get agent country)}"
 INI_AGENT_VOICE="$(ini_get agent voice female)"
 INI_AGENT_ROLE="$(ini_get agent role)"
 INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 45)"
-# Timeout range 30–60 (agent_limits.py; state_live_chat.md §1.5.1).
+# Time limit range 30–240 (agent_limits.py; state_long_cycles.md §1.1).
 case "${INI_AGENT_TIMEOUT}" in
   ''|*[!0-9]*) INI_AGENT_TIMEOUT=45 ;;
 esac
 if [ "${INI_AGENT_TIMEOUT}" -lt 30 ]; then INI_AGENT_TIMEOUT=30; fi
-if [ "${INI_AGENT_TIMEOUT}" -gt 60 ]; then INI_AGENT_TIMEOUT=60; fi
+if [ "${INI_AGENT_TIMEOUT}" -gt 240 ]; then INI_AGENT_TIMEOUT=240; fi
 INI_RUNAWAY_THRESHOLD="$(ini_get agent runaway_threshold 2500)"
 INI_GIT_PLATFORMS="$(ini_get git platforms none)"
 INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
@@ -2323,6 +2323,22 @@ if [ -f "${IDE_LAUNCHER}" ]; then
   ok "versa-agi-ide → /usr/local/bin/ (delegates to agictl agent ide)"
 fi
 
+# SearXNG provider scripts: `agictl system set-key brave_search|exa` runs them
+# (as root) to apply a search API key without a full update
+# (state_web_access.md §1.2 rule 8). _common.sh works without ui_lib.sh.
+if [ -f "${SCRIPT_DIR}/providers/searxng.sh" ]; then
+  mkdir -p "${LIB_DIR}/providers"
+  for provider_script in _common.sh searxng.sh searxng_settings.sh; do
+    if [ -f "${SCRIPT_DIR}/providers/${provider_script}" ]; then
+      cp "${SCRIPT_DIR}/providers/${provider_script}" "${LIB_DIR}/providers/${provider_script}"
+      chown root:root "${LIB_DIR}/providers/${provider_script}"
+      chmod 755 "${LIB_DIR}/providers/${provider_script}"
+    fi
+  done
+  chown root:root "${LIB_DIR}/providers"
+  chmod 755 "${LIB_DIR}/providers"
+fi
+
 # Install administrative tooling: binary → /usr/local/lib/versa-agi/, symlink → /usr/local/bin/
 # update.sh is a shipped script (not a generated stub) so --update replaces it.
 for admin_script in uninstall.sh rekey.sh backup.sh restore.sh update.sh; do
@@ -3400,6 +3416,20 @@ if [ -d "${PROVIDERS_DIR}" ]; then
     fi
   fi
 
+  # A new installation with the browser on turns it on for COA too
+  # (agents.browser_enabled), so COA can browse from its first cycle
+  # (state_web_access.md §1.1 rule 1). An update leaves the per-agent switch as
+  # the Primary User set it. Other agents are switched on one by one.
+  _coa_browser_on_for_new_install() {
+    [ "${UPDATE_MODE:-false}" = "false" ] || return 0
+    [ -f "${AGENTS_DB}" ] || return 0
+    if sqlite3 "${AGENTS_DB}" "UPDATE agents SET browser_enabled = 1, updated_at = datetime('now') WHERE name = 'coa';" 2>/dev/null; then
+      ok "Browser turned on for COA"
+    else
+      warn "Could not turn the browser on for COA — use agitop → COA → Browser Automation"
+    fi
+  }
+
   # Playwright (Headless Browser). The installer flag wins over the stock file.
   if [ -f "${PROVIDERS_DIR}/playwright.sh" ]; then
     if [ "${VERSA_BROWSER_ENABLED:-}" = "true" ] || [ "${VERSA_BROWSER_ENABLED:-}" = "false" ]; then
@@ -3412,6 +3442,7 @@ if [ -d "${PROVIDERS_DIR}" ]; then
       chmod +x "${PROVIDERS_DIR}/playwright.sh"
       bash "${PROVIDERS_DIR}/playwright.sh" --timeout "${INI_BROWSER_TIMEOUT}"
       _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+      _coa_browser_on_for_new_install
     elif [ -n "${VERSA_BROWSER_ENABLED:-}" ]; then
       info "Playwright provider skipped (VERSA_BROWSER_ENABLED=false)"
     elif [ "${UPDATE_MODE:-false}" = "false" ]; then
@@ -3424,6 +3455,7 @@ if [ -d "${PROVIDERS_DIR}" ]; then
         chmod +x "${PROVIDERS_DIR}/playwright.sh"
         bash "${PROVIDERS_DIR}/playwright.sh"
         _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+        _coa_browser_on_for_new_install
       else
         info "Playwright provider skipped ([browser] enabled=false)"
       fi

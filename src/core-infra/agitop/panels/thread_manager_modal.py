@@ -145,6 +145,52 @@ def _drain_all_threads(agent_name: str) -> bool:
         return False
 
 
+def _count_thread_frames(reader, agent_name: str, thread_id: str = ""):
+    """Summary frames a drain would delete (blank = every thread). None when unknown."""
+    if reader is None:
+        return None
+    try:
+        rows = reader.list_frames(agent_name)
+    except Exception:
+        return None
+    if thread_id:
+        rows = [r for r in rows if r.get("thread_id") == thread_id]
+    return len(rows)
+
+
+def drain_confirm_text(agent_name: str, thread_id: str, project_name: str,
+                       drain_all: bool, frames) -> str:
+    """What a drain is about to delete, with the number of summary frames."""
+    frames_text = "its summary frames" if frames is None else f"{frames} summary frame(s)"
+    if drain_all:
+        return (
+            f"[bold red]Drain ALL threads for {agent_name}?[/]\n\n"
+            "[bold]This will delete:[/]\n"
+            f"  • every thread of {agent_name} (all checkpoint state)\n"
+            f"  • [bold]{frames_text}[/] of {agent_name} — deleted for good; the agent can no longer search them\n\n"
+            "The agent will start with a fresh context on its next cycle.\n"
+            "[bold]Not affected:[/] cycle history, tasks, memory, and every other agent.\n"
+        )
+    label = thread_id
+    if project_name:
+        label += f" ({project_name})"
+    return (
+        f"[bold red]Drain thread {label}?[/]\n\n"
+        "[bold]This will delete:[/]\n"
+        "  • all checkpoint state for this thread\n"
+        f"  • [bold]{frames_text}[/] of this thread — deleted for good; the agent can no longer search them\n\n"
+        "The agent will start fresh on this thread's next cycle.\n"
+        f"[bold]Not affected:[/] {agent_name}'s other threads, cycle history, tasks, memory.\n"
+    )
+
+
+def _delete_thread_frames(reader, agent_name: str, thread_id: str = ""):
+    """Frames of a drained thread (blank = every thread). None when not deleted."""
+    if reader is None:
+        return None
+    return reader.delete_frames(agent_name, thread_id)
+
+
 class DrainConfirmModal(ModalScreen):
     """Confirmation before draining checkpoint thread(s)."""
 
@@ -190,21 +236,13 @@ class DrainConfirmModal(ModalScreen):
         self._parent = parent
 
     def compose(self) -> ComposeResult:
-        if self.drain_all:
-            body = (
-                f"[bold red]Drain ALL threads for {self.agent_name}?[/]\n\n"
-                "This will delete all checkpoint state.\n"
-                "The agent will start with a fresh context on its next cycle.\n"
-            )
-        else:
-            label = self.thread_id
-            if self.project_name:
-                label += f" ({self.project_name})"
-            body = (
-                f"[bold red]Drain thread {label}?[/]\n\n"
-                "This will delete all checkpoint state for this thread.\n"
-                "The agent will start fresh on this thread's next cycle.\n"
-            )
+        frames = _count_thread_frames(
+            getattr(self.app, "agent_reader", None), self.agent_name,
+            "" if self.drain_all else self.thread_id,
+        )
+        body = drain_confirm_text(
+            self.agent_name, self.thread_id, self.project_name, self.drain_all, frames,
+        )
 
         with Vertical(id="thread-drain-dialog"):
             yield Static(body)
@@ -227,16 +265,35 @@ class DrainConfirmModal(ModalScreen):
         else:
             ok = _drain_thread(self.agent_name, self.thread_id)
 
+        # Frames go with the thread (state_spawn_context.md §1.8 rule 6).
+        frames = _delete_thread_frames(
+            getattr(self.app, "agent_reader", None),
+            self.agent_name,
+            "" if self.drain_all else self.thread_id,
+        ) if ok else None
+
         self.app.pop_screen()
         if ok:
             label = "all threads" if self.drain_all else self.thread_id
-            self.app.notify(f"✓ Drained {label} for {self.agent_name}", title="Threads")
+            if frames is None:
+                self.app.notify(
+                    f"Drained {label} for {self.agent_name}, but its summary frames "
+                    "could not be deleted — check cycles.db permissions",
+                    title="Threads", severity="warning",
+                )
+            else:
+                self.app.notify(
+                    f"✓ Drained {label} for {self.agent_name} ({frames} summary frame(s) deleted)",
+                    title="Threads",
+                )
             parent = self._parent
             if parent is not None:
                 if hasattr(parent, "refresh_thread_table"):
                     parent.refresh_thread_table()
                 elif hasattr(parent, "refresh_table"):
                     parent.refresh_table()
+                if hasattr(parent, "refresh_frames_table"):
+                    parent.refresh_frames_table("")
             else:
                 active = self.app.screen
                 if hasattr(active, "refresh_thread_table"):

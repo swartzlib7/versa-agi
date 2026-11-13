@@ -13,7 +13,7 @@ Strict separation between the **agent**, the **monitoring layer** (Watchdog), an
 | npm / pip / cargo | User-level, workspace-local |
 | Run scripts | Anything in their workspace |
 | Network | curl, wget, API calls — no extra firewall |
-| Web search | When enabled — local SearXNG via `agictl search web` |
+| Web search | When enabled — local SearXNG via `agictl search web`. Queries go to public search engines, and to the Brave or Exa API when you add a key. `agictl search read` downloads a page an agent names (`http` / `https` only) |
 | Browser | When enabled — headless Chromium via `agictl browser` |
 | REST comms | VersaVoice via `agictl` |
 | Read system skills | Read-only shipped skills |

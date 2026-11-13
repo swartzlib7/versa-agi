@@ -23,9 +23,10 @@ import time
 from typing import Callable, Iterable
 
 WAIT_POLL_SECONDS = 3.0
-# Close the window this long before Lifeline's timeout: matches the 5-minute
-# time warning, so `cycle end` is accepted from then on.
-CLOSE_LEAD_SECONDS = 300
+# Close the window this long before the time limit: the last time warning
+# (state_long_cycles.md §1.7), so `cycle end` is accepted from then on. The
+# harness passes the warning's real lead, which is longer for slow steps.
+CLOSE_LEAD_SECONDS = 480
 ENV_STATE = "VERSA_LISTENING"
 ENV_MINUTES = "VERSA_LISTEN_MINUTES"
 
@@ -104,24 +105,12 @@ def closing_message(reason: str, minutes: int) -> str:
     )
 
 
-def touch(path: str | None) -> None:
-    """Turn marker for Lifeline's runaway monitor (§1.5.4). Best effort."""
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8"):
-            pass
-        os.utime(path, None)
-    except OSError:
-        pass
-
-
 class ListeningWindow:
     def __init__(self, minutes: int, deadline_epoch: float | None = None,
                  pu_ids: Iterable[str] = (), agent_ids: Iterable[str] = (),
                  clock: Callable[[], float] = time.time, env=None,
-                 marker_path: str | None = None, close_file: str | None = None,
-                 cycle_id: str | None = None):
+                 close_file: str | None = None, cycle_id: str | None = None,
+                 close_lead: Callable[[], float] | None = None):
         try:
             self.minutes = max(0, int(minutes or 0))
         except (TypeError, ValueError):
@@ -131,9 +120,9 @@ class ListeningWindow:
         self.agent_ids = {a for a in agent_ids if a}
         self._clock = clock
         self._env = env if env is not None else os.environ
-        self.marker_path = marker_path
         self.close_file = close_file
         self.cycle_id = cycle_id
+        self._close_lead = close_lead
         self.opened = False
         self.closing = False
         self.last_activity: float | None = None
@@ -158,7 +147,6 @@ class ListeningWindow:
             self._set_env("open")
         self.last_activity = self._clock()
         self.turns += 1
-        touch(self.marker_path)
         return True
 
     def note_activity(self) -> None:
@@ -175,11 +163,20 @@ class ListeningWindow:
         if requested:
             return requested
         now = self._clock()
-        if self.deadline is not None and self.deadline - now <= CLOSE_LEAD_SECONDS:
+        if self.deadline is not None and self.deadline - now <= self.close_lead():
             return "deadline"
         if self.last_activity is not None and now - self.last_activity >= self.minutes * 60:
             return "idle"
         return None
+
+    def close_lead(self) -> float:
+        """Seconds before the time limit at which the window closes."""
+        if self._close_lead is not None:
+            try:
+                return max(float(CLOSE_LEAD_SECONDS), float(self._close_lead()))
+            except (TypeError, ValueError):
+                pass
+        return float(CLOSE_LEAD_SECONDS)
 
     def begin_closing(self, reason: str) -> str:
         self.closing = True

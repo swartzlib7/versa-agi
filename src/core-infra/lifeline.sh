@@ -75,97 +75,95 @@ if [ -f "${LIFELINE_DISABLED_FLAG}" ] && [ "${IDE_GENERATE}" != "true" ]; then
   exit 0
 fi
 
-# ─── Runaway Agent Monitor ─────────────────────────
-# Background watcher: polls result file every 10s.
-# Checks: (1) line count, (2) result file size, (3) session file size DELTA.
-# If any threshold is exceeded, kills the agent and sets a sentinel flag.
+# ─── Cycle Monitor (state_long_cycles.md §1.2, §1.4) ─────────────────────────
+# Background watcher, one per spawned agent. Polls every 10 s.
+#   Runaway: growth of the result file over the last 15 minutes (lines, size).
+#            One sample a minute, 15 kept; the oldest is the baseline.
+#   Stall:   age of the harness heartbeat file. The harness touches it when a
+#            model call starts, when a reply arrives, and every 30 s while a
+#            tool runs, mail is awaited, or a live call is in progress.
+# On a breach it stops the agent and leaves a sentinel for the exit handler.
+# VERSA_MONITOR_POLL_SECONDS / VERSA_MONITOR_SAMPLE_POLLS exist for the tests.
 monitor_runaway() {
   local result_file="$1"
   local agent_user="$2"
   local agent_name="$3"
   local line_threshold="$4"
   local size_threshold_kb="${5:-2048}"
-  local session_dir="$6"
-  local baseline_session_size="${7:-0}"
-  # Listening window (state_live_chat.md §1.5.4): the harness touches this file
-  # at each new chat turn; thresholds then count from that turn, not the run.
-  local turn_marker="${8:-}"
+  local heartbeat_file="${6:-}"
+  local stall_limit="${7:-0}"
   local sentinel="/tmp/versa-agi-runaway-${agent_name}"
+  local stall_sentinel="/tmp/versa-agi-stall-${agent_name}"
   local size_threshold_bytes=$((size_threshold_kb * 1024))
-  local line_base=0 size_base=0 marker_seen=""
-  if [ -n "${turn_marker}" ] && [ -f "${turn_marker}" ]; then
-    marker_seen=$(stat -c %Y "${turn_marker}" 2>/dev/null || echo "")
-  fi
+  local poll_seconds="${VERSA_MONITOR_POLL_SECONDS:-10}"
+  local sample_polls="${VERSA_MONITOR_SAMPLE_POLLS:-6}"
+  local window_samples=15
+  local -a line_samples=(0)
+  local -a size_samples=(0)
+  local polls=0
+  local started
+  started=$(date +%s)
 
-  rm -f "${sentinel}" 2>/dev/null
+  rm -f "${sentinel}" "${stall_sentinel}" 2>/dev/null
   while true; do
-    sleep 10
+    sleep "${poll_seconds}"
+    polls=$((polls + 1))
     local trigger=""
     local diagnostics=""
+    local line_now=0 size_now=0
 
-    if [ -n "${turn_marker}" ] && [ -f "${turn_marker}" ]; then
-      local marker_now
-      marker_now=$(stat -c %Y "${turn_marker}" 2>/dev/null || echo "")
-      if [ -n "${marker_now}" ] && [ "${marker_now}" != "${marker_seen}" ]; then
-        marker_seen="${marker_now}"
-        line_base=$(wc -l < "${result_file}" 2>/dev/null || echo 0)
-        size_base=$(stat -c%s "${result_file}" 2>/dev/null || echo 0)
-        if [ -n "${session_dir}" ] && [ -d "${session_dir}" ]; then
-          local turn_session
-          turn_session=$(ls -t "${session_dir}"/session-*.jsonl "${session_dir}"/session-*.json 2>/dev/null | head -1)
-          if [ -n "${turn_session}" ]; then
-            baseline_session_size=$(stat -c%s "${turn_session}" 2>/dev/null || echo "${baseline_session_size}")
-          fi
-        fi
-      fi
-    fi
-
-    # Check 1: Result file line count (existing)
     if [ -f "${result_file}" ]; then
-      local line_count
-      line_count=$(wc -l < "${result_file}" 2>/dev/null || echo "0")
-      line_count=$(( line_count - line_base ))
-      if [ "${line_count}" -gt "${line_threshold}" ] 2>/dev/null; then
+      line_now=$(wc -l < "${result_file}" 2>/dev/null || echo "0")
+      size_now=$(stat -c%s "${result_file}" 2>/dev/null || echo "0")
+
+      # Check 1: lines written in the last 15 minutes
+      local line_growth=$(( line_now - line_samples[0] ))
+      if [ "${line_growth}" -gt "${line_threshold}" ] 2>/dev/null; then
         trigger="result_lines"
-        diagnostics="lines=${line_count}/${line_threshold}"
+        diagnostics="lines=${line_growth}/${line_threshold} in 15 min"
       fi
 
-      # Check 2: Result file size (catches long single-line output)
+      # Check 2: size written in the last 15 minutes (catches long single-line output)
       if [ -z "${trigger}" ]; then
-        local result_size
-        result_size=$(stat -c%s "${result_file}" 2>/dev/null || echo "0")
-        result_size=$(( result_size - size_base ))
-        if [ "${result_size}" -gt "${size_threshold_bytes}" ] 2>/dev/null; then
+        local size_growth=$(( size_now - size_samples[0] ))
+        if [ "${size_growth}" -gt "${size_threshold_bytes}" ] 2>/dev/null; then
           trigger="result_size"
-          local result_kb=$((result_size / 1024))
-          diagnostics="size=${result_kb}KB/${size_threshold_kb}KB"
+          diagnostics="size=$((size_growth / 1024))KB/${size_threshold_kb}KB in 15 min"
         fi
       fi
     fi
 
-    # Check 3: Session file size DELTA (growth since baseline)
-    # With --resume, session files grow across cycles — only trigger on this-cycle growth
-    if [ -z "${trigger}" ] && [ -n "${session_dir}" ] && [ -d "${session_dir}" ]; then
-      local latest_session
-      latest_session=$(ls -t "${session_dir}"/session-*.jsonl "${session_dir}"/session-*.json 2>/dev/null | head -1)
-      if [ -n "${latest_session}" ]; then
-        local session_size
-        session_size=$(stat -c%s "${latest_session}" 2>/dev/null || echo "0")
-        local session_delta=$(( session_size - baseline_session_size ))
-        if [ "${session_delta}" -gt "${size_threshold_bytes}" ] 2>/dev/null; then
-          trigger="session_size_delta"
-          local delta_kb=$((session_delta / 1024))
-          diagnostics="session_delta=${delta_kb}KB/${size_threshold_kb}KB (baseline=${baseline_session_size})"
-        fi
+    # One sample a minute; keep 15, so samples[0] is at most 15 minutes old.
+    if [ $((polls % sample_polls)) -eq 0 ]; then
+      line_samples+=("${line_now}")
+      size_samples+=("${size_now}")
+      if [ "${#line_samples[@]}" -gt "${window_samples}" ]; then
+        line_samples=("${line_samples[@]:1}")
+        size_samples=("${size_samples[@]:1}")
       fi
     fi
 
-    # Kill agent if any threshold breached
     if [ -n "${trigger}" ]; then
       echo "${trigger}:${diagnostics}" > "${sentinel}"
       pkill -u "${agent_user}" -f "harness.agent_harness" 2>/dev/null || true
       log "RUNAWAY: ${agent_name} ${trigger} exceeded threshold (${diagnostics}) — agent terminated"
       exit 0
+    fi
+
+    # Check 3: stall. Age is never counted from before this spawn, so a file
+    # left by an earlier cycle cannot trip it.
+    if [ -n "${heartbeat_file}" ] && [ "${stall_limit}" -gt 0 ] 2>/dev/null; then
+      local now beat age
+      now=$(date +%s)
+      beat=$(stat -c %Y "${heartbeat_file}" 2>/dev/null || echo 0)
+      [ "${beat}" -lt "${started}" ] 2>/dev/null && beat="${started}"
+      age=$(( now - beat ))
+      if [ "${age}" -gt "${stall_limit}" ]; then
+        echo "no heartbeat for ${age}s (limit ${stall_limit}s)" > "${stall_sentinel}"
+        pkill -u "${agent_user}" -f "harness.agent_harness" 2>/dev/null || true
+        log "STALL: ${agent_name} — no heartbeat for ${age}s (limit ${stall_limit}s) — agent stopped"
+        exit 0
+      fi
     fi
   done
 }
@@ -1333,7 +1331,7 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
   # Check if agent has exceeded monthly token budget before spawning
   TOKEN_BUDGET="${AGENT_TOKEN_BUDGET:-0}"
   if [ "${TOKEN_BUDGET}" -gt 0 ]; then
-    MONTHLY_TOKENS=$(sqlite3 "${CYCLES_DB}" "SELECT COALESCE(SUM(tokens_total), 0) FROM cycles WHERE id LIKE '${AGENT_NAME}-%' AND started_at >= strftime('%Y-%m-01', 'now');" 2>/dev/null || echo "0")
+    MONTHLY_TOKENS=$(sqlite3 "${CYCLES_DB}" "SELECT COALESCE(SUM(tokens_total), 0) FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*' AND started_at >= strftime('%Y-%m-01', 'now');" 2>/dev/null || echo "0")
     TOKEN_WARN_MARKER="/tmp/versa-agi-token-warn-${AGENT_NAME}-$(date +%Y-%m-%d)"
     BUDGET_PCT=0
     if [ "${MONTHLY_TOKENS}" -gt 0 ] && [ "${TOKEN_BUDGET}" -gt 0 ]; then
@@ -1395,8 +1393,10 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
 
   # ─── Circuit Breaker — Consecutive Failure Guard ──────
   # Prevents runaway API cost when an agent repeatedly fails on spawn.
-  # Only breaker-eligible exit codes count: 1 (error), 42 (input error), 99 (runaway).
-  # Excluded: 0 (success), 53 (turn limit), 124 (timeout — agent resumes next tick).
+  # Only breaker-eligible exit codes count: 1 (error), 42 (input error),
+  # 55 (repeated call), 97 (stall), 99 (runaway).
+  # Excluded: 0 (success), 53 (turn limit), 54 (time limit, closed by the
+  # harness), 124 (backstop kill — agent resumes next tick).
 
   # 1. Skip if already tripped
   CB_STATUS=$(sqlite3 "${AGENTS_DB}" "SELECT status FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
@@ -1408,12 +1408,12 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
 
   # 2. Count breaker-eligible failures in the last hour
   CB_HOURLY_COUNT=$(sqlite3 "${CYCLES_DB}" \
-    "SELECT COUNT(*) FROM cycles WHERE id LIKE '${AGENT_NAME}-%' AND exit_code IN (1, 42, 99) AND started_at >= datetime('now', '-1 hour');" \
+    "SELECT COUNT(*) FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*' AND exit_code IN (1, 42, 55, 97, 99) AND started_at >= datetime('now', '-1 hour');" \
     2>/dev/null || echo "0")
 
   # 3. Check last N cycles for consecutive breaker-eligible failures
   CB_CONSEC_COUNT=$(sqlite3 "${CYCLES_DB}" \
-    "SELECT COUNT(*) FROM (SELECT exit_code FROM cycles WHERE id LIKE '${AGENT_NAME}-%' ORDER BY started_at DESC LIMIT ${CB_CONSECUTIVE}) WHERE exit_code IN (1, 42, 99);" \
+    "SELECT COUNT(*) FROM (SELECT exit_code FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*' ORDER BY started_at DESC LIMIT ${CB_CONSECUTIVE}) WHERE exit_code IN (1, 42, 55, 97, 99);" \
     2>/dev/null || echo "0")
 
   # 4. Trip the breaker if either threshold is exceeded
@@ -1423,7 +1423,7 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
     [ "${CB_HOURLY_COUNT}" -ge "${CB_HOURLY}" ] 2>/dev/null && CB_TRIGGER="${CB_TRIGGER:+${CB_TRIGGER} + }${CB_HOURLY_COUNT} failures in last hour"
 
     CB_LAST_EXIT=$(sqlite3 "${CYCLES_DB}" \
-      "SELECT exit_code FROM cycles WHERE id LIKE '${AGENT_NAME}-%' ORDER BY started_at DESC LIMIT 1;" 2>/dev/null || echo "?")
+      "SELECT exit_code FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*' ORDER BY started_at DESC LIMIT 1;" 2>/dev/null || echo "?")
 
     log "CIRCUIT_BREAKER: ${AGENT_NAME} — TRIPPED (${CB_TRIGGER}, last exit: ${CB_LAST_EXIT}). Freezing agent."
 
@@ -1452,23 +1452,31 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
   fi  # IDE_GENERATE skip of frozen/budget/concurrency/breaker
 
   # ─── Execute — Spawn Agent with Safety Net ───────
-  # Defaults and the 30–60 Timeout range match agent_limits.py and
-  # init_agents_db.sh (state_live_chat.md §1.5). A row outside the range
+  # Defaults and the 30–240 time limit range match agent_limits.py and
+  # init_agents_db.sh (state_long_cycles.md §1.1). A row outside the range
   # (hand-edited DB) runs at the nearest bound.
+  # The harness closes the cycle at the time limit. `timeout` is the backstop
+  # for a model call still running then: the limit plus 5 minutes' grace.
   AGENT_TIMEOUT_MIN="${AGENT_TIMEOUT:-45}"
   case "${AGENT_TIMEOUT_MIN}" in
     ''|*[!0-9]*) AGENT_TIMEOUT_MIN=45 ;;
   esac
   if [ "${AGENT_TIMEOUT_MIN}" -lt 30 ]; then AGENT_TIMEOUT_MIN=30; fi
-  if [ "${AGENT_TIMEOUT_MIN}" -gt 60 ]; then AGENT_TIMEOUT_MIN=60; fi
-  TIMEOUT_DURATION="${AGENT_TIMEOUT_MIN}m"
+  if [ "${AGENT_TIMEOUT_MIN}" -gt 240 ]; then AGENT_TIMEOUT_MIN=240; fi
+  TIMEOUT_GRACE_MIN=5
+  TIMEOUT_DURATION="$(( AGENT_TIMEOUT_MIN + TIMEOUT_GRACE_MIN ))m"
+  # Stall limit (state_long_cycles.md §1.2 rule 3): 10 minutes, 20 on a local model.
+  STALL_LIMIT_SECONDS=600
+  if [ "${IS_LOCAL_MODEL}" = true ]; then STALL_LIMIT_SECONDS=1200; fi
   RUNAWAY_LIMIT="${AGENT_RUNAWAY_THRESHOLD:-2500}"
   RUNAWAY_SIZE_LIMIT="${AGENT_RUNAWAY_SIZE_THRESHOLD:-2048}"
   CYCLES_DIR="/var/lib/versa-agi/${AGENT_NAME}/cycles"
   RESULT_FILE="${CYCLES_DIR}/result_$(date +%s).json"
   RUNAWAY_SENTINEL="/tmp/versa-agi-runaway-${AGENT_NAME}"
+  STALL_SENTINEL="/tmp/versa-agi-stall-${AGENT_NAME}"
+  HEARTBEAT_FILE="${CYCLES_DIR}/heartbeat"
 
-  log "SPAWN: ${AGENT_NAME} as user ${AGENT_USER} (reason: ${WAKE_REASON}, timeout: ${TIMEOUT_DURATION}, runaway limit: ${RUNAWAY_LIMIT} lines / ${RUNAWAY_SIZE_LIMIT}KB)"
+  log "SPAWN: ${AGENT_NAME} as user ${AGENT_USER} (reason: ${WAKE_REASON}, time limit: ${AGENT_TIMEOUT_MIN}m + ${TIMEOUT_GRACE_MIN}m grace, stall limit: $(( STALL_LIMIT_SECONDS / 60 ))m, runaway limit: ${RUNAWAY_LIMIT} lines / ${RUNAWAY_SIZE_LIMIT}KB per 15 min)"
 
   # Increment spawn counter in main thread before forking
   SPAWNED_COUNT=$((SPAWNED_COUNT + 1))
@@ -2401,7 +2409,6 @@ ${IDE_RESUME_CONTEXT}"
       done
       sqlite3 "${AGENTS_DB}" "SELECT name FROM agents;" 2>/dev/null
     } | grep -v '^$' | sort -u | paste -sd, - )
-  TURN_MARKER="${CYCLES_DIR}/live_turn_marker"
   {
     echo "export AGICTL_CONFIG='${SYSTEM_CONFIG}'"
     echo "export AGICTL_AGENTS_DB='${AGENTS_DB}'"
@@ -2411,10 +2418,12 @@ ${IDE_RESUME_CONTEXT}"
     echo "export AGICTL_AGENT_DIR='${AGENT_PATH}/.agent'"
     echo "export VERSA_AGENT_NAME='${AGENT_NAME}'"
     # Live Chat (state_live_chat.md §5): who counts as an agent on this instance
-    # (a message from anyone else opens the listening window), and the file the
-    # harness touches at each chat turn for the runaway monitor.
+    # (a message from anyone else opens the listening window).
     echo "export VERSA_AGENT_IDS='${INSTANCE_AGENT_IDS}'"
-    echo "export VERSA_TURN_MARKER='${TURN_MARKER}'"
+    # Stall timer (state_long_cycles.md §1.2): the file the harness touches, and
+    # whether its steps are timed as a local model's.
+    echo "export VERSA_HEARTBEAT_FILE='${HEARTBEAT_FILE}'"
+    echo ",${VERSA_LOCAL_MODELS:-}," | grep -q ",${AGENT_MODEL}," && echo "export VERSA_LOCAL_MODEL='1'"
     # `agictl agent chat-close` writes "<cycleId> <reason>" here (state_live_chat.md LCH-23).
     echo "export VERSA_CHAT_CLOSE_FILE='/var/lib/versa-agi/${AGENT_NAME}/chat_close'"
     [ -n "${VERSA_FIRST_CONTACT:-}" ] && echo "export VERSA_FIRST_CONTACT='${VERSA_FIRST_CONTACT}'"
@@ -2540,23 +2549,8 @@ ${IDE_RESUME_CONTEXT}"
   # Token stats are extracted post-hoc from a separate JSON stats run.
   RESULT_LOG="${CYCLES_DIR}/result_$(date +%s).log"
 
-  # ─── Runaway Session-Delta Baseline ───────────────
-  # SESSION_DIR/BASELINE_SESSION_SIZE feed monitor_runaway Check 3 (session
-  # growth this cycle). They MUST be initialised: the spawn subshell runs with
-  # set +e but inherits set -u (nounset) from the top-level `set -euo pipefail`,
-  # and set +e does NOT disable nounset — referencing an unset variable here
-  # aborts the subshell before the harness ever runs (silent spawn failures).
-  SESSION_DIR="${CYCLES_DIR}"
-  BASELINE_SESSION_SIZE=0
-  if [ -d "${SESSION_DIR}" ]; then
-    _baseline_session=$(ls -t "${SESSION_DIR}"/session-*.jsonl "${SESSION_DIR}"/session-*.json 2>/dev/null | head -1)
-    if [ -n "${_baseline_session}" ]; then
-      BASELINE_SESSION_SIZE=$(stat -c%s "${_baseline_session}" 2>/dev/null || echo 0)
-    fi
-  fi
-
-  # Start runaway monitor BEFORE agent runs (with baseline for delta check)
-  monitor_runaway "${RESULT_FILE}" "${AGENT_USER}" "${AGENT_NAME}" "${RUNAWAY_LIMIT}" "${RUNAWAY_SIZE_LIMIT}" "${SESSION_DIR}" "${BASELINE_SESSION_SIZE}" "${TURN_MARKER}" &
+  # Start the cycle monitor BEFORE the agent runs: rolling runaway window and stall timer.
+  monitor_runaway "${RESULT_FILE}" "${AGENT_USER}" "${AGENT_NAME}" "${RUNAWAY_LIMIT}" "${RUNAWAY_SIZE_LIMIT}" "${HEARTBEAT_FILE}" "${STALL_LIMIT_SECONDS}" &
   MONITOR_PID=$!
 
   # Set agent status to 'active' in DB so dashboard reflects running state
@@ -2679,8 +2673,9 @@ ${IDE_RESUME_CONTEXT}"
     INBOX_POLL_PID=$!
     trap 'kill "${INBOX_POLL_PID}" 2>/dev/null || true' EXIT
   fi
-  # Same instant `timeout` starts counting from; the harness warns at 10 and
-  # 5 minutes left (state_live_chat.md §1.5.3).
+  # Same instant `timeout` starts counting from. DEADLINE_EPOCH is the time
+  # limit: the harness warns before it and closes the cycle at it
+  # (state_long_cycles.md §1.3, §1.7). `timeout` fires 5 minutes later.
   SPAWN_EPOCH=$(date +%s)
   DEADLINE_EPOCH=$(( SPAWN_EPOCH + AGENT_TIMEOUT_MIN * 60 ))
   # Activity start (VersaVoice chat strip: agent working). Listening minutes
@@ -2692,7 +2687,7 @@ ${IDE_RESUME_CONTEXT}"
   else
     ACTIVITY_WAKE="tasks"
   fi
-  ACTIVITY_CYCLES_TOTAL=$(sqlite3 "${CYCLES_DB}" "SELECT COUNT(*) FROM cycles WHERE id LIKE '${AGENT_NAME}-%';" 2>/dev/null || echo 0)
+  ACTIVITY_CYCLES_TOTAL=$(sqlite3 "${CYCLES_DB}" "SELECT COUNT(*) FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*';" 2>/dev/null || echo 0)
   # Listening window (state_live_chat.md P3): ask for the [live_chat]
   # setting; VersaVoice grants it, or 0 when 5 of the PU's agents listen.
   LISTEN_SETTING=$(sed -n '/^\[live_chat\]/,/^\[/{s/^idle_minutes=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
@@ -2708,7 +2703,7 @@ ${IDE_RESUME_CONTEXT}"
     done < <(sqlite3 "${MESSAGES_DB}" "SELECT DISTINCT CASE WHEN from_user_id < '${SUB_ACCOUNT_ID}' THEN from_user_id || '_' || '${SUB_ACCOUNT_ID}' ELSE '${SUB_ACCOUNT_ID}' || '_' || from_user_id END FROM messages WHERE status='unprocessed' AND direction='received' AND channel='vv' AND to_user_id='${SUB_ACCOUNT_ID}' AND from_user_id != '' LIMIT 20;" 2>/dev/null)
   fi
   LISTEN_MINUTES=$(_vv_activity start --wake "${ACTIVITY_WAKE}" --listen-minutes "${LISTEN_SETTING}" \
-    --hard-cap-epoch "${DEADLINE_EPOCH}" --cycles-total "${ACTIVITY_CYCLES_TOTAL:-0}" \
+    --hard-cap-epoch "$(( DEADLINE_EPOCH + TIMEOUT_GRACE_MIN * 60 ))" --cycles-total "${ACTIVITY_CYCLES_TOTAL:-0}" \
     ${ACTIVITY_CHANNEL_ARGS[@]+"${ACTIVITY_CHANNEL_ARGS[@]}"})
   case "${LISTEN_MINUTES}" in
     ''|*[!0-9]*) LISTEN_MINUTES=0 ;;
@@ -2777,12 +2772,28 @@ ${IDE_RESUME_CONTEXT}"
     fi
   fi
 
+  # ─── Stall Handler (state_long_cycles.md §1.2 rule 4) ─────
+  # The monitor stopped a harness whose heartbeat went quiet. Exit code 97
+  # counts toward the circuit breaker; tasks are not frozen.
+  STALL_INFO=""
+  if [ -f "${STALL_SENTINEL}" ]; then
+    STALL_INFO=$(cat "${STALL_SENTINEL}" 2>/dev/null || echo "unknown")
+    rm -f "${STALL_SENTINEL}"
+    EXIT_CODE=97
+  fi
+
   # ─── Activity end (VersaVoice chat strip: agent asleep) ─────
+  # Seven outcomes (state_long_cycles.md §1.8). 54 is a timeout, like the
+  # backstop kill. A cloud that predates `stall` and `loop` stores them as a
+  # crash. cycles.db keeps the exact code.
   case ${EXIT_CODE} in
     0)   ACTIVITY_OUTCOME="ok" ;;
     124) ACTIVITY_OUTCOME="timeout" ;;
+    54)  ACTIVITY_OUTCOME="timeout" ;;
     99)  ACTIVITY_OUTCOME="runaway" ;;
     53)  ACTIVITY_OUTCOME="step_limit" ;;
+    97)  ACTIVITY_OUTCOME="stall" ;;
+    55)  ACTIVITY_OUTCOME="loop" ;;
     *)   ACTIVITY_OUTCOME="crash" ;;
   esac
   _vv_activity end --outcome "${ACTIVITY_OUTCOME}" \
@@ -2793,7 +2804,10 @@ ${IDE_RESUME_CONTEXT}"
   case ${EXIT_CODE} in
     0)   log "DONE: ${AGENT_NAME} completed successfully" ;;
     99)  log "HALTED: ${AGENT_NAME} frozen after runaway detection" ;;
-    124) log "TIMEOUT: ${AGENT_NAME} killed after ${TIMEOUT_DURATION}" ;;
+    124) log "TIMEOUT: ${AGENT_NAME} stopped by the backstop after ${TIMEOUT_DURATION} (time limit ${AGENT_TIMEOUT_MIN}m + grace)" ;;
+    54)  log "LIMIT: ${AGENT_NAME} time limit reached — cycle closed by the harness (exit code 54)" ;;
+    55)  log "LOOP: ${AGENT_NAME} stopped — the same tool call was repeated (exit code 55)" ;;
+    97)  log "STALL: ${AGENT_NAME} stopped by the stall timer (${STALL_INFO}) (exit code 97)" ;;
     1)   log "ERROR: ${AGENT_NAME} exited with error (exit code 1)" ;;
     42)  log "ERROR: ${AGENT_NAME} input error (exit code 42)" ;;
     53)  log "LIMIT: ${AGENT_NAME} turn limit exceeded (exit code 53)" ;;
@@ -2804,6 +2818,12 @@ ${IDE_RESUME_CONTEXT}"
     mkdir -p "/tmp/versa-agi-step-resume"
     touch "${STEP_RESUME_SENTINEL}"
     log "RESUME: ${AGENT_NAME} step budget reached — continuation queued for next tick"
+  fi
+  # Time limit: same resume marker, so the next tick carries on with the same thread.
+  if [ "${EXIT_CODE}" -eq 54 ]; then
+    mkdir -p "/tmp/versa-agi-step-resume"
+    touch "${STEP_RESUME_SENTINEL}"
+    log "RESUME: ${AGENT_NAME} time limit reached — continuation queued for next tick"
   fi
 
   # NOTE: Dirty checkpoint sentinel removed — the harness now always validates
@@ -2875,10 +2895,18 @@ ${IDE_RESUME_CONTEXT}"
     TELEMETRY_FILE="/var/lib/versa-agi/${AGENT_NAME}/cycles/cycle_telemetry.json"
   fi
   
+  # The file is one per agent and survives a killed cycle. Read it only when it
+  # carries this spawn's cycle id; otherwise the numbers belong to an earlier
+  # cycle (state_spawn_context.md §1.5 rule 3).
   if [ -f "${TELEMETRY_FILE}" ]; then
+    TELEMETRY_CYCLE_ID=$(jq -r '.cycle_id // empty' "${TELEMETRY_FILE}" 2>/dev/null || true)
+    if [ -n "${CURRENT_CYCLE_ID}" ] && [ "${TELEMETRY_CYCLE_ID}" = "${CURRENT_CYCLE_ID}" ]; then
       TOKENS_IN=$(jq -r '.prompt_tokens // 0' "${TELEMETRY_FILE}" 2>/dev/null || echo "0")
       TOKENS_OUT=$(jq -r '.completion_tokens // 0' "${TELEMETRY_FILE}" 2>/dev/null || echo "0")
       TOKENS_TOTAL=$(jq -r '.total_tokens // 0' "${TELEMETRY_FILE}" 2>/dev/null || echo "0")
+    else
+      log "TOKENS: ${AGENT_NAME} — telemetry is from another cycle (${TELEMETRY_CYCLE_ID:-no id}); not recorded on ${CURRENT_CYCLE_ID:-this cycle}"
+    fi
   fi
 
   # Compute total if we have parts but no explicit total
@@ -2889,7 +2917,13 @@ ${IDE_RESUME_CONTEXT}"
   # Update the most recent cycle row with token data + exit code
   # ALWAYS record exit code — even with zero tokens — to prevent NULL gaps
   # that mask failure loops from the circuit breaker.
-  /usr/local/bin/agictl cycle tokens "${AGENT_NAME}" "${TOKENS_IN}" "${TOKENS_OUT}" "${TOKENS_THINK}" "${TOKENS_TOTAL}" --exit-code "${EXIT_CODE}" --cached "${TOKENS_CACHED}" --session-path "${SESSION_FILE_PATH}"
+  # With the cycle id, tokens and exit code land on this spawn's row, and a row
+  # the agent did not close is closed with the outcome (§1.5 rules 2 and 4).
+  CYCLE_ROW_ARGS=()
+  if [ -n "${CURRENT_CYCLE_ID}" ]; then
+    CYCLE_ROW_ARGS=(--cycle-id "${CURRENT_CYCLE_ID}" --outcome "${ACTIVITY_OUTCOME}")
+  fi
+  /usr/local/bin/agictl cycle tokens "${AGENT_NAME}" "${TOKENS_IN}" "${TOKENS_OUT}" "${TOKENS_THINK}" "${TOKENS_TOTAL}" --exit-code "${EXIT_CODE}" --cached "${TOKENS_CACHED}" --session-path "${SESSION_FILE_PATH}" "${CYCLE_ROW_ARGS[@]}"
   if [ "${TOKENS_TOTAL}" -gt 0 ] 2>/dev/null; then
     log "TOKENS: ${AGENT_NAME} — in=${TOKENS_IN} out=${TOKENS_OUT} think=${TOKENS_THINK} cached=${TOKENS_CACHED} total=${TOKENS_TOTAL} (session: $(basename "${SESSION_FILE_PATH}"))"
   else

@@ -35,6 +35,33 @@ xAI, OpenAI, Anthropic, and OpenRouter keys live in `provider_keys.env` (and the
 
 A unified `agictl vault` is **TD-SEC-015** (Future). Until then, treat those files as the live store.
 
+## Web search
+
+Search needs no key. Two optional keys add official search APIs inside the local SearXNG, for when the public search pages block it.
+
+| `setup.ini` `[search]` | Service | Effect |
+|---|---|---|
+| `brave_api_key` | Brave Search API | Adds Brave's API. Brave's public page is no longer read |
+| `exa_api_key` | Exa | Adds Exa's API |
+| `contact_url` | — (not a key) | A URL or `mailto:` address sent to Wikipedia and Wikidata, which ask every client to say who it is. Blank leaves those two off |
+
+Each service has a free monthly credit; its pricing page says what happens after that.
+
+Setup does not ask for these keys. Set one in any of three ways:
+
+| Who | How |
+|---|---|
+| You, in the dashboard | agitop → **API Keys** → **Brave Search API Key** or **Exa API Key** → **Save Changes** |
+| You, on the command line | `sudo agictl system set-key brave_search <key>` · `sudo agictl system set-key exa <key>` |
+| COA | Send COA the key and ask it to turn on better search. It runs `agictl search set-key` and does not keep or repeat the key |
+
+- Saving a key refreshes SearXNG. It can take a minute or two.
+- To remove a key, enter `off` in its place.
+- `agictl search status` shows whether each key is set (never the key) and which engines answer a test search.
+- `contact_url` is edited in `setup.ini`, then `sudo versa-agi-update`.
+
+The keys are kept in `setup.ini` `[search]` and written to `/etc/searxng/settings.yml`.
+
 ## Related
 
 - [Models](models.md)

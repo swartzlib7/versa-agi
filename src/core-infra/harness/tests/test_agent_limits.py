@@ -24,14 +24,14 @@ class TestAgentLimits(unittest.TestCase):
         self.assertEqual(agent_limits.DEFAULT_RUNAWAY_SIZE_KB, 2048)
 
     def test_timeout_error(self):
-        for ok in (30, "45", " 60 "):
+        for ok in (30, "45", " 60 ", 120, 240):
             self.assertEqual(agent_limits.timeout_error(ok), "", ok)
-        for bad in (29, 61, 0, -5, "abc", "", None):
+        for bad in (29, 241, 300, 0, -5, "abc", "", None):
             self.assertTrue(agent_limits.timeout_error(bad), bad)
-        self.assertIn("between 30 and 60", agent_limits.timeout_error(90))
+        self.assertIn("between 30 and 240", agent_limits.timeout_error(300))
 
     def test_clamp(self):
-        cases = {10: 30, 30: 30, 45: 45, 60: 60, 90: 60, "x": 45, None: 45}
+        cases = {10: 30, 30: 30, 45: 45, 60: 60, 90: 90, 240: 240, 300: 240, "x": 45, None: 45}
         for raw, want in cases.items():
             self.assertEqual(agent_limits.clamp_timeout(raw), want, raw)
 
@@ -47,7 +47,7 @@ class TestInitDbClamp(unittest.TestCase):
         script = os.path.join(CORE_INFRA, "scripts", "init_agents_db.sh")
         with open(script, encoding="utf-8") as fh:
             text = fh.read()
-        start = text.index("# ─── Timeout range 30–60 minutes")
+        start = text.index("# ─── Time limit range 30–240 minutes")
         end = text.index("\nfi\n", start) + 4
         block = text[start:end]
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,13 +56,13 @@ class TestInitDbClamp(unittest.TestCase):
                 conn.execute("CREATE TABLE agents (name TEXT, timeout_minutes INTEGER, "
                              "updated_at DATETIME)")
                 conn.executemany("INSERT INTO agents VALUES (?, ?, NULL)",
-                                 [("a", 10), ("b", 45), ("c", 90), ("d", None)])
+                                 [("a", 10), ("b", 45), ("c", 300), ("d", None), ("e", 120)])
             out = subprocess.run(["bash", "-c", f'set -euo pipefail\nDB_PATH="{db}"\n{block}'],
                                  capture_output=True, text=True, check=True).stdout
             self.assertIn("for 3 agent(s)", out)
             with sqlite3.connect(db) as conn:
                 rows = dict(conn.execute("SELECT name, timeout_minutes FROM agents"))
-            self.assertEqual(rows, {"a": 30, "b": 45, "c": 60, "d": 45})
+            self.assertEqual(rows, {"a": 30, "b": 45, "c": 240, "d": 45, "e": 120})
 
 
 try:
@@ -98,12 +98,14 @@ class TestSetTimeoutCli(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(json.loads(result.output)["success"])
         self.assertEqual(self._timeout(), 50)
+        self.assertEqual(self._set(120).exit_code, 0)    # state_long_cycles.md LRC-08
+        self.assertEqual(self._timeout(), 120)
 
     def test_out_of_range_refused(self):
-        for bad in (20, 75):
+        for bad in (20, 300):
             result = self._set(bad)
             self.assertEqual(result.exit_code, 1, result.output)
-            self.assertIn("between 30 and 60", result.output)
+            self.assertIn("between 30 and 240", result.output)
         self.assertEqual(self._timeout(), 45)
 
 

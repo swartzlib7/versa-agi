@@ -22,7 +22,10 @@ def outcome_for(exit_code, ended_at) -> str | None:
         code = int(exit_code)
     except (TypeError, ValueError):
         return "crash"
-    return {0: "ok", 124: "timeout", 99: "runaway", 53: "step_limit"}.get(code, "crash")
+    # 54 = time limit, closed by the harness. 55 = repeated call, 97 = stall
+    # (state_long_cycles.md §1.8).
+    return {0: "ok", 124: "timeout", 54: "timeout", 99: "runaway", 53: "step_limit",
+            97: "stall", 55: "loop"}.get(code, "crash")
 
 
 def wake_for(wake_reason) -> str:

@@ -1,6 +1,6 @@
 # Skill: Browser Automation — Headless Chromium
 
-> **Trigger**: Use this skill when you need to navigate web pages, extract content from URLs, fill forms, click elements, or capture screenshots. All operations use a sandboxed headless Chromium browser running as your agent user.
+> **Trigger**: Use this skill when a page needs a real browser: it builds its content with scripts, or you need to click, fill a form, or capture a screenshot. To simply read a page (documentation, an article, a reference), use `agictl search read "<url>"` first: it is faster and starts no browser (see the `web_research` skill). All operations here use a sandboxed headless Chromium browser running as your agent user.
 
 > **Harness tools:** Examples use shell form (`agictl group …`). In a work cycle, call the matching tool (`agictl_task`, `agictl_cycle`, …) and pass only the part **after** `agictl` as the `command` argument. Never prefix `agictl` in the argument. Full map: **cli_reference_agent.md** (*Harness tool invocation*).
 
@@ -15,7 +15,10 @@ If either prerequisite is unmet, the `agictl_browser` harness tool will not be a
 ## Commands
 
 ```bash
-agictl browser goto "<url>"                           # Load page, return text content
+agictl browser goto "<url>"                           # Load page, return its text (first 8000 characters)
+agictl browser goto "<url>" --offset <next_offset>    # Read on from where the last reply stopped
+agictl browser goto "<url>" --max-chars 20000         # Return more per call (limit 20000)
+agictl browser goto "<url>" --selector "<css>"        # Text of one part of the page
 agictl browser goto "<url>" --screenshot              # Load page + save screenshot
 agictl browser click "<url>" "<selector>"             # Navigate then click an element
 agictl browser fill "<url>" "<selector>" "<value>"    # Navigate then fill a form field
@@ -25,6 +28,14 @@ agictl browser extract "<url>"                        # Extract all text content
 agictl browser extract "<url>" --selector "<css>"     # Extract text from specific elements
 agictl browser extract "<url>" --selector "<css>" --attribute "<attr>"  # Extract attribute values
 ```
+
+Every command accepts `--user-agent "<text>"` for that call. Without it the browser presents itself as desktop Chrome. Set one when a site asks automated clients to identify themselves, or serves different content to a different browser.
+
+Each command waits for the page's scripts to finish (network quiet, then text unchanged for one second, up to the system settle time) before it reads.
+
+## Reading a long page
+
+`goto` returns `content_chars` (the full length). When more text follows, the reply has `"truncated": true` and `next_offset`. Call `goto` again with `--offset <next_offset>` to read the next part. Use `--selector` to read only the part you need.
 
 ## Security Guardrails
 
@@ -77,6 +88,10 @@ All commands return JSON:
   "url": "https://example.com",
   "title": "Example Domain",
   "content": "...",
+  "content_chars": 23110,
+  "offset": 0,
+  "truncated": true,
+  "next_offset": 8000,
   "screenshot": "/home/agi-name/workspace/screenshots/browser_20260607_120000.png"
 }
 ```
@@ -93,8 +108,8 @@ On failure:
 
 - No persistent browser sessions — each command spawns a fresh Chromium instance
 - No cookie/session management across commands
-- JavaScript-heavy SPAs may require `goto` before `extract` to let content render
-- Maximum content extraction is truncated to prevent token overflow
+- A page that keeps loading past the settle time is read as it is at that moment
+- A user agent does not pass a CAPTCHA or a login wall. If a page shows one, report it and use another source
 - Cannot interact with browser devtools or modify browser settings
 
 ## COA Delegation

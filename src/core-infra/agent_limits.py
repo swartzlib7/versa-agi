@@ -1,4 +1,4 @@
-"""Per-agent run limits: defaults and the Timeout range (state_live_chat.md §1.5).
+"""Per-agent run limits: defaults and the time limit range (state_long_cycles.md §1.1).
 
 One source for agictl, agitop and setup. lifeline.sh and init_agents_db.sh
 are bash and carry the same numbers; keep them in step with this file.
@@ -10,10 +10,11 @@ DEFAULT_TIMEOUT_MINUTES = 45
 DEFAULT_RUNAWAY_LINES = 2500
 DEFAULT_RUNAWAY_SIZE_KB = 2048
 
-# Timeout is the safety kill for a stuck run. 30 keeps room for a live call
-# (longest choice 25 min) inside a fresh run; 60 bounds a stuck run.
+# The time limit is when the harness closes the cycle. 30 keeps room for a
+# live call (longest choice 25 min) inside a fresh run. 240 is the ceiling: a
+# stuck run is caught by the stall timer, not by a short limit.
 TIMEOUT_MIN_MINUTES = 30
-TIMEOUT_MAX_MINUTES = 60
+TIMEOUT_MAX_MINUTES = 240
 
 
 def timeout_error(minutes) -> str:
