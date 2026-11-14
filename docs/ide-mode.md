@@ -1,6 +1,6 @@
 # IDE mode
 
-Put COA in an IDE session (VSCode, Cursor, Antigravity) so it runs on the IDE's inference as the `coa` user. Lifeline does not spawn a harness cycle while the mode is on.
+Put COA in an IDE session (VSCode, Cursor, Antigravity) so it runs on the IDE's inference as the `coa` user. The chat can be the IDE's own agent or an agent extension such as Claude Code; with an extension, inference is the extension's. Lifeline does not spawn a harness cycle while the mode is on.
 
 Native Linux, WSL, and OrbStack all work over Remote-SSH. Host class only changes how the SSH config is installed.
 
@@ -28,11 +28,23 @@ You do **not** open COA's home directory as yourself. Opening `/home/coa/coa-env
 
 Confirm you landed in the right place — `whoami` in the IDE terminal must print `coa`.
 
-While the mode is on, `AGENTS.md` at the workspace root is picked up automatically (Cursor, VS Code Copilot, Antigravity). That is the door. `ide off` deletes it (and the seed). COA reads `.agent/versa-agi_ide.md` itself — you do not have to attach it. Attaching the seed is optional.
+While the mode is on, `AGENTS.md` at the workspace root is picked up automatically (Cursor, VS Code Copilot, Antigravity, Claude Code). That is the door. `ide off` deletes it (and the seed). COA reads `.agent/versa-agi_ide.md` itself — you do not have to attach it. Attaching the seed is optional.
 
 Both the workspace and the seed live on the remote side, so the IDE's agent shares COA's `agictl` access, databases, and filesystem view. `agictl` is on the `PATH` in that terminal.
 
-On **Cursor** only, COA may offer a same-chat `/loop` after the first cycle. That is optional. VS Code and Antigravity run one cycle and wait. Do not treat a loop as how the mode works.
+COA first works out two things, in this order: which IDE the window is, and which tool is running the chat (the IDE's own agent, or an extension such as Claude Code). It tells you both at the start.
+
+A same-chat loop is optional and follows the tool, not the IDE:
+
+| Tool running the chat | Same-chat loop |
+|---|---|
+| Cursor agent | Yes (`/loop`) |
+| Claude Code, in any of the three IDEs | Yes (`/loop`) |
+| GitHub Copilot in VS Code | No: one cycle per message |
+| Antigravity agent | No: one cycle per message |
+| Another tool | Only if it has its own command that wakes the same chat on a timer |
+
+Where a loop is possible, COA asks for the interval in minutes and how many idle wakes to allow before it stops. Everything else in the mode works the same in every IDE and with every tool. Do not treat a loop as how the mode works.
 
 ## Every turn
 
@@ -60,7 +72,7 @@ COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] au
 - Not token-accounted. IDE turns do not write cycles.
 - Not a privilege grant beyond being `coa`. `on` is Primary User only (`sudo`). `off` is Primary User or COA. `status` is readable by COA on purpose.
 - Not a LAN-reachable login. The sshd rule accepts `coa` only from `127.0.0.1` / `::1`, by public key, never by password.
-- Not a required loop. Same-chat wake is Cursor-only and optional.
+- Not a required loop. Same-chat wake is optional, and offered only when the tool running the chat has one (Cursor agent, Claude Code).
 
 ## Troubleshooting
 

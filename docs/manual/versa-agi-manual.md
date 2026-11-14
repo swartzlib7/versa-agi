@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.8.0 · November 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.8.1 · November 2026</p>
 </div>
 
 ## At a glance
@@ -182,7 +182,7 @@ Agents do real work the way a person at a computer does: they write scripts, com
 
 ### Pair with an agent in your editor
 
-An agent can join you inside VS Code, Cursor, or Antigravity. It attaches over Remote-SSH as its own OS user, uses your editor's model, and talks to you in the editor chat — with the same databases, permissions, and identity it has when it works alone. Its own scheduled cycles pause while you pair, then resume. One switch, in the dashboard or on the command line.
+An agent can join you inside VS Code, Cursor, or Antigravity. It attaches over Remote-SSH as its own OS user, uses the model of your editor's agent or of an agent extension such as Claude Code, and talks to you in the editor chat — with the same databases, permissions, and identity it has when it works alone. Its own scheduled cycles pause while you pair, then resume. One switch, in the dashboard or on the command line.
 
 ### Riding the VersaVoice backbone {.page-top}
 
@@ -452,7 +452,7 @@ Add `gemini`, `xai`, `openai`, or `anthropic` the same way if you want those API
 
 <dl class="trouble">
 <dt>Update</dt>
-<dd><code>sudo ./setup.sh --update</code>, or <code>versa-agi-update</code>. Shipped files refresh. Your choices — feature switches, models you added — are kept. The update re-checks a few things as it runs: it confirms the update, checks your VersaVoice token again (and asks for a new one only if it fails), and asks the optional-feature questions again with your current answers as the defaults. Press Enter to keep them.</dd>
+<dd><code>sudo ./setup.sh --update</code>, or <code>versa-agi-update</code>. Shipped files refresh. Your choices — feature switches, models you added — are kept. After an update your COA gets a one-time update note for the release: the maintenance the update needs here, such as checking data a fixed fault could have left wrong, and anything marked for it to tell you. It deals with the note once and closes it. The update re-checks a few things as it runs: it confirms the update, checks your VersaVoice token again (and asks for a new one only if it fails), and asks the optional-feature questions again with your current answers as the defaults. Press Enter to keep them.</dd>
 <dt>Backup</dt>
 <dd><code>versa-agi-backup</code> writes an archive you can restore onto another machine.</dd>
 <dt>Uninstall</dt>
@@ -655,6 +655,8 @@ Agents never get blanket root. The one exception is **COA Autonomous Mode**: pas
 
 **General** also holds the circuit breaker, which stops repeated failed cycles from spending money, plus web search, browser automation, and how often the machine syncs with VersaVoice.
 
+Every time you see in agitop, and every time your agents are shown, is in this machine's time zone. A due date you type, or an agent types, is read in that zone too. Nothing is converted by hand.
+
 Web search runs on this machine and asks several public search engines at once. It needs no account. Agents search first, then read the page they need as plain text, and open the browser only for pages that need one.
 
 Public engines sometimes block automated searches. If results stop coming, you can add a search key from Brave or Exa, which are official search services with a free monthly credit:
@@ -856,5 +858,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.8.0, November 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.8.1, November 2026.</p>
 </div>

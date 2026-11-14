@@ -99,6 +99,13 @@ Tasks, memory, awareness, messages, and the agent's instructions stay through al
 
 Draining deletes summary frames for good. The agent can no longer search them. Purging deletes that agent's cycle history for good: its token totals restart, and its next wake starts without a note about its last cycle. Neither can be undone. Run `sudo versa-agi-backup` first if you may want them back.
 
+## A task ran at the wrong hour
+
+Due dates are read and shown in this machine's time zone. A task that an agent created before version 3.8.1, with a plain local time, was stored early by the machine's offset from UTC: five hours in US Eastern time.
+
+- Open the task in agitop → **Tasks**. The **Due** column is local time. Set the time you meant and save.
+- Or ask COA to check its open tasks' due times. The update note it received asks for this.
+
 ## Web search returns nothing
 
 `agictl search web "<query>"` lists the engines that did not answer and why (`unresponsive_engines`). Public search pages block automated readers from time to time; a block on one engine clears on its own.

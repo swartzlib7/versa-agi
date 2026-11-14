@@ -111,9 +111,11 @@ agictl task reminder "<text>" [--category CAT]        # Create a reminder task
 
 > **Frozen tasks**: Lifeline auto-freezes overdue tasks after the configured retry budget. When the work is still needed, or the Primary User asks you to resume, use `agictl task unfreeze <id>` (or `unfreeze-all` with your agent name), then snooze or reschedule it in the same cycle. You can only unfreeze tasks assigned to you — COA and the Primary User can unfreeze any agent's tasks.
 
-**task add options**: `--desc`, `--priority low|normal|high|urgent`, `--assignee`, `--project <id>`, `--callback notify_sponsor|notify_connection|await_reply|check_connection|none`, `--source-msg <id>`, `--requested-by <uid>`, `--due-date "YYYY-MM-DD HH:MM:SS"`
+**task add options**: `--desc`, `--priority low|normal|high|urgent`, `--assignee`, `--project <id>`, `--callback notify_sponsor|notify_connection|await_reply|check_connection|none`, `--source-msg <id>`, `--requested-by <uid>`, `--due-date "YYYY-MM-DD HH:MM"` (local time, or `now`)
 
-**task update options**: `--status planned|in_progress|waiting|blocked|cancelled|done`, `--desc`, `--priority`, `--assignee`, `--due-date "YYYY-MM-DD HH:MM:SS"`, `--requested-by`
+**task update options**: `--status planned|in_progress|waiting|blocked|cancelled|done`, `--desc`, `--priority`, `--assignee`, `--due-date "YYYY-MM-DD HH:MM"` (local time, or `now`), `--requested-by`
+
+> **Times are local.** Every time `agictl` shows you is in the host's time zone and ends with its name (`2026-11-13 11:30 EST`). Every time you type is read in that zone: `--due-date "YYYY-MM-DD HH:MM"`, or `--due-date now`. Do not convert to UTC and do not add an offset. A value that is not a date is refused.
 
 > `--due-date` is **mandatory** when creating tasks and when setting status back to `planned`. If a task cannot be completed by its due date, **roll the due date forward** — do not leave it in the past.
 

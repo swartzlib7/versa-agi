@@ -1,5 +1,12 @@
 """Agents panel — agent status table with prompt viewer modals."""
 
+import os as _os
+import sys as _sys
+_CORE_INFRA_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+if _CORE_INFRA_DIR not in _sys.path:
+    _sys.path.insert(0, _CORE_INFRA_DIR)
+import local_time  # noqa: E402
+
 import calendar
 import json
 import os
@@ -18,10 +25,10 @@ from textual.widgets import DataTable, Button, Static, Input, TextArea, Select
 
 from agitop.data import AgentReader
 from agitop.data.system_reader import SystemReader
+from agitop import zone_heading
 from agitop.panels.agent_prompt_menu import AgentPromptMenu
 from agitop.panels.model_params_ui import format_json_pretty, parse_json_object
 
-_TZ = time.strftime("%Z")
 
 
 def _ide_elapsed(status_message: str | None) -> str:
@@ -58,16 +65,10 @@ def _agent_extra_display(raw: str | None) -> str:
     return format_json_pretty(raw)
 
 def _utc_to_local(utc_str: str) -> str:
-    """Convert 'YYYY-MM-DD HH:MM:SS' UTC string to local timezone."""
+    """Stored UTC time → local 'YYYY-MM-DD HH:MM:SS' (local_time: that date's own offset)."""
     if not utc_str or utc_str == "--" or len(utc_str) < 16:
         return utc_str
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=timezone.utc).astimezone()
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, OSError):
-        return utc_str
+    return local_time.show(utc_str, seconds=True, zone=False)
 
 
 class PromptViewModal(ModalScreen):
@@ -142,12 +143,13 @@ class AgentsPanel(DataTable):
         self.add_columns(
             "Agent", "Provider", "Model", "Triage", "Role", "Reasoning", "Skills", "Routing",
             "Inactive", "Protected", "Browser", "Comms", "Req. By",
-            f"Last Cycle ({_TZ})", "Sent", "Recv", "Tasks", "Tokens", "Budget", "Status"
+            zone_heading.heading("Last Cycle"), "Sent", "Recv", "Tasks", "Tokens", "Budget", "Status"
         )
         self.refresh_data()
 
     def refresh_data(self) -> None:
         """Refresh agent data from SQLite and status files."""
+        zone_heading.refresh(self, "Last Cycle")
         is_running = self.system_reader.is_agent_process_running()
         
         agents = self.agent_reader.get_all_agents() if self.agent_reader else []

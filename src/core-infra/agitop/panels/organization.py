@@ -18,6 +18,13 @@ red = failed/overdue, dim(gray) = closed/inactive.
 
 from __future__ import annotations
 
+import os as _os
+import sys as _sys
+_CORE_INFRA_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+if _CORE_INFRA_DIR not in _sys.path:
+    _sys.path.insert(0, _CORE_INFRA_DIR)
+import local_time  # noqa: E402
+
 import json
 import os
 import re
@@ -52,10 +59,15 @@ def _yn(value) -> str:
 
 
 def _date(value) -> str:
-    """Trim a datetime/date string to its YYYY-MM-DD prefix for compact tables."""
+    """The local calendar date of a stored time, for compact tables.
+
+    A stored UTC time becomes its local date (it used to show the UTC date,
+    which is tomorrow's after early evening west of UTC). A calendar date
+    such as an invoice date is shown as it is.
+    """
     if not value:
         return "—"
-    return str(value)[:10]
+    return local_time.show_date(value)
 
 
 def _cents_to_input(cents) -> str:

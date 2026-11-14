@@ -287,7 +287,7 @@ class AgentReader:
             "COALESCE(SUM(tokens_cached), 0) as cached, "
             "COALESCE(SUM(tokens_total), 0) as total "
             "FROM cycles "
-            "WHERE started_at >= strftime('%Y-%m-01', 'now')"
+            "WHERE started_at >= datetime(strftime('%Y-%m-01', 'now', 'localtime'), 'utc')"
         )
         return rows[0] if rows else {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
 
@@ -296,7 +296,7 @@ class AgentReader:
         rows = self._query_cycles(
             "SELECT COALESCE(SUM(tokens_total), 0) as total "
             "FROM cycles "
-            "WHERE id GLOB ? AND started_at >= strftime('%Y-%m-01', 'now')",
+            "WHERE id GLOB ? AND started_at >= datetime(strftime('%Y-%m-01', 'now', 'localtime'), 'utc')",
             (f"{agent_name}-[0-9]*",)
         )
         return rows[0]["total"] if rows else 0
@@ -306,7 +306,7 @@ class AgentReader:
         try:
             conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
             conn.execute(
-                "DELETE FROM cycles WHERE started_at >= strftime('%Y-%m-01', 'now')"
+                "DELETE FROM cycles WHERE started_at >= datetime(strftime('%Y-%m-01', 'now', 'localtime'), 'utc')"
             )
             conn.commit()
             conn.execute("VACUUM")

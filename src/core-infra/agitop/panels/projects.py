@@ -6,12 +6,12 @@ _CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _CORE_INFRA not in sys.path:
     sys.path.insert(0, _CORE_INFRA)
 import db_connect  # noqa: E402
+import local_time  # noqa: E402
 
 import json
 import os
 import sqlite3
 import subprocess
-import time
 from typing import Optional
 from textual import on
 from textual.app import ComposeResult
@@ -22,6 +22,7 @@ from textual.widget import Widget
 
 from agitop.data import TasksReader
 from agitop.widgets import FlexDataTable
+from agitop import zone_heading
 
 try:
     from project_workspace import (
@@ -55,8 +56,6 @@ except ImportError:
         return set()
 
 
-_TZ = time.strftime("%Z")
-
 STATUS_COLORS = {
     "active": "green",
     "paused": "yellow",
@@ -88,15 +87,10 @@ def _preview_directory(display_name: str) -> tuple[str, str]:
 
 
 def _utc_to_local(utc_str: str) -> str:
-    if not utc_str or utc_str == "--" or len(utc_str) < 16:
-        return utc_str or "--"
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=timezone.utc).astimezone()
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except (ValueError, OSError):
-        return utc_str
+    """Stored UTC time → local 'YYYY-MM-DD HH:MM'. Empty → "--"."""
+    if not utc_str:
+        return "--"
+    return local_time.show(utc_str, zone=False)
 
 
 def _truncate(text: str, limit: int = 60) -> str:
@@ -489,7 +483,7 @@ class ProjectMembersModal(ModalScreen):
         self._refresh_members_table()
         mem_table = self.query_one("#project-memory-table", DataTable)
         mem_table.add_columns(
-            "Agent", "Phase", "Decisions", "Blockers", "Next Steps", f"Updated ({_TZ})",
+            "Agent", "Phase", "Decisions", "Blockers", "Next Steps", zone_heading.heading("Updated"),
         )
         self.refresh_project_memory_table()
 
@@ -532,7 +526,7 @@ class ProjectMembersModal(ModalScreen):
         table = self.query_one("#members-table", DataTable)
         table.cursor_type = "row"
         if not table.columns:
-            table.add_columns("", "Name", "Type", "Roles", "Branch", f"Assigned ({_TZ})")
+            table.add_columns("", "Name", "Type", "Roles", "Branch", zone_heading.heading("Assigned"))
         table.clear()
         self._member_rows = {}
 
@@ -552,7 +546,7 @@ class ProjectMembersModal(ModalScreen):
                 member_type,
                 str(m.get("roles") or "contributor"),
                 str(m.get("branch") or "--"),
-                str(m.get("assigned_at") or "--"),
+                _utc_to_local(str(m.get("assigned_at") or "")),
                 key=row_key,
             )
         if not members:

@@ -6,11 +6,11 @@ _CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _CORE_INFRA not in sys.path:
     sys.path.insert(0, _CORE_INFRA)
 import db_connect  # noqa: E402
+import local_time  # noqa: E402
 
 import json
 import os
 import subprocess
-import time
 import configparser
 from typing import Optional
 from textual import on
@@ -26,33 +26,25 @@ from agitop.data import TasksReader
 from agitop.data.status_reader import StatusReader
 from agitop.feature_flags import UTILITY_MODELS_UI_VISIBLE, SCRIPT_TASKS_UI_VISIBLE
 from agitop.widgets import FlexDataTable, PaginatedDataTable
+from agitop import zone_heading
 
-_TZ = time.strftime("%Z")
 
 def _utc_to_local(utc_str: str) -> str:
-    """Convert 'YYYY-MM-DD HH:MM:SS' UTC string to local timezone."""
+    """Stored UTC time → local 'YYYY-MM-DD HH:MM:SS' (local_time: that date's own offset)."""
     if not utc_str or utc_str == "--" or len(utc_str) < 16:
         return utc_str
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=timezone.utc).astimezone()
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, OSError):
-        return utc_str
+    return local_time.show(utc_str, seconds=True, zone=False)
 
 
 def _local_to_utc(local_str: str) -> str:
-    """Convert 'YYYY-MM-DD HH:MM:SS' local time to UTC for storage."""
+    """Local 'YYYY-MM-DD HH:MM:SS' from the form → UTC for storage.
+
+    The offset is the typed date's own, so a date after a daylight-saving
+    change is stored correctly (state_time_display.md F8).
+    """
     if not local_str or len(local_str) < 16:
         return local_str
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.strptime(local_str[:19], "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo).astimezone(timezone.utc)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, OSError):
-        return local_str
+    return local_time.local_to_store(local_str)
 
 
 def _parse_task_due_parts(due: str) -> tuple[str, str, str]:
@@ -717,7 +709,7 @@ class TaskEditModal(ModalScreen):
                                     )
                                 with Vertical(classes="task-field-col task-schedule-datetime-col"):
                                     yield Static(
-                                        f"[b]Due Date[/b] [dim](local — {_TZ}, stored UTC)[/]",
+                                        f"[b]Due Date[/b] [dim](local — {local_time.zone_label()}, stored UTC)[/]",
                                         classes="modal-form-label",
                                     )
                                     with Vertical(classes="task-schedule-datetime-box"):
@@ -753,7 +745,7 @@ class TaskEditModal(ModalScreen):
                                             )
                                 with Vertical(classes="task-field-col task-schedule-datetime-col"):
                                     yield Static(
-                                        f"[b]Wake After[/b] [dim](local — {_TZ})[/]",
+                                        f"[b]Wake After[/b] [dim](local — {local_time.zone_label()})[/]",
                                         classes="modal-form-label",
                                     )
                                     with Vertical(classes="task-schedule-datetime-box"):
@@ -1557,7 +1549,7 @@ class TasksPanel(Widget):
         self.table.add_column("Assign To", width=12, key="assign_to")
         self.table.add_column("Assign By", width=12, key="assign_by")
         self.table.add_column("Tags", width=12, key="tags")
-        self.table.add_column(f"Due ({_TZ})", width=19, key="due")
+        self.table.add_column(zone_heading.heading("Due"), width=19, key="due")
         self.table.apply_flex_widths()
         self.refresh_data()
 
@@ -1654,6 +1646,7 @@ class TasksPanel(Widget):
 
     def refresh_data(self) -> None:
         """Refresh task data from SQLite with pagination."""
+        zone_heading.refresh(self.table, "Due")
         self._total = self.tasks_reader.count_all_tasks() if self.tasks_reader else 0
         offset = self._page * self.PAGE_SIZE
         tasks = self.tasks_reader.get_all_tasks(limit=self.PAGE_SIZE, offset=offset) if self.tasks_reader else []

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+import local_time
 from harness.agent_mailbox import identity_ids, load_received_unread, rows_for_agent
 from harness.triage import _agi_tag_ids, _reply_to_message_id
 
@@ -50,7 +51,7 @@ def format_arrival_block(rows: list[dict], already: set[str],
     for msg in fresh:
         sender = (msg.get("display_name") or "").strip() or msg.get("from_user_id") or "?"
         text = msg.get("original_text") or msg.get("text") or ""
-        dt = msg.get("created_at") or ""
+        dt = local_time.show(msg.get("created_at") or "")   # local time, zone named
         uid = msg.get("from_user_id") or ""
         mid = (msg.get("message_id") or "").strip()
         flag = " [PRIMARY USER — answer first]" if uid in pu_ids else ""

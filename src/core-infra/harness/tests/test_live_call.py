@@ -800,7 +800,10 @@ class TestVoiceCardAndSummary(unittest.TestCase):
     def test_prompt_block_and_last_call_line(self):
         line = lc.last_call_line({"created_at": "2026-09-26T04:41:10Z", "voice_seconds": 252,
                                   "status": "ended", "summary": "Chose Friday.", "reason": "x"})
-        self.assertEqual(line, "2026-09-26 04:41 UTC (4.2 min, ended) — Chose Friday.")
+        # Stored in UTC, shown in the machine's zone with its name (state_time_display.md).
+        import local_time
+        self.assertEqual(line, f"{local_time.show('2026-09-26T04:41:10Z')} (4.2 min, ended) — Chose Friday.")
+        self.assertNotIn(" UTC (", line.replace(local_time.zone_label('2026-09-26T04:41:10Z') + " (", ""))
         self.assertEqual(lc.last_call_line(None), "")
         ready = lc.prompt_block(ready=True, reasons="ready", call_model="Google — Gemini 3.7 Flash",
                                 language=lc.ENGLISH, last_call=line)

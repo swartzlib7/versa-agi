@@ -21,6 +21,8 @@
 - **Local AI** — three runtimes: Ollama chat (NVIDIA/AMD), Docker SYCL chat (Intel ARC), `sd-cli` media (`local_media` paint). LTX video is **experimental** (parked; **>64 GB VRAM**). Matrix: [Local AI support](local-ai-support.md).
 - **Cloud providers** — vendor-agnostic catalog (`class=cloud`) via `provider_runtime` (Google, xAI, OpenAI, Anthropic, OpenRouter). Exact ModelDriver bindings for non-text (◆ / ◇).
 - **Web search** — local SearXNG (`agictl search web`) over Google, Bing, DuckDuckGo, Brave, Qwant and Yahoo; optional Brave and Exa API keys from the dashboard or through COA ([Credentials](credentials.md)).
+- **Local time everywhere** — times are stored in UTC and shown and typed in the machine's zone, for people and agents alike.
+- **Update notes for COA** — after an update COA gets a one-time note per release: the maintenance the update needs, and what to tell the Primary User.
 - **Page reading** — `agictl search read` returns the readable text of a page without starting a browser; agents search, then read, and use the browser only when a page needs it.
 - **Headless browser** — Playwright Chromium (`agictl browser`). Returns the whole page text and pages long text, waits for scripts to settle, presents as desktop Chrome.
 

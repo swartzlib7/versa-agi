@@ -420,7 +420,9 @@ class TestHarnessClose(unittest.TestCase):
             class P:
                 returncode = 0
                 stderr = ""
-                stdout = ('{"handoff": %s}' % ('"Open: X"' if saved_handoff else "null")) if cmd[1:3] == ["cycle", "get"] else "ok"
+                # The real shape of `agictl cycle get`: the row is under "cycle".
+                stdout = ('{"success": true, "cycle": {"id": "web-dev-300", "handoff": %s}}'
+                          % ('"Open: X"' if saved_handoff else "null")) if cmd[1:3] == ["cycle", "get"] else "ok"
             return P()
 
         env = {"VERSA_CYCLE_ID": "web-dev-300", "VERSA_LISTENING": "open", "VERSA_LISTEN_MINUTES": "15"}

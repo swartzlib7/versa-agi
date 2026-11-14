@@ -9,6 +9,11 @@ Money options are plain integers (cents, D1); the store passes them through
 unchanged. Effectful commands emit the standard agictl JSON envelope via
 ``json_response``; read commands print a JSON ``{"success": true, ...}`` payload
 so agents and scripts can parse them.
+
+Times (state_time_display.md §1 rule 10): ``created_at`` and ``updated_at`` are
+shown in local time with the zone name. The calendar dates of a record (issue,
+due, paid, expiry, transaction date) are never shifted. ``--stored`` prints the
+row as stored, for a script that reads those two fields.
 """
 
 from __future__ import annotations
@@ -22,6 +27,17 @@ import click
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import organization_store as store  # noqa: E402
 import organization_demo as demo  # noqa: E402
+import local_time  # noqa: E402
+
+# The stored UTC times in an Organization row. Not local_time.TIME_FIELDS: that
+# set holds `due_date`, which here is an invoice's calendar date.
+ROW_TIME_FIELDS = frozenset({"created_at", "updated_at"})
+_STORED_HELP = "Print created_at / updated_at as stored (UTC), for a script."
+
+
+def _shown(rows, stored: bool):
+    """Rows as printed: the two time fields local, unless the caller asked for stored values."""
+    return rows if stored else local_time.localize(rows, fields=ROW_TIME_FIELDS)
 
 
 def _field_options(entity: str):
@@ -119,12 +135,13 @@ def _attach(organization, entity: str, json_response):
     # ── get <id> ──
     @grp.command("get")
     @click.argument("row_id", type=int)
-    def get(row_id):
+    @click.option("--stored", is_flag=True, help=_STORED_HELP)
+    def get(row_id, stored):
         row = store.get(entity, row_id)
         if row is None:
             return json_response(False, error=f"{entity} {row_id} not found",
                                  code="not_found")
-        print(json.dumps({"success": True, "row": row}))
+        print(json.dumps({"success": True, "row": _shown(row, stored)}))
         return True
 
     # ── list ──
@@ -133,7 +150,8 @@ def _attach(organization, entity: str, json_response):
     @click.option("--org-id", type=int, default=None)
     @click.option("--status", default=None)
     @click.option("--limit", type=int, default=100)
-    def list_cmd(external_id, org_id, status, limit):
+    @click.option("--stored", is_flag=True, help=_STORED_HELP)
+    def list_cmd(external_id, org_id, status, limit, stored):
         where = {}
         cols = spec["columns"]
         if external_id is not None and "external_id" in cols:
@@ -146,7 +164,7 @@ def _attach(organization, entity: str, json_response):
             rows = store.list_rows(entity, where=where or None, limit=limit)
         except store.OrganizationStoreError as e:
             return json_response(False, error=str(e), code=e.code)
-        print(json.dumps({"success": True, "count": len(rows), "rows": rows}))
+        print(json.dumps({"success": True, "count": len(rows), "rows": _shown(rows, stored)}))
         return True
 
     # ── update <id> ──

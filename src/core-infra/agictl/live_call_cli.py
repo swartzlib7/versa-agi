@@ -18,6 +18,8 @@ import uuid
 
 import click
 
+import local_time
+
 import call_log_store
 import live_call_config
 
@@ -167,7 +169,7 @@ def register(
         """Recent calls: id, time, status, reason, voice seconds."""
         _require_reader()
         rows = call_log_store.list_calls(messages_db_path(), live_call_config.CALL_AGENT, limit=max(1, min(limit, 200)))
-        print(json.dumps(rows, indent=2, default=str))
+        print(json.dumps(local_time.localize(rows), indent=2, default=str))
 
     @calls_group.command("show")
     @click.argument("call_id")
@@ -179,7 +181,7 @@ def register(
             _fail(f"Call '{call_id}' not found")
         transcript = call_log_store.transcript_text(row.pop("transcript", []))
         delegations = row.pop("delegations", [])
-        print(json.dumps({"call": row, "transcript": transcript, "delegations": delegations},
+        print(json.dumps({"call": local_time.localize(row), "transcript": transcript, "delegations": delegations},
                          indent=2, default=str, ensure_ascii=False))
 
     # ── message call-bridge (hidden harness plumbing) ──────────────────

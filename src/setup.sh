@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.8.0"
+PRODUCT_VERSION="3.8.1"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -959,6 +959,8 @@ _VERSA_LIB_SHARED_PY=(
   privilege_guard.py
   live_call_config.py
   agent_limits.py
+  local_time.py
+  ide_probe.py
 )
 
 _deploy_server_agictl_shared_py() {
@@ -4893,6 +4895,28 @@ if [ -f "${REGISTRATION_CONF_SRC}" ]; then
   chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
   chmod 640 "/etc/versa-agi/registration.conf"
   ok "registration.conf deployed to /etc/versa-agi/"
+fi
+
+# ─── Update notes for COA (state_update_notes.md) ─────
+# An update puts each note COA has not had yet in its inbox, once. A new
+# installation records the shipped notes as delivered and sends nothing.
+# Never stops setup: a failure is a warning and the next update tries again.
+UPDATE_NOTES_DIR="${DEPLOYED_CORE_INFRA}/config/update_notes"
+if [ "${DRY_RUN:-false}" != true ] && [ -d "${UPDATE_NOTES_DIR}" ]; then
+  if [ "${UPDATE_MODE}" = true ]; then
+    _notes_out="$(/usr/local/bin/agictl system update-notes --deliver 2>/dev/null)" || true
+    _notes_sent="$(echo "${_notes_out}" | jq -r '(.sent // []) | join(", ")' 2>/dev/null || true)"
+    if [ -n "${_notes_sent}" ]; then
+      ok "Update note sent to COA: ${_notes_sent}"
+    elif echo "${_notes_out}" | jq -e '.success == true' >/dev/null 2>&1; then
+      info "No new update notes for COA"
+    else
+      warn "Update notes for COA were not delivered — the next update tries again"
+    fi
+  else
+    /usr/local/bin/agictl system update-notes --mark-delivered >/dev/null 2>&1 \
+      || warn "Update notes could not be recorded as delivered (non-fatal)"
+  fi
 fi
 
 echo ""

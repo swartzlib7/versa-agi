@@ -28,6 +28,7 @@ from harness.cycle_close import (
 from harness.heartbeat import Heartbeat
 from harness.repeat_guard import RepeatGuard, call_label
 from harness.step_clock import StepClock
+import local_time
 from harness.listening import (
     ListeningWindow,
     agent_ids_from_env,
@@ -559,7 +560,7 @@ class TaskInput(BaseModel):
     command: str = Field(description=(
         "The full agictl task subcommand. "
         "Examples: 'task list', 'task list --all', 'task get 73', "
-        "'task add \"Title\" --desc \"Description\" --priority high --due-date \"2026-05-20 12:00:00\"', "
+        "'task add \"Title\" --desc \"Description\" --priority high --due-date \"2026-05-20 12:00\"' (local time), "
         "'task update 73 --status in_progress', 'task update 73 --status done', "
         "'task progress 73 \"DONE: X. NEXT: Y.\"' (append progress journal entry), "
         "'task progress 73' (list journal), "
@@ -577,7 +578,7 @@ def agictl_task(command: str) -> str:
       - 'task list' — active tasks
       - 'task list --all' — all tasks including done/cancelled
       - 'task get 73' — full task details
-      - 'task add "Setup server" --desc "Docker setup" --priority high --due-date "2026-05-20 12:00:00"'
+      - 'task add "Setup server" --desc "Docker setup" --priority high --due-date "2026-05-20 12:00"' (due dates are local time; 'now' also works)
       - 'task update 73 --status in_progress'
       - 'task progress 73 "DONE: research. NEXT: draft doc."' — append progress entry (your breadcrumbs for next cycle)
       - 'task progress 73' — read the progress journal
@@ -1609,7 +1610,9 @@ def _saved_handoff(cycle_id: str) -> str:
         proc = subprocess.run(
             ["agictl", "cycle", "get", cycle_id], capture_output=True, text=True, timeout=15,
         )
-        row = json.loads(proc.stdout or "{}")
+        # `cycle get` answers {"success": true, "cycle": {...row...}}.
+        reply = json.loads(proc.stdout or "{}") or {}
+        row = reply.get("cycle") if isinstance(reply.get("cycle"), dict) else reply
         return str((row or {}).get("handoff") or "").strip()
     except Exception:  # noqa: BLE001
         return ""
@@ -2331,8 +2334,10 @@ def main():
                 return None
             parts = [HARNESS_NOTE]
             for row in rows:
+                # Stored in UTC; the agent is shown local time (state_time_display.md §1 rule 4).
                 parts.append(
-                    f"Frame {row.get('frame_start')} to {row.get('frame_end')}:\n{row.get('summary')}"
+                    f"Frame {local_time.show(row.get('frame_start'))} to "
+                    f"{local_time.show(row.get('frame_end'))}:\n{row.get('summary')}"
                 )
             return HumanMessage(content="\n\n".join(parts))
 

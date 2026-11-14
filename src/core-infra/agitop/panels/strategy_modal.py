@@ -15,10 +15,10 @@ _CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _CORE_INFRA not in sys.path:
     sys.path.insert(0, _CORE_INFRA)
 import db_connect  # noqa: E402
+import local_time  # noqa: E402
 
 import os
 import sqlite3
-import time
 import json
 from typing import Optional
 
@@ -30,8 +30,6 @@ from textual.widgets import DataTable, Button, Static, Input, Select, TabbedCont
 
 from agitop.data import TasksReader
 
-
-_TZ = time.strftime("%Z")
 
 # ── Pagination ──
 # Page size scales with taller tab tables (2× prior max-heights).
@@ -66,16 +64,10 @@ AWARENESS_TYPE_ICONS = {
 
 
 def _utc_to_local(utc_str: str) -> str:
-    """Convert 'YYYY-MM-DD HH:MM:SS' UTC string to local timezone."""
-    if not utc_str or utc_str == "--" or len(utc_str) < 16:
-        return utc_str or "Never"
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=timezone.utc).astimezone()
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except (ValueError, OSError):
-        return utc_str
+    """Stored UTC time → local 'YYYY-MM-DD HH:MM'. Empty → "Never"."""
+    if not utc_str:
+        return "Never"
+    return local_time.show(utc_str, zone=False)
 
 
 def _milestones_to_text(raw: str) -> str:

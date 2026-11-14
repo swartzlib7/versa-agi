@@ -106,7 +106,7 @@ agictl task progress <id> "DONE: [what you scanned/removed/refiled; manifest upd
 agictl task update <id> --due-date "YYYY-MM-DD 03:00:00"
 ```
 
-Set `--due-date` to the **first Friday of next month at 03:00:00** in the host timezone. Leave status `planned`. Do not leave `in_progress`. Ad-hoc tidy tasks: mark done after the report and manifest update.
+Set `--due-date` to the **first Friday of next month at 03:00:00**. Due dates are read in the host's time zone, so type 03:00 as it is. Leave status `planned`. Do not leave `in_progress`. Ad-hoc tidy tasks: mark done after the report and manifest update.
 
 ## Related commands
 

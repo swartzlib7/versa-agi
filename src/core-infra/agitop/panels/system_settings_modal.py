@@ -6,6 +6,7 @@ _CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _CORE_INFRA not in sys.path:
     sys.path.insert(0, _CORE_INFRA)
 import db_connect  # noqa: E402
+import local_time  # noqa: E402
 """Includes read-only Skill Viewer modal for inspecting skill file contents."""
 
 import json
@@ -1030,7 +1031,7 @@ class RunsLogModal(ModalScreen):
                 continue
             ok = rec.get("ok")
             mark = "[green]\u2713[/]" if ok else "[red]\u2717[/]"
-            ts = rec.get("ts", "")
+            ts = local_time.show(rec.get("ts", ""), seconds=True)     # stored UTC → local
             um = rec.get("um_id", "")
             model = rec.get("catalog_model", "")
             agent = rec.get("agent", "")
@@ -2031,7 +2032,7 @@ class SystemSettingsModal(ModalScreen):
                 if val and len(val) > 80:
                     val = val[:77] + "..."
                 table.add_row(
-                    str(r["updated_at"] or "--"),
+                    local_time.show(r["updated_at"], missing="--"),
                     str(r["agent_name"] or "?"),
                     r["key"],
                     val,
@@ -2477,7 +2478,7 @@ class SystemSettingsModal(ModalScreen):
                     display_status,
                     r.get("reason", "") or "—",
                     r.get("requested_by", "") or "—",
-                    r.get("requested_at", "") or "—",
+                    local_time.show(r.get("requested_at", ""), missing="—"),
                     key=str(abs_idx),
                 )
 

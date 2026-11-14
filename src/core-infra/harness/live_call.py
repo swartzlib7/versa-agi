@@ -26,6 +26,8 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+
+import local_time
 from typing import Any, Callable
 
 LIVE_API_BASE = os.environ.get("VERSA_LIVE_API_BASE", "https://api.openai.com/v1")
@@ -645,12 +647,12 @@ def last_call_line(row: dict | None) -> str:
     """One line for the latest call-log row (§3.4 P2-C), or '' when there is none."""
     if not row:
         return ""
-    when = str(row.get("created_at") or "")[:16].replace("T", " ")
+    when = local_time.show(row.get("created_at") or "")       # local time, zone named
     secs = row.get("voice_seconds")
     length = f"{secs / 60:.1f} min" if secs else "no audio"
     summary = " ".join(str(row.get("summary") or "").split())
     tail = summary or f"reason: {row.get('reason') or '—'}"
-    return f"{when} UTC ({length}, {row.get('status') or 'unknown'}) — {tail}"
+    return f"{when} ({length}, {row.get('status') or 'unknown'}) — {tail}"
 
 
 def prompt_block(*, ready: bool, reasons: str, call_model: str, language: CallLanguage,

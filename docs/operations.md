@@ -29,6 +29,21 @@ After setup, two home-directory symlinks:
 
 Token usage is tracked per cycle and totaled monthly in agitop.
 
+## Time
+
+Times are stored in UTC and shown in this machine's time zone, in agitop, in `agictl` output and in what agents are given. A time you or an agent types (a task's due date) is read in the same zone. Nobody converts by hand.
+
+## Updates and your COA
+
+After an update your COA gets a one-time **update note** for each release it has not had one for.
+
+| In the note | What your COA does |
+|---|---|
+| Maintenance the update needs on this instance, such as data a fixed fault could have left wrong | Checks once and corrects only what it finds. It may give another agent a specific task to help |
+| Points marked for you | Tells you once, in a short message, with the result of its checks |
+
+A note is one job with an end. Your COA records it as closed and does not repeat it. `sudo agictl system update-notes` lists the notes and when each was delivered.
+
 ## IDE mode
 
 `sudo versa-agi-ide` holds COA out of Lifeline spawning and writes `.agent/versa-agi_ide.md` for a Remote-SSH session. Full runbook: [IDE mode](ide-mode.md).

@@ -11,7 +11,7 @@ Use `agictl task` to manage your workload according to these parameters:
 ### Core Directives
 
 1. **NEVER leave a task `in_progress` at cycle end** unless you intend immediate re-spawn. Always defer to `waiting` or `blocked` with a future `due_date`, or mark `done`.
-2. **Task Creation:** `--due-date` is **mandatory**. A `planned` task only triggers spawn when its `due_date` arrives.
+2. **Task Creation:** `--due-date` is **mandatory**. A `planned` task only triggers spawn when its `due_date` arrives. Give it in local time (`"YYYY-MM-DD HH:MM"`, or `now`); every time you are shown is local too. Never convert to UTC or add an offset.
 3. **Data Context:** Use `agictl task get <id>` to read the full JSON payload. Use `--desc`, `--priority`, `--assignee` when designing the work queue.
 4. **Purpose Alignment:** When creating or reviewing tasks, consider which **Game** (postulate) the task advances. If a task doesn't serve any active postulate, question whether it should exist.
 5. **Awareness at Exit:** Before ending a cycle, formulate at least one conclusion about your work and persist it via `agictl awareness add`, and end with a `--handoff` (poise WORK CYCLE). The `cycle end` command will warn if no awareness was logged.
@@ -61,7 +61,7 @@ When you are in the **"need requester to confirm"** row above:
 agictl message send <uid> "I've completed [X] and verified [Y]. Please confirm [specific question]." --mode typed
 agictl message mark-processed <trigger_message_id>
 agictl task progress <id> "DONE: [what you verified this cycle]. NEXT: awaiting confirmation from <who> about <what>."
-agictl task update <id> --status waiting --due-date "YYYY-MM-DD HH:MM:SS"
+agictl task update <id> --status waiting --due-date "YYYY-MM-DD HH:MM"
 agictl task snooze <id> 1440
 agictl cycle end "Awaiting confirmation on task #<id>; will resume when <who> replies." --handoff "Open: task #<id> waiting on <who> | Watch: their reply | Next: task done if accepted"
 ```

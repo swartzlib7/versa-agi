@@ -7,6 +7,8 @@ _CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _CORE_INFRA not in sys.path:
     sys.path.insert(0, _CORE_INFRA)
 import db_connect  # noqa: E402
+import local_time  # noqa: E402
+import re
 
 import sqlite3
 from typing import Optional
@@ -21,6 +23,7 @@ from textual.widgets import (
 )
 
 from agitop.widgets.clear_checkbox import ClearCheckbox
+from agitop import zone_heading
 
 from agitop.panels.agent_memory_modal import (
     EditConnectionMemoryModal,
@@ -41,6 +44,14 @@ from agitop.panels.thread_manager_modal import (
     _get_thread_data,
     _resolve_project_name,
 )
+
+
+_ISO_UTC_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)")
+
+
+def local_times_in_text(text: str) -> str:
+    """Replace each ISO UTC time inside free text with the local time."""
+    return _ISO_UTC_IN_TEXT.sub(lambda m: local_time.show(m.group(0)), str(text or ""))
 
 
 class AgentPromptMenu(ModalScreen):
@@ -91,7 +102,8 @@ class AgentPromptMenu(ModalScreen):
         else:
             num_ctx_str = "Auto"
 
-        status_line = status + (f" — {status_msg}" if status_msg else "")
+        # A status note can carry a stored UTC time ("IDE mode since …Z"): show it local.
+        status_line = status + (f" — {local_times_in_text(status_msg)}" if status_msg else "")
         info_text = (
             f"  [dim]Model:[/]  [cyan]{model}[/]        [dim]Role:[/]  {role:16s}  [dim]Budget:[/]  {budget_str}\n"
             f"  [dim]User:[/]   {os_user:16s}  [dim]Ctx:[/]   {ctx_mode:16s}  [dim]num_ctx:[/] {num_ctx_str}\n"
@@ -474,8 +486,9 @@ class AgentPromptMenu(ModalScreen):
                                         "\n[dim]Step 3 must be a Remote-SSH window; opening "
                                         "that folder locally runs as [/][cyan]you[/][dim], "
                                         "not COA. The seed is still generated; COA reads it. "
-                                        "On Cursor, a same-chat loop is optional — not how "
-                                        "the mode works.[/]"
+                                        "A same-chat loop is optional, and offered only when the "
+                                        "tool running the chat can wake it (Cursor agent, "
+                                        "Claude Code).[/]"
                                     )
                                 with Vertical(classes="settings-section-box"):
                                     yield Static(
@@ -511,9 +524,8 @@ class AgentPromptMenu(ModalScreen):
         self.app.pop_screen()
 
     def on_mount(self) -> None:
-        _TZ = __import__("time").strftime("%Z")
         table = self.query_one("#agent-tab-mem-table", DataTable)
-        table.add_columns("Contact", "Rapport", "Comm Style", "Summary", f"Updated ({_TZ})")
+        table.add_columns("Contact", "Rapport", "Comm Style", "Summary", zone_heading.heading("Updated"))
         self.refresh_connection_table()
 
         thread_table = self.query_one("#agent-thread-table", DataTable)
@@ -834,8 +846,8 @@ class AgentPromptMenu(ModalScreen):
         for row in rows:
             body = " ".join(str(row.get("summary") or "").split())
             table.add_row(
-                str(row.get("frame_start") or ""),
-                str(row.get("frame_end") or ""),
+                local_time.show(row.get("frame_start")),
+                local_time.show(row.get("frame_end")),
                 str(row.get("status") or ""),
                 str(row.get("thread_id") or ""),
                 body[:160],

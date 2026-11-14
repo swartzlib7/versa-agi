@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import db_connect
+import local_time
 
 
 import json
@@ -187,7 +188,7 @@ def register(
                     f"{'Y' if r.get('enabled') else 'N'}"
                 )
             return
-        json_response(True, count=len(rows), utility_models=rows)
+        json_response(True, count=len(rows), utility_models=local_time.localize(rows))
 
     @utility_model.command("show")
     @click.argument("um_id")
@@ -196,7 +197,7 @@ def register(
         if not row:
             json_response(False, error=f"Utility Model '{um_id}' not found")
             sys.exit(1)
-        json_response(True, utility_model=row)
+        json_response(True, utility_model=local_time.localize(row))
 
     @utility_model.command("add")
     @click.option("--id", "um_id", required=True)

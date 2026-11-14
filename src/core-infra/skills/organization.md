@@ -35,6 +35,11 @@ agictl organization exchange get <id>
 
 Entity actions are consistent: `add` / `get` / `list` / `update` / `upsert` (and `delete` where allowed). Discover flags with `agictl organization <entity> add --help`.
 
+Times in `get` / `list`:
+- `created_at` and `updated_at` are in local time with the zone name (`2026-11-13 11:30 EST`).
+- Invoice, estimate and transaction dates (`issue_date`, `due_date`, `paid_date`, `expiry_date`, `transaction_date`) are calendar dates. They come back exactly as stored.
+- A script that reads `created_at` or `updated_at` adds `--stored` to get the stored UTC value.
+
 ## Rules of engagement
 
 1. **Feature gate** — If spawn context says Organization is OFF, do not use this command group.

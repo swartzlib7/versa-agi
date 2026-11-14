@@ -23,6 +23,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import db_connect  # noqa: E402
 import agent_limits  # noqa: E402
+import local_time  # noqa: E402
 
 # These modules are only available on full (client/local) installs.
 # Server-only topology deploys a minimal agictl subset (model commands only).
@@ -1021,6 +1022,127 @@ def system_set_key(key_type, value):
         sys.exit(1)
     else:
         json_response(True, key_type=key_type, files_updated=len(updated_files), updated_files=updated_files)
+
+def _update_notes_delivered(conn) -> dict:
+    """Release versions whose note this instance has had: {"3.9.0": "<delivered at, UTC>"}."""
+    try:
+        row = conn.execute("SELECT value FROM config WHERE key=?", ("update_notes_delivered",)).fetchone()
+        value = json.loads(row[0]) if row and row[0] else {}
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _update_note_in_inbox(message_id: str) -> bool:
+    """True when this release's note is already in messages.db, read or unread."""
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        found = conn.execute("SELECT 1 FROM messages WHERE message_id=? LIMIT 1", (message_id,)).fetchone()
+        conn.close()
+        return bool(found)
+    except Exception:
+        return False
+
+
+def _deliver_update_note(message_id: str, text: str) -> bool:
+    """Put one notice from Lifeline in COA's inbox (no outbox copy). True when stored."""
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        conn.execute(
+            "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
+            "message_id, text, mode, status, channel) "
+            "VALUES ('received', 'lifeline', 'coa', 'Lifeline', ?, ?, 'typed', 'unprocessed', 'internal')",
+            (message_id, text),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _installed_version() -> str:
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION"),
+                  encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+@system.command("update-notes", hidden=True)
+@click.option("--deliver", is_flag=True, help="Send COA each release note this instance has not had, once")
+@click.option("--mark-delivered", is_flag=True,
+              help="Record every shipped release note as delivered without sending (new installation)")
+@click.option("--notes-dir", default=None, hidden=True)
+@click.option("--installed-version", default=None, hidden=True)
+def system_update_notes(deliver, mark_delivered, notes_dir, installed_version):
+    """Update notes for COA (state_update_notes.md). No option: list notes and their state.
+
+    Run by setup.sh at the end of an install (--mark-delivered) or an update
+    (--deliver). A note is named for its release (3.9.0.md) and delivery is
+    recorded per release version, so a release's note is sent once.
+    """
+    from agictl import update_notes
+
+    if deliver and mark_delivered:
+        json_response(False, error="--deliver and --mark-delivered cannot be combined")
+        sys.exit(1)
+    notes = update_notes.list_notes(notes_dir or update_notes.NOTES_DIR)
+    installed = installed_version if installed_version is not None else _installed_version()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        delivered = _update_notes_delivered(conn)
+    except Exception as e:
+        json_response(False, error=f"cycles.db: {e}")
+        sys.exit(1)
+
+    if not deliver and not mark_delivered:
+        conn.close()
+        json_response(True, installed_version=installed, notes=[
+            {"name": n["name"], "title": n["title"], "chars": len(n["text"]), "draft": n["draft"],
+             "delivered_at": local_time.show(delivered.get(n["version"])) if n["version"] in delivered else "",
+             "problem": n["problem"]}
+            for n in notes
+        ])
+        return
+
+    def record(version: str) -> bool:
+        # One write per release, right after its note is stored: an interrupted
+        # run never leaves a sent note unrecorded for long.
+        delivered[version] = local_time.to_store(local_time.utc_now())
+        try:
+            _config_set(conn, update_notes.CONFIG_KEY, json.dumps(delivered, sort_keys=True))
+            conn.commit()
+            return True
+        except Exception:
+            return False
+
+    sent, already, failed = [], [], []
+    skipped = [{"name": n["name"], "problem": n["problem"]} for n in notes if n["problem"] and not n["draft"]]
+    for note in update_notes.due_notes(notes, delivered, installed):
+        version = note["version"]
+        mid = update_notes.message_id(version)
+        if deliver:
+            if _update_note_in_inbox(mid):
+                # Sent by an earlier run whose record was lost: record it, do not send again.
+                record(version)
+                already.append(version)
+                continue
+            if not _deliver_update_note(mid, update_notes.message_text(note)):
+                failed.append(version)
+                continue
+        if record(version):
+            sent.append(version)
+        else:
+            failed.append(version)
+    conn.close()
+    json_response(not failed, mode="deliver" if deliver else "mark-delivered", installed_version=installed,
+                  **({"sent": sent, "already_in_inbox": already} if deliver else {"marked": sent}),
+                  skipped=skipped, failed=failed)
+    if failed:
+        sys.exit(1)
+
 
 @system.command("whoami")
 def system_whoami():
@@ -6772,7 +6894,7 @@ def feedback_list(catalog_key, work_modality, as_table):
                            f"{(r.get('work_modality') or 'any'):<10} {r['created_by']:<8} "
                            f"{(r.get('note') or '')[:40]}")
             return
-        json_response(True, count=len(rows), feedback=rows)
+        json_response(True, count=len(rows), feedback=local_time.localize(rows))
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -6790,7 +6912,7 @@ def feedback_show(feedback_id):
         if not row:
             json_response(False, error=f"Feedback {feedback_id} not found")
             sys.exit(1)
-        json_response(True, feedback=dict(row))
+        json_response(True, feedback=local_time.localize(dict(row)))
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -7660,7 +7782,7 @@ def agent_list(show_all):
         agents = agent_reader.get_all_agents()
     else:
         agents = agent_reader.get_active_agents()
-    print(json.dumps(agents, indent=2, default=str))
+    print(json.dumps(local_time.localize(agents), indent=2, default=str))
 
 @agent.command("show")
 @click.argument("name")
@@ -7672,7 +7794,7 @@ def agent_show(name):
         row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
         conn.close()
         if row:
-            print(json.dumps(dict(row), indent=2, default=str))
+            print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
         else:
             json_response(False, error=f"Agent '{name}' not found")
     except Exception as e:
@@ -9151,7 +9273,7 @@ def agent_summary(exclude_watchdog):
     coa_user, watchdog_user, coa_display = _resolve_protected_identities()
     agents = agent_reader.get_all_agents()
     agents = sorted(agents, key=lambda x: (not x.get("protected", False), x["name"]))
-    print("| Name | Workspace | Role | Model | Status | Inactive | Requested By | Created At |")
+    print("| Name | Workspace | Role | Model | Status | Inactive | Requested By | Created At (local) |")
     print("|---|---|---|---|---|---|---|---|")
     for a in agents:
         raw_name = a.get("name", "") or ""
@@ -9164,7 +9286,7 @@ def agent_summary(exclude_watchdog):
             name_str = coa_display or name_str
         inactive_str = "True" if a.get("inactive") else "False"
         status = a.get("status") or ""
-        print(f"| {name_str} | {a.get('workspace', '')} | {a.get('role') or ''} | {a.get('model') or ''} | {status} | {inactive_str} | {a.get('requested_by') or ''} | {a.get('created_at') or ''} |")
+        print(f"| {name_str} | {a.get('workspace', '')} | {a.get('role') or ''} | {a.get('model') or ''} | {status} | {inactive_str} | {a.get('requested_by') or ''} | {local_time.show(a.get('created_at'))} |")
 
 @agent.command("ensure-protected")
 def agent_ensure_protected():
@@ -9291,6 +9413,22 @@ def task():
     """Agent task queue management."""
     pass
 
+def _typed_time_or_exit(text, option: str) -> str:
+    """A time typed for ``option`` → UTC text for storage. Local unless a zone is given.
+
+    `now` is the current moment. Anything that is not a date is refused, so a
+    word or a mis-typed value can never sit in a time column and fail to fire.
+    """
+    raw = str(text or "").strip()
+    if raw.lower() == "now":
+        return local_time.to_store(local_time.utc_now())
+    try:
+        return local_time.typed_to_store(raw)
+    except ValueError as exc:
+        json_response(False, error=f"{option}: {exc}")
+        sys.exit(1)
+
+
 @task.command("list")
 @click.option("--all", "show_all", is_flag=True, help="Show ALL tasks including done/cancelled")
 def task_list(show_all):
@@ -9299,7 +9437,7 @@ def task_list(show_all):
         tasks = tasks_reader.get_all_tasks() if hasattr(tasks_reader, 'get_all_tasks') else tasks_reader.get_active_tasks()
     else:
         tasks = tasks_reader.get_active_tasks()
-    print(json.dumps(tasks, indent=2, default=str))
+    print(json.dumps(local_time.localize(tasks), indent=2, default=str))
 
 @task.command("triage-registry", hidden=True)
 @click.option("--agent", "agent_name", required=True, help="Spawned agent this read is for")
@@ -9331,7 +9469,7 @@ def task_get(task_id):
             task_data["recent_progress"] = [dict(r) for r in reversed(rows)]
         except Exception:
             task_data["recent_progress"] = []
-        print(json.dumps(task_data, indent=2, default=str))
+        print(json.dumps(local_time.localize(task_data), indent=2, default=str))
     else:
         json_response(False, error=f"Task {task_id} not found")
 
@@ -9366,7 +9504,7 @@ def task_progress(task_id, note, last_n):
                 (task_id, last_n)
             ).fetchall()
             conn.close()
-            print(json.dumps([dict(r) for r in reversed(rows)], indent=2, default=str))
+            print(json.dumps(local_time.localize([dict(r) for r in reversed(rows)]), indent=2, default=str))
             return
 
         # Append mode
@@ -9402,7 +9540,8 @@ def task_progress(task_id, note, last_n):
 @click.option("--callback", default=None, type=click.Choice(["notify_sponsor", "notify_connection", "await_reply", "check_connection", "none"]))
 @click.option("--source-msg", default=None, type=int, help="Source message ID")
 @click.option("--requested-by", default=None, help="UID of who originated the request")
-@click.option("--due-date", default=None, help="Due date (YYYY-MM-DD HH:MM:SS) — required for planned tasks")
+@click.option("--due-date", default=None,
+              help='Due date in local time: "YYYY-MM-DD HH:MM", or "now". Required for planned tasks')
 @click.option("--utility-task", is_flag=True, help="Create as Utility Task (links one Utility Model)")
 @click.option("--utility-model", default=None, help="utility_models.id (required with --utility-task)")
 @click.option("--utility-input-files", default=None, help="JSON array of input file paths")
@@ -9427,6 +9566,8 @@ def task_add(title, desc, priority, assignee, project, callback, source_msg, req
     if not due_date:
         json_response(False, error="--due-date is required for planned tasks")
         sys.exit(1)
+    # A typed time is local; it is stored in UTC (state_time_display.md §1 rule 3).
+    due_date = _typed_time_or_exit(due_date, "--due-date")
     # Utility and Script modes are mutually exclusive (they share alert columns).
     if utility_task and script_task:
         json_response(False, error="--utility-task and --script-task are mutually exclusive")
@@ -9474,7 +9615,7 @@ def task_add(title, desc, priority, assignee, project, callback, source_msg, req
         conn.commit()
         conn.close()
         json_response(True, task_id=task_id, title=title, priority=priority, assigned_to=assignee,
-                      project_id=project, due_date=due_date, task_kind=task_kind,
+                      project_id=project, due_date=local_time.show(due_date), task_kind=task_kind,
                       utility_model_id=utility_model if utility_task else None,
                       script_path=script_path if script_task else None)
     except Exception as e:
@@ -9612,7 +9753,7 @@ def task_run_due_scripts(agent_name, agent_workspace):
 @click.option("--desc", help="Update description")
 @click.option("--priority", help="low, normal, high, urgent")
 @click.option("--assignee", help="Agent assigned")
-@click.option("--due-date", help="Next wake/due date (YYYY-MM-DD HH:MM:SS)")
+@click.option("--due-date", help='Next wake/due date in local time: "YYYY-MM-DD HH:MM", or "now"')
 @click.option("--requested-by", help="UID of who originated the request")
 @click.option("--utility-model", default=None)
 @click.option("--utility-task/--no-utility-task", default=None)
@@ -9635,7 +9776,7 @@ def task_update(task_id, task_status, desc, priority, assignee, due_date, reques
     if desc is not None: updates["description"] = desc
     if priority is not None: updates["priority"] = priority
     if assignee is not None: updates["assigned_to"] = assignee
-    if due_date is not None: updates["due_date"] = due_date
+    if due_date is not None: updates["due_date"] = _typed_time_or_exit(due_date, "--due-date")
     if requested_by is not None: updates["requested_by"] = requested_by
     if utility_task is not None: updates["task_kind"] = "utility" if utility_task else "standard"
     if utility_model is not None: updates["utility_model_id"] = utility_model
@@ -9663,7 +9804,10 @@ def task_update(task_id, task_status, desc, priority, assignee, due_date, reques
             return
 
     if tasks_reader.update_task(task_id, updates):
-        json_response(True, task_id=task_id, updated_fields=list(updates.keys()))
+        reply = {"task_id": task_id, "updated_fields": list(updates.keys())}
+        if "due_date" in updates:
+            reply["due_date"] = local_time.show(updates["due_date"])   # the local time that was understood
+        json_response(True, **reply)
     else:
         json_response(False, error=f"Failed to update task {task_id}")
 
@@ -9942,7 +10086,7 @@ def message_get(agent_uid, unread, last_n_minutes, last_n_count, limit, contact)
             if rid:
                 d["replyToMessageId"] = rid
             out.append(d)
-        print(json.dumps(out, indent=2, default=str))
+        print(json.dumps(local_time.localize(out), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -10593,13 +10737,14 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
             if history and mem_updated:
                 latest_msg = history[0].get("created_at", "")
                 if latest_msg and latest_msg > mem_updated:
-                    output += f"    ⚠ Memory may be stale — last updated {mem_updated}, newest message {latest_msg}\n"
+                    output += (f"    ⚠ Memory may be stale — last updated {local_time.show(mem_updated)}, "
+                               f"newest message {local_time.show(latest_msg)}\n")
 
         output += f"[{data['label']}: {data['name']} ({uid}) — last {len(history)} messages]\n"
         for msg in history:
             prefix = "YOU" if msg["direction"] == "sent" else "THEM"
             text = msg.get("cleaned_text") or msg.get("text") or ""
-            dt = msg.get("created_at", "")
+            dt = local_time.show(msg.get("created_at", ""))     # local time, zone named
             output += f"  [{dt}] {prefix}: {text}\n"
 
         # ── Consecutive outbound flood detection ──
@@ -10665,7 +10810,7 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         for msg in new_messages:
             sender_name = msg.get("display_name") or _resolve_contact_name(msg["from_user_id"])
             text = msg.get("original_text") or msg.get("text") or ""
-            dt = msg.get("created_at", "")
+            dt = local_time.show(msg.get("created_at", ""))     # local time, zone named
             mid = msg.get("message_id", "")
             output += f"  [!] [{dt}] FROM {sender_name} ({msg['from_user_id']}): {text}\n"
             project_ids, task_ids = _agi_tag_ids(msg.get("raw_payload"))
@@ -10846,7 +10991,10 @@ def frames_list(agent_name, thread_id, status, for_harness):
         for row in rows:
             if row.get("status") != "active":
                 row["summary"] = ""
-    print(json.dumps(rows, indent=2, default=str))
+        # The harness computes with these times: it gets the stored UTC values.
+        print(json.dumps(rows, indent=2, default=str))
+        return
+    print(json.dumps(local_time.localize(rows), indent=2, default=str))
 
 @cycle_frames.command("search")
 @click.argument("text")
@@ -10854,7 +11002,7 @@ def frames_list(agent_name, thread_id, status, for_harness):
 def frames_search(text, agent_name):
     """Search compaction frame summaries."""
     agent = _frames_agent(agent_name)
-    print(json.dumps(_frames_rows(agent, text=text), indent=2, default=str))
+    print(json.dumps(local_time.localize(_frames_rows(agent, text=text)), indent=2, default=str))
 
 @cycle.command("start")
 @click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
@@ -11076,7 +11224,7 @@ def cycle_get(cycle_id):
         if not row:
             json_response(False, error=f"Cycle '{cycle_id}' not found")
             sys.exit(1)
-        json_response(True, cycle=dict(row))
+        json_response(True, cycle=local_time.localize(dict(row)))
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -11472,7 +11620,7 @@ def project_list():
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT * FROM projects ORDER BY name").fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -11627,9 +11775,9 @@ def project_pause(project_id):
         agent_name = get_agent_name()
         conn.execute(
             """INSERT OR REPLACE INTO agent_memory_project (agent_name, project_id, current_phase, updated_at)
-               VALUES (?, ?, 'PAUSED — project paused at ' || datetime('now'), datetime('now'))
+               VALUES (?, ?, 'PAUSED — project paused at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)', datetime('now'))
                ON CONFLICT(agent_name, project_id) DO UPDATE SET
-                 current_phase = 'PAUSED — project paused at ' || datetime('now'),
+                 current_phase = 'PAUSED — project paused at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)',
                  updated_at = datetime('now')""",
             (agent_name, project_id)
         )
@@ -11692,9 +11840,9 @@ def project_archive(project_id, do_zip):
         agent_name = get_agent_name()
         conn.execute(
             """INSERT OR REPLACE INTO agent_memory_project (agent_name, project_id, current_phase, updated_at)
-               VALUES (?, ?, 'ARCHIVED — project archived at ' || datetime('now'), datetime('now'))
+               VALUES (?, ?, 'ARCHIVED — project archived at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)', datetime('now'))
                ON CONFLICT(agent_name, project_id) DO UPDATE SET
-                 current_phase = 'ARCHIVED — project archived at ' || datetime('now'),
+                 current_phase = 'ARCHIVED — project archived at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)',
                  updated_at = datetime('now')""",
             (agent_name, project_id)
         )
@@ -12232,7 +12380,7 @@ def project_members(project_id):
                 "roles": m["roles"],
                 "assigned": m["assigned_at"]
             })
-        print(json.dumps({"ok": True, "project_id": project_id, "project": name, "members": result}, indent=2, default=str))
+        print(json.dumps(local_time.localize({"ok": True, "project_id": project_id, "project": name, "members": result}), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
         sys.exit(1)
@@ -12408,7 +12556,7 @@ def game_show(game_id):
         ).fetchall()
         result["active_awareness"] = [dict(a) for a in awareness]
         conn.close()
-        print(json.dumps(result, indent=2, default=str))
+        print(json.dumps(local_time.localize(result), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -12424,7 +12572,7 @@ def game_list(game_status):
         else:
             rows = conn.execute("SELECT * FROM games ORDER BY name").fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -12494,7 +12642,7 @@ def opponent_list(project_id):
         else:
             rows = conn.execute("SELECT * FROM project_opponents ORDER BY project_id, name").fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -12859,7 +13007,7 @@ def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_nam
         query += " ORDER BY created_at DESC"
         rows = conn.execute(query, params).fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -12967,7 +13115,7 @@ def awareness_get(entry_id):
         if not row:
             json_response(False, error=f"Awareness entry id={entry_id} not found")
             sys.exit(1)
-        print(json.dumps(dict(row), indent=2, default=str))
+        print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -13065,7 +13213,7 @@ def connection_list_agent():
             d["countryOfResidence"] = d.pop("country_of_residence", None)
             d["stateOrProvince"] = d.pop("state_or_province", None)
             result.append(d)
-        print(json.dumps(result, indent=2, default=str))
+        print(json.dumps(local_time.localize(result), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -13252,7 +13400,7 @@ def memory_connection_get(contact_uid, target_agent):
         ).fetchone()
         conn.close()
         if row:
-            print(json.dumps(dict(row), indent=2, default=str))
+            print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
         else:
             print(json.dumps({"agent_name": agent_name, "contact_uid": contact_uid, "exists": False}))
     except Exception as e:
@@ -13329,7 +13477,7 @@ def memory_connection_list(target_agent):
             (agent_name,)
         ).fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -13355,7 +13503,7 @@ def memory_project_get(project_id, target_agent):
         ).fetchone()
         conn.close()
         if row:
-            print(json.dumps(dict(row), indent=2, default=str))
+            print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
         else:
             print(json.dumps({"agent_name": agent_name, "project_id": project_id, "exists": False}))
     except Exception as e:
@@ -13424,7 +13572,7 @@ def memory_project_list(target_agent):
             (agent_name,)
         ).fetchall()
         conn.close()
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -13453,7 +13601,7 @@ def memory_system_get(key, target_agent):
                 row = None
             conn.close()
             if row:
-                print(json.dumps(dict(row), indent=2, default=str))
+                print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
             else:
                 print(json.dumps({"key": key, "exists": False}))
         else:
@@ -13467,7 +13615,7 @@ def memory_system_get(key, target_agent):
                     "SELECT * FROM agent_memory_system ORDER BY key ASC"
                 ).fetchall()
             conn.close()
-            print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+            print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -13566,7 +13714,7 @@ def memory_system_list(target_agent, as_prompt):
             if block:
                 print(block)
             return
-        print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
     except Exception as e:
         json_response(False, error=str(e))
 
@@ -14782,7 +14930,7 @@ def skill_list(status, json_output):
     conn.close()
 
     if json_output:
-        skills_data = [dict(r) for r in rows]
+        skills_data = local_time.localize([dict(r) for r in rows])
         json_response(True, skills=skills_data, count=len(skills_data))
         return
 
@@ -15113,8 +15261,8 @@ def pkg_list():
             f"[{style}]{s}[/{style}]" if style else s,
             row["reason"] or "",
             row["requested_by"] or "",
-            row["requested_at"] or "",
-            row["resolved_at"] or "",
+            local_time.show(row["requested_at"]),
+            local_time.show(row["resolved_at"]),
         )
 
     console = Console()

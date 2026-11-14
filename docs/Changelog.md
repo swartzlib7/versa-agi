@@ -6,6 +6,45 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [Unreleased]
+
+### Versa Desktop
+
+#### Changed
+- **Computer use reads Networking** — The Chief Orchestrator Agent's desktop skill now covers the connection symbols on the top bar (Wi-Fi, Bluetooth, Ethernet, airplane mode), the Networking box's sections, its lists of networks and devices, and the question a Bluetooth pairing asks. The agent joins, forgets and pairs only what you ask for, and cannot type a Wi-Fi password: only you can.
+- **Computer use and the clipboard list's numbers** — The number you see on an entry now counts from 1 on each tab, and choosing an entry no longer moves it. The agent's skill maps "the second text entry" to the right copy.
+- **Computer use knows a floating box** — A part of the Computer opened from the top bar while an app shows now floats over the app. The agent sees that the app is covered and is told to close the box first if it aims a step at the app.
+- **Computer use sees what you were just told** — A line shown under the date, such as a file saved to Downloads, is part of what the agent reads.
+
+## [3.8.1] — 2026-11-13
+
+### Time
+
+#### Changed
+- **Local time everywhere** — Times are stored in UTC and now shown in the machine's time zone on every surface: agitop, `agictl` output (`2026-11-13 11:30 EST`), and everything agents are given in their prompts (task due dates, task progress, message times).
+- **Due dates are typed in local time** — `agictl task add … --due-date "2026-11-13 11:30"` means 11:30 local time, and `--due-date now` means this moment. The reply shows the time that was understood. A value that is not a date is refused.
+- **Monthly token totals follow the local month** — They used to roll over at the UTC month.
+- **`agictl organization` times** — `get` and `list` show `created_at` and `updated_at` in local time. Invoice, estimate and transaction dates are calendar dates and are unchanged. A script that needs the stored UTC value adds `--stored`.
+
+#### Fixed
+- **Tasks firing hours early** — A due date an agent typed in local time was stored unconverted and fired early by the UTC offset (five hours in US Eastern time). Agents were also told two different things about time zones. They are now told one: times are local in and out.
+- **agitop task editor across a daylight-saving change** — A due date typed for a date on the other side of a clock change was stored one hour off.
+- **agitop headings after a clock change** — A column heading that names the time zone, such as `Due (EST)`, kept the old name across a daylight-saving change until agitop was reopened. It now changes with the clock.
+- **agitop fields that showed UTC** — Project members "Assigned", System Memory "Updated", Packages "Requested At", Utility Runs log, Summary Frames, and the Organization tables.
+
+### Updates
+
+#### Added
+- **Update notes for your COA** — After an update the COA gets a one-time note for each release: the maintenance the update needs on your instance, such as checking data a fixed fault could have left wrong, and the points marked for it to tell you. It handles a note once and closes it. Notes are included for 3.8.0 and 3.8.1.
+
+### IDE mode
+
+#### Changed
+- **Claude Code and other agent tools** — IDE mode now works out two things: which IDE the window is (Cursor, Antigravity, VS Code), then which tool is running the chat (the editor's own agent, or an extension such as Claude Code). The optional same-chat loop follows the tool: it is offered with the Cursor agent and with Claude Code in any of the three IDEs, on the same terms. Every other rule is the same for every tool.
+
+#### Fixed
+- **Claude Code in Cursor read as VS Code** — With an extension running the chat, the agent could not tell which IDE it was in and declined a loop the tool supports.
+
 ## [3.8.0] — 2026-11-13
 
 ### Long-running cycles

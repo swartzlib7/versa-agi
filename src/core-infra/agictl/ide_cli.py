@@ -18,6 +18,7 @@ from pathlib import Path
 
 import click
 
+import local_time
 from agictl.platform_guard import detect_host_class, write_ssh_config_locally
 
 IDE_STATUS = "ide"
@@ -410,7 +411,7 @@ def _autonomous_gap():
         conn.close()
     if count <= 0 or not last:
         return empty
-    last_at = last[0] or ""
+    last_at = local_time.show(last[0] or "")      # local time, with the zone
     summary = (last[1] or "").replace("\n", " ").strip()[:120]
     wake = f", wake: {summary}" if summary else ""
     banner = (

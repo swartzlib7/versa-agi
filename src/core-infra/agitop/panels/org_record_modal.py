@@ -13,6 +13,13 @@ Staff entries get a sub-modal for associating addresses (org_staff_addresses).
 
 from __future__ import annotations
 
+import os as _os
+import sys as _sys
+_CORE_INFRA_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+if _CORE_INFRA_DIR not in _sys.path:
+    _sys.path.insert(0, _CORE_INFRA_DIR)
+import local_time  # noqa: E402
+
 import re
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
@@ -744,7 +751,7 @@ class OrgStaffPanel(Vertical):
             return label
         uid = conn.get("uid") or ""
         suffix = uid[-6:] if len(uid) >= 6 else uid
-        first = str(conn.get("first_seen") or "")[:10]
+        first = local_time.show_date(conn.get("first_seen") or "")
         if first:
             return f"{label} · …{suffix} · {first}"
         return f"{label} · …{suffix}"

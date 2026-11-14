@@ -747,7 +747,7 @@ $(cat "${TASK_PROTOCOL}")"
 - **YOUR ENVIRONMENT ROOT**: \`${AGENT_PATH}\` — CWD at cycle start. Agent data is at \`${AGENT_PATH}/.agent/\`.
 - **YOUR WORKSPACE**: \`${AGENT_PATH}/workspace/\` — ALL project work goes here. Never work in the environment root itself.
 - **STEP BUDGET**: You have **${AGENT_MAX_TURNS:-50} steps** this cycle. Each tool call counts. Plan accordingly — break large tasks into sub-tasks and schedule remainders. You will receive a warning when running low.
-- **Timezone**: ${SYSTEM_TZ}. ALWAYS use this timezone for scheduling. NEVER assume UTC. The current date/time arrives in your wake prompt.
+- **Timezone**: ${SYSTEM_TZ}. Every time you are shown is in this zone, and every time you give to \`agictl\` (for example \`--due-date \"YYYY-MM-DD HH:MM\"\`) is read in this zone. Do not convert to UTC and do not add an offset. The current date/time arrives in your wake prompt.
 - **SSH key**: ~/.ssh/versa_agi_ed25519 (public: ~/.ssh/versa_agi_ed25519.pub). For first-time git project assignments, send the public key to the Primary User for deploy key setup.
 - **Message addressing**: Address EVERY part of EACH new message. Satisfy requests in a SINGLE message. Long-form content → Markdown file with \`--markdown-paths\`.
 - **Efficiency**: Be decisive. Avoid lengthy monologues. Execute multiple tool actions concurrently when possible. Consider the recipient's language.
@@ -1289,7 +1289,7 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
     if [ "${OVERDUE_RETRYABLE:-0}" -gt 0 ]; then
       # Collect overdue task details for prompt injection (spawn_attempts incremented on spawn commit only)
       OVERDUE_DETAILS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
-        "SELECT id, title, due_date, spawn_attempts, status FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS} ORDER BY due_date ASC LIMIT 10;" 2>/dev/null || true)
+        "SELECT id, title, COALESCE(strftime('%Y-%m-%d %H:%M', due_date, 'localtime'), due_date), spawn_attempts, status FROM tasks WHERE ${OVERDUE_SPAWN_SQL} AND spawn_attempts < ${MAX_SPAWN_ATTEMPTS} ORDER BY due_date ASC LIMIT 10;" 2>/dev/null || true)
       log "OVERDUE: ${AGENT_NAME} — ${OVERDUE_RETRYABLE} overdue planned/waiting task(s) (retrying)"
 
       if [ "${SHOULD_WAKE}" = "false" ]; then
@@ -1331,7 +1331,7 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
   # Check if agent has exceeded monthly token budget before spawning
   TOKEN_BUDGET="${AGENT_TOKEN_BUDGET:-0}"
   if [ "${TOKEN_BUDGET}" -gt 0 ]; then
-    MONTHLY_TOKENS=$(sqlite3 "${CYCLES_DB}" "SELECT COALESCE(SUM(tokens_total), 0) FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*' AND started_at >= strftime('%Y-%m-01', 'now');" 2>/dev/null || echo "0")
+    MONTHLY_TOKENS=$(sqlite3 "${CYCLES_DB}" "SELECT COALESCE(SUM(tokens_total), 0) FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*' AND started_at >= datetime(strftime('%Y-%m-01', 'now', 'localtime'), 'utc');" 2>/dev/null || echo "0")
     TOKEN_WARN_MARKER="/tmp/versa-agi-token-warn-${AGENT_NAME}-$(date +%Y-%m-%d)"
     BUDGET_PCT=0
     if [ "${MONTHLY_TOKENS}" -gt 0 ] && [ "${TOKEN_BUDGET}" -gt 0 ]; then
@@ -1642,7 +1642,7 @@ Task #${_od_id} (${_od_title}) is on its last wake. If you do not snooze it (\`a
       fi
     done <<< "${OVERDUE_DETAILS}"
     OVERDUE_CONTEXT="
-## ── OVERDUE PLANNED TASKS (missed due date — you MUST reschedule or cancel each) ──
+## ── OVERDUE PLANNED TASKS (missed due date, shown in local time — you MUST reschedule or cancel each) ──
 ${OVERDUE_DETAILS}
 ${_LAST_CHANCE}
 "
@@ -1657,12 +1657,12 @@ ${_LAST_CHANCE}
     # They run on Lifeline ticks outside the harness — omit if none.
     _SESSION_MINS="${AGENT_TIMEOUT_MIN:-45}"
     EXECUTING_ROWS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
-      "SELECT '#' || id, title, task_kind, COALESCE(due_date, ''), COALESCE(script_path, '') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND task_kind IN ('script','utility') AND status NOT IN ('done', 'cancelled', 'frozen') AND due_date IS NOT NULL AND due_date <= datetime('now', '+${_SESSION_MINS} minutes') ORDER BY due_date ASC LIMIT 15;" 2>/dev/null || true)
+      "SELECT '#' || id, title, task_kind, COALESCE(strftime('%Y-%m-%d %H:%M', due_date, 'localtime'), due_date, ''), COALESCE(script_path, '') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND task_kind IN ('script','utility') AND status NOT IN ('done', 'cancelled', 'frozen') AND due_date IS NOT NULL AND due_date <= datetime('now', '+${_SESSION_MINS} minutes') ORDER BY due_date ASC LIMIT 15;" 2>/dev/null || true)
     if [ -n "${EXECUTING_ROWS}" ]; then
       TASK_SUMMARY="
 ## ── TASKS EXECUTING IN ${_SESSION_MINS} MINUTES ──
 [!] Script and utility jobs due in this session window (your Timeout). Lifeline runs them on its ticks — they do not stop this cycle. Do not plan your own work across those due times if a collision matters. They are not LLM work.
-[!] Format: #ID | Title | Kind | Due | Script
+[!] Format: #ID | Title | Kind | Due (local time) | Script
 
 ${EXECUTING_ROWS}
 ── END TASKS EXECUTING ──
@@ -1671,7 +1671,7 @@ ${EXECUTING_ROWS}
 
     # Agent's own tasks (non-terminal: active, planned, in_progress, waiting, blocked)
     AGENT_TASKS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
-      "SELECT '#' || id, title, status, priority, COALESCE(due_date, 'no due date') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND status NOT IN ('done', 'cancelled', 'frozen') ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 WHEN 'low' THEN 4 END, due_date ASC LIMIT 15;" 2>/dev/null || true)
+      "SELECT '#' || id, title, status, priority, COALESCE(strftime('%Y-%m-%d %H:%M', due_date, 'localtime'), due_date, 'no due date') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND status NOT IN ('done', 'cancelled', 'frozen') ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 WHEN 'low' THEN 4 END, due_date ASC LIMIT 15;" 2>/dev/null || true)
 
     if [ -n "${AGENT_TASKS}" ]; then
       TASK_COUNT=$(echo "${AGENT_TASKS}" | wc -l)
@@ -1686,7 +1686,7 @@ ${EXECUTING_ROWS}
 ## ── YOUR ACTIVE TASKS (${TASK_COUNT} task(s) assigned to you) ──
 ${TASK_MSG_HINT}
 [!] Use 'agictl task get <id>' for full details. Update status with 'agictl task update <id> --status <status>'.
-[!] Format: #ID | Title | Status | Priority | Due Date
+[!] Format: #ID | Title | Status | Priority | Due (local time)
 
 ${AGENT_TASKS}
 ── END ACTIVE TASKS ──
@@ -1706,12 +1706,12 @@ ${AGENT_TASKS}
       # agent breadcrumbs stay in SQLite for the Progress Journal UI; script/
       # utility rows older than 7 days are pruned on each deterministic append.
       TASK_PROGRESS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
-        "SELECT '#' || p.task_id, substr(p.created_at, 1, 16), COALESCE(p.agent_name, '?'), substr(replace(p.note, char(10), ' '), 1, 300) FROM task_progress p JOIN tasks t ON t.id = p.task_id WHERE t.assigned_to='${AGENT_NAME}' AND t.status NOT IN ('done', 'cancelled', 'frozen') AND COALESCE(t.task_kind, 'standard') NOT IN ('script', 'utility') AND p.created_at >= datetime('now', '-7 days') ORDER BY p.id DESC LIMIT 10;" 2>/dev/null | tac || true)
+        "SELECT '#' || p.task_id, COALESCE(strftime('%Y-%m-%d %H:%M', p.created_at, 'localtime'), substr(p.created_at, 1, 16)), COALESCE(p.agent_name, '?'), substr(replace(p.note, char(10), ' '), 1, 300) FROM task_progress p JOIN tasks t ON t.id = p.task_id WHERE t.assigned_to='${AGENT_NAME}' AND t.status NOT IN ('done', 'cancelled', 'frozen') AND COALESCE(t.task_kind, 'standard') NOT IN ('script', 'utility') AND p.created_at >= datetime('now', '-7 days') ORDER BY p.id DESC LIMIT 10;" 2>/dev/null | tac || true)
 
       if [ -n "${TASK_PROGRESS}" ]; then
         TASK_SUMMARY="${TASK_SUMMARY}
 ## ── TASK PROGRESS (your own breadcrumbs from previous cycles — oldest first) ──
-[!] Format: #TaskID | Timestamp (UTC) | Author | Entry
+[!] Format: #TaskID | Time (local) | Author | Entry
 [!] Continue from where these leave off. Append new entries with 'agictl task progress <id> \"...\"'.
 
 ${TASK_PROGRESS}
@@ -1759,7 +1759,7 @@ ${SYS_MEM}
     if [ "${AGENT_NAME}" = "${COA_USER}" ]; then
       # ── COA: Full Game Board ──
       ACTIVE_GAMES=$(sqlite3 -separator '|' "${TASKS_DB}" \
-        "SELECT id, name, postulate, posture, autonomy, freedoms_summary, barriers_summary, environment_assessed_at FROM games WHERE status='active' ORDER BY name;" 2>/dev/null || true)
+        "SELECT id, name, postulate, posture, autonomy, freedoms_summary, barriers_summary, COALESCE(strftime('%Y-%m-%d %H:%M', environment_assessed_at, 'localtime'), environment_assessed_at) FROM games WHERE status='active' ORDER BY name;" 2>/dev/null || true)
 
       if [ -n "${ACTIVE_GAMES}" ]; then
         while IFS='|' read -r G_ID G_NAME G_POST G_POSTURE G_AUTO G_FREE G_BARR G_ASSESSED; do
@@ -1770,7 +1770,7 @@ ${SYS_MEM}
     Posture: ${G_POSTURE} | Autonomy: ${G_AUTO}
     Freedoms: ${G_FREE:-Not yet assessed}
     Barriers: ${G_BARR:-Not yet assessed}
-    Last assessed: ${G_ASSESSED:-Never}"
+    Last assessed (local time): ${G_ASSESSED:-Never}"
         done <<< "${ACTIVE_GAMES}"
       fi
 
@@ -1951,14 +1951,14 @@ Guard auto-lifts after ${FLOOD_GUARD_TIMEOUT_HOURS} hours without a new outbound
   PKG_NOTICE=""
   if [ -f "${AGENTS_DB}" ]; then
     APPROVED_PKGS=$(sqlite3 -separator '|' "${AGENTS_DB}" \
-      "SELECT name, resolved_at FROM system_packages WHERE status='approved' AND requested_by='${AGENT_NAME}' AND notified_at IS NULL;" \
+      "SELECT name, COALESCE(strftime('%Y-%m-%d %H:%M', resolved_at, 'localtime'), resolved_at) FROM system_packages WHERE status='approved' AND requested_by='${AGENT_NAME}' AND notified_at IS NULL;" \
       2>/dev/null || true)
     if [ -n "${APPROVED_PKGS}" ]; then
       PKG_LIST=""
       while IFS='|' read -r PKG_NAME PKG_DATE; do
         [ -z "${PKG_NAME}" ] && continue
         PKG_LIST="${PKG_LIST}
-  - ${PKG_NAME} (approved at ${PKG_DATE})"
+  - ${PKG_NAME} (approved at ${PKG_DATE}, local time)"
       done <<< "${APPROVED_PKGS}"
 
       PKG_NOTICE="
@@ -2199,6 +2199,9 @@ CRITICAL INSTRUCTION: After you successfully execute a tool, DO NOT repeat the s
     if [ "${_ide_pending}" = "true" ]; then
       _ide_on=$(jq -r '.last_on // empty' /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || true)
       _ide_off=$(jq -r '.last_off // empty' /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || true)
+      # Stored as UTC (…Z); shown to COA in local time (state_time_display.md §1 rule 4).
+      [ -n "${_ide_on}" ] && _ide_on=$(date -d "${_ide_on}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "${_ide_on}")
+      [ -n "${_ide_off}" ] && _ide_off=$(date -d "${_ide_off}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "${_ide_off}")
       _ide_mins=$(jq -r '.session_minutes // 0' /var/lib/versa-agi/coa/ide_state.json 2>/dev/null || echo "0")
       _ide_mins=${_ide_mins:-0}
       if [ "${_ide_mins}" -ge 1440 ] 2>/dev/null; then
@@ -2323,7 +2326,7 @@ ${IDE_RESUME_CONTEXT}"
     {
       echo "# versa-agi_ide.md"
       echo ""
-      echo "Seed generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Point-in-time. Refresh via \`agictl agent ide status ${AGENT_NAME}\` every turn."
+      echo "Seed generated $(date '+%Y-%m-%d %H:%M %Z') (local time). Point-in-time. Refresh via \`agictl agent ide status ${AGENT_NAME}\` every turn."
       echo ""
       if [ -n "${VERSA_IDE_GAP_BANNER:-}" ]; then
         echo "## Autonomous activity since last IDE session"

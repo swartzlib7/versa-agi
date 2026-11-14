@@ -139,7 +139,7 @@ To continue on a **different model** (e.g. vision fallback) or with refreshed co
 2. **Change model if needed** — `agictl agent set-model coa <catalog-key>` (COA-approved models only).
 3. **Schedule the next wake** — Lifeline runs on CRON (~1 min) and spawns you when due work or unprocessed messages exist. Before ending the cycle (tool **`agictl_cycle`**):
    - **Snooze** an active task you own for ASAP: `agictl task snooze <id> 5` (minimum 5 minutes), **or**
-   - **Create a task for yourself** with `--due-date` now and a title stating the next action: `agictl task add "Identify PU image attachment" --due-date "YYYY-MM-DD HH:MM:SS" --desc "..."` (assignee defaults to you).
+   - **Create a task for yourself** with `--due-date` now and a title stating the next action: `agictl task add "Identify PU image attachment" --due-date now --desc "..."` (assignee defaults to you).
 4. **End cycle, solo** — tool **`agictl_cycle`** with argument **`cycle end "summary" --handoff "…"`** (EXIT step above) as the **final, lone tool call**. Never batch `cycle end` with other tool calls in the same step — siblings can be dropped and the cycle may end before they run.
 
 Tell the Primary User you will continue on the **next cycle**, not immediately.

@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.8.0-FF9800" alt="Versa AGi version 3.8.0">
+    <img src="https://img.shields.io/badge/version-3.8.1-FF9800" alt="Versa AGi version 3.8.1">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -84,7 +84,7 @@ Most AI workflows are disconnected chat windows. Versa AGi is persistent, local,
 | 🌍 | **Cross-cultural sync** | Localized translation in the VersaVoice ecosystem. |
 | ⚡ | **Compute-zero** | No work → no spawn → no API cost. |
 | ⏱️ | **Deterministic script tasks** | Shared `.sh` tools from **AGi-Tools** on a schedule — no LLM, zero tokens. |
-| 🧑‍💻 | **IDE Integration** | Pair with your agent in VSCode, Cursor, or Antigravity. It runs on your IDE's inference, as its own OS user, talking to you in the chat. Autonomous spawning is held while you work together. [Guide](docs/ide-mode.md) |
+| 🧑‍💻 | **IDE Integration** | Pair with your agent in VSCode, Cursor, or Antigravity, using the editor's own agent or an extension such as Claude Code. It runs on that tool's inference, as its own OS user, talking to you in the chat. Autonomous spawning is held while you work together. [Guide](docs/ide-mode.md) |
 
 ---
 
@@ -182,6 +182,21 @@ COA calls you in the **VersaVoice app** (Android, iOS, web) to settle a decision
 **Turn it on:** answer the Live Call question during `setup.sh` / `setup.sh --update`, or `sudo agitop` → System Settings → **Live Call** (on/off, call model, longest call, ring time, calls per cycle, spoken progress). The same tab shows your last call and its transcript.
 
 Ask COA in chat to call you, or let it call when a conversation will be faster. Only COA places calls. Approvals (packages, sudo, agents) are never given by voice. Use the app or agitop controls.
+
+### Updates
+
+```bash
+sudo versa-agi-update
+```
+
+Shipped files refresh; your settings, models and data are kept. After an update your COA gets a one-time **update note** for each release it has not had one for:
+
+| In the note | What your COA does |
+|---|---|
+| Maintenance the update needs on this instance, such as data a fixed fault could have left wrong | Checks once and corrects only what it finds |
+| Points marked for you | Tells you once, in a short message, with the result of its checks |
+
+The note is one job with an end: your COA closes it and does not repeat it. `sudo agictl system update-notes` lists the notes and when each was delivered.
 
 ### Uninstall
 

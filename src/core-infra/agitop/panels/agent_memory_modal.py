@@ -7,12 +7,12 @@ _CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _CORE_INFRA not in sys.path:
     sys.path.insert(0, _CORE_INFRA)
 import db_connect  # noqa: E402
+import local_time  # noqa: E402
 
 
 import json
 import os
 import sqlite3
-import time
 from typing import Optional
 
 from textual import on
@@ -21,19 +21,14 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Select, Static, TextArea
 
-_TZ = time.strftime("%Z")
+from agitop import zone_heading  # noqa: E402
 
 
 def _utc_to_local(utc_str: str) -> str:
-    if not utc_str or utc_str == "--" or len(utc_str) < 16:
-        return utc_str or "--"
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=timezone.utc).astimezone()
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except (ValueError, OSError):
-        return utc_str
+    """Stored UTC time → local 'YYYY-MM-DD HH:MM'. Empty → "--"."""
+    if not utc_str:
+        return "--"
+    return local_time.show(utc_str, zone=False)
 
 
 def _tasks_db() -> str:
@@ -112,7 +107,7 @@ class AgentMemoryViewModal(ModalScreen):
 
     def on_mount(self) -> None:
         conn_table = self.query_one("#agent-memory-connection-table", DataTable)
-        conn_table.add_columns("Contact", "Rapport", "Comm Style", "Summary", f"Updated ({_TZ})")
+        conn_table.add_columns("Contact", "Rapport", "Comm Style", "Summary", zone_heading.heading("Updated"))
         self.refresh_connection_table()
 
     def refresh_connection_table(self) -> None:

@@ -1,6 +1,6 @@
 # IDE session seed
 
-Standing rules (handshake, how you operate, close-out, Cursor loop) live in **`AGENTS.md`** at the workspace root. This file is the **seed**: point-in-time poise and live state. The LIVE SITUATION block below is superseded by the refresh in this file.
+Standing rules (handshake, how you operate, close-out, same-chat loop) live in **`AGENTS.md`** at the workspace root. This file is the **seed**: point-in-time poise and live state. The LIVE SITUATION block below is superseded by the refresh in this file.
 
 ## Refresh live state
 

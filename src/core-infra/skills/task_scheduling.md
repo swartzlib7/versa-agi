@@ -20,12 +20,20 @@
 
 ### Time Awareness
 
-- **Know the current time.** Always check the system clock before scheduling:
+- **Know the current time.** It is in your wake prompt, in local time. To check it again:
   ```bash
-  date -u '+%Y-%m-%dT%H:%M:%SZ'
+  date '+%Y-%m-%d %H:%M %Z'
   ```
+- **Times are local, in and out.** Every time you are shown (task due dates, journal entries, messages, cycle times) is in the host's time zone and names it (`2026-11-13 11:30 EST`). Every due date you type is read in that zone:
+  ```bash
+  agictl task add "..." --project <id> --due-date "2026-11-13 11:30"
+  agictl task add "..." --project <id> --due-date now
+  ```
+  - Do not convert to UTC. Do not add or subtract an offset. The system does the conversion and handles daylight-saving changes.
+  - The reply shows the local time that was understood. Check it.
+  - A value that is not a date (`tomorrow`, `in 2 hours`) is refused. Work out the date and time, or use `agictl task snooze <id> <minutes>`.
 - **Never schedule in the past.** If a task's due date has passed, roll it forward — never leave it behind.
-- **Respect time zones.** The Primary User's timezone is in their PROFILE. Schedule deliverables for their waking hours.
+- **Respect the person's day.** The host's zone is the Primary User's working zone unless their PROFILE says otherwise. Schedule deliverables for their waking hours.
 
 ### Realistic Timeline Estimation
 

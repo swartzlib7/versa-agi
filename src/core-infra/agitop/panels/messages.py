@@ -1,11 +1,18 @@
 """Messages panel — recent messages with live data and message viewer modal."""
+
+import os as _os
+import sys as _sys
+_CORE_INFRA_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+if _CORE_INFRA_DIR not in _sys.path:
+    _sys.path.insert(0, _CORE_INFRA_DIR)
+import local_time  # noqa: E402
+
 from agitop.data import AgentReader
 
 import json
 import os
 import re
 import subprocess
-import time
 from typing import Optional
 
 from textual import on
@@ -18,8 +25,8 @@ from textual.widget import Widget
 from agitop.data import MessageReader
 from agitop.data.config_reader import ConfigReader
 from agitop.widgets import FlexDataTable
+from agitop import zone_heading
 
-_TZ = time.strftime("%Z")
 
 
 class PasteSafeTextArea(TextArea):
@@ -38,16 +45,11 @@ class PasteSafeTextArea(TextArea):
 
 
 def _utc_to_local(utc_str: str) -> str:
-    """Convert 'YYYY-MM-DD HH:MM:SS' UTC string to local timezone."""
-    if not utc_str or len(utc_str) < 16:
+    """Stored UTC time → local 'YYYY-MM-DD HH:MM:SS' (local_time: that date's own offset)."""
+    if not utc_str or utc_str == "--" or len(utc_str) < 16:
         return utc_str
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.strptime(utc_str[:19], "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=timezone.utc).astimezone()
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, OSError):
-        return utc_str
+    return local_time.show(utc_str, seconds=True, zone=False)
+
 
 # Regex to strip emotion/stage-direction tags like [cheerful], [short pause], etc.
 _EMOTION_TAG_RE = re.compile(r'\[(?:cheerful|calm|sad|angry|excited|thoughtful|surprised|'
@@ -782,7 +784,7 @@ class MessagesPanel(Widget):
         self.table.add_column("Mode", width=8, key="mode")
         self.table.add_column("Status", width=10, key="status")
         self.table.add_column("Attach", width=6, key="attach")
-        self.table.add_column(f"Date/Time ({_TZ})", width=14, key="datetime")
+        self.table.add_column(zone_heading.heading("Date/Time"), width=14, key="datetime")
         self.table.add_column("Cycle", width=8, key="cycle")
         self.table.apply_flex_widths()
         self._update_filter_links()
@@ -832,6 +834,7 @@ class MessagesPanel(Widget):
 
     def refresh_data(self) -> None:
         """Refresh message data from SQLite with pagination."""
+        zone_heading.refresh(self.table, "Date/Time")
         self._total = self.message_reader.count_messages(
             channel=self._channel_filter
         ) if self.message_reader else 0
