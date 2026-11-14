@@ -8,13 +8,24 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 
 ## [Unreleased]
 
-### Versa Desktop
+## [3.8.2] — 2026-11-13
+
+### Updates
+
+#### Added
+- **Update note for 3.8.2** — After this update your COA checks whether you ever asked it to delete or clear local messages when that was not possible, and asks you whether you still want it done.
+
+### Messages
+
+#### Added
+- **COA can delete local messages** — Ask your Chief Orchestrator Agent and it deletes messages from your machine, for itself or for any sub-agent: the messages between agents, the local copies of VersaVoice messages from you or other people, or both (`agictl message delete-local`). Unread messages are kept unless you ask otherwise. Nothing is deleted in VersaVoice: your app and the other person's copy are not affected.
 
 #### Changed
-- **Computer use reads Networking** — The Chief Orchestrator Agent's desktop skill now covers the connection symbols on the top bar (Wi-Fi, Bluetooth, Ethernet, airplane mode), the Networking box's sections, its lists of networks and devices, and the question a Bluetooth pairing asks. The agent joins, forgets and pairs only what you ask for, and cannot type a Wi-Fi password: only you can.
-- **Computer use and the clipboard list's numbers** — The number you see on an entry now counts from 1 on each tab, and choosing an entry no longer moves it. The agent's skill maps "the second text entry" to the right copy.
-- **Computer use knows a floating box** — A part of the Computer opened from the top bar while an app shows now floats over the app. The agent sees that the app is covered and is told to close the box first if it aims a step at the app.
-- **Computer use sees what you were just told** — A line shown under the date, such as a file saved to Downloads, is part of what the agent reads.
+- **`agictl message delete` on a local message** — It now says the message is local and names `delete-local`, without calling VersaVoice.
+
+#### Fixed
+- **A new contact's first message** — The agent's prompt left out the contact's profile (language, dialect, voice) and any memory of them when they had no earlier messages. Both are now included from the first message.
+- **`agictl message count-unprocessed` time window** — The seconds argument was accepted and ignored. A value above 0 now counts only messages received in that window; `0` still counts all of them.
 
 ## [3.8.1] — 2026-11-13
 
@@ -44,6 +55,14 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 
 #### Fixed
 - **Claude Code in Cursor read as VS Code** — With an extension running the chat, the agent could not tell which IDE it was in and declined a loop the tool supports.
+
+### Versa Desktop
+
+#### Changed
+- **Computer use reads Networking** — The Chief Orchestrator Agent's desktop skill now covers the connection symbols on the top bar (Wi-Fi, Bluetooth, Ethernet, airplane mode), the Networking box's sections, its lists of networks and devices, and the question a Bluetooth pairing asks. The agent joins, forgets and pairs only what you ask for, and cannot type a Wi-Fi password: only you can.
+- **Computer use and the clipboard list's numbers** — The number you see on an entry now counts from 1 on each tab, and choosing an entry no longer moves it. The agent's skill maps "the second text entry" to the right copy.
+- **Computer use knows a floating box** — A part of the Computer opened from the top bar while an app shows now floats over the app. The agent sees that the app is covered and is told to close the box first if it aims a step at the app.
+- **Computer use sees what you were just told** — A line shown under the date, such as a file saved to Downloads, is part of what the agent reads.
 
 ## [3.8.0] — 2026-11-13
 

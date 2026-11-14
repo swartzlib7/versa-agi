@@ -400,7 +400,7 @@ When a user asks you to resend a file that was previously received:
 
 ## Message Deletion
 
-`agictl message delete <message_id> --channel <channel_id>` removes a message from your VV cloud space. The other participant's copy is **not affected**. Your local message history is also unchanged.
+`agictl message delete <message_id> --channel <channel_id>` removes a message from your VV cloud space and its copy in your local message history. The other participant's copy is **not affected**.
 
 **Rules:**
 1. **Only delete when instructed by the Primary User** — do not delete messages autonomously
@@ -414,6 +414,30 @@ agictl message get YOUR_SUB_ACCOUNT_ID --contact <uid> --last-n-count 10
 # Delete the specific message
 agictl message delete <message_id> --channel <channel_id>
 ```
+
+### Deleting local copies (COA only)
+
+`agictl message delete-local` deletes messages from this machine's database only. Nothing is sent to VersaVoice: the cloud copy and the other person's copy stay as they are. You run it yourself, for yourself or for any sub-agent, when the Primary User asks.
+
+It covers both kinds of message an agent holds locally:
+
+- **Between agents** (`agictl message internal`; ids start `int_`). These exist only here, so `message delete` cannot remove them.
+- **Local copies of VersaVoice messages**, from the Primary User or any contact. A deleted one is never synced back in.
+
+```bash
+agictl message delete-local --agent <name> --dry-run          # count first, by kind
+agictl message delete-local --agent <name>                    # everything that agent sent and received
+agictl message delete-local --agent <name> --channel internal # only messages between agents
+agictl message delete-local --agent <name> --channel vv       # only local copies of VersaVoice messages
+agictl message delete-local --agent <name> --with <other>     # one exchange: an agent name or a contact uid
+agictl message delete-local --agent <name> --before "2026-11-01 00:00"   # only older ones (local time)
+agictl message delete-local <message_id> [<message_id> ...]   # named messages
+```
+
+- The same rule applies: **only when instructed by the Primary User**. Ask which agent and which kind when it is not clear.
+- Each agent holds its own copy of an exchange. Deleting one agent's messages leaves the other agent's copy.
+- A received message that is not yet processed is kept, so unread mail is not lost. `--include-unread` deletes those too. A message still waiting to be sent is always kept.
+- Deleted messages no longer appear in that agent's conversation history. Summaries already made of a conversation, and attachment files already saved in a workspace, are separate and stay.
 
 ## Connection Authorization
 

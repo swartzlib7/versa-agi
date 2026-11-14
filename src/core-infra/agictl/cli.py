@@ -10254,11 +10254,22 @@ def message_mark_processed(message_id):
 @click.argument("message_id")
 @click.option("--channel", required=True, help="Channel ID (from message get output)")
 def message_delete(message_id, channel):
-    """Delete a message from VersaVoice cloud (sub-account's space only).
+    """Delete a VersaVoice message: from the cloud (this sub-account's space) and,
+    once the cloud confirms, its copy in the local database.
 
     RESTRICTED: Only use when explicitly instructed by the Primary User.
     Deletes only from this agent's space — the other participant's copy is preserved.
+    A local (agent-to-agent) message has no cloud copy: use `message delete-local`.
     """
+    try:
+        local_row = message_reader._query("SELECT channel FROM messages WHERE message_id = ? LIMIT 1", (message_id,))
+    except Exception:
+        local_row = []
+    if local_row and local_row[0]["channel"] == "internal":
+        json_response(False, message_id=message_id,
+                      error="This is a local (agent-to-agent) message. It has no VersaVoice copy, so this "
+                            f"command cannot delete it. Use: agictl message delete-local {message_id}")
+        sys.exit(1)
     config = get_config()
     sub_account_id = config.get("versavoice", {}).get("sub_account_id")
     token = config.get("versavoice", {}).get("api_token")
@@ -10280,6 +10291,67 @@ def message_delete(message_id, channel):
         json_response(False, error=error_msg, message_id=message_id)
         sys.exit(1)
 
+@message.command("delete-local")
+@click.argument("message_ids", nargs=-1)
+@click.option("--agent", "agent_name", default=None, help="Delete this agent's local messages (coa or a sub-agent)")
+@click.option("--channel", type=click.Choice(["all", "internal", "vv"]), default="all", show_default=True,
+              help="internal = between agents; vv = local copies of VersaVoice messages")
+@click.option("--with", "other", default=None, help="Only those exchanged with this agent, sender or contact uid")
+@click.option("--before", default=None, help='Only those created before this local time: "2026-11-01 00:00"')
+@click.option("--include-unread", is_flag=True, help="Also delete received messages not yet processed")
+@click.option("--dry-run", is_flag=True, help="Count what would be deleted; delete nothing")
+def message_delete_local(message_ids, agent_name, channel, other, before, include_unread, dry_run):
+    """Delete messages from this machine's database only. COA or Primary User only.
+
+    Covers both kinds of message an agent holds locally: the internal ones
+    between agents, and the local copies of VersaVoice messages (from the
+    Primary User or any contact). Nothing is sent to VersaVoice: the cloud
+    copy and the other person's copy stay as they are.
+
+    Give message ids, or --agent NAME for everything that agent sent and
+    received. Unread messages are kept unless --include-unread; a message
+    still waiting to be sent is always kept.
+    RESTRICTED: delete only when the Primary User asked for it. COA runs the
+    command itself; the Primary User does not have to.
+    """
+    _require_pu_or_coa()
+    if bool(message_ids) == bool(agent_name):
+        json_response(False, error="Give message ids, or --agent <name>: one or the other")
+        sys.exit(1)
+    if message_ids and (other or before):
+        json_response(False, error="--with and --before go with --agent, not with message ids")
+        sys.exit(1)
+    before_utc = ""
+    agent_ids = []
+    if agent_name:
+        agent_name = agent_name.lower()
+        try:
+            agents_conn = db_connect.connect_compat(agents_db, timeout=5)
+            known = agents_conn.execute("SELECT name FROM agents WHERE name=?", (agent_name,)).fetchone()
+            agents_conn.close()
+        except Exception as e:
+            json_response(False, error=str(e))
+            sys.exit(1)
+        if not known:
+            json_response(False, error=f"Agent '{agent_name}' not found in registry")
+            sys.exit(1)
+        # Internal rows carry the agent's name; VersaVoice rows carry its account id.
+        agent_ids = [agent_name]
+        vv_uid = _agent_vv_uid_map().get(agent_name)
+        if vv_uid:
+            agent_ids.append(vv_uid)
+        if before:
+            before_utc = _typed_time_or_exit(before, "--before")
+    try:
+        result = message_reader.delete_local_messages(
+            message_ids=message_ids, agent_ids=agent_ids, other=(other or "").strip(),
+            before_utc=before_utc, channel=channel, include_unread=include_unread, dry_run=dry_run)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    json_response(True, action="would_delete" if dry_run else "deleted", agent=agent_name,
+                  channel=channel, versavoice="not touched", **result)
+
 @message.command("sync-inbox")
 @click.argument("agent_user")
 @click.option("--agent-path", required=True)
@@ -10300,7 +10372,10 @@ def message_sync_inbox(agent_user, agent_path, sub_account, token, full):
 @click.argument("within_seconds", type=int)
 @click.option("--agent-name", default="", help="Agent name for internal message matching")
 def message_count_unprocessed(sub_account, within_seconds, agent_name):
-    """Count unprocessed messages within time window."""
+    """Count unprocessed received messages. WITHIN_SECONDS above 0 counts only
+    those received in the last that many seconds; 0 counts all of them."""
+    if within_seconds < 0:
+        raise click.BadParameter("must be 0 (no window) or a number of seconds", param_hint="WITHIN_SECONDS")
     print(message_reader.count_unprocessed(sub_account, within_seconds, agent_name=agent_name))
 
 @message.command("received-unread", hidden=True)
@@ -10714,10 +10789,10 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
         output += f"--- CONVERSATION HISTORY (last {depth} messages per contact — use agictl message get for more) ---\n\n"
     for uid, data in thread_targets.items():
         history = message_reader.get_contact_history(sub_account, uid, limit=depth, exclude_unprocessed=True, agent_name=agent_name)
-        if not history:
-            continue
 
-        # Inject per-contact profile + memory before their thread
+        # Per-contact profile + memory before their thread. Written for a contact
+        # with no earlier messages too: a first message is when the language,
+        # dialect and voice lines matter most (SPWN-53).
         output += _build_profile_block(uid, data['name'], data['label'])
         cmem = contact_memories.get(uid)
         if cmem:
@@ -10740,6 +10815,9 @@ def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent
                     output += (f"    ⚠ Memory may be stale — last updated {local_time.show(mem_updated)}, "
                                f"newest message {local_time.show(latest_msg)}\n")
 
+        if not history:
+            output += f"[{data['label']}: {data['name']} ({uid}) — no earlier messages]\n\n"
+            continue
         output += f"[{data['label']}: {data['name']} ({uid}) — last {len(history)} messages]\n"
         for msg in history:
             prefix = "YOU" if msg["direction"] == "sent" else "THEM"

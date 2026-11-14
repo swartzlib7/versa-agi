@@ -83,19 +83,23 @@ class MessageReader:
     def count_unprocessed(self, sub_account: str, within_seconds: int = 0, agent_name: str = "") -> int:
         """Count unprocessed received messages for a specific sub-account.
         Filters by to_user_id for multi-agent support (shared messages.db).
-        If agent_name is provided, also matches internal messages addressed by name."""
+        If agent_name is provided, also matches internal messages addressed by name.
+
+        ``within_seconds`` above 0 counts only messages received in the last
+        that many seconds; 0 means no window (every unprocessed message).
+        ``datetime(created_at)`` reads both stored forms (plain and ISO `…Z`)."""
+        ids = [sub_account]
         if agent_name and agent_name != sub_account:
-            rows = self._query(
-                "SELECT COUNT(*) as c FROM messages "
-                "WHERE status = 'unprocessed' AND direction = 'received' AND (to_user_id = ? OR to_user_id = ?)",
-                (sub_account, agent_name)
-            )
-        else:
-            rows = self._query(
-                "SELECT COUNT(*) as c FROM messages "
-                "WHERE status = 'unprocessed' AND direction = 'received' AND to_user_id = ?",
-                (sub_account,)
-            )
+            ids.append(agent_name)
+        sql = ("SELECT COUNT(*) as c FROM messages "
+               "WHERE status = 'unprocessed' AND direction = 'received' "
+               f"AND to_user_id IN ({','.join('?' * len(ids))})")
+        params = list(ids)
+        window = int(within_seconds or 0)
+        if window > 0:
+            sql += " AND datetime(created_at) >= datetime('now', ?)"
+            params.append(f"-{window} seconds")
+        rows = self._query(sql, tuple(params))
         return rows[0]["c"] if rows else 0
 
     def count_stale(self, sub_account: str, older_than_seconds: int) -> int:
@@ -348,6 +352,83 @@ class MessageReader:
             return True
         except Exception:
             return False
+
+    def delete_local_messages(self, message_ids=(), agent_ids=(), other: str = "", before_utc: str = "",
+                              channel: str = "all", include_unread: bool = False, dry_run: bool = False) -> dict:
+        """Delete the local copies of messages. Nothing is sent to VersaVoice. SPWN-55.
+
+        Either ``message_ids``, or ``agent_ids`` (an agent's name and its
+        VersaVoice account id): the rows that agent sent and the rows it
+        received, optionally only those exchanged with ``other`` and only
+        those created before ``before_utc`` (stored UTC text).
+
+        ``channel``: ``internal`` (agent-to-agent), ``vv`` (local copies of
+        VersaVoice messages) or ``all``. A deleted VersaVoice row is
+        tombstoned so inbox sync never brings it back.
+
+        Kept: a received message still unprocessed, unless ``include_unread``;
+        always, a message waiting to be sent (``pending`` / ``queued``).
+        Returns ``{deleted, by_channel, kept_unread, kept_unsent,
+        skipped_channel, not_found}``; with ``dry_run`` nothing is deleted.
+        """
+        ids = [str(i) for i in (message_ids or ()) if str(i).strip()]
+        mine = [str(i) for i in (agent_ids or ()) if str(i).strip()]
+        result = {"deleted": 0, "by_channel": {}, "kept_unread": 0, "kept_unsent": 0,
+                  "skipped_channel": [], "not_found": []}
+        where: list[str] = []
+        params: list = []
+        if channel in ("internal", "vv"):
+            where.append("channel = ?")
+            params.append(channel)
+        if ids:
+            where.append(f"message_id IN ({','.join('?' * len(ids))})")
+            params += ids
+        elif mine:
+            marks = ",".join("?" * len(mine))
+            where.append(f"((direction = 'sent' AND from_user_id IN ({marks})) "
+                         f"OR (direction = 'received' AND to_user_id IN ({marks})))")
+            params += mine + mine
+            if other:
+                where.append("((direction = 'sent' AND to_user_id = ?) OR (direction = 'received' AND from_user_id = ?))")
+                params += [other, other]
+            if before_utc:
+                where.append("datetime(created_at) < datetime(?)")
+                params.append(before_utc)
+        else:
+            return result
+        scope = " AND ".join(where)
+        unread = "(direction = 'received' AND status = 'unprocessed')"
+        unsent = "(status IN ('pending', 'queued'))"
+        conn = db_connect.connect_compat(self.db_path, timeout=5)
+        try:
+            if ids:
+                known = {row[0]: row[1] for row in conn.execute(
+                    f"SELECT message_id, channel FROM messages WHERE message_id IN ({','.join('?' * len(ids))})", ids)}
+                result["not_found"] = [i for i in ids if i not in known]
+                if channel in ("internal", "vv"):
+                    result["skipped_channel"] = [i for i in ids if known.get(i) not in (None, channel)]
+            result["kept_unsent"] = conn.execute(
+                f"SELECT COUNT(*) FROM messages WHERE {scope} AND {unsent}", params).fetchone()[0]
+            scope += f" AND NOT {unsent}"
+            if not include_unread:
+                result["kept_unread"] = conn.execute(
+                    f"SELECT COUNT(*) FROM messages WHERE {scope} AND {unread}", params).fetchone()[0]
+                scope += f" AND NOT {unread}"
+            rows = conn.execute(f"SELECT message_id, channel FROM messages WHERE {scope}", params).fetchall()
+            for _, row_channel in rows:
+                result["by_channel"][row_channel] = result["by_channel"].get(row_channel, 0) + 1
+            result["deleted"] = len(rows)
+            if not dry_run and rows:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS deleted_message_ids ("
+                    "message_id TEXT PRIMARY KEY, deleted_at DATETIME NOT NULL DEFAULT (datetime('now')))")
+                conn.executemany("INSERT OR IGNORE INTO deleted_message_ids (message_id) VALUES (?)",
+                                 [(mid,) for mid, row_channel in rows if row_channel == "vv" and mid])
+                conn.execute(f"DELETE FROM messages WHERE {scope}", params)
+                conn.commit()
+        finally:
+            conn.close()
+        return result
 
     def update_message_status(self, message_id: str, new_status: str) -> bool:
         """Update the status of a message."""

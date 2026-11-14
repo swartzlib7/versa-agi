@@ -254,7 +254,9 @@ agictl message get <sub_account_uid> --last-n-minutes 30    # Messages from last
 agictl message send <contact_uid> "<text>" --mode MODE  # Send via REST Adapter (JSON)
 agictl message internal <agent_name> "<text>"         # Direct SQLite message (no VV API)
 agictl message mark-processed <message_id>            # Mark message as handled (JSON)
-agictl message delete <message_id> --channel <id>     # Delete from VV cloud (PU authorization required)
+agictl message delete <message_id> --channel <id>     # Delete from VV cloud and the local copy (PU authorization required)
+agictl message delete-local <message_id> [...]        # Delete local copies by id; VersaVoice not touched (PU authorization required)
+agictl message delete-local --agent <name> [--channel all|internal|vv] [--with <other>] [--before "YYYY-MM-DD HH:MM"] [--include-unread] [--dry-run]
 agictl message sync-inbox <agent_user> --agent-path P --sub-account SA --token T  # Pull from API
 agictl message conversation-context <sub_account_uid> [sponsor_uid]  # Build context blob
 ```
@@ -265,7 +267,9 @@ agictl message conversation-context <sub_account_uid> [sponsor_uid]  # Build con
 
 **Modes**: `typed` (text as-is), `translate` (AI translation), `speak` (TTS same-language), `speak_translated` (TTS + translation)
 
-> **Message Deletion**: `message delete` removes a message from your VV cloud space only (the other participant's copy and your local history are preserved). Requires Primary User authorization — do not delete messages autonomously.
+> **Message Deletion**: both commands need the Primary User's authorization. Do not delete messages on your own initiative.
+> - `message delete` removes a VersaVoice message from your VV cloud space and its local copy. The other participant's copy is preserved.
+> - `message delete-local` removes messages from this machine's database only, and you run it yourself when the Primary User asks. It covers the internal messages between agents (`--channel internal`), the local copies of VersaVoice messages from the Primary User or any contact (`--channel vv`), or both (the default). `--agent <name>` takes everything that agent sent and received, for you or for any sub-agent. Unread messages are kept unless `--include-unread`; a message still waiting to be sent is always kept. Run it with `--dry-run` first: it gives the count for each kind. Nothing is deleted in VersaVoice.
 
 **Attachment flags** (all multi-value — repeat the flag for each file/URL, max 10 total):
 
@@ -301,7 +305,7 @@ Live Call settings (`[features] live_call`, `[live_call]`) are **Primary User on
 
 ### Message Data (for system scripts)
 ```bash
-agictl message count-unprocessed <sub_account> <seconds>   # Count within time window
+agictl message count-unprocessed <sub_account> <seconds>   # Count received in the last <seconds>; 0 = no window
 agictl message count-stale <sub_account> <seconds>         # Count stuck messages
 agictl message fail-stale <sub_account> <seconds>          # Force-fail stuck messages
 agictl message blacklisted <sub_account>                   # UIDs matching security blacklist
