@@ -841,13 +841,13 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
                 yield Input(value=current_budget, placeholder="e.g. 5000000 (0=unlimited)", id="input-budget", type="integer")
             with Vertical(classes="setup-form-col"):
                 yield Static("[cyan]Time limit (minutes, 30–240)[/] — the cycle is closed at this point and resumes on the next spawn")
-                yield Input(value=current_timeout, placeholder="e.g. 45", id="input-timeout", type="integer")
+                yield Input(value=current_timeout, placeholder="e.g. 90", id="input-timeout", type="integer")
 
     if not is_cloud and ctx_options:
         with Horizontal(classes="setup-form-row"):
             with Vertical(classes="setup-form-col"):
                 yield Static("[cyan]Time limit (minutes, 30–240)[/] — the cycle is closed at this point and resumes on the next spawn")
-                yield Input(value=current_timeout, placeholder="e.g. 45", id="input-timeout", type="integer")
+                yield Input(value=current_timeout, placeholder="e.g. 90", id="input-timeout", type="integer")
             with Vertical(classes="setup-form-col"):
                 yield Static("[cyan]Runaway Threshold (lines)[/] — max output lines in 15 minutes before freeze")
                 yield Input(value=current_threshold, placeholder="e.g. 300", id="input-threshold", type="integer")

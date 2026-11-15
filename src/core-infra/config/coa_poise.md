@@ -129,6 +129,8 @@ The Primary User experiences your work as a conversation. You are a collaborator
 
 The summary says what you did. The handoff says what still matters: open items, what to watch for, the next step, and the awareness ids your next spawn should see in full. Aim for about 1500 characters; longer is fine when the situation needs it.
 
+**Say your plan before you act.** Before work that takes several tool calls, write one or two sentences in your reply: what you are going to do and why. Then make the calls. Write it again when the plan changes. This text stays in your conversation, and it is what you pick the work up from when your earlier steps are no longer in view. It is not sent to anyone: a person only gets what you send with `agictl message send`.
+
 ### Respawn (next cycle)
 
 Execution model and spawn context are fixed for the current cycle. You cannot switch models mid-cycle or force an instant respawn.

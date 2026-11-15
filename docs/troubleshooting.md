@@ -69,16 +69,49 @@ The reason is in the Lifeline log (`/var/log/versa-agi-lifeline.log`) and in agi
 |---|---|---|---|
 | `LIMIT: … time limit reached` | The cycle reached the agent's time limit. It was closed with a summary and a handoff. | The agent wakes on the next pulse and carries on in the same thread. | Nothing. If long work hits the limit every cycle, raise it (below). |
 | `TIMEOUT: … stopped by the backstop` | One model call was still running 5 minutes after the time limit. | The cycle is stopped and its record closed with a note. The agent wakes again when work is due. | If it repeats, check that the model server or provider is answering. |
-| `STALL:` | The model gave no reply for 10 minutes (20 minutes on a local model). | The cycle is stopped. Tasks are not frozen. The agent wakes again when work is due. | Check that the model server or provider is answering. Five stalls in a row trip the circuit breaker. |
+| `STALL:` | The model gave no reply for 10 minutes (20 minutes on a local model). A reply that is streamed counts from its last piece, so a long reply that is still arriving is not a stall. | The cycle is stopped. Tasks are not frozen. The agent wakes again when work is due. | Check that the model server or provider is answering. Five stalls in a row trip the circuit breaker. |
+| `CACHE KEEP-ALIVE: off for this cycle` (cycle log) | While a chat was waiting, a request that keeps a Claude model's cached price alive failed, or found nothing cached. | The chat carries on. The next message costs more, once. Keep-alive starts again in the next cycle. | Nothing. If it appears in every chat, check the provider's status, and through OpenRouter the account's privacy setting. |
 | `LOOP:` | The agent made the same tool call and got the same result 6 times. It was told at the third. | The cycle is closed with a summary and a handoff. Tasks are not frozen. | Open the cycle in **Cycle Logs** and read what was blocked. |
 | `RUNAWAY:` then `HALTED:` | The cycle wrote more output in 15 minutes than the agent's runaway thresholds allow (2500 lines or 2048 KB by default). | The cycle is stopped, all of the agent's tasks are frozen, and the Primary User is told. | Read the cycle log, then `agictl task unfreeze-all <name>`. |
 
-Time limit: 30 to 240 minutes per agent, 45 by default.
+Time limit: 30 to 240 minutes per agent, 90 by default on a new installation (45 before 3.9.0).
 
 - agitop → agent → **Technical** → **Time limit**, then **Save**.
 - Or `sudo agictl agent set-timeout <name> <minutes>`.
+- Or ask your Chief Orchestrator Agent to change it.
+
+The new limit holds from the agent's next cycle.
 
 The agent is warned at 15 minutes and at 8 minutes before the limit, earlier when its steps are slow. Every 30 minutes of a cycle a `[CHECK-IN]` line is written to the cycle log, and the agent is asked to record its task progress.
+
+## A model is refused through OpenRouter (404, ZDR)
+
+The cycle log shows `404 … 0 endpoints … ZDR violation (account settings)`.
+
+Your OpenRouter account is set to use only endpoints with zero data retention, and the model has none. Claude Fable 5.2 requires 30-day retention at Anthropic, so it is always refused under that setting. Claude Opus 5.5 is refused the same way when it searches the web; for that case Versa AGi asks once more without the search and leaves it off for the cycle (`WEB SEARCH: off for this cycle` in the cycle log), so the agent still answers.
+
+1. Open `https://openrouter.ai/settings/privacy` and allow endpoints that retain data, or
+2. Assign the model's own-API key instead (`claude-fable-5-2` with an Anthropic key), or
+3. Turn the model's web search off (`sudo agictl model params set model:<catalog_key> --web-search off`).
+
+## A GPT model fails with "Function tools with reasoning_effort are not supported"
+
+The cycle log shows `400 … Function tools with reasoning_effort are not supported for <model> in /v1/chat/completions`.
+
+The model is on an OpenAI key and is being called on OpenAI's older endpoint, which takes tools only with reasoning off. From 3.9.0, GPT-5.6 and later use the newer endpoint by rule.
+
+1. Update to 3.9.0 or later (`sudo ./setup.sh --update`).
+2. If the model was imported under a name that does not start with `gpt-` and a version, set the rule on its row: `sudo agictl model params set model:<catalog_key> --traits '{"api":"responses"}'`.
+3. Check the result: `sudo agictl model params get model:<catalog_key>` shows `"api": "responses"` under `traits`.
+
+## The model declined a request
+
+The cycle log shows `[REFUSAL] <model> declined a reply`. The provider's safety check stopped the reply.
+
+1. The declined reply is discarded and the agent is told. It can carry on another way, or tell whoever asked that the request was declined, and end the cycle.
+2. If the model declines again straight away, the log shows `REFUSAL CLOSED:`. The cycle is closed with a summary that names the model and the reason, the agent waits 15 minutes before its next cycle, and you get one message per agent per day. It does not count toward the circuit breaker. To end the wait sooner: agitop → System Settings → General → **Lift**.
+
+Read the request in the cycle log. If the work is legitimate, rephrase it or assign another model to the agent. A request that asks a Claude model to recount its own earlier reasoning can be declined; ask for the result or for new work. On Anthropic's own API the reason is shown as `refusal` without a category; through OpenRouter it is `content_filter`.
 
 ## Reset one agent's history
 

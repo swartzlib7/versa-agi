@@ -15,6 +15,28 @@ _THINK_MODE_OPTIONS = [
     ("levels (low/medium/high)", "levels"),
 ]
 
+_WEB_SEARCH_OPTIONS = [
+    ("inherit", ""),
+    ("on", "on"),
+    ("off", "off"),
+]
+
+# Who runs the search for each provider search route (model_traits.web_search).
+_WEB_SEARCH_ROUTE_LABELS = {
+    "openrouter": "through OpenRouter, the model provider's own search",
+    "anthropic": "Anthropic's web search",
+    "openai": "OpenAI's web search; it runs only with a reasoning level other than none",
+}
+
+
+def web_search_hint(route: str) -> str:
+    """One line under the Web search field: who searches, and that it is billed."""
+    who = _WEB_SEARCH_ROUTE_LABELS.get(route, "the provider's search")
+    return (
+        f"The model searches the web itself ({who}). On unless set to off. "
+        "The provider charges for each search, on top of tokens."
+    )
+
 
 def format_json_pretty(value: Any) -> str:
     """Pretty-print a JSON object for TextArea display."""
@@ -51,6 +73,8 @@ def compose_catalog_generation_params(
     reasoning_opts: list[tuple[str, str]],
     *,
     show_think_mode: bool = False,
+    web_search_route: str = "",
+    reasoning_always_on: bool = False,
 ) -> ComposeResult:
     """Default Generation Params section for Model Manager catalog form."""
     with Horizontal(classes="mm-form-row"):
@@ -67,7 +91,8 @@ def compose_catalog_generation_params(
                 prompt="inherit",
             )
             yield Static(
-                "Default thinking level at spawn. Blank = inherit.",
+                "Default thinking level at spawn. Blank = inherit."
+                + (" This model always reasons." if reasoning_always_on else ""),
                 classes="mm-form-hint",
             )
     with Horizontal(classes="mm-form-row"):
@@ -81,6 +106,18 @@ def compose_catalog_generation_params(
                 "Legal effort values for this model (pickers + validation) — not the default. CSV: none,low,high",
                 classes="mm-form-hint",
             )
+    if web_search_route:
+        with Horizontal(classes="mm-form-row"):
+            with Vertical(classes="mm-form-col"):
+                yield Static("[b]Web search[/]")
+                yield Select(
+                    _WEB_SEARCH_OPTIONS,
+                    value="",
+                    allow_blank=True,
+                    id="f-web-search",
+                    prompt="inherit",
+                )
+                yield Static(web_search_hint(web_search_route), classes="mm-form-hint")
     if show_think_mode:
         with Horizontal(classes="mm-form-row"):
             with Vertical(classes="mm-form-col"):
@@ -172,6 +209,16 @@ def load_catalog_generation_params(
     except Exception:
         pass
 
+    try:
+        web_sel = root.query_one("#f-web-search", Select)
+        if isinstance(structured.get("web_search"), bool):
+            web_sel.value = "on" if structured["web_search"] else "off"
+        else:
+            web_sel.value = ""
+            web_sel.prompt = f"inherit ({'on' if resolved.get('web_search') else 'off'})"
+    except Exception:
+        pass
+
     extra = structured.get("extra")
     if extra:
         root.query_one("#f-extra", TextArea).text = format_json_pretty(extra)
@@ -191,6 +238,7 @@ def collect_catalog_generation_params(root, model_key: str) -> tuple[dict[str, A
         "has_allowed": False,
         "has_think": False,
         "has_extra": False,
+        "has_web": False,
     }
 
     temp_raw = root.query_one("#f-temperature", Input).value.strip()
@@ -234,6 +282,14 @@ def collect_catalog_generation_params(root, model_key: str) -> tuple[dict[str, A
         if isinstance(think_val, str) and think_val:
             result["think_mode"] = think_val
             flags["has_think"] = True
+    except Exception:
+        pass
+
+    try:
+        web_val = root.query_one("#f-web-search", Select).value
+        if isinstance(web_val, str) and web_val in ("on", "off"):
+            result["web_search"] = web_val
+            flags["has_web"] = True
     except Exception:
         pass
 

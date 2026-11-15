@@ -165,12 +165,23 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
         modality="video",
         adapter_id=chat_video_in_google_media.ADAPTER_ID,
     ),
+    # DR-CM-14 — Gemini 4 Hydrogen and Carbon image input, native Google.
+    _binding("gemini-4-hydrogen"),
+    _binding("gemini-4-carbon"),
+    # DR-ANTH-01 — direct Anthropic image input (Opus 5.5, Fable 5.2).
+    _binding("claude-opus-5-5"),
+    _binding("claude-fable-5-2"),
     # DR-CM-08 — direct xAI image input (Grok 4.5, 4.6, 4.7).
     _binding("grok-4.5"),
     _binding("grok-4.6"),
     _binding("grok-4.7"),
     # DR-CM-07 — promoted OpenRouter image input used by active agents.
     _binding("openai/gpt-5.6-luna"),
+    # DR-CM-15 — GPT-6.1 Sol and GPT-6 Sol image input, OpenAI's own API and OpenRouter.
+    _binding("gpt-6.1-sol"),
+    _binding("openai/gpt-6.1-sol"),
+    _binding("gpt-6-sol"),
+    _binding("openai/gpt-6-sol"),
     # DR-CM-11 — OpenRouter Grok image input (4.5, 4.6, 4.7).
     _binding("x-ai/grok-4.5"),
     _binding("x-ai/grok-4.6"),
@@ -189,6 +200,12 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
         modality="video",
         adapter_id=chat_video_in_content_parts.ADAPTER_ID,
     ),
+    # DR-CM-14 — OpenRouter Gemini 4 Hydrogen and Carbon image input.
+    _binding("google/gemini-4-hydrogen"),
+    _binding("google/gemini-4-carbon"),
+    # DR-ANTH-01 — OpenRouter Claude image input (Opus 5.5, Fable 5.2).
+    _binding("anthropic/claude-opus-5.5"),
+    _binding("anthropic/claude-fable-5.2"),
     # DR-LOC-01 — local SYCL chat vision (llama-server content parts).
     _binding("qwen3.6:35b"),
     _binding("qwen3.8:27b"),

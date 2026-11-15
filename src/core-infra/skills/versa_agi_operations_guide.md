@@ -112,6 +112,24 @@ Spawn reasons PU may hear about: unread messages, due tasks, orchestration needs
 - On an agent channel the PU may tag projects/tasks. Spawn context shows **TAGGED PROJECT IDS** / **TAGGED TASK IDS** — resolve with `project list` / `task get`; do not invent names.
 - A package approval in VersaVoice lands on the same pulse as new mail (or Retrieve Messages & Sync). Wait for `PKG_NOTICE` before `pkg install`.
 
+### Live chat (how long a chat can last)
+
+When a person writes to an agent, that agent's cycle stays open after the reply and answers new messages within seconds. Two limits end a chat.
+
+| Limit | What it is | Stock value | Who changes it |
+|-------|------------|-------------|----------------|
+| **Chat listening** | How long the agent waits after the last message before the chat closes | 15 minutes (Off, 5, 10, 15 or 30) | The PU only: agitop → **System Settings → Live Chat**. You cannot change it |
+| **Time limit** | The longest one cycle, and so one chat, may run. The chat closes about 8 minutes before it (earlier on a slow model), so you can send last replies and write your handoff | 90 minutes (30 to 240), set per agent | The PU: agitop → agent → **Technical → Time limit**. Or you, when the PU asks |
+
+- **Why a quiet chat does not wait for the whole time limit.** While a chat is open, your tasks that fall due wait, and mail from other agents is answered after the PU. The listening time keeps a quiet chat from holding that work back. A chat runs up to the time limit only while someone keeps writing inside the listening time.
+- **Nothing is lost when a chat closes.** The next message wakes you in a new cycle with the conversation carried over.
+- **To change the time limit when the PU asks:**
+  1. Read the current value: `agictl agent show <name>` (`timeout_minutes`). For yourself the name is `coa`.
+  2. Set it: `agictl agent set-timeout <name> <minutes>`, 30 to 240. Other values are refused.
+  3. Tell the PU the new value and that it holds **from the next cycle**: a chat that is already running keeps the limit it started with.
+- Change it only when the PU asks. Sub-agents cannot change a time limit; you can change theirs when the PU asks.
+- **What to tell the PU**, in a few sentences: a chat stays open while you both keep writing; it closes after the listening time with no new message (they set that in agitop, 30 minutes at most) or shortly before the time limit; a closed chat picks up where it left off with their next message.
+
 ### Live call
 
 - **Only COA calls**, with the `agictl_call_pu` tool (no terminal command). Empty `recipient_id` rings the Primary User. A connection's user id rings that contact, the same people COA may message. The PU cannot start a call to an agent; they ask in chat ("call me") and COA calls if Live Call is ready.

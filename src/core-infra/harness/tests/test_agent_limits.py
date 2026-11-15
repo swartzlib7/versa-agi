@@ -19,7 +19,7 @@ import agent_limits  # noqa: E402
 
 class TestAgentLimits(unittest.TestCase):
     def test_defaults(self):
-        self.assertEqual(agent_limits.DEFAULT_TIMEOUT_MINUTES, 45)
+        self.assertEqual(agent_limits.DEFAULT_TIMEOUT_MINUTES, 90)   # PU 2026-11-15 (was 45)
         self.assertEqual(agent_limits.DEFAULT_RUNAWAY_LINES, 2500)
         self.assertEqual(agent_limits.DEFAULT_RUNAWAY_SIZE_KB, 2048)
 
@@ -31,7 +31,7 @@ class TestAgentLimits(unittest.TestCase):
         self.assertIn("between 30 and 240", agent_limits.timeout_error(300))
 
     def test_clamp(self):
-        cases = {10: 30, 30: 30, 45: 45, 60: 60, 90: 90, 240: 240, 300: 240, "x": 45, None: 45}
+        cases = {10: 30, 30: 30, 45: 45, 60: 60, 90: 90, 240: 240, 300: 240, "x": 90, None: 90}
         for raw, want in cases.items():
             self.assertEqual(agent_limits.clamp_timeout(raw), want, raw)
 
@@ -62,7 +62,7 @@ class TestInitDbClamp(unittest.TestCase):
             self.assertIn("for 3 agent(s)", out)
             with sqlite3.connect(db) as conn:
                 rows = dict(conn.execute("SELECT name, timeout_minutes FROM agents"))
-            self.assertEqual(rows, {"a": 30, "b": 45, "c": 240, "d": 45, "e": 120})
+            self.assertEqual(rows, {"a": 30, "b": 45, "c": 240, "d": 90, "e": 120})
 
 
 try:
@@ -85,9 +85,11 @@ class TestSetTimeoutCli(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _set(self, minutes):
-        with patch.object(agictl_cli, "agents_db", self.db):
-            return CliRunner().invoke(agictl_cli.cli, ["agent", "set-timeout", "coa", str(minutes)])
+    def _set(self, minutes, name="coa", caller=""):
+        # AGICTL_AGENT_USER is the OS caller the agictl wrapper records; empty is the Primary User.
+        env = {"AGICTL_AGENT_USER": caller}
+        with patch.object(agictl_cli, "agents_db", self.db), patch.dict(os.environ, env):
+            return CliRunner().invoke(agictl_cli.cli, ["agent", "set-timeout", name, str(minutes)])
 
     def _timeout(self):
         with sqlite3.connect(self.db) as conn:
@@ -106,6 +108,27 @@ class TestSetTimeoutCli(unittest.TestCase):
             result = self._set(bad)
             self.assertEqual(result.exit_code, 1, result.output)
             self.assertIn("between 30 and 240", result.output)
+        self.assertEqual(self._timeout(), 45)
+
+    def test_coa_may_change_it_and_is_told_when_it_applies(self):
+        """state_live_chat.md D23: COA changes the limit when the Primary User asks."""
+        result = self._set(240, caller="coa")
+        self.assertEqual(result.exit_code, 0, result.output)
+        reply = json.loads(result.output)
+        self.assertEqual(reply["timeout_minutes"], 240)
+        self.assertIn("next cycle", reply["applies"])
+        self.assertEqual(self._timeout(), 240)
+
+    def test_sub_agent_is_refused(self):
+        result = self._set(240, caller="agi-web-dev")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("only COA or the Primary User", result.output)
+        self.assertEqual(self._timeout(), 45)
+
+    def test_unknown_agent_is_an_error(self):
+        result = self._set(60, name="nobody")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("not found", result.output)
         self.assertEqual(self._timeout(), 45)
 
 

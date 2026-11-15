@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.8.2"
+PRODUCT_VERSION="3.9.0"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -547,10 +547,10 @@ INI_AGENT_LANGUAGE="${INSTALL_ACCEPTANCE_LANGUAGE:-$(ini_get agent language en)}
 INI_AGENT_COUNTRY="${INSTALL_ACCEPTANCE_COUNTRY:-$(ini_get agent country)}"
 INI_AGENT_VOICE="$(ini_get agent voice female)"
 INI_AGENT_ROLE="$(ini_get agent role)"
-INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 45)"
+INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 90)"
 # Time limit range 30–240 (agent_limits.py; state_long_cycles.md §1.1).
 case "${INI_AGENT_TIMEOUT}" in
-  ''|*[!0-9]*) INI_AGENT_TIMEOUT=45 ;;
+  ''|*[!0-9]*) INI_AGENT_TIMEOUT=90 ;;
 esac
 if [ "${INI_AGENT_TIMEOUT}" -lt 30 ]; then INI_AGENT_TIMEOUT=30; fi
 if [ "${INI_AGENT_TIMEOUT}" -gt 240 ]; then INI_AGENT_TIMEOUT=240; fi
@@ -1026,7 +1026,7 @@ if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
     chmod 640 "/etc/versa-agi/models.ini"
     cp "${SCRIPT_DIR}/models.ini" "${DEPLOYED_CORE_INFRA}/config/"
   fi
-  for hfile in model_context.py model_params.py; do
+  for hfile in model_context.py model_params.py model_traits.py; do
     if [ -f "${SOURCE_CORE_INFRA}/harness/${hfile}" ]; then
       cp "${SOURCE_CORE_INFRA}/harness/${hfile}" "${DEPLOYED_CORE_INFRA}/harness/"
     fi
@@ -1242,9 +1242,12 @@ if [ "${UPDATE_MODE}" = false ]; then
         cp "${SOURCE_CORE_INFRA}/harness/model_context.py" "${DEPLOYED_CORE_INFRA}/harness/"
         touch "${DEPLOYED_CORE_INFRA}/harness/__init__.py"
       fi
-      if [ -f "${SOURCE_CORE_INFRA}/harness/model_params.py" ]; then
-        cp "${SOURCE_CORE_INFRA}/harness/model_params.py" "${DEPLOYED_CORE_INFRA}/harness/"
-      fi
+      # model_params imports model_traits: the two always travel together.
+      for hfile in model_params.py model_traits.py; do
+        if [ -f "${SOURCE_CORE_INFRA}/harness/${hfile}" ]; then
+          cp "${SOURCE_CORE_INFRA}/harness/${hfile}" "${DEPLOYED_CORE_INFRA}/harness/"
+        fi
+      done
       _deploy_server_agictl_shared_py "${SOURCE_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}"
       if [ -f "${SOURCE_CORE_INFRA}/VERSION" ]; then
         cp "${SOURCE_CORE_INFRA}/VERSION" "${DEPLOYED_CORE_INFRA}/VERSION"
@@ -4806,7 +4809,7 @@ MINSEED
   _ini_set "service_account_key" "${INI_SA_KEY_PATH:-}"
   _ini_set "cron_interval" "${CRON_INTERVAL:-1}"
   _ini_set "file_mon_enabled" "$(ini_get agent file_mon_enabled false)"
-  _ini_set "timeout_minutes" "${INI_AGENT_TIMEOUT:-45}"
+  _ini_set "timeout_minutes" "${INI_AGENT_TIMEOUT:-90}"
   _ini_set "runaway_threshold" "${INI_RUNAWAY_THRESHOLD:-2500}"
   _ini_set "circuit_breaker_consecutive" "$(ini_get agent circuit_breaker_consecutive 5)"
   _ini_set "circuit_breaker_hourly" "$(ini_get agent circuit_breaker_hourly 20)"

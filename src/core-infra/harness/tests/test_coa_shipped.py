@@ -32,11 +32,17 @@ class CoaShippedMap(unittest.TestCase):
         self.assertEqual(
             keys_for_provider("openrouter", STOCK),
             [
-                "x-ai/grok-4.6",
+                "anthropic/claude-opus-5.5",
                 "x-ai/grok-4.7",
+                "x-ai/grok-4.6",
+                "google/gemini-4-carbon",
                 "google/gemini-3.7-flash",
+                "openai/gpt-6.1-sol",
+                "openai/gpt-6-sol",
                 "openai/gpt-5.6-terra",
                 "anthropic/claude-opus-4.8",
+                "anthropic/claude-fable-5.2",
+                "google/gemini-4-hydrogen",
                 "openai/gpt-5.6-sol",
                 "z-ai/glm-5.3-flash",
                 "deepseek/deepseek-v4-flash-0731",
@@ -45,7 +51,7 @@ class CoaShippedMap(unittest.TestCase):
         )
 
     def test_grok_dual_provider(self):
-        self.assertEqual(keys_for_provider("xai", STOCK), ["grok-4.6", "grok-4.7"])
+        self.assertEqual(keys_for_provider("xai", STOCK), ["grok-4.7", "grok-4.6"])
         self.assertIn("x-ai/grok-4.6", keys_for_provider("openrouter", STOCK))
         self.assertIn("x-ai/grok-4.7", keys_for_provider("openrouter", STOCK))
         self.assertIn("grok-4.6", all_keys(STOCK))
@@ -58,11 +64,17 @@ class CoaShippedMap(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "Grok 4.6",
+                "Opus 5.5",
                 "Grok 4.7",
+                "Grok 4.6",
+                "Gemini 4 Carbon",
                 "Gemini 3.7 Flash",
+                "GPT-6.1 Sol",
+                "GPT-6 Sol",
                 "GPT-5.6 Terra",
                 "Opus 4.8",
+                "Fable 5.2",
+                "Gemini 4 Hydrogen",
                 "GPT-5.6 Sol",
                 "GLM 5.3 Flash",
                 "DeepSeek V4Flash0731",
@@ -75,11 +87,17 @@ class CoaShippedMap(unittest.TestCase):
         self.assertEqual(
             [oid for oid, _, _ in offerings],
             [
-                "grok-4.6",
+                "claude-opus-5-5",
                 "grok-4.7",
+                "grok-4.6",
+                "gemini-4-carbon",
                 "gemini-3.7-flash",
+                "gpt-6.1-sol",
+                "gpt-6-sol",
                 "gpt-5.6-terra",
                 "claude-opus-4-8",
+                "claude-fable-5-2",
+                "gemini-4-hydrogen",
                 "gpt-5.6-sol",
                 "glm-5.3-flash",
                 "deepseek-v4-flash-0731",
@@ -145,10 +163,22 @@ class StockLayerParity(unittest.TestCase):
             "gemini-3.7-flash": 1_048_576,
             "grok-4.6": 500_000,
             "grok-4.7": 500_000,
+            "gpt-6.1-sol": 1_050_000,
+            "openai/gpt-6.1-sol": 1_050_000,
+            "gpt-6-sol": 1_050_000,
+            "openai/gpt-6-sol": 1_050_000,
             "gpt-5.6-terra": 1_050_000,
             "gpt-5.6-sol": 1_050_000,
             "gpt-5.6-luna": 1_050_000,
             "claude-opus-4-8": 1_000_000,
+            "claude-opus-5-5": 1_000_000,
+            "claude-fable-5-2": 1_000_000,
+            "gemini-4-hydrogen": 1_048_576,
+            "gemini-4-carbon": 1_048_576,
+            "anthropic/claude-opus-5.5": 1_000_000,
+            "anthropic/claude-fable-5.2": 1_000_000,
+            "google/gemini-4-hydrogen": 1_048_576,
+            "google/gemini-4-carbon": 1_048_576,
             "deepseek/deepseek-v4-flash-0731": 1_310_720,
             "z-ai/glm-5.3-flash": 1_048_576,
         }
@@ -165,6 +195,14 @@ class StockLayerParity(unittest.TestCase):
             "gemini-3.7-flash": ("medium", ["low", "medium", "high"]),
             "grok-4.6": ("high", ["low", "medium", "high", "xhigh"]),
             "grok-4.7": ("high", ["low", "medium", "high", "xhigh"]),
+            "gpt-6.1-sol": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            "openai/gpt-6.1-sol": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            "gpt-6-sol": (
+                "high", ["none", "low", "medium", "high", "xhigh", "max"]
+            ),
+            "openai/gpt-6-sol": (
+                "high", ["none", "low", "medium", "high", "xhigh", "max"]
+            ),
             "gpt-5.6-terra": (
                 "none", ["none", "low", "medium", "high", "xhigh", "max"]
             ),
@@ -177,6 +215,12 @@ class StockLayerParity(unittest.TestCase):
             "claude-opus-4-8": (
                 "none", ["none", "low", "medium", "high", "xhigh", "max"]
             ),
+            # Reasoning cannot be turned off on these four: no "none".
+            "claude-opus-5-5": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            "claude-fable-5-2": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            "gemini-4-hydrogen": ("high", ["low", "medium", "high"]),
+            "gemini-4-carbon": ("high", ["low", "medium", "high"]),
+            "google/gemini-4-hydrogen": ("high", ["low", "medium", "high", "xhigh"]),
             "deepseek/deepseek-v4-flash-0731": (
                 "high", ["none", "low", "high", "max"]
             ),

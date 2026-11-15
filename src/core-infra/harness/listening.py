@@ -49,9 +49,20 @@ def is_person(row: dict, pu_ids: set[str], agent_ids: set[str]) -> bool:
     return sender not in agent_ids
 
 
-def conversations_block(pu_first_name: str) -> str:
-    """Fixed CONVERSATIONS rules for the system prompt (§1.6). Byte-stable per install."""
+def conversations_block(pu_first_name: str, coa: bool = False, minutes: int = 0) -> str:
+    """Fixed CONVERSATIONS rules for the system prompt (§1.6). Byte-stable per install.
+
+    ``coa`` adds rule 7 (D23): when a chat closes and where the instructions
+    for changing the time limit are. ``minutes`` is the listening time granted.
+    """
     pu = (pu_first_name or "").strip() or "the Primary User"
+    rule_7 = ""
+    if coa and minutes > 0:
+        rule_7 = (
+            f"7. This chat closes when nobody has written for {int(minutes)} minutes, or a few minutes "
+            f"before your time limit. When {pu} asks how long a chat can last, or asks you to change "
+            "it, load the skill `versa_agi_operations_guide.md` (Live chat) and follow it.\n"
+        )
     return (
         "\n\n## ── CONVERSATIONS ──\n"
         "1. When a person writes to you, your cycle stays open for a while after you reply, "
@@ -67,6 +78,7 @@ def conversations_block(pu_first_name: str) -> str:
         "5. Tasks that fall due while you are chatting wait until the chat ends; Lifeline "
         "will wake you for them.\n"
         "6. Anything unfinished — work or conversation — can continue in your next spawn.\n"
+        + rule_7 +
         "── END CONVERSATIONS ──\n"
     )
 
@@ -186,11 +198,13 @@ class ListeningWindow:
 
 def wait_for_mail(window: ListeningWindow, inject: Callable[[], bool],
                   sleep: Callable[[float], None] = time.sleep,
-                  poll_seconds: float = WAIT_POLL_SECONDS) -> str:
+                  poll_seconds: float = WAIT_POLL_SECONDS,
+                  tick: Callable[[], object] | None = None) -> str:
     """Block between turns until mail is injected or the window must close.
 
     Returns "mail" (``inject`` fed a new turn), or the close reason
     ("idle" / "deadline"). ``inject`` is the harness's mid-cycle mail hook.
+    ``tick`` runs on every poll that brought no mail (the cache keep-alive).
     """
     while True:
         reason = window.close_reason()
@@ -199,3 +213,5 @@ def wait_for_mail(window: ListeningWindow, inject: Callable[[], bool],
         sleep(poll_seconds)
         if inject():
             return "mail"
+        if tick is not None:
+            tick()

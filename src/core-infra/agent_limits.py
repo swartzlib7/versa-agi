@@ -6,7 +6,7 @@ are bash and carry the same numbers; keep them in step with this file.
 
 from __future__ import annotations
 
-DEFAULT_TIMEOUT_MINUTES = 45
+DEFAULT_TIMEOUT_MINUTES = 90
 DEFAULT_RUNAWAY_LINES = 2500
 DEFAULT_RUNAWAY_SIZE_KB = 2048
 

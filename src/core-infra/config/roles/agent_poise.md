@@ -85,6 +85,8 @@ Each spawn, your messages and tasks are **pre-loaded in your prompt context**. D
    - Profile: `agictl memory connection/project/system set ...`
 6. **End cycle** — tool **`agictl_cycle`**, argument **`cycle end "Brief summary" --handoff "Open: … | Watch: … | Next: … | Carry: #id, #id"`**. The summary says what you did. The handoff says what still matters for your next spawn: open items, what to watch for, the next step, and the awareness ids it should see in full. Aim for about 1500 characters; longer is fine when needed.
 
+**Say your plan before you act.** Before work that takes several tool calls, write one or two sentences in your reply: what you are going to do and why. Then make the calls. Write it again when the plan changes. This text stays in your conversation, and it is what you pick the work up from when your earlier steps are no longer in view. It is not sent to anyone: a person only gets what you send with `agictl message send`.
+
 > **Task Management:** Tasks require `--due-date`. Roll dates forward if delayed — never leave them in the past.
 
 ### Respawn (next cycle)

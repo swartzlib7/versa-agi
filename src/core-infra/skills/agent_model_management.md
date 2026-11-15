@@ -102,7 +102,7 @@ models.ini JSON  →  normalized params  →  to_native_kwargs()  →  LangChain
 | Layer | Where | What you edit |
 |-------|--------|----------------|
 | **Data** | `[model_params]`, `[model_params_custom]`, agent Overrides tab | JSON per `default` or `model:<catalog_key>`; agents.db nullable columns |
-| **Stable** | `resolve_model_params()` in `harness/model_params.py` | Merged vocabulary: `temperature`, `reasoning_effort`, `reasoning_max_tokens`, `allowed_reasoning_efforts`, `think_mode`, `extra` |
+| **Stable** | `resolve_model_params()` in `harness/model_params.py` | Merged vocabulary: `temperature`, `reasoning_effort`, `reasoning_max_tokens`, `allowed_reasoning_efforts`, `think_mode`, `web_search`, `traits`, `extra` |
 | **Adapter** | `to_native_kwargs()` same module | Maps stable keys → provider-native kwargs (`ChatAnthropic`, `ChatOpenAI`, `ChatOllama`, …) |
 
 **Precedence:** agent override → `model:<key>` → `default` → system defaults.
@@ -117,6 +117,10 @@ models.ini JSON  →  normalized params  →  to_native_kwargs()  →  LangChain
 agictl model params get model:claude-opus-4-8
 agictl model params set model:qwen3.6:35b --reasoning-effort high --extra '{"top_p":0.95}'
 ```
+
+**Reasoning that cannot be turned off:** when `params get` shows `reasoning_always_on: true` (no `none` in `allowed_reasoning_efforts`), pick a level from the list. Claude Fable 5.2, Claude Opus 5.5, Gemini 4 Carbon and Gemini 4 Hydrogen are such models.
+
+**Provider web search:** a model that has a provider search route searches the web itself, and it is on by default. The provider bills each search. `agictl model params set model:<key> --web-search off` turns it off for that model (`on` turns it back on); do that when the Primary User asks. It works for Claude and Gemini models through OpenRouter, for Claude models on Anthropic's own API, and for GPT-5.6 and later on OpenAI's own API; the command refuses any other model. A searched reply lists its sources. Run a search in a step of its own, not together with other tool calls, and state what you found in your reply.
 
 ## Local parameters (Ollama + SYCL)
 

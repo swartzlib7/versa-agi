@@ -704,6 +704,8 @@ class ModelManagerModal(ModalScreen):
             param_args += ["--allowed-reasoning-efforts", result["allowed_reasoning_efforts_csv"]]
         if result.get("think_mode"):
             param_args += ["--think-mode", result["think_mode"]]
+        if result.get("web_search") in ("on", "off"):
+            param_args += ["--web-search", result["web_search"]]
 
         if result.get("_mode") == "add":
             args = ["model", "catalog", "add", result["key"],
@@ -909,7 +911,21 @@ class CatalogFormModal(ModalScreen):
                     )
                 from agitop.panels.model_params_ui import compose_catalog_generation_params
                 show_think = e.get("class") == "local" or default_provider == "ollama"
-                yield from compose_catalog_generation_params(reasoning_opts, show_think_mode=show_think)
+                search_route, always_reasons = "", False
+                if self._edit and e.get("key"):
+                    try:
+                        from harness.model_params import reasoning_always_on, web_search_route
+
+                        search_route = web_search_route(e["key"])
+                        always_reasons = reasoning_always_on(e["key"])
+                    except Exception:
+                        search_route, always_reasons = "", False
+                yield from compose_catalog_generation_params(
+                    reasoning_opts,
+                    show_think_mode=show_think,
+                    web_search_route=search_route,
+                    reasoning_always_on=always_reasons,
+                )
 
                 if not self._edit:
                     yield Static(

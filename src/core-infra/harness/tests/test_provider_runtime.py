@@ -322,6 +322,114 @@ class TestRuntimeKeysAndClients(unittest.TestCase):
         self.assertEqual(client.kwargs["temperature"], 0.3)
         self.assertEqual(client.kwargs["default_headers"]["X-OpenRouter-Title"], "Versa AGi")
 
+    def _fake_client(self, module_name, class_name):
+        fake_module = types.ModuleType(module_name)
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        setattr(fake_module, class_name, FakeClient)
+        return fake_module
+
+    def test_google_client_receives_the_thinking_level(self):
+        """The level was computed and then dropped: Gemini 3+ ran at Google's default (N8)."""
+        route = resolve_provider_route(
+            "gemini-3.7-flash",
+            catalog={"gemini-3.7-flash": _catalog_row("google")},
+            providers=PROVIDERS,
+        )
+        fake = self._fake_client("langchain_google_genai", "ChatGoogleGenerativeAI")
+        with patch.dict(sys.modules, {"langchain_google_genai": fake}):
+            client = create_langchain_client(
+                route,
+                native_params={"thinking_level": "high", "streaming": True},
+                key_resolver=lambda slug: f"{slug}-key",
+            )
+        self.assertEqual(client.kwargs["thinking_level"], "high")
+        self.assertTrue(client.kwargs["streaming"])
+        self.assertEqual(client.kwargs["google_api_key"], "google-key")
+        self.assertNotIn("temperature", client.kwargs)
+
+    def test_google_client_keeps_the_gemini_2_5_budget(self):
+        route = resolve_provider_route(
+            "gemini-2.5-flash",
+            catalog={"gemini-2.5-flash": _catalog_row("google")},
+            providers=PROVIDERS,
+        )
+        fake = self._fake_client("langchain_google_genai", "ChatGoogleGenerativeAI")
+        with patch.dict(sys.modules, {"langchain_google_genai": fake}):
+            client = create_langchain_client(
+                route,
+                native_params={"temperature": 0.2, "model_kwargs": {"thinking_budget": 4096}},
+                key_resolver=lambda slug: "k",
+            )
+        self.assertEqual(client.kwargs["thinking_budget"], 4096)
+        self.assertEqual(client.kwargs["temperature"], 0.2)
+
+    def test_anthropic_client_receives_limit_stream_and_adaptive_thinking(self):
+        route = resolve_provider_route(
+            "claude-fable-5-2",
+            catalog={"claude-fable-5-2": _catalog_row("anthropic")},
+            providers=PROVIDERS,
+        )
+        fake = self._fake_client("langchain_anthropic", "ChatAnthropic")
+        beat = object()
+        with patch.dict(sys.modules, {"langchain_anthropic": fake}):
+            client = create_langchain_client(
+                route,
+                native_params={
+                    "thinking": {"type": "adaptive", "display": "summarized"},
+                    "output_config": {"effort": "high"},
+                    "max_tokens": 64000,
+                    "streaming": True,
+                },
+                key_resolver=lambda slug: f"{slug}-key",
+                callbacks=[beat],
+            )
+        self.assertEqual(client.kwargs["max_tokens"], 64000)
+        self.assertTrue(client.kwargs["streaming"])
+        self.assertEqual(client.kwargs["thinking"]["type"], "adaptive")
+        self.assertEqual(client.kwargs["output_config"], {"effort": "high"})
+        self.assertEqual(client.kwargs["callbacks"], [beat])
+        self.assertNotIn("temperature", client.kwargs)
+
+    def test_anthropic_client_carries_the_cache_field_to_the_request(self):
+        """§2.7 B16: the top-level field rides in model_kwargs, which the client spreads into each request."""
+        route = resolve_provider_route(
+            "claude-opus-5-5",
+            catalog={"claude-opus-5-5": _catalog_row("anthropic")},
+            providers=PROVIDERS,
+        )
+        fake = self._fake_client("langchain_anthropic", "ChatAnthropic")
+        with patch.dict(sys.modules, {"langchain_anthropic": fake}):
+            marked = create_langchain_client(
+                route, native_params={"max_tokens": 64000, "cache_control": {"type": "ephemeral"}},
+                key_resolver=lambda slug: f"{slug}-key",
+            )
+            plain = create_langchain_client(
+                route, native_params={"max_tokens": 64000}, key_resolver=lambda slug: f"{slug}-key",
+            )
+        self.assertEqual(marked.kwargs["model_kwargs"], {"cache_control": {"type": "ephemeral"}})
+        self.assertNotIn("cache_control", marked.kwargs)
+        self.assertNotIn("model_kwargs", plain.kwargs)
+
+    def test_anthropic_client_still_takes_temperature_for_older_models(self):
+        route = resolve_provider_route(
+            "claude-sonnet-4-6",
+            catalog={"claude-sonnet-4-6": _catalog_row("anthropic")},
+            providers=PROVIDERS,
+        )
+        fake = self._fake_client("langchain_anthropic", "ChatAnthropic")
+        with patch.dict(sys.modules, {"langchain_anthropic": fake}):
+            client = create_langchain_client(
+                route,
+                native_params={"temperature": 0.2, "streaming": True},
+                key_resolver=lambda slug: "k",
+            )
+        self.assertEqual(client.kwargs["temperature"], 0.2)
+        self.assertNotIn("callbacks", client.kwargs)
+
     def test_raw_openai_client_uses_provider_route(self):
         route = resolve_provider_route(
             "not-a-grok-name",
@@ -443,6 +551,22 @@ class TestProviderFamilyCompatibility(unittest.TestCase):
         self.assertNotIn("temperature", native)
 
     def test_direct_openai_sends_explicit_none_reasoning_for_tools(self):
+        # A model on Chat Completions (before GPT-5.6): the explicit none stays.
+        native = to_native_kwargs(
+            "openai_compat",
+            "gpt-5.5",
+            {
+                "temperature": 0.2,
+                "reasoning_effort": "none",
+                "extra": {},
+            },
+            provider_slug="openai",
+        )
+        self.assertEqual(native["reasoning_effort"], "none")
+        self.assertEqual(native["temperature"], 0.2)
+        self.assertNotIn("extra_body", native)
+
+    def test_direct_openai_gpt_56_uses_the_responses_endpoint(self):
         native = to_native_kwargs(
             "openai_compat",
             "gpt-5.6-terra",
@@ -453,7 +577,9 @@ class TestProviderFamilyCompatibility(unittest.TestCase):
             },
             provider_slug="openai",
         )
-        self.assertEqual(native["reasoning_effort"], "none")
+        self.assertNotIn("reasoning_effort", native)
+        self.assertTrue(native["use_responses_api"])
+        self.assertEqual(native["reasoning"], {"effort": "none"})
         self.assertEqual(native["temperature"], 0.2)
         self.assertNotIn("extra_body", native)
 

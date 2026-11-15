@@ -54,12 +54,27 @@ EXPECTED_INPUT_BINDINGS = {
     # DR-CM-13
     "gemini-3.7-flash": "google",
     "google/gemini-3.7-flash": "openrouter",
+    # DR-CM-14
+    "gemini-4-hydrogen": "google",
+    "gemini-4-carbon": "google",
+    "google/gemini-4-hydrogen": "openrouter",
+    "google/gemini-4-carbon": "openrouter",
+    # DR-ANTH-01
+    "claude-opus-5-5": "anthropic",
+    "claude-fable-5-2": "anthropic",
+    "anthropic/claude-opus-5.5": "openrouter",
+    "anthropic/claude-fable-5.2": "openrouter",
     # DR-CM-08
     "grok-4.5": "xai",
     "grok-4.6": "xai",
     "grok-4.7": "xai",
     # DR-CM-07
     "openai/gpt-5.6-luna": "openrouter",
+    # DR-CM-15
+    "gpt-6.1-sol": "openai",
+    "openai/gpt-6.1-sol": "openrouter",
+    "gpt-6-sol": "openai",
+    "openai/gpt-6-sol": "openrouter",
     # DR-CM-11
     "x-ai/grok-4.5": "openrouter",
     "x-ai/grok-4.6": "openrouter",
@@ -150,14 +165,22 @@ class RegistryTestCase(unittest.TestCase):
         # None uses model_catalog.resolve_models_ini_path() → /etc/versa-agi.
         cls.catalog = load_catalog(MODELS_INI)
         cls.providers = load_providers(MODELS_INI)
-        # Grok 4.6/4.7 live in models.ini.stock. The resolver fixture catalog
-        # is models.ini, which still carries older keys such as grok-4.5.
+        # Models added after models.ini was last regenerated live in
+        # models.ini.stock. The resolver fixture catalog is models.ini, which
+        # still carries older keys such as grok-4.5.
         stock = os.path.join(os.path.dirname(REPOSITORY_MODELS_INI), "models.ini.stock")
         if os.path.isfile(stock):
             cfg = configparser.ConfigParser(delimiters=("=",), strict=False)
             cfg.optionxform = str
             cfg.read(stock)
-            for key in ("grok-4.6", "x-ai/grok-4.6", "grok-4.7", "x-ai/grok-4.7"):
+            for key in (
+                "grok-4.6", "x-ai/grok-4.6", "grok-4.7", "x-ai/grok-4.7",
+                "gemini-4-hydrogen", "gemini-4-carbon",
+                "google/gemini-4-hydrogen", "google/gemini-4-carbon",
+                "claude-opus-5-5", "claude-fable-5-2",
+                "anthropic/claude-opus-5.5", "anthropic/claude-fable-5.2",
+                "gpt-6-sol", "openai/gpt-6-sol", "gpt-6.1-sol", "openai/gpt-6.1-sol",
+            ):
                 if key in cls.catalog or not cfg.has_option("catalog_library", key):
                     continue
                 parsed = parse_catalog_row(cfg.get("catalog_library", key))

@@ -26,21 +26,51 @@ STOCK = os.path.abspath(STOCK)
 
 
 class RecommendedMap(unittest.TestCase):
-    def test_xai_is_grok_46_and_47(self):
-        self.assertEqual(cb.recommended_keys("xai", STOCK), ["grok-4.6", "grok-4.7"])
+    def test_xai_suggests_grok_47(self):
+        """Grok 4.7 is first, so it is the model COA Setup suggests for xAI."""
+        self.assertEqual(cb.recommended_keys("xai", STOCK), ["grok-4.7", "grok-4.6"])
 
-    def test_anthropic_is_opus_48(self):
-        self.assertEqual(cb.recommended_keys("anthropic", STOCK), ["claude-opus-4-8"])
+    def test_anthropic_suggests_opus_55(self):
+        """Opus 5.5 is first, so it is the model COA Setup suggests for Anthropic."""
+        self.assertEqual(
+            cb.recommended_keys("anthropic", STOCK),
+            ["claude-opus-5-5", "claude-opus-4-8", "claude-fable-5-2"],
+        )
+
+    def test_opus_55_is_suggested_for_openrouter(self):
+        self.assertEqual(cb.recommended_keys("openrouter", STOCK)[0], "anthropic/claude-opus-5.5")
+
+    def test_the_four_new_models_can_serve_coa(self):
+        """COA eligibility is the catalog `coa` flag (4th field of the stock row)."""
+        import configparser
+
+        cfg = configparser.ConfigParser(delimiters=("=",), strict=False)
+        cfg.optionxform = str
+        cfg.read(STOCK)
+        for key in (
+            "claude-opus-5-5", "claude-fable-5-2", "gemini-4-hydrogen", "gemini-4-carbon",
+            "anthropic/claude-opus-5.5", "anthropic/claude-fable-5.2",
+            "google/gemini-4-hydrogen", "google/gemini-4-carbon",
+            "gpt-6-sol", "openai/gpt-6-sol", "gpt-6.1-sol", "openai/gpt-6.1-sol",
+        ):
+            fields = cfg.get("catalog_library", key).split("|")
+            self.assertEqual((fields[2], fields[3]), ("true", "true"), key)
 
     def test_openrouter_shipped_order(self):
         self.assertEqual(
             cb.recommended_keys("openrouter", STOCK),
             [
-                "x-ai/grok-4.6",
+                "anthropic/claude-opus-5.5",
                 "x-ai/grok-4.7",
+                "x-ai/grok-4.6",
+                "google/gemini-4-carbon",
                 "google/gemini-3.7-flash",
+                "openai/gpt-6.1-sol",
+                "openai/gpt-6-sol",
                 "openai/gpt-5.6-terra",
                 "anthropic/claude-opus-4.8",
+                "anthropic/claude-fable-5.2",
+                "google/gemini-4-hydrogen",
                 "openai/gpt-5.6-sol",
                 "z-ai/glm-5.3-flash",
                 "deepseek/deepseek-v4-flash-0731",
@@ -48,13 +78,18 @@ class RecommendedMap(unittest.TestCase):
             ],
         )
 
-    def test_google_is_gemini_37_flash(self):
-        self.assertEqual(cb.recommended_keys("google", STOCK), ["gemini-3.7-flash"])
+    def test_google_suggests_gemini_4_carbon(self):
+        """Gemini 4 Carbon is first, so it is the model COA Setup suggests for Google."""
+        self.assertEqual(
+            cb.recommended_keys("google", STOCK),
+            ["gemini-4-carbon", "gemini-3.7-flash", "gemini-4-hydrogen"],
+        )
 
-    def test_openai_gpt56_three(self):
+    def test_openai_suggests_gpt_61_sol(self):
+        """GPT-6.1 Sol is first, so it is the model COA Setup suggests for OpenAI."""
         self.assertEqual(
             cb.recommended_keys("openai", STOCK),
-            ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
+            ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
         )
 
     def test_options_label_first(self):

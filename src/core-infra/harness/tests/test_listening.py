@@ -174,6 +174,19 @@ class TestPromptCopy(unittest.TestCase):
         self.assertIn("Lifeline will wake you", a)
         self.assertIn("the Primary User comes first".split()[1], a)
 
+    def test_coa_is_told_when_a_chat_closes_and_where_to_look(self):
+        """state_live_chat.md D23: rule 7 is for COA only and names the listening time."""
+        plain = conversations_block("Steven")
+        self.assertNotIn("7. ", plain)
+        self.assertEqual(plain, conversations_block("Steven", coa=False, minutes=15))
+        coa = conversations_block("Steven", coa=True, minutes=15)
+        self.assertIn("7. This chat closes when nobody has written for 15 minutes", coa)
+        self.assertIn("versa_agi_operations_guide.md", coa)
+        self.assertTrue(coa.rstrip().endswith("── END CONVERSATIONS ──"))
+        self.assertEqual(coa, conversations_block("Steven", coa=True, minutes=15))
+        # No window granted: nothing to explain.
+        self.assertEqual(conversations_block("Steven", coa=True, minutes=0), plain)
+
     def test_pu_rows_flagged_first(self):
         rows = [
             {"message_id": "a", "from_user_id": "steve", "display_name": "Steve", "text": "hi"},

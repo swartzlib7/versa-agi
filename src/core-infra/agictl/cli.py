@@ -7016,7 +7016,8 @@ def _validate_params_scope(scope: str) -> str:
 
 
 def _build_params_json(temperature, reasoning_effort, reasoning_max_tokens, extra,
-                       allowed_reasoning_efforts=None, think_mode=None, base=None):
+                       allowed_reasoning_efforts=None, think_mode=None, base=None,
+                       web_search=None, traits=None):
     from harness.model_params import build_params_layer_update
     return build_params_layer_update(
         base=base,
@@ -7026,6 +7027,8 @@ def _build_params_json(temperature, reasoning_effort, reasoning_max_tokens, extr
         allowed_reasoning_efforts=allowed_reasoning_efforts,
         think_mode=think_mode,
         extra=extra,
+        web_search=web_search,
+        traits=traits,
     )
 
 
@@ -7077,9 +7080,12 @@ def params_get(scope):
         "effective": layers.get(scope, {}),
     }
     if scope.startswith("model:"):
+        from harness.model_params import reasoning_always_on, traits_for
         model_id = scope.split(":", 1)[1]
         payload["resolved"] = resolve_model_params(model_id)
         payload["allowed_reasoning_efforts"] = list(allowed_reasoning_efforts(model_id))
+        payload["reasoning_always_on"] = reasoning_always_on(model_id)
+        payload["traits"] = traits_for(model_id).as_dict()
     json_response(True, **payload)
 
 
@@ -7095,19 +7101,39 @@ def params_get(scope):
 @click.option("--think-mode", type=click.Choice(["boolean", "levels"]), default=None,
               help="Ollama thinking mapping: boolean (on/off) or levels (low/medium/high)")
 @click.option("--extra", default=None, help="JSON object merged into the passthrough bag")
+@click.option("--web-search", type=click.Choice(["on", "off"]), default=None,
+              help="The provider's own web search for this model (billed per search)")
+@click.option("--traits", default=None,
+              help="JSON object overriding request traits, e.g. '{\"streaming\":true}'; '{}' clears")
 @click.option("--no-sync", is_flag=True, help="Skip regenerating inference endpoint config")
 def params_set(scope, temperature, reasoning_effort, reasoning_max_tokens,
-               allowed_reasoning_efforts, think_mode, extra, no_sync):
+               allowed_reasoning_efforts, think_mode, extra, web_search, traits, no_sync):
     """Set or update params for a scope (writes [model_params_custom])."""
     from harness.model_params import list_model_params
     if not any(v is not None for v in (
         temperature, reasoning_effort, reasoning_max_tokens, allowed_reasoning_efforts,
-        think_mode, extra,
+        think_mode, extra, web_search, traits,
     )):
         json_response(False, error="Provide at least one of --temperature, --reasoning-effort, "
                       "--reasoning-max-tokens, --allowed-reasoning-efforts, --think-mode, "
-                      "--extra")
+                      "--extra, --web-search, --traits")
         sys.exit(1)
+    if web_search == "on" and scope.startswith("model:"):
+        from harness.model_params import web_search_route
+        if not web_search_route(scope.split(":", 1)[1]):
+            json_response(False, error=f"'{scope.split(':', 1)[1]}' has no provider web search route. "
+                          "It is available for Claude and Gemini models through OpenRouter, "
+                          "for Claude models on Anthropic's own API, and for GPT-5.6 and later "
+                          "on OpenAI's own API.")
+            sys.exit(1)
+    if traits is not None:
+        try:
+            parsed_traits = json.loads(traits)
+            if not isinstance(parsed_traits, dict):
+                raise ValueError("traits must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            json_response(False, error=f"Invalid --traits JSON: {e}")
+            sys.exit(1)
     if extra is not None:
         try:
             parsed = json.loads(extra)
@@ -7117,12 +7143,18 @@ def params_set(scope, temperature, reasoning_effort, reasoning_max_tokens,
             json_response(False, error=f"Invalid --extra JSON: {e}")
             sys.exit(1)
     layers = list_model_params()
-    merged = _build_params_json(
-        temperature, reasoning_effort, reasoning_max_tokens, extra,
-        allowed_reasoning_efforts=allowed_reasoning_efforts,
-        think_mode=think_mode,
-        base=layers.get(scope) or {},
-    )
+    try:
+        merged = _build_params_json(
+            temperature, reasoning_effort, reasoning_max_tokens, extra,
+            allowed_reasoning_efforts=allowed_reasoning_efforts,
+            think_mode=think_mode,
+            base=layers.get(scope) or {},
+            web_search=None if web_search is None else web_search == "on",
+            traits=parsed_traits if traits is not None else None,
+        )
+    except ValueError as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
     value = json.dumps(merged, separators=(",", ":"))
     targets = _models_ini_write_targets()
     if not targets:
@@ -9056,20 +9088,36 @@ def agent_remove(name, archive):
 @click.argument("name")
 @click.argument("minutes", type=int)
 def agent_set_timeout(name, minutes):
-    """Set an agent's time limit in minutes (30–240). The harness closes the cycle there."""
+    """Set an agent's time limit in minutes (30–240). The harness closes the cycle there.
+
+    COA or the Primary User only. Lifeline reads the limit when it starts a
+    cycle, so a cycle that is running keeps the limit it started with.
+    """
     import agent_limits
+    name = name.lower()
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        json_response(False, error="Permission denied: only COA or the Primary User can change an agent's "
+                                   f"time limit (caller: {caller})")
+        sys.exit(1)
     err = agent_limits.timeout_error(minutes)
     if err:
         json_response(False, error=err)
         sys.exit(1)
     try:
         conn = db_connect.connect_compat(agents_db, timeout=5)
-        conn.execute("UPDATE agents SET timeout_minutes=?, updated_at=datetime('now') WHERE name=?", (minutes, name))
+        changed = conn.execute("UPDATE agents SET timeout_minutes=?, updated_at=datetime('now') WHERE name=?",
+                               (minutes, name)).rowcount
         conn.commit()
         conn.close()
-        json_response(True, agent=name, timeout_minutes=minutes)
     except Exception as e:
         json_response(False, error=str(e))
+        sys.exit(1)
+    if not changed:
+        json_response(False, error=f"Agent '{name}' not found")
+        sys.exit(1)
+    json_response(True, agent=name, timeout_minutes=minutes,
+                  applies="From this agent's next cycle. A cycle that is running keeps the limit it started with.")
 
 
 @agent.command("set-model")

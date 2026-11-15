@@ -1457,9 +1457,9 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
   # (hand-edited DB) runs at the nearest bound.
   # The harness closes the cycle at the time limit. `timeout` is the backstop
   # for a model call still running then: the limit plus 5 minutes' grace.
-  AGENT_TIMEOUT_MIN="${AGENT_TIMEOUT:-45}"
+  AGENT_TIMEOUT_MIN="${AGENT_TIMEOUT:-90}"
   case "${AGENT_TIMEOUT_MIN}" in
-    ''|*[!0-9]*) AGENT_TIMEOUT_MIN=45 ;;
+    ''|*[!0-9]*) AGENT_TIMEOUT_MIN=90 ;;
   esac
   if [ "${AGENT_TIMEOUT_MIN}" -lt 30 ]; then AGENT_TIMEOUT_MIN=30; fi
   if [ "${AGENT_TIMEOUT_MIN}" -gt 240 ]; then AGENT_TIMEOUT_MIN=240; fi
@@ -1655,7 +1655,7 @@ ${_LAST_CHANCE}
   if [ -f "${TASKS_DB}" ]; then
     # Script/utility jobs due in this session window (agitop Timeout minutes).
     # They run on Lifeline ticks outside the harness — omit if none.
-    _SESSION_MINS="${AGENT_TIMEOUT_MIN:-45}"
+    _SESSION_MINS="${AGENT_TIMEOUT_MIN:-90}"
     EXECUTING_ROWS=$(sqlite3 -separator ' | ' "${TASKS_DB}" \
       "SELECT '#' || id, title, task_kind, COALESCE(strftime('%Y-%m-%d %H:%M', due_date, 'localtime'), due_date, ''), COALESCE(script_path, '') FROM tasks WHERE assigned_to='${AGENT_NAME}' AND task_kind IN ('script','utility') AND status NOT IN ('done', 'cancelled', 'frozen') AND due_date IS NOT NULL AND due_date <= datetime('now', '+${_SESSION_MINS} minutes') ORDER BY due_date ASC LIMIT 15;" 2>/dev/null || true)
     if [ -n "${EXECUTING_ROWS}" ]; then
@@ -2841,15 +2841,20 @@ ${IDE_RESUME_CONTEXT}"
     ALERT_JSON=$(python3 "${SCRIPT_DIR}/provider_alerts.py" classify "${RESULT_FILE}" 2>/dev/null || echo '{"kind":"none"}')
     ALERT_KIND=$(printf '%s' "${ALERT_JSON}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('kind') or 'none')" 2>/dev/null || echo "none")
     ALERT_FATAL=$(printf '%s' "${ALERT_JSON}" | python3 -c "import json,sys; print('1' if json.load(sys.stdin).get('fatal') else '0')" 2>/dev/null || echo "0")
-    if [ "${ALERT_KIND}" = "forbidden" ] || [ "${ALERT_KIND}" = "quota" ]; then
+    if [ "${ALERT_KIND}" = "forbidden" ] || [ "${ALERT_KIND}" = "quota" ] || [ "${ALERT_KIND}" = "refusal" ]; then
       if [ "${EXIT_CODE}" != "0" ] || [ "${ALERT_FATAL}" = "1" ]; then
         QUOTA_COOLDOWN=3600
+        # The model declined twice: a short wait, so a request it will not
+        # answer is not retried on every tick.
+        [ "${ALERT_KIND}" = "refusal" ] && QUOTA_COOLDOWN=900
         log "PROVIDER_ALERT: ${AGENT_NAME} — ${ALERT_KIND}. Cooldown ${QUOTA_COOLDOWN}s."
         echo "$(( $(date +%s) + QUOTA_COOLDOWN ))" > "${COOLDOWN_FILE}"
       else
         log "PROVIDER_ALERT: ${AGENT_NAME} — ${ALERT_KIND} (cycle continued; no cooldown)"
       fi
       ALERT_MARK="/tmp/versa-agi-provider-alert-${AGENT_NAME}-$(date +%Y-%m-%d)"
+      # A refusal has its own once-a-day mark, so it does not hide a 403 the same day.
+      [ "${ALERT_KIND}" = "refusal" ] && ALERT_MARK="/tmp/versa-agi-refusal-alert-${AGENT_NAME}-$(date +%Y-%m-%d)"
       if [ ! -f "${ALERT_MARK}" ]; then
         PU_UID=$(jq -r '.primary_user.uid // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)
         [ -z "${PU_UID}" ] && PU_UID=$(jq -r '.primary_user.uid // empty' "${COA_CONFIG}" 2>/dev/null || true)
@@ -2907,6 +2912,9 @@ ${IDE_RESUME_CONTEXT}"
       TOKENS_IN=$(jq -r '.prompt_tokens // 0' "${TELEMETRY_FILE}" 2>/dev/null || echo "0")
       TOKENS_OUT=$(jq -r '.completion_tokens // 0' "${TELEMETRY_FILE}" 2>/dev/null || echo "0")
       TOKENS_TOTAL=$(jq -r '.total_tokens // 0' "${TELEMETRY_FILE}" 2>/dev/null || echo "0")
+      # Input tokens the provider billed at its cached price (harness/prompt_cache.py).
+      TOKENS_CACHED=$(jq -r '.cached_tokens // 0' "${TELEMETRY_FILE}" 2>/dev/null || echo "0")
+      case "${TOKENS_CACHED}" in ''|*[!0-9]*) TOKENS_CACHED=0 ;; esac
     else
       log "TOKENS: ${AGENT_NAME} — telemetry is from another cycle (${TELEMETRY_CYCLE_ID:-no id}); not recorded on ${CURRENT_CYCLE_ID:-this cycle}"
     fi

@@ -211,8 +211,8 @@ file_mon_enabled=false
 # The harness warns the agent at about 15 and 8 minutes left (earlier when its
 # steps are slow), closes the cycle at the limit, and the next spawn resumes it.
 # A stuck run is caught by the stall timer (10 minutes; 20 on a local model).
-# Stock default 45 — also seeds COA/new agents via agents.db column defaults.
-timeout_minutes=45
+# Stock default 90 — also seeds COA/new agents via agents.db column defaults.
+timeout_minutes=90
 
 # Maximum output lines in any 15 minutes before an agent session is killed (runaway detection).
 # If the result file grows by more than this within 15 minutes, the agent is terminated,

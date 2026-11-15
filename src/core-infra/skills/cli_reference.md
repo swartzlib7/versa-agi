@@ -94,7 +94,8 @@ agictl agent kill <name>                              # COA-only: terminate runn
 agictl agent request-remove <name> [--reason TEXT]    # Flag for removal (sets removal_requested, deactivates, notifies PU)
 agictl agent cancel-remove <name>                     # Cancel pending removal (reactivates agent)
 agictl agent remove <name>                            # Context-aware: non-root → request-remove, root → confirm-remove
-agictl agent set-timeout <name> <minutes>             # Set the cycle time limit (30–240)
+agictl agent set-timeout <name> <minutes>             # Set the cycle time limit (30–240). COA or Primary User only; holds from the agent's next cycle
+                                                      #   When the PU asks how long a chat can last: versa_agi_operations_guide.md → Live chat
 sudo agictl agent set-model <name> <model>            # Assign catalog model to agent (COA or Primary User only)
 sudo agictl agent set-model <name> --clear            # Clear assignment → inherit system default
 agictl agent status show                              # Read your current status from DB
@@ -591,10 +592,14 @@ Layered defaults in `[model_params]` / `[model_params_custom]` (JSON per scope).
 ```bash
 agictl model params list [--table]
 agictl model params get <default|model:id>
-agictl model params set <scope> [--temperature F] [--reasoning-effort none|minimal|low|medium|high] \
-    [--reasoning-max-tokens N] [--extra '{"top_p":0.9}']
+agictl model params set <scope> [--temperature F] [--reasoning-effort none|minimal|low|medium|high|xhigh|max] \
+    [--reasoning-max-tokens N] [--extra '{"top_p":0.9}'] [--web-search on|off] [--traits '{"streaming":true}']
 agictl model params clear <scope>                     # Remove custom override (reverts to lower layers)
 ```
+
+- `params get model:<key>` shows `allowed_reasoning_efforts`. When `none` is not in that list (`reasoning_always_on: true`), the model cannot run without reasoning; a setting of `none` runs at the model's default effort.
+- `--web-search on|off`: the model searches the web itself, billed per search by its provider. It is on by default; `off` turns it off for that model. Only models with a provider search route take it (`traits.web_search` in `params get`): Claude and Gemini through OpenRouter, Claude on Anthropic's own API, GPT-5.6 and later on OpenAI's own API. The agents' own search is `agictl search`.
+- `--traits` overrides one of the model's request rules (shown under `traits` in `params get`); `'{}'` removes the override.
 
 **Scopes:** `default` (system baseline), `model:deepseek/deepseek-v4-flash`. Per-agent overrides are nullable `agents.db` columns — set via agitop **Technical Setup** (⚙) or leave empty to inherit. The `extra` JSON bag passes provider-specific keys verbatim (e.g. `top_p`, `frequency_penalty`).
 

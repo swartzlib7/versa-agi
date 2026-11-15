@@ -15,7 +15,7 @@
 - **Hybrid skill injection** — `hybrid` / `full` / `lazy` per agent.
 - **Context window** — `pre_model_hook` trim; conversation depth per agent.
 - **Budget warnings** — 80% / 95% HumanMessage; hard stop at 100%.
-- **Time limit** — per agent, 30–240 min (default 45). At the limit the harness closes the cycle with a summary and a handoff, and the next spawn resumes the same thread.
+- **Time limit** — per agent, 30–240 min (default 90). At the limit the harness closes the cycle with a summary and a handoff, and the next spawn resumes the same thread.
 - **Time warnings** — at 15 and 8 minutes before the time limit, earlier when the agent's steps are slow.
 - **Check-in** — every 30 minutes of a cycle: a line in the cycle log and a prompt to journal task progress.
 - **Local AI** — three runtimes: Ollama chat (NVIDIA/AMD), Docker SYCL chat (Intel ARC), `sd-cli` media (`local_media` paint). LTX video is **experimental** (parked; **>64 GB VRAM**). Matrix: [Local AI support](local-ai-support.md).

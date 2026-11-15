@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS agents (
   status            TEXT,
   status_message    TEXT,
   model             TEXT,
-  timeout_minutes   INTEGER DEFAULT 45,
+  timeout_minutes   INTEGER DEFAULT 90,
   runaway_threshold INTEGER DEFAULT 2500,
   runaway_size_threshold INTEGER DEFAULT 2048,
   inactive          BOOLEAN DEFAULT 0,
@@ -183,11 +183,11 @@ sqlite3 "${DB_PATH}" "ALTER TABLE agents ADD COLUMN model_routing_enabled INTEGE
 sqlite3 "${DB_PATH}" "ALTER TABLE agents DROP COLUMN multimodal_inline_enabled;" 2>/dev/null || true
 
 # ─── Time limit range 30–240 minutes (state_long_cycles.md §1.1; agent_limits.py) ───
-# Rows outside the range move to the nearest bound; an empty value gets the default 45.
+# Rows outside the range move to the nearest bound; an empty value gets the default 90.
 _TIMEOUT_OUT_OF_RANGE="timeout_minutes IS NULL OR timeout_minutes < 30 OR timeout_minutes > 240"
 _timeout_fix_count="$(sqlite3 "${DB_PATH}" "SELECT COUNT(*) FROM agents WHERE ${_TIMEOUT_OUT_OF_RANGE};" 2>/dev/null || echo 0)"
 if [ "${_timeout_fix_count:-0}" -gt 0 ] 2>/dev/null; then
-  sqlite3 "${DB_PATH}" "UPDATE agents SET timeout_minutes = CASE WHEN timeout_minutes IS NULL THEN 45 WHEN timeout_minutes < 30 THEN 30 ELSE 240 END, updated_at = datetime('now') WHERE ${_TIMEOUT_OUT_OF_RANGE};"
+  sqlite3 "${DB_PATH}" "UPDATE agents SET timeout_minutes = CASE WHEN timeout_minutes IS NULL THEN 90 WHEN timeout_minutes < 30 THEN 30 ELSE 240 END, updated_at = datetime('now') WHERE ${_TIMEOUT_OUT_OF_RANGE};"
   echo "Time limit moved into the 30–240 minute range for ${_timeout_fix_count} agent(s)"
 fi
 

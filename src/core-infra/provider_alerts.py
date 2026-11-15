@@ -16,6 +16,11 @@ KIND_FORBIDDEN = "forbidden"
 KIND_QUOTA = "quota"
 KIND_RATE_LIMIT = "rate_limit"
 KIND_OVERLOAD = "overload"
+KIND_REFUSAL = "refusal"
+
+# Written by the harness when the model declined twice and the cycle was closed
+# (harness/model_reply.REFUSAL_CLOSED_MARK). Not an error code: the cycle exits 0.
+_REFUSAL_CLOSED = re.compile(r"REFUSAL CLOSED:\s*(.+)")
 
 _HTTP_403 = re.compile(
     r"(Error code:\s*403|HTTP/?1\.1?\s*403|HTTP\s+403|\"status_code\":\s*403)",
@@ -67,6 +72,14 @@ def classify_text(text: str) -> dict[str, Any]:
     if m_prov:
         out["provider"] = m_prov.group(1).strip()
 
+    m_refusal = _REFUSAL_CLOSED.search(text)
+    if m_refusal:
+        # The cycle ended on this, whatever else the log holds. Marked fatal so
+        # Lifeline waits before the next cycle although the exit code is 0.
+        out["kind"] = KIND_REFUSAL
+        out["detail"] = m_refusal.group(1).strip()
+        out["fatal"] = True
+        return out
     if _HTTP_403.search(text) or _CREDITS.search(text):
         out["kind"] = KIND_FORBIDDEN
         out["detail"] = _detail_403(text)
@@ -111,6 +124,13 @@ def format_pu_message(agent: str, info: dict[str, Any]) -> str:
     elif kind == KIND_QUOTA:
         title = "⚠️ Provider daily quota exhausted"
         hint = "Lifeline will back off for 1 hour and retry after that."
+    elif kind == KIND_REFUSAL:
+        title = "⚠️ The model declined a request"
+        hint = (
+            "The agent was told and the model declined again, so the cycle was closed "
+            "with nothing further done. The agent waits 15 minutes before its next cycle. "
+            "Rephrase the request, or assign another model to the agent."
+        )
     else:
         return ""
     lines = [title, "", f"Agent: {agent}"]

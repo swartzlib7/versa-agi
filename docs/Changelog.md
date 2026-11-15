@@ -8,6 +8,34 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 
 ## [Unreleased]
 
+## [3.9.0] — 2026-11-14
+
+### Updates
+
+#### Added
+- **Update note for 3.9.0** — After this update your COA tells you about the six new models, web search being on, and what Claude Fable 5.2 needs from your provider account.
+
+### Models
+
+#### Added
+- **Six new models** — Claude Fable 5.2, Claude Opus 5.5, Gemini 4 Carbon, Gemini 4 Hydrogen, GPT-6.1 Sol and GPT-6 Sol are offered beside the current models, each with its provider's own key and through OpenRouter. They can read images. The Claude and Gemini models and GPT-6.1 Sol always reason: you choose how much, not whether.
+- **Web search by the model itself** — A model can look things up on the web through its provider and list the pages it used. It is on for every model that has it, and the provider charges for each search on top of tokens. Turn it off per model in agitop → Models → Edit → Web search. Available for Claude and Gemini models through OpenRouter, for Claude models with an Anthropic key, and for GPT-5.6 and later with an OpenAI key.
+- **A declined request is handled** — When a provider's safety check stops a reply, the agent is told and can carry on another way or tell whoever asked. If the model declines again, the cycle is closed with the reason, the agent rests for 15 minutes, and you get a message. Before, it looked like an empty reply.
+- **Suggested models** for the Chief Orchestrator Agent at setup: Opus 5.5 with an Anthropic or OpenRouter key, Grok 4.7 with an xAI key, GPT-6.1 Sol with an OpenAI key, Gemini 4 Carbon with a Google key.
+- **Lower cost for Claude models** — Claude bills repeated input at a cached price only when a request asks for it; the other providers do it by themselves. Versa AGi now asks, with an Anthropic key and through OpenRouter. From the second step of a cycle, about 99% of the input was read from the cache in our tests, at about 5% of the input price on Opus 5.5 (2.5% on Fable 5.2, 10% on Opus 4.8). While a chat waits for your next message the cache is kept alive, so a quiet stretch does not cost a rewrite. A tool run or a call longer than 5 minutes still does, once. See [Models](models.md#cached-input).
+- **Cached input is counted** — A cycle's record now holds how many input tokens were billed at the cached price, for every provider, and its cost estimate uses that. The cycle log ends with a `CACHE:` line.
+- **Agents write down their plan** — Before work that takes several steps, an agent writes a sentence or two on what it is going to do and why. It keeps the plan in its conversation and you can read it in the cycle log. Grok with an xAI key does not write one.
+- **Time limit starts at 90 minutes** — On a new installation an agent's time limit is 90 minutes (was 45). Agents on an installation that is updated keep the limit they have.
+- **Ask your Chief Orchestrator Agent to change a time limit** — It can set its own or a sub-agent's time limit (30 to 240 minutes) when you ask, and explain how long a chat can last. The new limit holds from the agent's next cycle. Sub-agents cannot change a time limit.
+- **An agent keeps its conversation when its model changes** — A conversation started on one provider continues on another, including after a web search.
+
+#### Fixed
+- **GPT-5.6 models with an OpenAI key failed at every reasoning level except none.** OpenAI takes tools and reasoning together on a newer endpoint only; Versa AGi now uses it for GPT-5.6 and later.
+- **Claude Opus 4.8 with an Anthropic key was cut off at about 4,000 tokens per reply**, shared between its thinking and its answer. It now has room for long replies.
+- **The reasoning level had no effect on Gemini 3.7 Flash with a Google key**: the model ran at Google's default whatever you chose. Your setting now applies.
+- **Reasoning was lost between tool steps through OpenRouter** for Claude and Gemini models. The model now continues the same line of reasoning across a task's steps.
+- **A long reply is no longer stopped as stalled** on the new models and on Claude with an Anthropic key: the reply is streamed, and the 10-minute stall check counts from its last piece.
+
 ## [3.8.2] — 2026-11-13
 
 ### Updates

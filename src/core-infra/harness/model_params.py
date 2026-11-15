@@ -11,9 +11,9 @@
 #
 # - Data: [model_params], [model_params_custom], agents.db nullable overrides.
 # - Stable: temperature, reasoning_effort, reasoning_max_tokens,
-#   allowed_reasoning_efforts, think_mode, extra (passthrough).
+#   allowed_reasoning_efforts, think_mode, web_search, traits, extra (passthrough).
 # - Adapter: to_native_kwargs(family, model, params) — only place provider API
-#   shapes are encoded. Config stays provider-agnostic.
+#   shapes are encoded. Which shape a model takes comes from model_traits.
 # ─────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ import configparser
 import json
 import os
 from typing import Any
+
+from . import model_traits
 
 _MODELS_INI_PATHS = [
     "/etc/versa-agi/models.ini",
@@ -297,21 +299,22 @@ def _load_provider_cls(provider_slug: str | None) -> str:
 
 
 def _merge_layers(*layers: dict[str, Any] | None) -> dict[str, Any]:
-    """Shallow-merge param layers; ``extra`` bags deep-merge."""
+    """Shallow-merge param layers; the ``extra`` and ``traits`` bags deep-merge."""
     merged: dict[str, Any] = {}
-    extra: dict[str, Any] = {}
+    bags: dict[str, dict[str, Any]] = {"extra": {}, "traits": {}}
     for layer in layers:
         if not layer:
             continue
         for key, val in layer.items():
-            if key == "extra":
+            if key in bags:
                 if isinstance(val, dict):
-                    extra.update(val)
+                    bags[key].update(val)
                 continue
             if val is not None:
                 merged[key] = val
-    if extra:
-        merged["extra"] = extra
+    for key, bag in bags.items():
+        if bag:
+            merged[key] = bag
     return merged
 
 
@@ -356,14 +359,19 @@ def resolve_model_params(
     effort = resolved.get("reasoning_effort") or "none"
     if effort not in REASONING_EFFORTS:
         effort = "none"
-    allowed = set(allowed_reasoning_efforts(model_name))
+    allowed_order = allowed_reasoning_efforts(model_name)
+    allowed = set(allowed_order)
     if effort not in allowed:
         model_default = (layers.get(f"model:{model_name}") or {}).get("reasoning_effort")
         if model_default in allowed:
             effort = model_default
-        else:
+        elif "none" in allowed:
             effort = "none"
+        else:
+            # Reasoning cannot be turned off on this model: its lowest level.
+            effort = allowed_order[0]
     resolved["reasoning_effort"] = effort
+    resolved["web_search"] = bool(resolved.get("web_search"))
     if "extra" not in resolved:
         resolved["extra"] = {}
     return resolved
@@ -401,15 +409,54 @@ def _reasoning_active(params: dict[str, Any]) -> bool:
     return effort != "none" or bool(params.get("reasoning_max_tokens"))
 
 
-def _anthropic_adaptive_thinking_model(model_name: str) -> bool:
-    """Claude Opus 4.7+ — sampling params 400; use adaptive thinking + effort."""
-    if not model_name.startswith("claude-opus-4-"):
+def traits_for(
+    model_name: str,
+    family: str | None = None,
+    provider_slug: str | None = None,
+) -> model_traits.ModelTraits:
+    """Request traits of a catalog model: rules plus the model row's ``traits``."""
+    slug = provider_slug or _load_catalog_provider(model_name)
+    fam = family or detect_provider_family(model_name, slug)
+    return model_traits.resolve_traits(
+        fam, slug, model_name, _model_param_layer(model_name).get("traits"),
+    )
+
+
+def reasoning_always_on(model_name: str) -> bool:
+    """True when the model's allowed efforts leave no way to turn reasoning off."""
+    return "none" not in allowed_reasoning_efforts(model_name)
+
+
+def web_search_route(model_name: str) -> str:
+    """Provider search route this model can use ("" when it has none)."""
+    return traits_for(model_name).web_search
+
+
+def web_search_enabled(model_name: str, agent_overrides: dict[str, Any] | None = None) -> bool:
+    """True when this model will search: the setting is on and its route can run now.
+
+    OpenAI's own search needs reasoning on, so it is off for an agent or model
+    whose reasoning level resolves to ``none``.
+    """
+    route = web_search_route(model_name)
+    if not route:
         return False
-    suffix = model_name.rsplit("-", 1)[-1]
-    try:
-        return int(suffix) >= 7
-    except ValueError:
-        return model_name in {"claude-opus-4-7", "claude-opus-4-8"}
+    resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
+    if not resolved.get("web_search"):
+        return False
+    return route != model_traits.SEARCH_OPENAI or _reasoning_active(resolved)
+
+
+def builtin_search_tools(
+    model_name: str, agent_overrides: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Provider search tool entries to bind beside the function tools."""
+    resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
+    return model_traits.builtin_search_tools(
+        traits_for(model_name),
+        bool(resolved.get("web_search")) and bool(web_search_route(model_name)),
+        reasoning_on=_reasoning_active(resolved),
+    )
 
 
 def _anthropic_effort_from_reasoning(effort: str) -> str:
@@ -472,8 +519,19 @@ def to_native_kwargs(
     model_name: str,
     params: dict[str, Any],
     provider_slug: str | None = None,
+    prompt_cache: bool = False,
+    cache_session: str = "",
 ) -> dict[str, Any]:
-    """Translate normalized params to LangChain constructor kwargs."""
+    """Translate normalized params to LangChain constructor kwargs.
+
+    ``prompt_cache``: ask for the provider's cached price on repeated input,
+    where the model needs to be asked (trait ``cache``). Set for the model
+    that runs the cycle only: a one-off call would pay the write surcharge
+    and never read the entry back (harness/prompt_cache.py).
+    ``cache_session``: an opaque id for the conversation. OpenRouter keeps a
+    conversation on one upstream provider from its first request only when it
+    is given one; without it the second request can miss the entry (§2.7 B18).
+    """
     kwargs: dict[str, Any] = {}
     extra_body: dict[str, Any] = {}
     model_kwargs: dict[str, Any] = {}
@@ -485,38 +543,50 @@ def to_native_kwargs(
     thinking_on = _reasoning_active(params)
     slug = provider_slug or _load_catalog_provider(model_name)
 
+    traits = model_traits.resolve_traits(
+        family, slug, model_name, _model_param_layer(model_name).get("traits"),
+    )
+
     if family == "anthropic":
-        adaptive = _anthropic_adaptive_thinking_model(model_name)
-        if thinking_on:
-            if adaptive:
-                model_kwargs["thinking"] = {"type": "adaptive"}
-                if effort != "none":
-                    model_kwargs["output_config"] = {
-                        "effort": _anthropic_effort_from_reasoning(effort),
-                    }
-            else:
-                model_kwargs["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": budget or _effort_budget(effort),
+        if traits.thinking == model_traits.THINKING_ADAPTIVE:
+            # Adaptive models reject sampling parameters and thinking budgets.
+            if thinking_on:
+                thinking: dict[str, Any] = {"type": "adaptive"}
+                if traits.replay == model_traits.REPLAY_BOUND:
+                    # Reasoning is always on here; a summary gives the stream
+                    # something to deliver while the model thinks.
+                    thinking["display"] = "summarized"
+                kwargs["thinking"] = thinking
+                kwargs["output_config"] = {
+                    "effort": _anthropic_effort_from_reasoning(effort),
                 }
-        elif temp is not None and not adaptive:
+        elif thinking_on:
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": budget or _effort_budget(effort),
+            }
+        elif temp is not None and traits.sampling:
             kwargs["temperature"] = temp
+        if traits.max_output_tokens:
+            kwargs["max_tokens"] = traits.max_output_tokens
     elif family == "google":
-        if model_name.startswith("gemini-3"):
+        if traits.thinking == model_traits.THINKING_LEVEL:
             # Gemini 3+ uses discrete thinking levels. Google rejects the
             # Gemini 2.5 thinking_budget shape and recommends omitting legacy
             # sampling overrides for these models.
             if thinking_on:
-                kwargs["thinking_level"] = effort
+                kwargs["thinking_level"] = model_traits.google_thinking_level(effort)
         else:
-            if temp is not None:
-                kwargs["temperature"] = temp
             if thinking_on:
                 model_kwargs["thinking_budget"] = budget or _effort_budget(effort)
+        if temp is not None and traits.sampling:
+            kwargs["temperature"] = temp
+        if traits.max_output_tokens:
+            kwargs["max_output_tokens"] = traits.max_output_tokens
     elif family == "openai_compat":
         is_local_llamacpp = slug == "llamacpp"
         is_openrouter = slug == "openrouter"
-        if temp is not None and not (thinking_on and not is_openrouter):
+        if temp is not None and traits.sampling and not (thinking_on and not is_openrouter):
             if not (is_local_llamacpp and _ollama_think_mode(model_name)):
                 kwargs["temperature"] = temp
         if is_openrouter:
@@ -524,13 +594,27 @@ def to_native_kwargs(
             if effort == "none":
                 # Omission preserves the upstream model's default, which is
                 # reasoning-on for several shipped models. `none` must
-                # explicitly disable reasoning.
+                # explicitly disable reasoning. A model whose reasoning cannot
+                # be turned off never resolves to `none`.
                 reasoning["enabled"] = False
             else:
                 reasoning["effort"] = effort
             if budget:
                 reasoning["max_tokens"] = budget
             extra_body["reasoning"] = reasoning
+            plugins = model_traits.openrouter_search_plugins(
+                traits, bool(params.get("web_search")),
+            )
+            if plugins:
+                extra_body["plugins"] = plugins
+        elif traits.api == model_traits.API_RESPONSES:
+            # Responses endpoint: tools and reasoning together. Nothing is
+            # stored at the provider; each reply carries its reasoning record
+            # encrypted, and the thread sends it back.
+            kwargs["use_responses_api"] = True
+            kwargs["store"] = False
+            kwargs["include"] = ["reasoning.encrypted_content"]
+            kwargs["reasoning"] = {"effort": effort}
         elif thinking_on and effort != "none" and not is_local_llamacpp:
             kwargs["reasoning_effort"] = effort
         elif (
@@ -541,6 +625,8 @@ def to_native_kwargs(
             # Direct OpenAI Chat Completions + tools: gpt-5.6-terra (and similar)
             # apply a non-none default unless reasoning_effort=none is explicit.
             kwargs["reasoning_effort"] = "none"
+        if traits.max_output_tokens and not is_local_llamacpp:
+            kwargs["max_tokens"] = traits.max_output_tokens
     elif family == "local":
         if temp is not None:
             kwargs["temperature"] = temp
@@ -569,6 +655,15 @@ def to_native_kwargs(
     elif extra and family in ("anthropic", "google"):
         model_kwargs.update(extra)
 
+    if traits.streaming and family != "local":
+        kwargs["streaming"] = True
+    if prompt_cache and traits.cache == model_traits.CACHE_MARKS:
+        if family == "anthropic":
+            kwargs["cache_control"] = dict(model_traits.CACHE_MARK)
+        elif family == "openai_compat":
+            extra_body["cache_control"] = dict(model_traits.CACHE_MARK)
+            if cache_session:
+                extra_body["session_id"] = cache_session
     if extra_body:
         kwargs["extra_body"] = extra_body
     if model_kwargs:
@@ -588,6 +683,8 @@ STRUCTURED_TOP_LEVEL_KEYS = frozenset({
     "reasoning_max_tokens",
     "allowed_reasoning_efforts",
     "think_mode",
+    "web_search",
+    "traits",
     "extra",
 })
 
@@ -701,6 +798,18 @@ def normalize_custom_params(
         warnings.append("extra must be a JSON object; removed")
         out.pop("extra", None)
 
+    if "web_search" in out and not isinstance(out["web_search"], bool):
+        warnings.append("web_search must be true or false; removed")
+        out.pop("web_search", None)
+
+    if "traits" in out:
+        cleaned, trait_warnings = model_traits.normalize_overrides(out["traits"])
+        warnings.extend(trait_warnings)
+        if cleaned:
+            out["traits"] = cleaned
+        else:
+            out.pop("traits", None)
+
     return out, warnings
 
 
@@ -713,6 +822,8 @@ def build_params_layer_update(
     allowed_reasoning_efforts: str | list[str] | None = None,
     think_mode: str | None = None,
     extra: str | dict[str, Any] | None = None,
+    web_search: bool | None = None,
+    traits: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an updated params layer (agictl model params set / UI save path)."""
     data = strip_unknown_params_keys(base)
@@ -739,4 +850,17 @@ def build_params_layer_update(
             if extra and not parsed_extra:
                 raise ValueError("extra must be a JSON object")
         data["extra"] = parsed_extra
+    if web_search is not None:
+        data["web_search"] = bool(web_search)
+    if traits is not None:
+        parsed_traits = traits if isinstance(traits, dict) else _parse_params_json(traits)
+        if traits and not parsed_traits:
+            raise ValueError("traits must be a JSON object")
+        cleaned, trait_warnings = model_traits.normalize_overrides(parsed_traits)
+        if trait_warnings:
+            raise ValueError("; ".join(trait_warnings))
+        if cleaned:
+            data["traits"] = cleaned
+        else:
+            data.pop("traits", None)
     return strip_unknown_params_keys(data)

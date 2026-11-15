@@ -303,25 +303,48 @@ def _required_api_key(
     )
 
 
+# Constructor arguments each client takes from the translated Model params.
+_GOOGLE_NATIVE_KEYS = ("temperature", "thinking_level", "max_output_tokens", "streaming")
+_ANTHROPIC_NATIVE_KEYS = ("temperature", "thinking", "output_config", "max_tokens", "streaming")
+
+
+def _openai_compatible_class(route: ProviderRoute):
+    """``ChatOpenAI``, or the OpenRouter subclass that keeps reasoning records."""
+    from langchain_openai import ChatOpenAI
+
+    if route.provider_slug == "openrouter":
+        try:
+            from harness.openrouter_chat import OpenRouterChat
+        except ImportError:
+            return ChatOpenAI
+        if issubclass(OpenRouterChat, ChatOpenAI):
+            return OpenRouterChat
+    return ChatOpenAI
+
+
 def create_langchain_client(
     route: ProviderRoute,
     *,
     native_params: dict[str, Any] | None = None,
     num_ctx: int = 0,
     key_resolver: Callable[[str], str] = resolve_provider_api_key,
+    callbacks: Sequence[Any] | None = None,
 ):
     """Create the route's LangChain client with already-translated params."""
 
     native = dict(native_params or {})
+    shared: dict[str, Any] = {"callbacks": list(callbacks)} if callbacks else {}
     if route.client_type == "ChatGoogleGenerativeAI":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         kwargs: dict[str, Any] = {
             "model": route.api_model,
             "google_api_key": _required_api_key(route, key_resolver),
+            **shared,
         }
-        if "temperature" in native:
-            kwargs["temperature"] = native["temperature"]
+        for key in _GOOGLE_NATIVE_KEYS:
+            if key in native:
+                kwargs[key] = native[key]
         if native.get("model_kwargs"):
             kwargs.update(native["model_kwargs"])
         return ChatGoogleGenerativeAI(**kwargs)
@@ -332,34 +355,41 @@ def create_langchain_client(
         kwargs = {
             "model": route.api_model,
             "api_key": _required_api_key(route, key_resolver),
+            **shared,
         }
+        for key in _ANTHROPIC_NATIVE_KEYS:
+            if key in native:
+                kwargs[key] = native[key]
         if native.get("model_kwargs"):
             kwargs.update(native["model_kwargs"])
-        elif "temperature" in native:
-            kwargs["temperature"] = native["temperature"]
+        if native.get("cache_control"):
+            # Top-level field of the request: the cache mark follows the end of the conversation.
+            kwargs["model_kwargs"] = {"cache_control": dict(native["cache_control"])}
         return ChatAnthropic(**kwargs)
 
     if route.client_type == "ChatOpenAI":
-        from langchain_openai import ChatOpenAI
-
         base: dict[str, Any] = {
             "model": route.api_model,
             "api_key": _required_api_key(route, key_resolver),
+            **shared,
         }
         if route.provider_slug != "openai":
             base["base_url"] = route.endpoint
         if route.default_headers:
             base["default_headers"] = dict(route.default_headers)
+        if native.get("streaming"):
+            # Token counts arrive on the last streamed chunk only when asked for.
+            base["stream_usage"] = True
         merged = {
             **base,
             **{key: value for key, value in native.items() if key not in base},
         }
-        return ChatOpenAI(**merged)
+        return _openai_compatible_class(route)(**merged)
 
     if route.client_type == "ChatOllama":
         from langchain_ollama import ChatOllama
 
-        kwargs = {"base_url": route.endpoint, "model": route.api_model}
+        kwargs = {"base_url": route.endpoint, "model": route.api_model, **shared}
         if "temperature" in native:
             kwargs["temperature"] = native["temperature"]
         for key, value in native.items():

@@ -29,6 +29,9 @@ from harness.heartbeat import Heartbeat
 from harness.repeat_guard import RepeatGuard, call_label
 from harness.step_clock import StepClock
 import local_time
+from harness.cache_keepalive import KeepAlive, LastRequest
+from harness.prompt_cache import cache_log_line, cache_totals, session_id as cache_session_id
+from harness.prompt_cache import system_prompt as cached_system_prompt
 from harness.listening import (
     ListeningWindow,
     agent_ids_from_env,
@@ -43,6 +46,16 @@ def tlog(msg: str):
     """Timestamped print for result file traceability."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
+
+
+def _reply_text(msg) -> str:
+    """A model reply as text for logs: its text parts, not its reasoning record."""
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content
+    from harness.compaction import message_text
+
+    return message_text(msg) or ("" if isinstance(msg, AIMessage) else str(content))
 
 
 def _format_params_audit(model_name: str, agent_overrides: dict | None) -> str:
@@ -81,6 +94,8 @@ def _resolve_llm_provider_and_native(
     model_name: str,
     num_ctx: int = 0,
     agent_overrides: dict | None = None,
+    prompt_cache: bool = False,
+    cache_session: str = "",
 ) -> tuple[Any, dict[str, Any]]:
     """Resolve exact Provider route and translated Model parameters."""
     from harness.model_params import (
@@ -94,7 +109,8 @@ def _resolve_llm_provider_and_native(
     provider_slug = provider_route.provider_slug
     resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
     family = provider_route.family
-    native = to_native_kwargs(family, model_name, resolved, provider_slug=provider_slug)
+    native = to_native_kwargs(family, model_name, resolved, provider_slug=provider_slug,
+                              prompt_cache=prompt_cache, cache_session=cache_session)
     if provider_slug in ("ollama", "llamacpp"):
         native = apply_native_for_local_runtime(native, provider_slug)
     return provider_route, native
@@ -1043,6 +1059,13 @@ _LIVE_CALL_RUNTIME = None  # harness.live_call.LiveCallRuntime, set in main()
 _HARNESS_DEADLINE_EPOCH = None  # Lifeline --deadline-epoch, set in main()
 # Stall timer (state_long_cycles.md §1.2). A no-op until main() gives it the file.
 _HEARTBEAT = Heartbeat(None)
+# Set once the cycle model is built; its pings are counted with the cycle's tokens.
+_CACHE_KEEPALIVE = None
+
+
+def _keepalive_usage() -> tuple[int, int, int, int]:
+    """(input, output, read, written) tokens of this cycle's cache keep-alive pings."""
+    return _CACHE_KEEPALIVE.usage() if _CACHE_KEEPALIVE is not None else (0, 0, 0, 0)
 # A call must leave this much time before the hard stop (state_live_chat.md §1.7).
 CALL_DEADLINE_MARGIN_SECONDS = 180
 CALL_MIN_MINUTES = 5
@@ -1524,6 +1547,13 @@ def write_running_telemetry(agent_name: str, messages: list, telemetry_file: str
     """
     try:
         total_tokens, prompt_tokens, completion_tokens = usage_totals(messages)
+        cache_read, cache_write = cache_totals(messages)
+        ping_in, ping_out, ping_read, ping_write = _keepalive_usage()
+        total_tokens += ping_in + ping_out
+        prompt_tokens += ping_in
+        completion_tokens += ping_out
+        cache_read += ping_read
+        cache_write += ping_write
         path = telemetry_file or telemetry_path(agent_name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f"{path}.tmp"
@@ -1533,6 +1563,8 @@ def write_running_telemetry(agent_name: str, messages: list, telemetry_file: str
                 "total_tokens": total_tokens,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
+                "cached_tokens": cache_read,
+                "cache_write_tokens": cache_write,
                 "partial": True,
             }, f)
         os.replace(tmp, path)
@@ -1540,14 +1572,15 @@ def write_running_telemetry(agent_name: str, messages: list, telemetry_file: str
         pass
 
 
-def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, completion_tokens: int, messages: list):
+def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, completion_tokens: int, messages: list,
+                    cached_tokens: int = 0, cache_write_tokens: int = 0):
     telemetry_file = telemetry_path(agent_name)
 
     os.makedirs(os.path.dirname(telemetry_file), exist_ok=True)
 
     serializable_messages = []
     for m in messages:
-        msg_dict = {"type": m.type, "content": m.content if isinstance(m.content, str) else str(m.content)}
+        msg_dict = {"type": m.type, "content": _reply_text(m)}
         if hasattr(m, "tool_calls") and m.tool_calls:
             msg_dict["toolCalls"] = [{"name": tc.get("name", "unknown"), "status": "called"} for tc in m.tool_calls]
         serializable_messages.append(msg_dict)
@@ -1558,6 +1591,8 @@ def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, comp
             "total_tokens": total_tokens,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens,
             "messages": serializable_messages
         }, f)
 
@@ -1684,7 +1719,8 @@ def _write_checkin_line(line: str) -> None:
 # LLM Provider Resolution
 # ═══════════════════════════════════════════════════════
 
-def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = None):
+def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = None,
+            prompt_cache: bool = False, cache_session: str = "", extra_callbacks: list | None = None):
     """Instantiate the exact catalog Model's Provider client.
 
     Provider slug, endpoint, credentials, and client class come from the merged
@@ -1695,6 +1731,9 @@ def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = No
         model_name: The model identifier (e.g. 'gemini-2.5-flash', 'gpt-5.5-2026-04-23')
         num_ctx: Context window size in tokens for Ollama models. 0 = Ollama default.
         agent_overrides: Optional per-agent param overrides (temperature, reasoning, extra).
+        prompt_cache: True for the model that runs the cycle (harness/prompt_cache.py).
+        cache_session: Opaque id of the agent's thread, for a route that pins by id.
+        extra_callbacks: Callback handlers for this client (the cache keep-alive's recorder).
     """
     from provider_runtime import create_langchain_client
 
@@ -1702,11 +1741,21 @@ def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = No
         model_name,
         num_ctx=num_ctx,
         agent_overrides=agent_overrides,
+        prompt_cache=prompt_cache,
+        cache_session=cache_session,
     )
+    callbacks = None
+    if native.get("streaming"):
+        # A streamed reply touches the heartbeat as it arrives (state_long_cycles.md §1.2).
+        from harness.stream_heartbeat import StreamHeartbeat
+        callbacks = [StreamHeartbeat(lambda: _HEARTBEAT.beat())]
+    if extra_callbacks:
+        callbacks = (callbacks or []) + list(extra_callbacks)
     return create_langchain_client(
         provider_route,
         native_params=native,
         num_ctx=num_ctx,
+        callbacks=callbacks,
     )
 
 
@@ -1987,7 +2036,12 @@ def main():
         except Exception as e:
             tlog(f"ROUTING: cycle set-routing failed — {e}")
 
-    llm = get_llm(execution_model, num_ctx=args.num_ctx, agent_overrides=agent_param_overrides)
+    # What the cycle model was last sent: the cache keep-alive sends it again while a chat waits.
+    last_request = LastRequest()
+    llm = get_llm(execution_model, num_ctx=args.num_ctx, agent_overrides=agent_param_overrides,
+                  prompt_cache=True,
+                  cache_session=cache_session_id(args.agent, args.thread_id or ""),
+                  extra_callbacks=[last_request])
 
     from harness.model_params import detect_provider_family
     from model_catalog import catalog_entry_for_model
@@ -1999,6 +2053,25 @@ def main():
         "execution_model": execution_model,
         "provider_family": detect_provider_family(execution_model, _provider_slug),
     })
+
+    # Request traits of the execution model (state_model_drivers.md §2.7).
+    from harness.model_params import builtin_search_tools, traits_for, web_search_enabled
+    from harness.model_reply import (
+        PROVIDER_SEARCH_HINT, REFUSALS_BEFORE_CLOSE, refusal_closed_line, refusal_note,
+        refusal_reason, refusal_summary, search_log_line,
+    )
+    from harness.reasoning_replay import ReplayGuard, is_binding_error, wire_for
+
+    execution_traits = traits_for(
+        execution_model, _HARNESS_VIEW_CTX["provider_family"], _provider_slug,
+    )
+    replay_guard = ReplayGuard(
+        execution_traits.replay, execution_model, log=tlog,
+        wire=wire_for(_HARNESS_VIEW_CTX["provider_family"], execution_traits.api),
+    )
+    provider_search_tools = builtin_search_tools(execution_model, agent_param_overrides)
+    if web_search_enabled(execution_model, agent_param_overrides):
+        tlog(f"WEB SEARCH: provider search on for {execution_model} ({execution_traits.web_search})")
 
     # Inject skills based on triage classification
     # Filter out always-injected skills — they're not triage-driven.
@@ -2054,6 +2127,8 @@ def main():
     enhanced_prompt = system_prompt
     if skill_content:
         enhanced_prompt = system_prompt + "\n" + skill_content
+    if provider_search_tools:
+        enhanced_prompt += PROVIDER_SEARCH_HINT
 
     # ── Live Chat: CONVERSATIONS rules (state_live_chat.md §1.6) ──
     listen_pu_ids: set[str] = set()
@@ -2063,7 +2138,8 @@ def main():
         if pu_uid:
             listen_pu_ids.add(pu_uid)
         from harness.live_call import pu_call_name
-        enhanced_prompt += conversations_block(pu_call_name(pu) if pu else "")
+        enhanced_prompt += conversations_block(pu_call_name(pu) if pu else "",
+                                               coa=args.agent == "coa", minutes=args.listen_minutes)
         tlog(f"LISTEN: {args.listen_minutes} min window granted; conversations block added")
 
     # ── Live Call status + last call (COA, feature on) — dynamic tail, cache-safe ──
@@ -2409,18 +2485,29 @@ def main():
             tlog(f"CONTEXT TRIM: trim_messages returned empty — kept last {len(trimmed)} message(s)")
         if block is not None:
             trimmed = [block] + list(trimmed)
+        if not in_call:
+            # Reasoning records the cycle model cannot accept are left out (§2.7 B3).
+            trimmed = replay_guard.apply(list(trimmed))
         return {"llm_input_messages": trimmed}
 
     agent_kwargs = {
         "model": llm,
-        "tools": ALL_TOOLS,
-        "prompt": enhanced_prompt,
+        "tools": list(ALL_TOOLS) + provider_search_tools,
+        # Marked for the provider's cache where the model has to be asked (§2.7 B16).
+        "prompt": cached_system_prompt(execution_traits, enhanced_prompt),
         "pre_model_hook": pre_model_hook,
     }
     if checkpointer:
         agent_kwargs["checkpointer"] = checkpointer
 
     agent = create_react_agent(**agent_kwargs)
+
+    # ── Cache keep-alive while a chat waits (state_model_drivers.md §2.7 B17) ──
+    global _CACHE_KEEPALIVE
+    _CACHE_KEEPALIVE = KeepAlive(
+        execution_traits, llm, agent_kwargs["tools"], last_request,
+        family=_HARNESS_VIEW_CTX["provider_family"], log=tlog,
+    )
 
     # ── Live call mode (COA) ──
     # Call turns run on [live_call] call_model through a second graph that shares
@@ -2676,6 +2763,10 @@ def main():
     budget_hard_stop = False
     limit_stop = False           # time limit: the harness closes the cycle (exit 54)
     loop_stop = ""               # repeated call: the cycle summary (exit 55)
+    refusal_stop = ""            # the provider declined twice: the cycle summary
+    refusals_in_row = 0          # declined replies with no ordinary reply between them
+    declined_reply = None        # (message, reason) of a declined reply not yet handled
+    binding_retry_used = False   # one retry without reasoning records (§2.7 B4)
     input_messages = messages  # Initial input for first stream invocation
     _harness_crashed = False
     pending_view_trims: list[dict] = []
@@ -2790,6 +2881,20 @@ def main():
                             _HEARTBEAT.beat()
                             _HEARTBEAT.set_hold("tools", bool(getattr(msg, "tool_calls", None)))
                             if not _in_call_turn():
+                                _declined = refusal_reason(msg)
+                                if _declined:
+                                    refusals_in_row += 1
+                                    declined_reply = (msg, _declined)
+                                    tlog(f"[REFUSAL] {execution_model} declined a reply (reason: {_declined})")
+                                    # Nothing else to do with this reply: the run ends here
+                                    # and the refusal is handled below (§2.7 B6).
+                                    continue
+                                refusals_in_row = 0
+                                declined_reply = None
+                                _search_line = search_log_line(msg)
+                                if _search_line:
+                                    tlog(_search_line)
+                            if not _in_call_turn():
                                 for tc in (getattr(msg, "tool_calls", None) or []):
                                     if tc.get("id"):
                                         open_tool_calls[tc["id"]] = (tc.get("name", "?"), tc.get("args"))
@@ -2808,7 +2913,7 @@ def main():
                                 else:
                                     tlog(f"[STEP {step_count}/{max_steps}] AGENT → tool call: {tool_names}")
                             elif not _in_call_turn():
-                                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                                content = _reply_text(msg)
                                 preview = content[:200].replace("\n", " ")
                                 tlog(f"[STEP {step_count}/{max_steps}] AGENT → {preview}")
                             # Trim after any agent turn once the model has consumed the inject
@@ -3057,9 +3162,45 @@ def main():
                         _HEARTBEAT.set_hold("tools", False)
                         time.sleep(delay)
                         continue
+                    # A replayed reasoning record was refused: send the request once
+                    # more without any (state_model_drivers.md §2.7 B4).
+                    if replay_guard.active and is_binding_error(e) and not binding_retry_used:
+                        binding_retry_used = True
+                        replay_guard.strip_all_next()
+                        tlog("REASONING REPLAY: provider refused a replayed record — retrying once without them")
+                        _HEARTBEAT.set_hold("tools", False)
+                        continue
                     raise  # non-transient, or retry budget exhausted → crash
                 break  # stream invocation finished without a transient error
 
+            if stream_natural_end and declined_reply is not None:
+                # The declined reply leaves the thread. The first time, the agent is
+                # told and gets a turn to act on it; a second refusal in a row closes
+                # the cycle and Lifeline tells the Primary User (§2.7 B6).
+                _declined_msg, _declined_reason = declined_reply
+                declined_reply = None
+                if _declined_msg in messages:
+                    messages.remove(_declined_msg)
+                if checkpointer and getattr(_declined_msg, "id", None):
+                    # Removed in its own write, not with the next input: a retried
+                    # input must not ask for the same removal twice.
+                    try:
+                        agent.update_state(
+                            config, {"messages": [RemoveMessage(id=_declined_msg.id)]},
+                            as_node="__start__",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        tlog(f"[REFUSAL] Declined reply left in the thread — {e}")
+                if refusals_in_row < REFUSALS_BEFORE_CLOSE:
+                    _note = HumanMessage(content=refusal_note(_declined_reason), id=str(uuid.uuid4()))
+                    input_messages = [_note]
+                    messages.append(_note)
+                    tlog("[REFUSAL] The declined reply was discarded and the agent was told")
+                    continue
+                refusal_stop = refusal_summary(_declined_reason, execution_model)
+                tlog(refusal_closed_line(_declined_reason, execution_model))
+                cycle_ended = True
+                break
             if stream_natural_end:
                 last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
                 # ── Live call: the reply to "call ended" is the last-call note ──
@@ -3083,7 +3224,8 @@ def main():
                     tlog(f"LISTEN: waiting for messages ({listening.minutes} min idle window)")
                     step_clock.skip()  # waiting is not step time (§1.7 rule 1)
                     with _HEARTBEAT.holding("mail"):
-                        close_reason = wait_for_mail(listening, _inject_midcycle_mail)
+                        close_reason = wait_for_mail(listening, _inject_midcycle_mail,
+                                                     tick=_CACHE_KEEPALIVE.tick)
                     if close_reason == "mail":
                         continue
                     closing = listening.begin_closing(close_reason)
@@ -3096,7 +3238,7 @@ def main():
                         continue
                 break
 
-        final_message = messages[-1].content
+        final_message = _reply_text(messages[-1])
         tlog(f"\n--- CYCLE COMPLETE ({step_count} steps) ---")
         tlog(final_message)
     except Exception as e:
@@ -3133,7 +3275,21 @@ def main():
         completion_tokens = completion_chars // 4
         total_tokens = total_chars // 4
 
-    write_telemetry(args.agent, total_tokens, prompt_tokens, completion_tokens, result_messages)
+    cache_read, cache_write = cache_totals(result_messages)
+    # Keep-alive pings are requests too: their tokens belong to the cycle.
+    ping_in, ping_out, ping_read, ping_write = _keepalive_usage()
+    total_tokens += ping_in + ping_out
+    prompt_tokens += ping_in
+    completion_tokens += ping_out
+    cache_read += ping_read
+    cache_write += ping_write
+    cache_line = cache_log_line(prompt_tokens, cache_read, cache_write,
+                                pings=_CACHE_KEEPALIVE.pings if _CACHE_KEEPALIVE is not None else 0)
+    if cache_line:
+        tlog(cache_line)
+
+    write_telemetry(args.agent, total_tokens, prompt_tokens, completion_tokens, result_messages,
+                    cached_tokens=cache_read, cache_write_tokens=cache_write)
 
     if pending_view_trims:
         _trim_view_inject_payloads(agent, config, pending_view_trims)
@@ -3166,6 +3322,11 @@ def main():
             "TIME LIMIT", messages, last_tool_label,
         )
         sys.exit(EXIT_TIME_LIMIT)
+
+    # The provider declined twice: the harness closes the cycle with the reason. Exit 0;
+    # Lifeline reads the log line, waits before the next cycle and tells the Primary User.
+    if refusal_stop:
+        _close_cycle_from_harness(args.agent, refusal_stop, "REFUSAL")
 
     # Repeated call: closed with what was repeated; counts toward the breaker (exit 55).
     if loop_stop:

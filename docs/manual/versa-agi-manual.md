@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.8.2 · November 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.9.0 · November 2026</p>
 </div>
 
 ## At a glance
@@ -212,7 +212,7 @@ In a chat with an agent, one line above the recording box shows where it is:
 - **You come first.** If the agent is chatting with someone else when you write, it tells them it will be right back, answers you, then returns to them.
 - **More than one person.** Several people can chat with the same agent at once. Each sees the status line in their own chat with the agent. You can ask the agent to bring someone in; their replies reach the same session. The agent keeps each conversation separate and shares one person's matters with another only when that serves your purpose.
 - **Tasks wait.** Tasks that fall due during a chat wait until it ends. The agent is woken for them afterwards.
-- **The time limit still holds.** Every cycle has a time limit (Part 5). At about 15 minutes left the agent is told to keep chatting; at about 8 minutes left the chat closes and the agent hands off. A slow model reaches both points earlier. Your next message starts a new cycle.
+- **The time limit still holds.** Every cycle has a time limit (Part 5). At about 15 minutes left the agent is told to keep chatting; at about 8 minutes left the chat closes and the agent hands off. A slow model reaches both points earlier. Your next message starts a new cycle. For a longer chat, raise the agent's time limit (Part 5), or ask your Chief Orchestrator Agent to raise it; a chat still closes after the listening time with no new message.
 - **Five at a time.** At most 5 of your agents listen at once. Any others answer once per cycle, as before.
 
 On each agent's card in the app, a small icon shows the same state: resting, working, or here. The card's **ACTIVITY** section shows how many cycles the agent has run, a busy graph for the last 48 hours, its last 20 cycles (the newest is selected; tap another to see when it ran, how long, what woke it and how it ended), how its cycles ended (ok, timeout, runaway, step limit, crash), what woke it (messages, tasks, or a forced run), and how long its cycles take (average, longest, and how they spread). After an update, past cycles from the machine's history are filled in once, so the charts start with history, not empty.
@@ -563,11 +563,13 @@ Choose **Save** to keep a change.
 <figcaption>The Chief Orchestrator Agent's window. The tabs along the top hold its logs, prompt, and pairing.</figcaption>
 </figure>
 
-On **Technical**, **Time limit** is the longest one cycle may run: 30 to 240 minutes, 45 by default. Other values are refused. An update moves any older value outside the range to the nearest end of it.
+On **Technical**, **Time limit** is the longest one cycle may run: 30 to 240 minutes, 90 by default on a new installation (agents made before 3.9.0 keep the limit they have). Other values are refused. You can also ask your Chief Orchestrator Agent to change it, for itself or for a sub-agent; the new limit holds from that agent's next cycle. An update moves any older value outside the range to the nearest end of it.
 
 - **Before the limit.** The agent is told to wrap up at 15 minutes left, and to close at 8 minutes left. A slow model is told earlier.
 - **At the limit.** If the agent has not closed its cycle, the system closes it and writes a short summary and a handoff. The agent's next cycle starts on the scheduler's next pass and carries on in the same conversation.
 - **During a long cycle.** Every 30 minutes the system writes a check-in line to the cycle log and asks the agent to record where each task stands.
+- **Cached input.** Each step sends the agent's prompt and conversation again, and providers bill that repeated input at a lower price. With a Claude model the system asks for this on every request; other providers do it by themselves. The cycle log ends with a `CACHE:` line that says how much was read from the cache. With Claude, the system keeps the cache alive while a chat waits for your next message, so a quiet stretch costs very little. A tool run or a call longer than 5 minutes makes the next request pay the full price once.
+- **Before a run of steps.** An agent writes a sentence or two on what it is going to do and why before work that takes several steps, and again when its plan changes. The plan is in the cycle log. It is not sent to you as a message.
 
 **💤 End chat**, on **General** beside **Halt Agent**, closes the agent's live chat. It finishes its current reply, hands off, and rests until the next message. Nothing is halted. From the command line:
 
@@ -688,13 +690,21 @@ The voice runs on GPT-Live, so Live Call needs an OpenAI key and a call model. U
 <figcaption>Settings → Live Call.</figcaption>
 </figure>
 
-**Live Chat** holds one setting, **Chat listening (minutes)**: how long an agent stays in a chat after the last message. Off, 5, 10, 15, or 30; 15 by default. Off means the agent answers once per cycle, as before.
+**Live Chat** holds one setting, **Chat listening (minutes)**: how long an agent stays in a chat after the last message. Off, 5, 10, 15, or 30; 15 by default. Off means the agent answers once per cycle, as before. Only you can change it. While a chat is open the agent's due tasks wait and other agents are answered after you, which is why a quiet chat closes after this time and does not wait for the time limit.
 
 The other tabs: **Skills Registry**, **System Memory**, **Image Processing**, **Audio Processing**, and **Utility Models**.
 
 ### Models and routing
 
 **Models** opens the Model Manager: every model in the catalog, its provider, the kind of work it suits, its prices, and whether it may route, call, or serve the Chief Orchestrator Agent. **Edit**, **Reset**, **Remove**, and **Add** manage the list. The **Providers** tab turns a provider on or off.
+
+**Edit** also holds the model's reasoning level and, for models that have it, **Web search**. With Web search on, the model looks things up on the web itself through its provider and lists the pages it used under its reply. It is on for every model that has it, and the provider charges for each search on top of tokens; set **Web search** to off to stop that. It is available for Claude and Gemini models reached through OpenRouter, for Claude models on an Anthropic key, and for GPT-5.6 and later on an OpenAI key.
+
+When you change an agent's model, the agent keeps its conversation, also when the new model is from another provider.
+
+Some models always reason: Claude Fable 5.2, Claude Opus 5.5, Gemini 4 Carbon, and Gemini 4 Hydrogen among them. Their reasoning level has no "none"; choose how much they reason instead. Claude Fable 5.2 is the most capable and the most expensive model offered, and it needs data retention switched on with the provider: with an Anthropic key that is an Anthropic account setting, and through OpenRouter it is the privacy setting of your OpenRouter account.
+
+A provider's safety check can decline a request. The agent is then told and either carries on another way or tells you. If the model declines twice in a row, the cycle ends there, the agent rests for 15 minutes, and you get a message naming the agent, the model and the reason. Rephrase the request, or give the agent another model.
 
 **Routing** picks a preferred model per kind of work: fast, balanced, reasoning, code, and local.
 
@@ -858,5 +868,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.8.2, November 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.9.0, November 2026.</p>
 </div>

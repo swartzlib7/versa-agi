@@ -2,8 +2,9 @@
 
 The harness touches the file when a model call starts, when a reply arrives,
 and every 30 seconds while a tool runs, while it waits for mail, and while a
-live call is in progress. Nothing touches it while one model call is in
-flight, so the file's age is how long that call has been running.
+live call is in progress. Nothing touches it while a model call that is not
+streamed is in flight, so the file's age is how long that call has been
+running. A streamed reply touches it as its pieces arrive (stream_heartbeat).
 """
 
 from __future__ import annotations

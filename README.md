@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.8.2-FF9800" alt="Versa AGi version 3.8.2">
+    <img src="https://img.shields.io/badge/version-3.9.0-FF9800" alt="Versa AGi version 3.9.0">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -165,6 +165,8 @@ When a person writes to an agent in the VersaVoice app, the agent's cycle stays 
 
 **Setting:** `sudo agitop` → System Settings → **Live Chat** → **Chat listening (minutes)**: Off, 5, 10, 15 or 30 (default 15). Off answers once per cycle, as before.
 
+**How long a chat can last:** until nobody has written for the listening time, or until shortly before the agent's time limit (30 to 240 minutes, default 90). You can ask your Chief Orchestrator Agent to change a time limit; it holds from the agent's next cycle.
+
 **In the app:** a status line above the recording box in each agent chat (resting, waking, working, here); a status icon and an **ACTIVITY** section on each agent card (all-time cycles, 48-hour busy graph, last 20 cycles with details, outcomes, what woke it, cycle lengths).
 
 **End a chat early:** agitop → agent → General → **💤 End chat**, or `sudo agictl agent chat-close <name>`. The agent finishes its reply, hands off, and rests until the next message. Nothing is halted.
@@ -235,7 +237,7 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 | **Concurrent spawns** | 3 per Lifeline tick | Configurable; excess queued |
 | **Local AI concurrency** | `sycl_parallel` slots | Prevents inference OOM |
 | **Active agents** | Unlimited | Soft gate — warns |
-| **Agent cycle time (Time limit)** | 30–240 min per agent (default 45) | Warnings at 15 and 8 min left, earlier for a slow model. At the limit the cycle is closed with a summary and a handoff, and the next cycle carries on in the same thread |
+| **Agent cycle time (Time limit)** | 30–240 min per agent (default 90) | Warnings at 15 and 8 min left, earlier for a slow model. At the limit the cycle is closed with a summary and a handoff, and the next cycle carries on in the same thread |
 | **Wait for one model reply** | 10 min (20 on a local model) | Cycle stopped; counts toward the circuit breaker |
 | **Same tool call with the same result** | 6 times within the last 20 tool calls | Agent told at 3, cycle stopped at 6; counts toward the circuit breaker |
 | **Cycle output (runaway)** | 2500 lines or 2048 KB in 15 min, per agent | Cycle stopped, the agent's tasks frozen, Primary User told |
@@ -258,6 +260,7 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 > | **2026.08** | Vendor-agnostic catalog layers and first-login COA assign. See [Models](docs/models.md). |
 > | **2026.09** | **Live voice calls** — COA calls you in the VersaVoice app over OpenAI GPT-Live, with the harness answering every request. |
 > | **2026.10** | **ElevenLabs Eleven v4** — agent voice replies and VersaVoice Neural Voice move to Eleven v4 (Enhanced) and v4 Turbo (Standard): richer emotional delivery, Standard voice in 78 of the 93 languages. |
+> | **2026.11** | **New flagship models** — Claude Fable 5.2, Claude Opus 5.5, Gemini 4 Carbon and Hydrogen, GPT-6.1 Sol and GPT-6 Sol, each on its provider's key and through OpenRouter, with web search by the model itself. Claude models cost less: repeated input is billed at the cached price. An agent keeps its conversation when its model changes. See [Models](docs/models.md). |
 
 ## Privacy & Terms of Service
 
