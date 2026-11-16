@@ -42,6 +42,7 @@ from privilege_guard import (  # noqa: E402
 )
 from identity import provision_identity
 from comms import fetch_inbox, send_message, mark_message_processed, build_attachments
+import message_attachments
 from model_hf_ingest import (
     CLASS_VLM,
     HfIngestError,
@@ -10142,22 +10143,34 @@ def message_get(agent_uid, unread, last_n_minutes, last_n_count, limit, contact)
 @click.argument("contact_uid")
 @click.argument("text")
 @click.option("--mode", default="typed", type=click.Choice(["typed", "translate", "speak", "speak_translated"]))
-@click.option("--media", "media_paths", multiple=True, help="Path to media file to attach (repeatable)")
+@click.option("--media", "--file", "media_paths", multiple=True,
+              help="Path to a picture (--media) or a file such as a PDF, spreadsheet or ZIP (--file) to attach (repeatable)")
 @click.option("--markdown", "markdown_paths", multiple=True, help="Path to markdown file to attach (repeatable)")
+# The old spelling: shipped skills named it until 3.9.1, and agents carry it in memories and summaries.
+@click.option("--markdown-paths", "markdown_paths_old", multiple=True, hidden=True)
 @click.option("--url", "urls", multiple=True, help="URL to attach (repeatable)")
-def message_send(contact_uid, text, mode, media_paths, markdown_paths, urls):
+def message_send(contact_uid, text, mode, media_paths, markdown_paths, markdown_paths_old, urls):
     """Send a message via REST Comms Adapter. Returns JSON.
 
     VV-gated routing: when VersaVoice is disabled (setup.ini [versavoice] enabled=false),
     outbound messages are auto-routed as internal SQLite records instead of calling the
     VV REST API. Agents are completely unaware of this routing decision.
     """
+    markdown_paths = tuple(markdown_paths) + tuple(markdown_paths_old)
+    to_versavoice = _is_vv_enabled()
+    # A message goes with every attachment it was given, or not at all (state_message_body.md rule 11).
+    cannot_attach = message_attachments.problems(media_paths, markdown_paths, urls,
+                                                 to_versavoice=to_versavoice)
+    if cannot_attach:
+        json_response(False, error=message_attachments.refusal(cannot_attach))
+        sys.exit(1)
     # ── VV-Gated Routing ──
     # When VV is disabled, route outbound messages internally instead of
     # calling the VV REST API. The agent is completely unaware of this.
-    if not _is_vv_enabled():
+    if not to_versavoice:
         attachment_paths = list(media_paths) + list(markdown_paths)
-        _send_as_internal(contact_uid, text, mode, messages_db,
+        # This route has no link attachment: links go under the text.
+        _send_as_internal(contact_uid, message_attachments.text_with_links(text, urls), mode, messages_db,
                           attachment_paths=attachment_paths if attachment_paths else None)
         return
 
@@ -10193,12 +10206,18 @@ def message_send(contact_uid, text, mode, media_paths, markdown_paths, urls):
     # Build attachments payload if any flags provided
     attachments = None
     if media_paths or markdown_paths or urls:
+        not_built = []
         attachments = build_attachments(
             token, sub_account_id, contact_uid,
             media_paths=list(media_paths),
             markdown_paths=list(markdown_paths),
-            urls=list(urls)
+            urls=list(urls),
+            problems=not_built,
         )
+        if not_built:
+            # For example an upload the server refused. The message must not go without it.
+            json_response(False, error=message_attachments.refusal(not_built))
+            sys.exit(1)
         if not attachments:
             attachments = None  # Don't send empty array
     

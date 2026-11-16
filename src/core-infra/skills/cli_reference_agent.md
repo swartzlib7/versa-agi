@@ -142,13 +142,16 @@ Spawn context may include **`TAGGED PROJECT IDS`** / **`TAGGED TASK IDS`** (IDs 
 
 **Modes**: `typed` (text as-is), `translate` (AI translation), `speak` (TTS same-language), `speak_translated` (TTS + translation)
 
-**Attachment flags** (repeatable, max 10 total):
+**Attachment flags** (repeatable, max 10 total). Code, commands and logs go in a `--markdown` file, never in the message text, typed or spoken:
 
 | Flag | Accepts | Behavior |
 |---|---|---|
-| `--media` | File path | Uploads file, attaches download URL |
-| `--markdown` | File path | Reads `.md` content inline as text |
-| `--url` | URL string | Passes URL directly |
+| `--media` | File path | A picture: JPEG, PNG, GIF, WebP or HEIC, 20 MB each. Uploaded, then attached |
+| `--file` | File path | A file to keep or open elsewhere: PDF, Word, Excel, CSV, JSON, INI, TXT, Markdown or ZIP, 20 MB each. The same option as `--media` |
+| `--markdown` | File path | A text file written as Markdown, 5 MB each. Its text is sent with the message; the file name is the title shown |
+| `--url` | Web address | Starts with `http://` or `https://` |
+
+Any other kind of file (audio, video, a program, another kind of archive) cannot be attached. If an attachment is missing, the wrong kind or too large, the send is refused and nothing goes out.
 
 ```bash
 # Example: send with media, markdown, and URL attachments
@@ -403,7 +406,8 @@ Use for: requesting build tools, libraries, or runtime dependencies that your wo
 |---|---|---|
 | VV API rate | 60 req/min | Sleeps when approaching limit |
 | Message text | 2048 chars | Hard block at send |
-| Attachments | 10 per message, 50MB per file | Hard block |
+| Attachments sent | 10 per message; a picture or file 20 MB, a Markdown document 5 MB | The send is refused |
+| Attachments received | 50 MB per file | Larger files are not downloaded |
 | Concurrent spawns | 3 per tick | Excess agents queued for next tick |
 | Circuit Breaker | 5 consecutive / 20 per hour | Auto-freezes agent, sends notification |
 

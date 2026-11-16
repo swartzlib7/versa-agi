@@ -614,7 +614,11 @@ def agictl_task(command: str) -> str:
 class MessageInput(BaseModel):
     command: str = Field(description=(
         "The full agictl message subcommand. "
+        "The text of a message to a person is plain conversation: never put code, commands, logs or "
+        "file paths in it, in any mode. Write them to a Markdown file in your workspace and attach it "
+        "with --markdown <path>; attach links with --url. A picture goes in --media; a PDF, spreadsheet or ZIP in --file. "
         "Examples: 'message send UID \"Hello!\" --mode typed', "
+        "'message send UID \"The script is ready. I attached it.\" --mode typed --markdown workspace/script.md', "
         "'message get SUB_ACCOUNT_UID --unread', 'message get SUB_ACCOUNT_UID --last-n-count 10', "
         "'message internal agent-name \"message text\"', "
         "'message mark-processed MSG_ID'."
@@ -623,8 +627,15 @@ class MessageInput(BaseModel):
 @tool("agictl_message", args_schema=MessageInput)
 def agictl_message(command: str) -> str:
     """Send and receive messages via VersaVoice or internal agent channels.
+    The text of a message to a person is plain conversation. Code, commands, logs and file paths
+    never go in the text, typed or spoken: write them to a Markdown file in your workspace and
+    attach it with --markdown <path>. Links go in --url. A picture goes in --media;
+    a file to keep (PDF, Word, Excel, CSV, ZIP) goes in --file.
+    A send with an attachment that cannot be attached is refused and nothing goes out.
     Examples:
       - 'message send UID "Hello!" --mode typed' — send to VersaVoice contact
+      - 'message send UID "The script is ready. I attached it." --mode typed --markdown workspace/script.md'
+        — code or long detail goes in the attached file, not in the text
       - 'message get SUB_ACCOUNT_UID --unread' — unprocessed inbound messages
       - 'message get SUB_ACCOUNT_UID --contact UID --last-n-count 10' — conversation history
       - 'message internal agent-name "message"' — send to another agent

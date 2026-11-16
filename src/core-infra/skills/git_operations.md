@@ -27,7 +27,7 @@ When assigning an agent to a git project for the **first time**:
 
 1. Read the agent's public key: `cat ~/.ssh/versa_agi_ed25519.pub`
 2. Write the key content to a markdown file (for attachment)
-3. Send a message to the Primary User with the MD file attached (`--markdown-paths`), requesting they add it as a **deploy key** on the Git platform
+3. Send a message to the Primary User with the MD file attached (`--markdown <path>`), requesting they add it as a **deploy key** on the Git platform
 4. Create a tracking task: `agictl task add "PU: Add SSH deploy key for {agent} on {platform}"`
 5. Snooze the task: `agictl task snooze <id> 5` (check back in 5 minutes)
 6. **Do not attempt git push operations until the PU confirms the key is added**

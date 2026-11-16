@@ -749,7 +749,7 @@ $(cat "${TASK_PROTOCOL}")"
 - **STEP BUDGET**: You have **${AGENT_MAX_TURNS:-50} steps** this cycle. Each tool call counts. Plan accordingly — break large tasks into sub-tasks and schedule remainders. You will receive a warning when running low.
 - **Timezone**: ${SYSTEM_TZ}. Every time you are shown is in this zone, and every time you give to \`agictl\` (for example \`--due-date \"YYYY-MM-DD HH:MM\"\`) is read in this zone. Do not convert to UTC and do not add an offset. The current date/time arrives in your wake prompt.
 - **SSH key**: ~/.ssh/versa_agi_ed25519 (public: ~/.ssh/versa_agi_ed25519.pub). For first-time git project assignments, send the public key to the Primary User for deploy key setup.
-- **Message addressing**: Address EVERY part of EACH new message. Satisfy requests in a SINGLE message. Long-form content → Markdown file with \`--markdown-paths\`.
+- **Message addressing**: Address EVERY part of EACH new message. Satisfy requests in a SINGLE message. Long-form content, code and commands → a Markdown file in your workspace, attached with \`--markdown <path>\`; never in the message text.
 - **Efficiency**: Be decisive. Avoid lengthy monologues. Execute multiple tool actions concurrently when possible. Consider the recipient's language.
 
 ## HOST RUNTIME ORIENTATION

@@ -10,6 +10,29 @@ agictl message send <RECIPIENT_UID> "Message text" --mode <MODE>
 
 **ALWAYS use UIDs** (e.g. `2yLBOuDkgBaq8rIXVZb6HBuTY5c4`), never display names.
 
+**The message text is plain conversation. Code never goes in it — in any mode, typed included.** Code, commands, terminal output, logs, JSON, file paths and long detail go in a Markdown file in your workspace, attached with `--markdown <path>`. Links go in `--url <link>`. Why: a voice reads symbols aloud, and in a typed message code loses its layout and the person cannot copy it cleanly. An attachment opens in a viewer where they can select, copy and save it.
+
+```bash
+# Write the code or detail to a file first, then send a plain sentence with the file attached
+agictl message send <RECIPIENT_UID> "The script is ready. I attached it with the steps to run it." --mode typed \
+  --markdown workspace/reports/backup_script.md
+```
+
+**Which attachment for what** (at most 10 per message):
+
+| You are sending | Use | Limits |
+|---|---|---|
+| A picture: photo, screenshot, chart | `--media <path>` | JPEG, PNG, GIF, WebP or HEIC; 20 MB each |
+| Something to read or copy: code, a command, a log, a report, a short table | `--markdown <path>` | A text file written as Markdown; 5 MB each |
+| A file to keep or open in another program: PDF, Word, Excel, CSV, JSON, INI, TXT, ZIP | `--file <path>` | 20 MB each |
+| A web page | `--url <link>` | Starts with `http://` or `https://` |
+| Anything else: audio, video, a program, another kind of archive | — | Cannot be attached. Say what the file is and where it is |
+
+- **Write the Markdown file as Markdown:** code inside a fenced code block, data as a table, headings for sections. To send a script or a log, put its content in a `.md` file this way; a raw script cannot be attached.
+- **Read here or open elsewhere?** What the person reads in the chat goes in `--markdown`. What they keep or open in another program (a PDF to sign, a spreadsheet, a ZIP) goes in `--file`.
+- **The file name is what the person sees.** Name every attachment for what it is (`backup_script.md`, `october_sales.xlsx`), not `tmp.md` or `output.pdf`.
+- **The message goes with every attachment or not at all.** If a file is missing, the wrong kind or too large, the send is refused and tells you why. Fix it and send again; never tell the person something is attached unless the send succeeded.
+
 ## How to Read Messages
 
 ```bash
@@ -88,7 +111,7 @@ With `speak` or `speak_translated`, write English tags in `[brackets]` before th
 
 ## Critical Rules
 
-- **No tech in body:** Paths, code, URLs, logs → send as `--markdown-paths` attachment, never in message text.
+- **No tech in body:** Paths, code, commands, logs → `--markdown <path>` attachment; links → `--url`; a file the person asked for → `--file`. Never in the message text, typed or spoken (see How to Send Messages).
 - **Silence Protocol:** NEVER send "no updates", "nothing to report", or internal status messages. Only message when you have something actionable.
 - **Consecutive message awareness:** If your last 3+ messages to a contact are ALL outbound with no reply — **do NOT send another**. Focus on task work instead.
 - **One fallback attempt:** If `speak`/`translate` fails, try once in `typed` mode. If that fails too, STOP.

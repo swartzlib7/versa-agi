@@ -277,13 +277,16 @@ agictl message conversation-context <sub_account_uid> [sponsor_uid]  # Build con
 > - `message delete` removes a VersaVoice message from your VV cloud space and its local copy. The other participant's copy is preserved.
 > - `message delete-local` removes messages from this machine's database only, and you run it yourself when the Primary User asks. It covers the internal messages between agents (`--channel internal`), the local copies of VersaVoice messages from the Primary User or any contact (`--channel vv`), or both (the default). `--agent <name>` takes everything that agent sent and received, for you or for any sub-agent. Unread messages are kept unless `--include-unread`; a message still waiting to be sent is always kept. Run it with `--dry-run` first: it gives the count for each kind. Nothing is deleted in VersaVoice.
 
-**Attachment flags** (all multi-value — repeat the flag for each file/URL, max 10 total):
+**Attachment flags** (all multi-value — repeat the flag for each file/URL, max 10 total). Code, commands and logs go in a `--markdown` file, never in the message text, typed or spoken:
 
 | Flag | Type | Accepts | Behavior |
 |---|---|---|---|
-| `--media` | File path | Repeatable | Uploads file via `/attachments/upload`, attaches download URL |
-| `--markdown` | File path | Repeatable | Reads `.md` content inline, attaches as raw text |
-| `--url` | URL string | Repeatable | Passes URL directly |
+| `--media` | File path | Repeatable | A picture: JPEG, PNG, GIF, WebP or HEIC, 20 MB each. Uploaded, then attached |
+| `--file` | File path | Repeatable | A file to keep or open elsewhere: PDF, Word, Excel, CSV, JSON, INI, TXT, Markdown or ZIP, 20 MB each. The same option as `--media` |
+| `--markdown` | File path | Repeatable | A text file written as Markdown, 5 MB each. Its text is sent with the message; the file name is the title shown |
+| `--url` | Web address | Repeatable | Starts with `http://` or `https://` |
+
+Any other kind of file (audio, video, a program, another kind of archive) cannot be attached. If an attachment is missing, the wrong kind or too large, the send is refused and nothing goes out.
 
 ```bash
 # Example: send with 2 media files, 1 markdown, and 1 URL
@@ -777,7 +780,8 @@ sudo agictl pkg remove <name>                         # Remove a package from th
 | **Active agents** | Unlimited | `agent activate` (soft gate) | Warns if > 3 but allows activation |
 | **Circuit Breaker** | 5 consecutive / 20 per hour | `lifeline.sh` + `setup.ini` | Auto-freezes agent, sends VV notification. Configurable via agitop ⚙ System Settings |
 | **Message text** | 2048 chars | VV Cloud Function | Hard block at send |
-| **Attachments** | 10 per message, 50MB per file | `comms.py` / VV CF | Hard block |
+| **Attachments sent** | 10 per message; a picture or file 20 MB, a Markdown document 5 MB | `message_attachments.py` / VV CF | The send is refused |
+| **Attachments received** | 50 MB per file | `comms.py` | Larger files are not downloaded |
 
 > **Concurrency model**: You can activate any number of agents, but the Lifeline only spawns **3 per CRON tick** (Gemini free tier). Remaining agents are queued and run on the next tick.
 

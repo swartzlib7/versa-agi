@@ -13,10 +13,12 @@ from urllib.parse import urlparse
 import sqlite3
 from rich.console import Console
 
+import message_attachments
+
 console = Console()
 
 VV_API_BASE = "https://us-central1-versavoice-s777.cloudfunctions.net/api/v1"
-MAX_FILE_SIZE = 52428800 # 50MB
+MAX_FILE_SIZE = 52428800 # 50MB, one inbound file. Outbound limits: message_attachments.py
 
 # ── Rate Limiter (VV API: 60 req/min) ──
 # Use 55 as effective limit with 5-request safety margin
@@ -380,14 +382,20 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
         console.print(f"[bold red]Database Error:[/bold red] {str(e)}")
         return False, 0
 
-def upload_media(token, sub_account_id, recipient_id, file_path):
-    """Upload a media file to VersaVoice via /attachments/upload. Returns {downloadUrl, meta} or None."""
+def upload_media(token, sub_account_id, recipient_id, file_path, problems=None):
+    """Upload a media file to VersaVoice via /attachments/upload. Returns {downloadUrl, meta} or None.
+
+    A failure is added to `problems` (when given) in words the sending agent can act on.
+    """
     if not os.path.isfile(file_path):
         console.print(f"[red]File not found: {file_path}[/red]")
+        if problems is not None:
+            problems.append(f"{file_path}: there is no file at this path.")
         return None
     
     file_name = os.path.basename(file_path)
-    mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    mime_type = (message_attachments.media_mime(file_path)
+                 or mimetypes.guess_type(file_path)[0] or "application/octet-stream")
     
     with open(file_path, 'rb') as f:
         data_b64 = base64.b64encode(f.read()).decode('ascii')
@@ -404,6 +412,8 @@ def upload_media(token, sub_account_id, recipient_id, file_path):
     if not response or not response.get("downloadUrl"):
         err = response.get("message", str(response)) if response else "Upload failed"
         console.print(f"[red]Media upload failed ({file_name}): {err}[/red]")
+        if problems is not None:
+            problems.append(f"{file_name}: the upload was refused ({err}).")
         return None
     
     return {
@@ -411,20 +421,22 @@ def upload_media(token, sub_account_id, recipient_id, file_path):
         "meta": response.get("meta", {"fileName": file_name, "mimeType": mime_type})
     }
 
-def build_attachments(token, sub_account_id, recipient_id, media_paths=None, markdown_paths=None, urls=None):
+def build_attachments(token, sub_account_id, recipient_id, media_paths=None, markdown_paths=None, urls=None,
+                      problems=None):
     """Build a VV attachments array from local files and URLs.
     
     - media_paths: list of file paths → uploaded via /attachments/upload
     - markdown_paths: list of .md file paths → read content inline
     - urls: list of URL strings → passed directly
     
-    Returns list of attachment dicts or empty list.
+    Returns list of attachment dicts or empty list. Each attachment that could not be built is
+    added to `problems` (when given); the caller then does not send (state_message_body.md rule 11).
     """
     attachments = []
     
     # Media: upload each file, get download URL
     for path in (media_paths or []):
-        result = upload_media(token, sub_account_id, recipient_id, path)
+        result = upload_media(token, sub_account_id, recipient_id, path, problems=problems)
         if result:
             meta = result["meta"]
             attachments.append({
@@ -441,6 +453,8 @@ def build_attachments(token, sub_account_id, recipient_id, media_paths=None, mar
     for path in (markdown_paths or []):
         if not os.path.isfile(path):
             console.print(f"[red]Markdown file not found: {path}[/red]")
+            if problems is not None:
+                problems.append(f"--markdown {path}: there is no file at this path.")
             continue
         with open(path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -460,9 +474,9 @@ def build_attachments(token, sub_account_id, recipient_id, media_paths=None, mar
             "meta": None
         })
     
-    if len(attachments) > 10:
+    if len(attachments) > message_attachments.MAX_ATTACHMENTS:
         console.print(f"[yellow]Warning: {len(attachments)} attachments exceeds max 10. Truncating.[/yellow]")
-        attachments = attachments[:10]
+        attachments = attachments[:message_attachments.MAX_ATTACHMENTS]
     
     return attachments
 

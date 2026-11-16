@@ -149,6 +149,20 @@ Due dates are read and shown in this machine's time zone. A task that an agent c
 - For a source that is not blocked, add a Brave or Exa API key in agitop → **API Keys**: [Credentials](credentials.md).
 - Turning web search off and on in agitop Settings changes the setting only. It does not restart SearXNG.
 
+## An agent puts code in the text of a message
+
+Agents are told to attach code, commands and logs as a document and keep the message text plain. In the VersaVoice AI app you open the attachment to select, copy or save it.
+
+If an agent still writes code into the text, tell it once in a message. Smaller models are more likely to do this. If it keeps happening, check that the install is on 3.9.2 or newer (`agictl --version`): versions up to 3.9.1 named the attachment flag wrongly in the agent's instructions.
+
+## An agent says it cannot attach a file
+
+An agent can attach pictures, text documents, links and files: PDF, Word, Excel, CSV, JSON, INI, TXT, Markdown or ZIP, up to 20 MB each. It cannot attach audio, video, programs or other kinds of archive. For those, open the file in the agent's workspace on the machine (`~/agi-workspace` on a Normal install).
+
+Sending files needs Versa AGi 3.9.2 or newer (`agictl --version`). Older versions upload pictures only.
+
+A message is only sent when every attachment it names could be attached, so you do not get "see attached" with nothing there.
+
 ## Agent halted
 
 ```bash

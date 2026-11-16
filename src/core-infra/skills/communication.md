@@ -277,15 +277,15 @@ VersaVoice AI renders messages as **chat bubbles** — rich containers designed 
 
 > **The message body is for natural, conversational language ONLY. All technical content MUST be sent as attachments — never in the body.** This applies to EVERY mode (`typed`, `translate`, `speak`, `speak_translated`) without exception.
 
-This is the single most important messaging rule. Violations cause TTS audio misbehavior in voice modes and degrade readability in text modes. The platform is designed for human conversation — not terminal output.
+This is the single most important messaging rule. It holds for typed messages as much as spoken ones. In a voice mode the voice reads symbols aloud. In a typed message, code in a chat bubble loses its layout and the person cannot copy it cleanly; an attachment opens in a viewer where they can select, copy and save it. The platform is designed for human conversation — not terminal output.
 
 **The following MUST NEVER appear in the message body:**
 
 | Prohibited Content | Why | Correct Approach |
 |---|---|---|
 | File paths or filenames (`/home/coa/report.md`, `duties.md`) | Not natural language — garbles TTS, confuses readers | Refer by description: "the duties file", "the deployment script" |
-| Code snippets, CLI commands, terminal output | Technical notation — unreadable when spoken | Write to a file, attach with `--markdown` |
-| URLs or links | TTS reads them character-by-character | Attach with `--url` |
+| Code snippets, CLI commands, terminal output | Unreadable when spoken; in a typed bubble it loses its layout and is hard to copy | Write to a file, attach with `--markdown` |
+| URLs or links | A voice reads them character-by-character; an attached link opens with one tap | Attach with `--url` |
 | UIDs, hashes, API keys, auth tokens | Security risk and unreadable | Attach with `--markdown` if explicitly requested |
 | JSON, YAML, or structured data | Not conversational — belongs in a file | Write to workspace, attach with `--markdown` |
 
@@ -341,18 +341,50 @@ Voice messages should be written in proper paragraphs with natural flow. Bullets
 
 **Inbound viewing (mandatory):** Do not call `agictl_view_image` / `agictl_view_video` (or otherwise load an inbound file) unless the Primary User or a Connection **explicitly asked** in that message. Presence of a file is not a request. If they did ask, view before describing — do not invent content. IDE mode is exempt (no harness spawn).
 
-VersaVoice AI supports attachments alongside messages. Attachment types:
+VersaVoice AI supports attachments alongside a message. Choose by what you are sending:
 
-- **Media files** (`--media <path>`) — images, audio, documents
-- **Markdown content** (`--markdown <path>`) — structured text documents rendered inline
-- **URLs** (`--url <link>`) — links to external resources
+| You are sending | Use | Limits |
+|---|---|---|
+| A picture: photo, screenshot, chart | `--media <path>` | JPEG, PNG, GIF, WebP or HEIC; 20 MB each |
+| Something to read or copy: code, a command, a log, a report, a short table | `--markdown <path>` | A text file written as Markdown; 5 MB each |
+| A file to keep or open in another program: PDF, Word, Excel, CSV, JSON, INI, TXT, ZIP | `--file <path>` | 20 MB each |
+| A web page | `--url <link>` | Starts with `http://` or `https://` |
+| Anything else: audio, video, a program, another kind of archive | — | Cannot be attached. Say what the file is and where it is |
+
+`--media` and `--file` are the same option under two names; each takes a picture or a file.
 
 ```bash
-agictl message send <RECIPIENT_UID> "Here is the report" --mode typed --media /path/to/file.png --markdown /path/to/report.md
+agictl message send <RECIPIENT_UID> "Here is the report, with the chart and the signed contract." --mode typed \
+  --media /path/to/chart.png --markdown /path/to/october_sales.md --file /path/to/contract_signed.pdf
 ```
 
 > [!CAUTION]
-> **Maximum 10 attachments per message.** Exceeding this will truncate silently.
+> **Maximum 10 attachments per message.** An eleventh is refused, and nothing is sent.
+
+### Writing a Markdown attachment
+
+The person opens it in a viewer that renders Markdown and lets them select, copy and save.
+
+1. **Write it as Markdown.** Code and commands inside a fenced code block, with the language named. Data as a table. Headings for sections.
+2. **A script or a log goes inside a `.md` file**, in a code block. A raw script cannot be attached, and a raw file given to `--markdown` loses its layout when it is rendered.
+3. **Data: read here or open elsewhere?** A short table the person reads in the chat is a Markdown table. Data they will open in a spreadsheet goes as the CSV or Excel file itself with `--file`.
+4. **Name the file for what it is.** The file name without `.md` is the title the person sees: `backup_script.md`, `october_sales.md`. Never `tmp.md`, `output.md` or `report_final_v2.md`. The same holds for a file sent with `--file`.
+5. **One document per subject.** Several short pieces that belong together go in one file.
+
+### Sending a file
+
+`--file` sends the file itself: PDF, Word (`.doc`, `.docx`), Excel (`.xls`, `.xlsx`), CSV, JSON, INI, TXT, Markdown or ZIP, up to 20 MB each. The person downloads it or opens it in another program. Use it when they asked for the file, or when it is something to keep, sign or edit. Several files that belong together can go in one ZIP.
+
+### A file that cannot be attached
+
+Audio, video, programs and other kinds of archive cannot be attached.
+
+- If the content is text you can read (a script, a log), put the part the person needs in a Markdown file and attach that.
+- Otherwise say what the file is and which project it is in, and ask how they want it. The Primary User can open an agent's workspace on the machine.
+
+### When a send is refused
+
+`agictl message send` checks every attachment before anything is sent. A missing or empty file, a kind of file that cannot be attached, a file over its limit, a link that is not a web address or more than 10 attachments refuses the whole message with the reason. Nothing was sent: fix what it names and send again. Never tell the person something is attached unless the send answered success.
 
 ### Attachment Source Rules (MANDATORY)
 
@@ -378,8 +410,10 @@ When a user asks you to resend a file that was previously received:
 ### When to Include Attachments
 
 - **Reports or structured data** → attach as Markdown alongside a summary message
-- **References** → include URLs inline in the message text or attach with `--url`
-- **Media/screenshots** → attach the file rather than describing it
+- **References** → attach links with `--url`; never write them in the message text
+- **Code, commands, logs** → write to a Markdown file in your workspace and attach with `--markdown`, whatever the mode
+- **Pictures and screenshots** → attach with `--media` rather than describing them
+- **A file the person asked for or will keep** (PDF, spreadsheet, ZIP) → attach with `--file`
 
 ---
 

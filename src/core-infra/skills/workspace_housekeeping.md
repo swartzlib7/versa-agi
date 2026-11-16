@@ -94,7 +94,7 @@ In the same run, before messaging:
 
 ### 6. Report
 
-- **Sub-agents:** send COA the dated report **and** say the manifest was updated (`agictl message send` COA's UID, `--mode typed`, `--markdown-paths` the report file). Do **not** message the Primary User. One message. If the scan found zero leftovers and the manifest has no new Open rows, send a one-line "clean" to COA so the digest can close.
+- **Sub-agents:** send COA the dated report **and** say the manifest was updated (`agictl message send` COA's UID, `--mode typed`, `--markdown` the report file). Do **not** message the Primary User. One message. If the scan found zero leftovers and the manifest has no new Open rows, send a one-line "clean" to COA so the digest can close.
 - **COA:** wait until the other agents' reports are in (or 90 minutes after the scheduled start), merge into one digest, send **one** message to the Primary User. Translate from the manifests: what was removed, what was kept, what the PU already agreed, what still needs a decision. No internal task IDs unless useful. When the PU replies, COA writes the agreement onto the relevant agent’s manifest (or tells that agent to) before the next monthly run.
 
 ### 7. Close the task for next month (recurring only)
@@ -114,5 +114,5 @@ Set `--due-date` to the **first Friday of next month at 03:00:00**. Due dates ar
 agictl project list
 agictl task progress <id> "..."
 agictl task update <id> --due-date "YYYY-MM-DD 03:00:00"
-agictl message send <uid> "..." --mode typed --markdown-paths <report.md>
+agictl message send <uid> "..." --mode typed --markdown <report.md>
 ```

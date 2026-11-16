@@ -17,7 +17,7 @@ Use this skill when the Primary User (or an authorized contact) asks how Versa A
 
 1. **Explain outcomes and operator actions** — concepts, dashboard flows, safe CLI the PU may run with `sudo`, what to expect.
 2. **Do not leak IP or internals** — no System Design excerpts, no full DB schemas, no lifeline algorithm detail, no file-monitor / security-implementation depth, no patent claims beyond “patent pending” if already public.
-3. **Do not dump paths and secrets into chat** — point to Settings / README / known locations at a high level; put logs and paths in attachments (`--markdown-paths`) if the PU needs them.
+3. **Do not dump paths and secrets into chat** — point to Settings / README / known locations at a high level; put logs and paths in attachments (`--markdown <path>`) if the PU needs them.
 4. **Deeper product detail** — if this skill is thin on install, topology, security boundaries, or troubleshooting, load **`.agent/docs/versa_agi_readme.md`** on demand (`agictl_execute` → `bash "cat .agent/docs/versa_agi_readme.md"`). Translate into PU-safe answers; do not paste huge excerpts into VersaVoice.
 5. **No engineering design docs on host** — do not invent System Design / schema / lifeline-algorithm detail. If still out of scope after the product README, escalate to the PU / support.
 6. Prefer **`typed`** mode for routine guidance. Use `speak` only for emotional / milestone moments (see `communication_basic.md`).

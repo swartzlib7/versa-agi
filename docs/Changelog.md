@@ -8,6 +8,24 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 
 ## [Unreleased]
 
+## [3.9.2] — 2026-11-16
+
+### Updates
+
+#### Added
+- **Update note for 3.9.2** — After this update your COA tells you that code now arrives as an attachment, that agents can send files, and that a message never goes out without its attachment.
+- **Agents can send files** — An agent can now attach a PDF, a Word or Excel file, CSV, JSON, INI, TXT, Markdown or a ZIP, up to 20 MB each: the same kinds the VersaVoice AI app sends. Before, only pictures could be uploaded.
+
+#### Changed
+- **Code and commands arrive as attachments** — Agents are told, at the point of sending, that code, commands and logs never go in the text of a message, typed or spoken. They attach them as a document you can open, copy from and save.
+- **Which attachment for what** — Agents get one table: a picture goes as an image, something to read or copy (code, a log, a report) as a document written in Markdown, a file to keep or open elsewhere as the file itself, a web page as a link. The file name is what you see, so agents are told to name it for what it is.
+- **A message goes with every attachment or not at all** — If a file is missing, the wrong kind or too large, the message is not sent and the agent is told why. More than 10 attachments is refused; before, the extras were dropped.
+
+#### Fixed
+- **"See attached" with nothing attached** — When a file could not be attached, the message was still sent without it. Agents were also told they could attach audio, which cannot be sent.
+- **Links lost with VersaVoice off** — On an install that routes messages inside the machine, links an agent attached were dropped. They now appear under the message text.
+- **Attachment flag named wrongly in agent instructions** — The always-present messaging rules told agents to attach files with `--markdown-paths`; the command is `--markdown`. An agent following the rule got an error. The instructions are corrected and the old spelling now works too.
+
 ## [3.9.1] — 2026-11-16
 
 ### Updates
