@@ -44,11 +44,26 @@ A same-chat loop is optional and follows the tool, not the IDE:
 | Antigravity agent | No: one cycle per message |
 | Another tool | Only if it has its own command that wakes the same chat on a timer |
 
-Where a loop is possible, COA asks for the interval in minutes and how many idle wakes to allow before it stops. Everything else in the mode works the same in every IDE and with every tool. Do not treat a loop as how the mode works.
+Where a loop is possible, COA asks how often to wake (in minutes) and how the loop ends. Everything else in the mode works the same in every IDE and with every tool. Do not treat a loop as how the mode works.
+
+## Leaving a loop running
+
+You can leave the chat open and have COA check for work on a timer, for example every 15 minutes for a working day.
+
+- **What a check does.** One command, `agictl agent ide tick coa`, tells COA whether anything is waiting: new messages from anyone, and her tasks that have come due. Nothing waiting: she ends the turn in one line. Something waiting: she handles it as in a normal work cycle.
+- **How a loop ends.** After a fixed number of hours, after a number of quiet checks in a row, or whichever comes first. You choose when it starts. The system keeps the count, not the chat, so a long session does not lose track.
+- **What happens when it runs out.** By default COA closes the session: she writes what she did to her memory and task journals, sends you one message (what she did, that the loop has ended, that IDE mode is off), and turns IDE mode off, so Lifeline takes over. She sends no closing notes to anyone else. To come back, turn the mode on again. If you would rather she only stop the loop and leave the mode on, say so when you start it. Telling her to stop in the chat ends only the loop.
+- **If the session was not closed.** When a loop has run out and the mode is still on 45 minutes later, Lifeline sends you a message. It does not turn the mode off for you.
+- **Your own messages.** Write in the chat at any time. COA follows your message; the loop carries on.
+- **Sub-agents carry on as usual.** Only COA is held while IDE mode is on. Her inbox still fills; nobody but her picks up her messages and due tasks.
+- **If the loop stops ticking** (the chat was closed, the tool's loop ended, the computer slept), Lifeline sends you one message after two missed checks, saying what is waiting. Open the chat again, or turn the mode off and Lifeline takes over.
+- **Cost.** Each check is one turn of the IDE chat, billed by the tool you use (not by Versa AGi's providers). At 15 minutes that is 32 turns in 8 hours; at 30 minutes, 16.
 
 ## Every turn
 
-COA must run `agictl agent ide status coa` first. If the mode is off, it stops. If `message` reports Lifeline cycles since the last IDE session, it tells you and refreshes live state before using anything remembered from the chat.
+At the start of a chat COA runs `agictl agent ide status coa` and reads the session file once. If `message` reports Lifeline cycles since the last IDE session, it tells you and refreshes live state before using anything remembered from the chat.
+
+On every later message, and on every timer wake, COA first runs `agictl agent ide tick coa`. If the mode is off, it stops. It does not read the session file again, unless the mode was turned off and on under an open chat; the command says so.
 
 ## Disable
 
@@ -84,6 +99,8 @@ COA returns to normal Lifeline spawning on the next pulse. That is not `[coa] au
 | Connected, but `whoami` is not `coa` | You opened a local folder instead of a Remote-SSH window. |
 | COA acts like it has no history | Confirm the folder is `/home/coa/coa-env` (so `AGENTS.md` loads), IDE mode is on, and `.agent/versa-agi_ide.md` exists. Run `agictl agent ide status coa`. |
 | COA answered, then went quiet about tasks | The mode was turned off mid-chat. That is the per-turn check doing its job. |
+| After an update COA asks the old questions, or a loop does not end the way this page says | The chat is running in a tool process that started before the update and still holds the old rules. COA should notice at the start: `agictl agent ide status coa` names the installed rules version. If it does not, reload the IDE window (or start a new chat session of the tool) after turning IDE mode on. |
+| A message from Lifeline says COA's IDE loop is silent | The chat stopped waking. Open it again and ask COA to continue, or turn the mode off. Check the loop with `agictl agent ide status coa` (`loop`). |
 
 ## Related
 

@@ -1116,6 +1116,28 @@ ${AGENT_REGISTRY_CONTENT}
       sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='ide', status_message=COALESCE(NULLIF(status_message,''),'IDE mode (hold restored)'), updated_at=datetime('now') WHERE name='${AGENT_NAME}';" 2>/dev/null || true
     fi
     log "HOLD: ${AGENT_NAME} — IDE mode. Skipping spawn (inbox/utility/scripts continue)."
+    # A loop the Primary User left running in the IDE chat has gone silent
+    # (chat closed, loop ended, machine slept), or ran out without turning the
+    # mode off as agreed. Nobody starts this agent while the mode is on, so the
+    # Primary User is told, once each. The mode is never turned off from here
+    # (state_coa_ide_mode.md rules 5, 27 and 29).
+    _IDE_WATCH="$(AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_AGENTS_DB="${AGENTS_DB}" \
+      AGICTL_TASKS_DB="${TASKS_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
+      /usr/local/bin/agictl agent ide loop-watch "${AGENT_NAME}" 2>/dev/null || true)"
+    if [ "$(printf '%s' "${_IDE_WATCH}" | jq -r '.alert // false' 2>/dev/null || true)" = "true" ]; then
+      _IDE_WATCH_TEXT="$(printf '%s' "${_IDE_WATCH}" | jq -r '.text // empty' 2>/dev/null || true)"
+      # silent: ticks stopped. end_overdue: the loop ran out and the mode is still on (rule 29).
+      _IDE_WATCH_KIND="$(printf '%s' "${_IDE_WATCH}" | jq -r '.kind // "silent"' 2>/dev/null || echo silent)"
+      _IDE_PU_UID="$(jq -r '.primary_user.uid // empty' "${SYSTEM_CONFIG}" 2>/dev/null || true)"
+      if [ -n "${_IDE_PU_UID}" ] && [ -n "${_IDE_WATCH_TEXT}" ]; then
+        AGICTL_MESSAGES_DB="${MESSAGES_DB}" AGICTL_CONFIG="${SYSTEM_CONFIG}" \
+          /usr/local/bin/agictl message send "${_IDE_PU_UID}" "${_IDE_WATCH_TEXT}" --mode typed 2>/dev/null \
+          && log "NOTIFY: IDE loop ${_IDE_WATCH_KIND} — Primary User told" \
+          || log "WARN: IDE loop ${_IDE_WATCH_KIND} — could not tell the Primary User"
+      else
+        log "WARN: IDE loop ${_IDE_WATCH_KIND} — no Primary User uid or text to send"
+      fi
+    fi
     flock -u 200
     continue
   fi

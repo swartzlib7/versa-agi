@@ -102,6 +102,11 @@ agictl agent status show                              # Read your current status
 agictl agent status set <state> ["summary"]           # Write status + message to DB
 agictl agent ide status [coa]                         # IDE mode on/off + gap digest (COA-readable)
 agictl agent ide off [coa]                            # End IDE mode (COA or Primary User). Does not turn it on.
+agictl agent ide tick [coa] [--on-message]            # IDE mode: is there anything to do? Unread messages, due tasks, the loop, and "do": work | idle | stop
+                                                      #   --on-message: the Primary User wrote; not counted as a tick. "do" may also be close (the loop ran out: end the session)
+agictl agent ide loop start [coa] --every <min> [--hours <n>] [--idle-ticks <n>] [--at-end off|stay]   # Terms of a same-chat loop; the system counts the ticks
+                                                      #   --at-end off (default): when the loop runs out, tick answers "close": close-out, one message to the PU, ide off
+agictl agent ide loop stop [coa]                      # Forget the loop's terms (disarm the tool's own loop as well)
 sudo agictl agent ide on [coa]                        # Enable IDE mode (Primary User only)
 agictl agent count [--active]                         # Count agents (default: all)
 agictl agent summary                                  # Markdown table for context injection (includes Status column)

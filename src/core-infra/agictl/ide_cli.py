@@ -4,6 +4,11 @@ on is Primary User only (empty AGICTL_AGENT_USER AND euid 0).
 off is PU or COA (wrapper stamp AGICTL_AGENT_USER=coa). Other agents refused.
 status stays COA-readable — the per-turn self-check depends on it.
 Do not "harden" status to PU-only later; that kills containment silently.
+
+tick, loop start and loop stop are PU or COA, like off. tick is what COA runs
+on every timer wake and on every message: one answer for "is there anything
+to do" (state_coa_ide_mode.md rules 24 to 27; the rules are in ide_loop.py).
+loop-watch is Lifeline's: it is refused for every agent.
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from pathlib import Path
 import click
 
 import local_time
+from agictl import ide_loop
 from agictl.platform_guard import detect_host_class, write_ssh_config_locally
 
 IDE_STATUS = "ide"
@@ -74,7 +80,18 @@ Match all
 """
 
 
-def register(agent_group, json_response):
+def register(agent_group, json_response, waiting=None):
+    """``waiting(name)`` returns {"messages": unread rows, "tasks": due tasks, "next_task": row or None}."""
+
+    def _waiting(name):
+        try:
+            found = waiting(name) if waiting else {}
+        except Exception:  # noqa: BLE001 — a tick must answer even when a database cannot be read
+            found = {"error": "messages or tasks could not be read"}
+        return {"messages": found.get("messages") or [], "tasks": found.get("tasks") or [],
+                "next_task": found.get("next_task"), "error": found.get("error", ""),
+                "pu_uid": found.get("pu_uid") or ""}
+
     @agent_group.group("ide")
     def ide():
         """Hold COA out of Lifeline and generate an IDE session seed."""
@@ -113,6 +130,8 @@ def register(agent_group, json_response):
         state = _read_state()
         state["last_on"] = now
         state["resume_pending"] = False
+        if not already:
+            state.pop("loop", None)   # a loop belongs to one session
         _write_state(state)
 
         gap = _autonomous_gap()
@@ -190,6 +209,7 @@ def register(agent_group, json_response):
             state["last_off"] = now
             state["session_minutes"] = _session_minutes(last_on, now)
             state["resume_pending"] = True
+            state.pop("loop", None)
             _write_state(state)
         json_response(
             True,
@@ -215,7 +235,175 @@ def register(agent_group, json_response):
             sys.exit(1)
         host = detect_host_class()
         gap = _autonomous_gap()
-        json_response(True, **_status_payload(name, host, gap, row=row))
+        payload = _status_payload(name, host, gap, row=row)
+        state = _read_state()
+        payload["loop"] = ide_loop.view(state.get("loop"), local_time.utc_now())
+        if payload["mode"] == "on":
+            # A tool keeps the door it loaded when its process started (rule 30).
+            payload["rules_version"] = _installed_door_version()
+            payload["message"] += ide_loop.door_notice(payload["rules_version"], str(AGENTS_DOOR))
+        if payload["mode"] == "on" and state.get("session_seen") != state.get("last_on"):
+            # This chat has now been told about this session (and its Lifeline gap): tick stays quiet.
+            state["session_seen"] = state.get("last_on")
+            _write_state(state)
+        json_response(True, **payload)
+
+    @ide.command("tick")
+    @click.argument("name", default="coa")
+    @click.option("--on-message", is_flag=True,
+                  help="The Primary User wrote in the chat: not counted as a tick; the idle count starts again")
+    def ide_tick(name, on_message):
+        """Is there anything to do? One answer: unread messages, due tasks, the loop, and what to do."""
+        _require_ide_off(json_response)   # the same callers as off: the Primary User or COA
+        name = _require_coa(name, json_response)
+        row = _agent_row(name)
+        mode_on = bool(row) and (row["status"] or "").strip() == IDE_STATUS and IDE_FILE.is_file()
+        now = local_time.utc_now()
+        state = _read_state()
+        found = _waiting(name) if mode_on else {"messages": [], "tasks": [], "next_task": None, "error": "",
+                                                "pu_uid": ""}
+        answer, loop_after = ide_loop.decide(
+            state.get("loop"), mode_on, len(found["messages"]), len(found["tasks"]), now,
+            on_message=on_message,
+        )
+        # The mode was turned off and on again since this chat last looked: the seed is new,
+        # and Lifeline cycles may have run in between. Said once (rules 14, 15).
+        notice = ""
+        if mode_on and state.get("session_seen") != state.get("last_on"):
+            banner = _autonomous_gap().get("banner") or ""
+            notice = ("IDE mode was turned on again since this chat last checked: a new session. "
+                      f"Read `.agent/{IDE_FILE_NAME}` again, once, before acting on anything remembered "
+                      "from this chat." + (f" {banner}" if banner else ""))
+        changed = loop_after != state.get("loop") or bool(notice)
+        if loop_after is None:
+            state.pop("loop", None)
+        else:
+            state["loop"] = loop_after
+        if notice:
+            state["session_seen"] = state.get("last_on")
+        if changed:
+            _write_state(state)
+        next_task = found["next_task"]
+        payload = {
+            "mode": "on" if mode_on else "off",
+            "do": answer["do"],
+            "say": answer["say"],
+            "messages": ide_loop.summarize_messages(found["messages"]),
+            "tasks_due": ide_loop.summarize_tasks(found["tasks"]),
+            "next_task_due": ({"id": next_task.get("id"), "title": next_task.get("title"),
+                               "due": local_time.show(next_task.get("due_date"))} if next_task else None),
+            "loop": ide_loop.view(loop_after, now),
+        }
+        if mode_on:
+            payload["rules_version"] = _installed_door_version()
+        if answer.get("last"):
+            payload["last"] = True
+        if answer["do"] == ide_loop.DO_CLOSE or (answer.get("last") and loop_after):
+            # The one message of an unattended close goes to the Primary User, who is not in the chat.
+            uid = found.get("pu_uid") or ""
+            payload["tell_primary_user"] = (f'agictl message send {uid} "<what you did; the loop has ended; '
+                                            f'IDE mode is off>" --mode typed' if uid else
+                                            "Primary User uid not found: use the uid in your seed.")
+        if notice:
+            payload["notice"] = notice
+        if found["error"]:
+            payload["warning"] = found["error"]
+        json_response(True, **payload)
+
+    @ide.group("loop")
+    def ide_loop_group():
+        """The terms of a same-chat loop. The system keeps them and counts the ticks."""
+
+    @ide_loop_group.command("start")
+    @click.argument("name", default="coa")
+    @click.option("--every", type=int, required=True, help="Minutes between ticks (5 to 120)")
+    @click.option("--hours", type=float, default=None, help="End after this many hours (up to 24)")
+    @click.option("--idle-ticks", type=int, default=None,
+                  help="End after this many ticks in a row with nothing to do")
+    @click.option("--at-end", type=click.Choice(ide_loop.AT_END_CHOICES), default=ide_loop.AT_END_OFF,
+                  show_default=True,
+                  help="When the loop runs out: 'off' closes the session and turns IDE mode off; "
+                       "'stay' ends only the loop")
+    def ide_loop_start(name, every, hours, idle_ticks, at_end):
+        """Set how often the chat is woken and how the loop ends. Arm the tool's own loop after this."""
+        _require_ide_off(json_response)
+        name = _require_coa(name, json_response)
+        row = _agent_row(name)
+        if not row or (row["status"] or "").strip() != IDE_STATUS:
+            json_response(False, error="IDE mode is off: there is no session to loop in.")
+            sys.exit(1)
+        error = ide_loop.terms_error(every, hours, idle_ticks)
+        if error:
+            json_response(False, error=error)
+            sys.exit(1)
+        now = local_time.utc_now()
+        state = _read_state()
+        state["loop"] = ide_loop.new_loop(every, hours, idle_ticks, now, at_end=at_end)
+        _write_state(state)
+        json_response(
+            True, loop=ide_loop.view(state["loop"], now),
+            next=(f"Arm this chat's own loop at {every} minutes with the prompt: "
+                  f"Run `agictl agent ide tick {name}` and do what its \"do\" and \"say\" tell you."),
+            at_end=("When the loop runs out you close the session and turn IDE mode off. Tell the Primary User."
+                    if at_end == ide_loop.AT_END_OFF else
+                    "When the loop runs out only the loop ends; IDE mode stays on until someone turns it off."),
+        )
+
+    @ide_loop_group.command("stop")
+    @click.argument("name", default="coa")
+    def ide_loop_stop(name):
+        """Forget the loop's terms. Disarm the tool's own loop as well."""
+        _require_ide_off(json_response)
+        name = _require_coa(name, json_response)
+        state = _read_state()
+        was_armed = bool(state.pop("loop", None))
+        if was_armed:
+            _write_state(state)
+        json_response(True, loop={"armed": False}, was_armed=was_armed)
+
+    @ide.command("loop-watch", hidden=True)
+    @click.argument("name", default="coa")
+    def ide_loop_watch(name):
+        """Lifeline only: has a running loop gone silent? ``alert`` is true once per silence."""
+        if (os.environ.get("AGICTL_AGENT_USER", "") or "").strip():
+            json_response(False, error="agictl agent ide loop-watch is Lifeline only.", alert=False)
+            sys.exit(1)
+        name = _require_coa(name, json_response)
+        state = _read_state()
+        loop = state.get("loop")
+        now = local_time.utc_now()
+        overdue = ide_loop.end_overdue_minutes(loop, now)
+        minutes = ide_loop.silent_minutes(loop, now)
+        if overdue and not loop.get("end_warned_at"):
+            # The loop was to turn the mode off and did not (rule 29). Said once; the mode is left on.
+            found = _waiting(name)
+            loop["end_warned_at"] = _utc_now()
+            state["loop"] = loop
+            _write_state(state)
+            json_response(
+                True, alert=True, kind="end_overdue", overdue_minutes=overdue,
+                text=ide_loop.end_overdue_text(loop, overdue, len(found["messages"]), len(found["tasks"])),
+            )
+            return
+        if not minutes or loop.get("warned_at"):
+            json_response(True, alert=False, silent_minutes=minutes, overdue_minutes=overdue)
+            return
+        found = _waiting(name)
+        loop["warned_at"] = _utc_now()
+        state["loop"] = loop
+        _write_state(state)
+        json_response(
+            True, alert=True, kind="silent", silent_minutes=minutes,
+            text=ide_loop.silence_text(loop, minutes, len(found["messages"]), len(found["tasks"])),
+        )
+
+
+def _installed_door_version() -> str:
+    """The version stamp of the door installed in the workspace ("" when it has none)."""
+    try:
+        return ide_loop.door_stamp(AGENTS_DOOR.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
 
 
 def _require_ide_on(json_response):

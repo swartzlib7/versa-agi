@@ -8,6 +8,18 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 
 ## [Unreleased]
 
+## [3.9.1] — 2026-11-16
+
+### Updates
+
+#### Added
+- **Update note for 3.9.1** — After this update your COA tells you about the IDE mode loop, and to reload an IDE window that was open before the update.
+- **Leave a loop running in IDE mode** — Your Chief Orchestrator Agent can check for work on a timer while the IDE chat stays open, for example every 15 minutes for a working day. One command tells it whether new messages or due tasks are waiting. You choose how the loop ends: after a number of hours, after a number of quiet checks in a row, or both. When it runs out, your agent writes down what it did, sends you one message and turns IDE mode off, unless you asked it to leave the mode on. If the loop stops ticking, or ends without the mode going off, Lifeline sends you a message. See [IDE mode](ide-mode.md).
+
+#### Changed
+- **IDE mode reads its session file once** — at the start of a chat, not on every message. Later messages start with one short check.
+- **IDE mode notices old rules** — A chat left open across an update kept following the rules it had loaded. The rules file now carries a version, and the agent is told at the start of a chat when its copy is old.
+
 ## [3.9.0] — 2026-11-14
 
 ### Updates

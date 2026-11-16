@@ -15585,9 +15585,23 @@ def pkg_install(name):
 
 
 
+def _ide_waiting(name: str) -> dict:
+    """What is waiting for COA right now: her unread mail and the tasks Lifeline would wake her for."""
+    from agent_reads import ids_for_spawned_agent, received_unread
+    config = get_config()
+    sub = str((config.get("versavoice") or {}).get("sub_account_id") or "").strip()
+    ids = ids_for_spawned_agent(name, get_agent_name(), sub)
+    return {
+        "messages": received_unread(messages_db, ids),
+        "tasks": tasks_reader.pending_for(name) if tasks_reader else [],
+        "next_task": tasks_reader.next_due_for(name) if tasks_reader else None,
+        "pu_uid": str((config.get("primary_user") or {}).get("uid") or "").strip(),
+    }
+
+
 try:
     from agictl import ide_cli
-    ide_cli.register(agent, json_response=json_response)
+    ide_cli.register(agent, json_response=json_response, waiting=lambda name: _ide_waiting(name))
 except ImportError:
     pass
 

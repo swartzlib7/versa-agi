@@ -2,6 +2,8 @@
 
 Standing rules (handshake, how you operate, close-out, same-chat loop) live in **`AGENTS.md`** at the workspace root. This file is the **seed**: point-in-time poise and live state. The LIVE SITUATION block below is superseded by the refresh in this file.
 
+**Read this file once, at the start of a chat.** Do not read it again on a later message or on a timer wake: `agictl agent ide tick coa` tells you what is waiting from then on (`AGENTS.md`).
+
 ## Refresh live state
 
 Do not trust the seed snapshot. After `agictl agent ide status coa` (see `AGENTS.md`), run these exactly as written:

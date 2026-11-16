@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.9.0-FF9800" alt="Versa AGi version 3.9.0">
+    <img src="https://img.shields.io/badge/version-3.9.1-FF9800" alt="Versa AGi version 3.9.1">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -260,7 +260,7 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 > | **2026.08** | Vendor-agnostic catalog layers and first-login COA assign. See [Models](docs/models.md). |
 > | **2026.09** | **Live voice calls** — COA calls you in the VersaVoice app over OpenAI GPT-Live, with the harness answering every request. |
 > | **2026.10** | **ElevenLabs Eleven v4** — agent voice replies and VersaVoice Neural Voice move to Eleven v4 (Enhanced) and v4 Turbo (Standard): richer emotional delivery, Standard voice in 78 of the 93 languages. |
-> | **2026.11** | **New flagship models** — Claude Fable 5.2, Claude Opus 5.5, Gemini 4 Carbon and Hydrogen, GPT-6.1 Sol and GPT-6 Sol, each on its provider's key and through OpenRouter, with web search by the model itself. Claude models cost less: repeated input is billed at the cached price. An agent keeps its conversation when its model changes. See [Models](docs/models.md). |
+> | **2026.11** | **New flagship models** — Claude Fable 5.2, Claude Opus 5.5, Gemini 4 Carbon and Hydrogen, GPT-6.1 Sol and GPT-6 Sol, each on its provider's key and through OpenRouter, with web search by the model itself. Claude models cost less: repeated input is billed at the cached price. In IDE mode the agent can check for messages and due tasks on a timer for a working day, then close the session itself. An agent keeps its conversation when its model changes. See [Models](docs/models.md). |
 
 ## Privacy & Terms of Service
 

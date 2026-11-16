@@ -450,20 +450,44 @@ class TasksReader:
         Deterministic task kinds (utility — TD-UTIL-001, script — TD-SCRIPT-001) are
         excluded: they run via their own lifeline runners and must never spawn the
         LLM agent."""
-        rows = self._query(
-            "SELECT COUNT(*) as c FROM tasks "
-            "WHERE ("
-            "  status = 'in_progress' "
-            "  OR (status IN ('planned', 'waiting', 'blocked') "
-            "      AND due_date IS NOT NULL "
-            "      AND due_date <= datetime('now') "
-            "      AND (wake_after IS NULL OR wake_after <= datetime('now')))"
-            ") "
-            "AND (task_kind IS NULL OR task_kind NOT IN ('utility', 'script')) "
-            "AND (assigned_to = ? OR assigned_to IS NULL)",
-            (agent,)
-        )
+        rows = self._query(f"SELECT COUNT(*) as c FROM tasks WHERE {self._PENDING_WHERE}", (agent,))
         return rows[0]["c"] if rows else 0
+
+    # One rule for "this agent has work now": count_pending (Lifeline's wake) and
+    # pending_for (COA's IDE tick) must never disagree.
+    _PENDING_WHERE = (
+        "("
+        "  status = 'in_progress' "
+        "  OR (status IN ('planned', 'waiting', 'blocked') "
+        "      AND due_date IS NOT NULL "
+        "      AND due_date <= datetime('now') "
+        "      AND (wake_after IS NULL OR wake_after <= datetime('now')))"
+        ") "
+        "AND (task_kind IS NULL OR task_kind NOT IN ('utility', 'script')) "
+        "AND (assigned_to = ? OR assigned_to IS NULL)"
+    )
+
+    def pending_for(self, agent: str, limit: int = 20) -> list[dict]:
+        """The tasks count_pending counts, most urgent first (state_coa_ide_mode.md rule 24)."""
+        return self._query(
+            f"SELECT id, title, status, priority, due_date, assigned_to FROM tasks WHERE {self._PENDING_WHERE} "
+            "ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END, "
+            "due_date ASC LIMIT ?",
+            (agent, limit),
+        )
+
+    def next_due_for(self, agent: str) -> dict | None:
+        """The open task of this agent that comes due next, or None."""
+        rows = self._query(
+            "SELECT id, title, status, priority, due_date FROM tasks "
+            "WHERE status IN ('planned', 'waiting', 'blocked') AND due_date IS NOT NULL "
+            "AND due_date > datetime('now') "
+            "AND (task_kind IS NULL OR task_kind NOT IN ('utility', 'script')) "
+            "AND (assigned_to = ? OR assigned_to IS NULL) "
+            "ORDER BY due_date ASC LIMIT 1",
+            (agent,),
+        )
+        return rows[0] if rows else None
 
     def count_due_blocked(self, agent: str) -> int:
         rows = self._query(
