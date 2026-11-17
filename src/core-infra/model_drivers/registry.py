@@ -171,6 +171,9 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
     # DR-ANTH-01 — direct Anthropic image input (Opus 5.5, Fable 5.2).
     _binding("claude-opus-5-5"),
     _binding("claude-fable-5-2"),
+    # DR-ANTH-02 — direct Anthropic image input (Sonnet 5.5, Sonnet 5), probed 2026-11-16.
+    _binding("claude-sonnet-5-5"),
+    _binding("claude-sonnet-5"),
     # DR-CM-08 — direct xAI image input (Grok 4.5, 4.6, 4.7).
     _binding("grok-4.5"),
     _binding("grok-4.6"),
@@ -206,6 +209,9 @@ _MODEL_DRIVER_ROWS: tuple[ModelDriver, ...] = (
     # DR-ANTH-01 — OpenRouter Claude image input (Opus 5.5, Fable 5.2).
     _binding("anthropic/claude-opus-5.5"),
     _binding("anthropic/claude-fable-5.2"),
+    # DR-ANTH-02 — OpenRouter Claude image input (Sonnet 5.5, Sonnet 5), probed 2026-11-16.
+    _binding("anthropic/claude-sonnet-5.5"),
+    _binding("anthropic/claude-sonnet-5"),
     # DR-LOC-01 — local SYCL chat vision (llama-server content parts).
     _binding("qwen3.6:35b"),
     _binding("qwen3.8:27b"),

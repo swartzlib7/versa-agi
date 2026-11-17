@@ -29,6 +29,10 @@ in the next. Anthropic continues such a reply, but rejects the pair once the
 reply is complete and a later request sends it again. ``settle_server_tools``
 takes the split pairs out of completed replies and leaves a note with the
 sources in their place.
+
+When Anthropic still answers that a server tool call has no result (B19), the
+cycle sends the request once more with the provider's tool parts of every
+completed reply left out (``ReplayGuard.drop_server_tools``).
 """
 
 from __future__ import annotations
@@ -45,6 +49,8 @@ REASONING_KWARGS = ("reasoning_details", "reasoning_content", "reasoning")
 EMPTY_REPLY = "(no text)"
 # Anthropic's answer when a record is replayed after its history changed.
 BINDING_ERROR_MARK = "bound to a different conversation"
+# Anthropic's answer when a replayed server tool call is not followed by its result.
+SERVER_TOOL_ERROR_MARKS = ("was found without a corresponding", "_tool_result")
 
 # wire: the request format of the model being called.
 WIRE_ANTHROPIC = "anthropic"
@@ -166,15 +172,27 @@ def _without_server_parts(message: Any, keep_waiting: bool = False) -> Any:
         return message
 
 
-def settle_server_tools(messages: list) -> list:
+def _has_server_parts(message: Any) -> bool:
+    content = getattr(message, "content", None)
+    if not _is_ai(message) or not isinstance(content, list):
+        return False
+    return any(_server_call_id(p) or _server_result_id(p) for p in content)
+
+
+def settle_server_tools(messages: list, every: bool = False) -> list:
     """Replies without the server tool pairs that are split across replies.
 
     Anthropic takes a server tool call without its result only in the newest
     reply, while that reply waits for one of our tools. Everywhere else a
     split pair is removed. In the newest reply the waiting call stays and a
     result that answers an earlier reply's call goes.
+
+    ``every``: whole pairs go as well (after Anthropic refused a request over
+    a server tool call, B19). A call the newest reply still waits for stays.
     """
     split = [_split_server_parts(m) for m in messages]
+    if every:
+        split = [(call, result or _has_server_parts(m)) for (call, result), m in zip(split, messages)]
     if not any(call or result for call, result in split):
         return messages
     last_ai = max((i for i, m in enumerate(messages) if _is_ai(m)), default=-1)
@@ -309,6 +327,12 @@ def is_binding_error(error: BaseException) -> bool:
     return BINDING_ERROR_MARK in str(error)
 
 
+def is_server_tool_error(error: BaseException) -> bool:
+    """The provider refused a replayed server tool call: it found no result for it."""
+    text = str(error)
+    return all(mark in text for mark in SERVER_TOOL_ERROR_MARKS)
+
+
 class ReplayGuard:
     """Removes reasoning records the model being called cannot accept."""
 
@@ -326,6 +350,7 @@ class ReplayGuard:
         self._stripped: set[str] = set()
         self._sent: list[str] | None = None  # fingerprints of the last request
         self._strip_all_next = False
+        self._drop_server_tools = False
 
     @property
     def active(self) -> bool:
@@ -335,13 +360,21 @@ class ReplayGuard:
         """Remove every record on the next request (after a binding error)."""
         self._strip_all_next = True
 
+    def drop_server_tools(self) -> None:
+        """From the next request on, completed replies go without the provider's tool parts."""
+        self._drop_server_tools = True
+
+    @property
+    def server_tools_dropped(self) -> bool:
+        return self._drop_server_tools
+
     @staticmethod
     def _key(message: Any, prints: str) -> str:
         return str(getattr(message, "id", None) or prints)
 
     def apply(self, messages: list) -> list:
         if self.wire == WIRE_ANTHROPIC:
-            messages = settle_server_tools(messages)
+            messages = settle_server_tools(messages, every=self._drop_server_tools)
         if not self.active:
             if not self.wire:
                 return messages

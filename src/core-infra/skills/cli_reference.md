@@ -614,12 +614,17 @@ agictl model params clear <scope>                     # Remove custom override (
 ### model live-call — call-capable models (Live Call)
 
 ```bash
-agictl model live-call list                           # Shipped, effective, and selectable call models + settings
+agictl model live-call list                           # Call models: order of preference, suggested, selectable, settings
+agictl model live-call use <key>                      # PU/root/COA — choose the call model (call-capable, enabled, keyed)
+agictl model live-call use --reasoning medium         # PU/root/COA — reasoning on a call: auto | low | medium | high
+agictl model live-call use <key> --reasoning auto     # both at once
 sudo agictl model live-call set <key>                 # PU/root — mark a catalog key call-capable
 sudo agictl model live-call unset <key>               # PU/root — remove it (shipped keys are overridden in the site layer)
 ```
 
-Shipped call-capable keys live in `models.ini [catalog_live_call]` (Gemini 3.7 Flash, Grok 4.6, and their OpenRouter aliases); site changes go to `[catalog_live_call_custom]` and survive `--update`. agitop **Model Manager → ✎ Edit → Call-capable** checkbox sets it for that model.
+**COA and `use`:** only when the Primary User asks. Tell them what the call model was and what it is now (the command answers both). It applies from your next cycle. You cannot mark a model call-capable or change any other Live Call setting; those are the Primary User's (agitop → System Settings → Live Call).
+
+Shipped call-capable keys live in `models.ini [catalog_live_call]`, best first: Claude Sonnet 5.5, Gemini 4 Hydrogen, Claude Opus 5.5, Claude Sonnet 5, Claude Opus 4.8, Grok 4.6, Gemini 3.7 Flash, each as the provider's own key and then its OpenRouter alias. `suggested` in `list` is the first of them that can run here. `--reasoning auto` (stock) uses the level measured for each shipped model; site changes go to `[catalog_live_call_custom]` and survive `--update`. agitop **Model Manager → ✎ Edit → Call-capable** checkbox sets it for that model.
 
 ### provider — model providers (CRUD)
 

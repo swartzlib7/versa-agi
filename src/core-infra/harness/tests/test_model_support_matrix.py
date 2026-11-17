@@ -50,6 +50,8 @@ EXPECTED = {
     "claude-opus-4-8":  ("", A, False, 64000, True, "", AN, False, "none"),
     "claude-opus-5-5":  ("", A, False, 64000, True, BOUND, AN, True, "high"),
     "claude-fable-5-2": ("", A, False, 64000, True, BOUND, AN, True, "high"),
+    "claude-sonnet-5-5": ("", A, False, 64000, True, BOUND, AN, True, "high"),
+    "claude-sonnet-5":   ("", A, False, 64000, True, "", AN, True, "high"),
     # OpenRouter
     "x-ai/grok-4.6": ("", "", True, 0, False, "", "", True, "high"),
     "x-ai/grok-4.7": ("", "", True, 0, False, "", "", True, "high"),
@@ -64,6 +66,8 @@ EXPECTED = {
     "anthropic/claude-opus-4.8":  ("", "", False, 0, False, "", OR, False, "none"),
     "anthropic/claude-opus-5.5":  ("", "", False, 0, True, BOUND, OR, True, "high"),
     "anthropic/claude-fable-5.2": ("", "", False, 0, True, BOUND, OR, True, "high"),
+    "anthropic/claude-sonnet-5.5": ("", "", False, 0, True, BOUND, OR, True, "high"),
+    "anthropic/claude-sonnet-5":   ("", "", False, 0, True, "", OR, True, "high"),
     "deepseek/deepseek-v4-flash-0731": ("", "", True, 0, False, "", "", False, "high"),
     "z-ai/glm-5.3-flash": ("", "", True, 0, False, "", "", True, "max"),
 }
@@ -195,6 +199,22 @@ class TestSupportMatrix(unittest.TestCase):
             text = handle.read()
         missing = [key for key in self.shipped if f"`{key}`" not in text]
         self.assertEqual(missing, [])
+
+    def test_the_live_call_table_is_the_stock_list(self):
+        """§3.3: same keys, same order, same level on Auto as the stock file."""
+        if not os.path.isfile(MATRIX_DOC):
+            self.skipTest("design documents are not part of an installation")
+        with open(MATRIX_DOC, encoding="utf-8") as handle:
+            text = handle.read()
+        start = text.index("### 3.3 Shipped Live Call models")
+        rows = []
+        for line in text[start:text.index("\n---\n", start)].split("\n"):
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) == 7 and cells[3].startswith("`"):
+                rows.append((cells[3].strip("`"), cells[4]))
+        ini = _stock()
+        stock = [(key, ini.get("catalog_live_call_reasoning", key)) for key in ini.options("catalog_live_call")]
+        self.assertEqual(rows, stock)
 
 
 if __name__ == "__main__":

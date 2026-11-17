@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.9.2-FF9800" alt="Versa AGi version 3.9.2">
+    <img src="https://img.shields.io/badge/version-3.9.3-FF9800" alt="Versa AGi version 3.9.3">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -179,9 +179,9 @@ COA calls you in the **VersaVoice app** (Android, iOS, web) to settle a decision
 
 - VersaVoice enabled, with the app signed in on your phone or browser
 - An **OpenAI** API key (GPT-Live voice)
-- A **call model**: a fast call-capable model with a keyed provider (e.g. Gemini 3.7 Flash or Grok 4.6)
+- A **call model**: a fast call-capable model with a keyed provider. Shipped, best first: Claude Sonnet 5.5, Gemini 4 Hydrogen, Claude Opus 5.5, Claude Sonnet 5, Claude Opus 4.8, Grok 4.6, Gemini 3.7 Flash. Setup suggests the best one you have a key for, and the provider's own key ahead of OpenRouter
 
-**Turn it on:** answer the Live Call question during `setup.sh` / `setup.sh --update`, or `sudo agitop` → System Settings → **Live Call** (on/off, call model, longest call, ring time, calls per cycle, spoken progress). The same tab shows your last call and its transcript.
+**Turn it on:** answer the Live Call question during `setup.sh` / `setup.sh --update`, or `sudo agitop` → System Settings → **Live Call** (on/off, call model, reasoning on a call, longest call, ring time, calls per cycle, spoken progress). You can also ask COA to change the call model. The same tab shows your last call and its transcript.
 
 Ask COA in chat to call you, or let it call when a conversation will be faster. Only COA places calls. Approvals (packages, sudo, agents) are never given by voice. Use the app or agitop controls.
 

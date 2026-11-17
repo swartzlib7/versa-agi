@@ -350,7 +350,8 @@ def create_langchain_client(
         return ChatGoogleGenerativeAI(**kwargs)
 
     if route.client_type == "ChatAnthropic":
-        from langchain_anthropic import ChatAnthropic
+        # ChatAnthropic that sends nested search parts back whole (state_model_drivers.md B19).
+        from harness.anthropic_chat import HarnessChatAnthropic as ChatAnthropic
 
         kwargs = {
             "model": route.api_model,

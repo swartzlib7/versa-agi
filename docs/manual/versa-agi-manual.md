@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.9.2 · November 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.9.3 · November 2026</p>
 </div>
 
 ## At a glance
@@ -679,7 +679,8 @@ A cycle closed at its time limit is not a failure and does not count. With the s
 **Live Call** sets up calls to you:
 
 - **Enabled** and **Speak progress** (a short line such as "let me pull that up" while it checks).
-- **Call model**: only call-capable models with a key are listed.
+- **Call model**: only call-capable models with a key are listed, and the best one you can use is marked as suggested. The shipped call models, best first: Claude Sonnet 5.5, Gemini 4 Hydrogen, Claude Opus 5.5, Claude Sonnet 5, Claude Opus 4.8, Grok 4.6, Gemini 3.7 Flash. Where you have both a provider's own key and an OpenRouter key, the provider's own version is suggested. You can also ask your Chief Orchestrator Agent to change the call model.
+- **Reasoning on a call**: how much the call model thinks before it answers. **Auto** uses a level measured for each shipped model, so answers stay quick.
 - The longest call (5, 10, 15, or 25 minutes; 15 by default), how long it rings, and calls per cycle.
 - **Last call** and its **Transcript**.
 
@@ -868,5 +869,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.9.2, November 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.9.3, November 2026.</p>
 </div>

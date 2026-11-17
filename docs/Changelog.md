@@ -6,7 +6,23 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
-## [Unreleased]
+## [3.9.3] — 2026-11-17
+
+### Updates
+
+#### Added
+- **Claude Sonnet 5.5 and Claude Sonnet 5** — Both can be assigned to any agent, with an Anthropic key or through OpenRouter.
+- **More Live Call models** — Claude Sonnet 5.5, Gemini 4 Hydrogen, Claude Opus 5.5, Claude Sonnet 5 and Claude Opus 4.8 join Grok 4.6 and Gemini 3.7 Flash. Setup and agitop suggest the best one you have a key for, and the provider's own key ahead of OpenRouter.
+- **Ask COA to change the call model** — Your Chief Orchestrator Agent can switch the Live Call model, and how much it reasons on a call, when you ask.
+- **Reasoning on a call** — A new Live Call setting: Auto, Low, Medium or High.
+- **Live Call models table** — The Models page lists the shipped call models, best first, with their keys and the reasoning level each uses on Auto.
+
+#### Changed
+- **The call model reasons before it answers** — On a call your agent now thinks at a level measured for each shipped model, so it does the work properly and still answers quickly. Before, it used the lowest level the model had.
+
+#### Fixed
+- **An agent on Claude could stop after a web search** — With an Anthropic key, a search the model ran from a code step made every later cycle of that conversation fail, and after five failures the agent was paused. The conversation is now sent back correctly, and a conversation that was stopped this way works again after the update. If the agent was paused, clear its circuit breaker once.
+- **You are now told when an agent is paused** — When repeated failed cycles pause an agent, you get a message saying which agent, why (in plain words, such as "the cycle ended with an error" or "the cycle stalled"), and how to bring it back. That message, and the two token budget warnings, were never delivered before. If the message cannot be sent at that moment, it is tried again until it goes.
 
 ## [3.9.2] — 2026-11-16
 

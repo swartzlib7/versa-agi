@@ -176,6 +176,7 @@ def _live_call_view() -> dict:
     last_row = _live_call_last_row()
     view = {"enabled": False, "call_model": "", "max_minutes": 15, "join_timeout_seconds": 45,
             "calls_per_cycle": 1, "narrate_progress": True, "options": [("(none)", "")], "status": "",
+            "reasoning_effort": "auto", "reasoning_choices": ("auto", "low", "medium", "high"),
             "last_call": _format_last_call(last_row),
             "last_transcript": _live_call_transcript(last_row)}
     try:
@@ -183,11 +184,15 @@ def _live_call_view() -> dict:
         settings = lcc.read_settings()
         view.update(enabled=settings.enabled, call_model=settings.call_model,
                     max_minutes=settings.max_minutes, join_timeout_seconds=settings.join_timeout_seconds,
-                    calls_per_cycle=settings.calls_per_cycle, narrate_progress=settings.narrate_progress)
+                    calls_per_cycle=settings.calls_per_cycle, narrate_progress=settings.narrate_progress,
+                    reasoning_effort=settings.reasoning_effort,
+                    reasoning_choices=lcc.CALL_REASONING_CHOICES)
         options = [("(none)", "")]
         keys = set()
         for row in lcc.selectable_call_models():
-            options.append((row["display"], row["key"]))
+            # The best model that can run here (live_call_config.call_order) is named as such.
+            shown = f"{row['display']} (suggested)" if row.get("suggested") else row["display"]
+            options.append((shown, row["key"]))
             keys.add(row["key"])
         if settings.call_model and settings.call_model not in keys:
             current = lcc.model_display(
@@ -1620,10 +1625,25 @@ class SystemSettingsModal(ModalScreen):
                                         id="select-live-call-model",
                                         allow_blank=False,
                                     )
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Reasoning on a call[/]")
+                                    yield Select(
+                                        [("Auto (measured per model)" if level == "auto"
+                                          else level.capitalize(), level)
+                                         for level in live_call_view["reasoning_choices"]],
+                                        value=live_call_view["reasoning_effort"],
+                                        id="select-live-call-reasoning",
+                                        allow_blank=False,
+                                    )
                             yield Static(
                                 "[dim]Speak progress: COA says a short line like \"Let me pull up the QA "
                                 "schedule\" while it looks things up. Call model: only call-capable "
-                                "models with a provider key are listed (Models → Edit → Call-capable).[/]"
+                                "models with a provider key are listed (Models → Edit → Call-capable); "
+                                "the suggested one is the best that can run here, with a provider's own "
+                                "key ahead of OpenRouter. Reasoning on a call: how much the call model "
+                                "thinks before it answers. Auto uses the level measured for each "
+                                "shipped model to keep spoken answers quick; a model without the chosen "
+                                "level uses the nearest one below.[/]"
                             )
                             yield Static("")
                             with Horizontal(classes="task-field-row"):
@@ -1947,6 +1967,7 @@ class SystemSettingsModal(ModalScreen):
         join_timeout = self.query_one("#input-live-call-join-timeout", Input).value.strip() or "45"
         per_cycle = self.query_one("#input-live-call-per-cycle", Input).value.strip() or "1"
         narrate = self.query_one("#chk-live-call-narrate", Checkbox).value
+        reasoning = str(self.query_one("#select-live-call-reasoning", Select).value or "auto")
         if enabled and not call_model:
             self.app.notify("Choose a call model before turning Live Call on.", severity="warning")
             return False
@@ -1956,6 +1977,7 @@ class SystemSettingsModal(ModalScreen):
             ("live_call", "join_timeout_seconds", join_timeout),
             ("live_call", "calls_per_cycle", per_cycle),
             ("live_call", "narrate_progress", "true" if narrate else "false"),
+            ("live_call", "reasoning_effort", reasoning),
             ("features", "live_call", "true" if enabled else "false"),
         ]
         for section, key, value in writes:

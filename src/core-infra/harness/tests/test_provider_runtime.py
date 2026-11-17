@@ -373,9 +373,9 @@ class TestRuntimeKeysAndClients(unittest.TestCase):
             catalog={"claude-fable-5-2": _catalog_row("anthropic")},
             providers=PROVIDERS,
         )
-        fake = self._fake_client("langchain_anthropic", "ChatAnthropic")
+        fake = self._fake_client("harness.anthropic_chat", "HarnessChatAnthropic")
         beat = object()
-        with patch.dict(sys.modules, {"langchain_anthropic": fake}):
+        with patch.dict(sys.modules, {"harness.anthropic_chat": fake}):
             client = create_langchain_client(
                 route,
                 native_params={
@@ -401,8 +401,8 @@ class TestRuntimeKeysAndClients(unittest.TestCase):
             catalog={"claude-opus-5-5": _catalog_row("anthropic")},
             providers=PROVIDERS,
         )
-        fake = self._fake_client("langchain_anthropic", "ChatAnthropic")
-        with patch.dict(sys.modules, {"langchain_anthropic": fake}):
+        fake = self._fake_client("harness.anthropic_chat", "HarnessChatAnthropic")
+        with patch.dict(sys.modules, {"harness.anthropic_chat": fake}):
             marked = create_langchain_client(
                 route, native_params={"max_tokens": 64000, "cache_control": {"type": "ephemeral"}},
                 key_resolver=lambda slug: f"{slug}-key",
@@ -420,8 +420,8 @@ class TestRuntimeKeysAndClients(unittest.TestCase):
             catalog={"claude-sonnet-4-6": _catalog_row("anthropic")},
             providers=PROVIDERS,
         )
-        fake = self._fake_client("langchain_anthropic", "ChatAnthropic")
-        with patch.dict(sys.modules, {"langchain_anthropic": fake}):
+        fake = self._fake_client("harness.anthropic_chat", "HarnessChatAnthropic")
+        with patch.dict(sys.modules, {"harness.anthropic_chat": fake}):
             client = create_langchain_client(
                 route,
                 native_params={"temperature": 0.2, "streaming": True},

@@ -67,6 +67,11 @@ class TestHarnessWiring(unittest.TestCase):
                    "raise  # non-transient, or retry budget exhausted → crash")
         self.assertIn("replay_guard.strip_all_next()", self.source)
 
+    def test_a_refused_server_tool_call_is_retried_once_without_provider_tool_parts(self):
+        self.after("replay_guard.wire == WIRE_ANTHROPIC and is_server_tool_error(e)",
+                   "raise  # non-transient, or retry budget exhausted → crash")
+        self.after("and not replay_guard.server_tools_dropped", "replay_guard.drop_server_tools()")
+
     def test_a_declined_reply_is_removed_and_the_agent_is_told_once(self):
         self.after("_declined = refusal_reason(msg)",
                    "if stream_natural_end and declined_reply is not None:")

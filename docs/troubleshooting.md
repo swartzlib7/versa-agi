@@ -47,6 +47,8 @@ agictl agent activate <name>
 
 Thresholds: `setup.ini` `[agent]` or agitop Settings.
 
+When an agent is paused this way you get a message from your Chief Orchestrator Agent's account that names the agent, the reason, and how to bring it back (from 3.9.3; earlier versions did not deliver it). The reason is the number of failed cycles and what the last failure was: the cycle ended with an error, had an input error, repeated the same tool call, stalled, or was stopped as a runaway. The error itself is in the cycle log. If no message arrives, look in `/var/log/versa-agi-lifeline.log` for `Circuit breaker (<name>)`: `NOTIFY:` means it was sent, `WARN:` means the send failed and it is tried again every minute while the agent stays paused.
+
 Which stopped cycles count as failures:
 
 | How the cycle ended | Counts toward the circuit breaker |
@@ -93,6 +95,15 @@ Your OpenRouter account is set to use only endpoints with zero data retention, a
 1. Open `https://openrouter.ai/settings/privacy` and allow endpoints that retain data, or
 2. Assign the model's own-API key instead (`claude-fable-5-2` with an Anthropic key), or
 3. Turn the model's web search off (`sudo agictl model params set model:<catalog_key> --web-search off`).
+
+## A Claude agent fails every cycle after a web search ("without a corresponding code_execution_tool_result")
+
+The cycle log shows `400 … code_execution tool use … was found without a corresponding code_execution_tool_result block`, on every cycle of the same conversation. After five failures the agent is paused (circuit breaker).
+
+The model is on an Anthropic key and ran a web search from a code step. Before 3.9.3 that reply was sent back incomplete, and Anthropic refused the conversation from then on.
+
+1. Update to 3.9.3 or later (`sudo ./setup.sh --update`). The conversation itself is not damaged; it works again from the next cycle.
+2. If the agent was paused: `sudo agictl agent activate <name>`, or in agitop click the agent's row → **Clear Circuit Breaker**.
 
 ## A GPT model fails with "Function tools with reasoning_effort are not supported"
 

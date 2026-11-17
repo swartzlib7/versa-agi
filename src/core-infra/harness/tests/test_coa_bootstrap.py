@@ -34,7 +34,7 @@ class RecommendedMap(unittest.TestCase):
         """Opus 5.5 is first, so it is the model COA Setup suggests for Anthropic."""
         self.assertEqual(
             cb.recommended_keys("anthropic", STOCK),
-            ["claude-opus-5-5", "claude-opus-4-8", "claude-fable-5-2"],
+            ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-8", "claude-sonnet-5", "claude-fable-5-2"],
         )
 
     def test_opus_55_is_suggested_for_openrouter(self):
@@ -61,6 +61,7 @@ class RecommendedMap(unittest.TestCase):
             cb.recommended_keys("openrouter", STOCK),
             [
                 "anthropic/claude-opus-5.5",
+                "anthropic/claude-sonnet-5.5",
                 "x-ai/grok-4.7",
                 "x-ai/grok-4.6",
                 "google/gemini-4-carbon",
@@ -69,6 +70,7 @@ class RecommendedMap(unittest.TestCase):
                 "openai/gpt-6-sol",
                 "openai/gpt-5.6-terra",
                 "anthropic/claude-opus-4.8",
+                "anthropic/claude-sonnet-5",
                 "anthropic/claude-fable-5.2",
                 "google/gemini-4-hydrogen",
                 "openai/gpt-5.6-sol",

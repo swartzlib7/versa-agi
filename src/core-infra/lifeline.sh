@@ -343,6 +343,50 @@ if [ -f "${SETUP_INI}" ]; then
   [ -n "${_cb_h}" ] && CB_HOURLY="${_cb_h}"
 fi
 
+# ─── Lifeline's own notices to the Primary User ───────
+# One function for the notices Lifeline sends by itself (circuit breaker, token
+# budget): from COA's account, to the Primary User in the COA config, over
+# VersaVoice or the route inside the install. The log says whether it went
+# (state_provider_alerts.md rule 9).
+#   notify_primary_user "<what, for the log>" "<text>"   → 0 sent, 1 not sent
+notify_primary_user() {
+  local what="$1" text="$2" pu_uid
+  pu_uid=$(jq -r '.primary_user.uid // empty' "${COA_CONFIG}" 2>/dev/null || true)
+  if [ -z "${pu_uid}" ] || [ -z "${text}" ]; then
+    log "WARN: ${what} — could not tell the Primary User (no Primary User uid in the COA config, or no text)"
+    return 1
+  fi
+  if AGICTL_MESSAGES_DB="/var/lib/versa-agi/messages.db" AGICTL_CONFIG="${COA_CONFIG}" \
+    /usr/local/bin/agictl message send "${pu_uid}" "${text}" --mode typed >/dev/null 2>&1; then
+    log "NOTIFY: ${what} — Primary User told"
+    return 0
+  fi
+  log "WARN: ${what} — could not tell the Primary User (message send failed)"
+  return 1
+}
+
+#   exit_code_words "<exit code>"   → a breaker-eligible exit code in words
+# Nothing for an empty or unknown ('?') code; "exit code <n>" for any other.
+exit_code_words() {
+  case "${1:-}" in
+    1)      printf '%s' "the cycle ended with an error" ;;
+    42)     printf '%s' "the cycle had an input error" ;;
+    55)     printf '%s' "the same tool call was repeated" ;;
+    97)     printf '%s' "the cycle stalled" ;;
+    99)     printf '%s' "a runaway cycle was stopped" ;;
+    ''|'?') ;;
+    *)      printf '%s' "exit code $1" ;;
+  esac
+}
+
+#   breaker_notice_text "<agent>" "<what tripped it>" "<last exit code>"   → the circuit breaker notice
+breaker_notice_text() {
+  local last why
+  last=$(exit_code_words "${3:-}")
+  why="${2:-repeated failures}${last:+; last failure: ${last}}"
+  printf '%s' "🚨 Agent '$1' is paused. Its cycles failed repeatedly (${why}), so Versa AGi stopped starting new ones to prevent runaway API cost. Its tasks are frozen. To bring it back: run 'sudo agictl agent activate $1', or in agitop click the agent's row → Clear Circuit Breaker. The cycle log shows why the cycles failed. If you are not sure what to do, contact your system administrator."
+}
+
 # ─── Task Management — Overdue Task Retry Budget ───────
 # Max lifeline wake cycles for overdue planned/waiting tasks before auto-freeze.
 # Configurable via agitop ⚙ System Settings modal.
@@ -1074,6 +1118,29 @@ ${AGENT_REGISTRY_CONTENT}
   # (auto-freeze) and harness spawn until a catalog model is assigned.
   # invalid_config / circuit_breaker / halted use the same hold for any agent.
   HOLD_STATUS=$(sqlite3 "${AGENTS_DB}" "SELECT COALESCE(status,'') FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
+  # A circuit breaker notice that did not reach the Primary User: try again
+  # while the agent is still paused, drop the mark once it is not. Here, because
+  # a paused agent's pass ends at the hold below (state_provider_alerts.md rule 9).
+  # The mark is an empty file in the agent's state folder; the text is built
+  # again from the reason stored with the status.
+  CB_NOTICE_PENDING="/var/lib/versa-agi/${AGENT_NAME}/breaker_notice_pending"
+  if [ -f "${CB_NOTICE_PENDING}" ]; then
+    if [ "${HOLD_STATUS}" != "circuit_breaker" ]; then
+      rm -f "${CB_NOTICE_PENDING}"
+    else
+      CB_WHY=$(sqlite3 "${AGENTS_DB}" "SELECT COALESCE(status_message,'') FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
+      CB_WHY="${CB_WHY#Auto-frozen: }"
+      # Stored as "<what tripped it> (last exit: <code>)".
+      CB_LATE_EXIT=""
+      if [[ "${CB_WHY}" =~ ^(.*)\ \(last\ exit:\ ([0-9]+)\)$ ]]; then
+        CB_WHY="${BASH_REMATCH[1]}"
+        CB_LATE_EXIT="${BASH_REMATCH[2]}"
+      fi
+      if notify_primary_user "Circuit breaker (${AGENT_NAME}), sent late" "$(breaker_notice_text "${AGENT_NAME}" "${CB_WHY}" "${CB_LATE_EXIT}")"; then
+        rm -f "${CB_NOTICE_PENDING}"
+      fi
+    fi
+  fi
   HOLD_ASSIGNED=$(sqlite3 "${AGENTS_DB}" "SELECT TRIM(COALESCE(model,'')) FROM agents WHERE name='${AGENT_NAME}';" 2>/dev/null || echo "")
   if [ "${IDE_GENERATE}" != "true" ] && [ "${AGENT_NAME}" = "coa" ] && [ -z "${HOLD_ASSIGNED}" ]; then
     log "HOLD: coa — no model assigned (first-login). Skipping spawn and task-freeze."
@@ -1364,14 +1431,8 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
       log "TOKEN_BUDGET_EXCEEDED: ${AGENT_NAME} used ${MONTHLY_TOKENS} tokens (budget: ${TOKEN_BUDGET}, ${BUDGET_PCT}%) — skipping spawn"
       if [ ! -f "${TOKEN_WARN_MARKER}" ]; then
         # Notify PU once daily
-        COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' ${COA_CONFIG} 2>/dev/null || true)
-        COA_TOKEN=$(jq -r '.versavoice.api_token // empty' ${COA_CONFIG} 2>/dev/null || true)
-        PU_UID=$(jq -r '.primary_user.uid // empty' ${COA_CONFIG} 2>/dev/null || true)
-        if [ -n "${COA_SUB}" ] && [ -n "${COA_TOKEN}" ] && [ -n "${PU_UID}" ]; then
-          AGICTL_CONFIG="${COA_CONFIG}" /usr/local/bin/agictl message send \
-            "${COA_SUB}" "${PU_UID}" "⚠️ Agent ${AGENT_NAME} has exceeded its monthly token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET} tokens, ${BUDGET_PCT}%). Spawn blocked until budget is increased or month resets." \
-            --mode translate --token "${COA_TOKEN}" 2>/dev/null || true
-        fi
+        BUDGET_MSG="⚠️ Agent ${AGENT_NAME} has exceeded its monthly token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET} tokens, ${BUDGET_PCT}%). It does not start new cycles until the budget is raised or the month ends."
+        notify_primary_user "Token budget exceeded (${AGENT_NAME})" "${BUDGET_MSG}" || true
         touch "${TOKEN_WARN_MARKER}"
       fi
       flock -u 200
@@ -1379,14 +1440,8 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
     elif [ "${BUDGET_PCT}" -ge 90 ]; then
       log "TOKEN_WARNING: ${AGENT_NAME} at ${BUDGET_PCT}% of token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET})"
       if [ ! -f "${TOKEN_WARN_MARKER}" ]; then
-        COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' ${COA_CONFIG} 2>/dev/null || true)
-        COA_TOKEN=$(jq -r '.versavoice.api_token // empty' ${COA_CONFIG} 2>/dev/null || true)
-        PU_UID=$(jq -r '.primary_user.uid // empty' ${COA_CONFIG} 2>/dev/null || true)
-        if [ -n "${COA_SUB}" ] && [ -n "${COA_TOKEN}" ] && [ -n "${PU_UID}" ]; then
-          AGICTL_CONFIG="${COA_CONFIG}" /usr/local/bin/agictl message send \
-            "${COA_SUB}" "${PU_UID}" "⚠️ Agent ${AGENT_NAME} is approaching its monthly token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET} tokens, ${BUDGET_PCT}%). Consider increasing the budget or reducing agent activity." \
-            --mode translate --token "${COA_TOKEN}" 2>/dev/null || true
-        fi
+        BUDGET_MSG="⚠️ Agent ${AGENT_NAME} is close to its monthly token budget (${MONTHLY_TOKENS} / ${TOKEN_BUDGET} tokens, ${BUDGET_PCT}%). At 100% it stops starting new cycles until the budget is raised or the month ends."
+        notify_primary_user "Token budget at ${BUDGET_PCT}% (${AGENT_NAME})" "${BUDGET_MSG}" || true
         touch "${TOKEN_WARN_MARKER}"
       fi
     fi
@@ -1457,15 +1512,11 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
     # Freeze all active tasks
     /usr/local/bin/agictl task freeze-all "${AGENT_NAME}" 2>/dev/null || true
 
-    # Notify Primary User via VersaVoice
-    COA_SUB=$(jq -r '.versavoice.sub_account_id // empty' ${COA_CONFIG} 2>/dev/null || true)
-    COA_TOKEN=$(jq -r '.versavoice.api_token // empty' ${COA_CONFIG} 2>/dev/null || true)
-    PU_UID=$(jq -r '.primary_user.uid // empty' ${COA_CONFIG} 2>/dev/null || true)
-    if [ -n "${COA_SUB}" ] && [ -n "${COA_TOKEN}" ] && [ -n "${PU_UID}" ]; then
-      CB_MSG="🚨 Circuit Breaker Tripped — Agent '${AGENT_NAME}' has been auto-frozen after ${CB_TRIGGER} (last exit code: ${CB_LAST_EXIT}). This prevents runaway API cost from repeated failures. To recover: run 'agictl agent activate ${AGENT_NAME}' or use the agitop dashboard."
-      AGICTL_CONFIG="${COA_CONFIG}" /usr/local/bin/agictl message send \
-        "${COA_SUB}" "${PU_UID}" "${CB_MSG}" \
-        --mode translate --token "${COA_TOKEN}" 2>/dev/null || true
+    # Tell the Primary User. If the notice cannot be sent, a mark is left and it
+    # is tried again on each pass while the agent is paused (state_provider_alerts.md rule 9).
+    if ! notify_primary_user "Circuit breaker (${AGENT_NAME})" \
+      "$(breaker_notice_text "${AGENT_NAME}" "${CB_TRIGGER}" "${CB_LAST_EXIT}")"; then
+      : > "${CB_NOTICE_PENDING}" 2>/dev/null || true
     fi
 
     flock -u 200

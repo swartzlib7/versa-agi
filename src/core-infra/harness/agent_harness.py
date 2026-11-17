@@ -1177,19 +1177,22 @@ if (os.environ.get("VERSA_AGENT_NAME", "").strip().lower() == "coa"
     ALL_TOOLS.append(agictl_desktop)
 
 
-_REASONING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+def _call_model_overrides(call_model: str, wanted: str | None = None) -> dict | None:
+    """The reasoning level for call turns (live_call_config.call_effort_for).
 
-
-def _call_model_overrides(call_model: str) -> dict | None:
-    """Lowest reasoning effort the call model allows — spoken answers need speed."""
+    [live_call] reasoning_effort: `auto` (stock) asks for the level shipped for this model,
+    measured to keep spoken answers quick; low / medium / high ask for that level. The call
+    model does the work the person asked for, so it reasons; state_live_voice_call.md §3.13.
+    """
     from harness.model_params import agent_overrides_from_values, allowed_reasoning_efforts
+    from live_call_config import DEFAULT_CALL_REASONING, call_effort_for
 
-    allowed = set(allowed_reasoning_efforts(call_model))
-    lowest = next((e for e in _REASONING_EFFORT_ORDER if e in allowed), None)
-    if not lowest:
+    effort = call_effort_for(call_model, allowed_reasoning_efforts(call_model),
+                             wanted or DEFAULT_CALL_REASONING)
+    if not effort:
         return None
     return agent_overrides_from_values(
-        temperature=None, reasoning_effort=lowest, reasoning_max_tokens=None, model_params_extra=None,
+        temperature=None, reasoning_effort=effort, reasoning_max_tokens=None, model_params_extra=None,
     )
 
 
@@ -2071,7 +2074,9 @@ def main():
         PROVIDER_SEARCH_HINT, REFUSALS_BEFORE_CLOSE, refusal_closed_line, refusal_note,
         refusal_reason, refusal_summary, search_log_line,
     )
-    from harness.reasoning_replay import ReplayGuard, is_binding_error, wire_for
+    from harness.reasoning_replay import (
+        WIRE_ANTHROPIC, ReplayGuard, is_binding_error, is_server_tool_error, wire_for,
+    )
 
     execution_traits = traits_for(
         execution_model, _HARNESS_VIEW_CTX["provider_family"], _provider_slug,
@@ -2537,7 +2542,10 @@ def main():
                 from provider_runtime import resolve_provider_api_key
 
                 call_model = _LIVE_CALL_GATE.call_model
-                call_llm = get_llm(call_model, agent_overrides=_call_model_overrides(call_model))
+                call_overrides = _call_model_overrides(
+                    call_model, _LIVE_CALL_GATE.settings.reasoning_effort if _LIVE_CALL_GATE.settings else None,
+                )
+                call_llm = get_llm(call_model, agent_overrides=call_overrides)
 
                 def call_pre_model_hook(state):
                     trimmed = pre_model_hook(state)["llm_input_messages"]
@@ -2560,7 +2568,9 @@ def main():
                     context_provider=_live_call_context,
                 )
                 _LIVE_CALL_RUNTIME = live_runtime
-                tlog(f"LIVE CALL: ready — call model {call_model}, voice {_LIVE_CALL_GATE.settings.voice_model}")
+                tlog(f"LIVE CALL: ready — call model {call_model}, reasoning "
+                     f"{(call_overrides or {}).get('reasoning_effort') or 'model default'}, "
+                     f"voice {_LIVE_CALL_GATE.settings.voice_model}")
             except Exception as e:
                 live_runtime = None
                 call_agent = None
@@ -3179,6 +3189,17 @@ def main():
                         binding_retry_used = True
                         replay_guard.strip_all_next()
                         tlog("REASONING REPLAY: provider refused a replayed record — retrying once without them")
+                        _HEARTBEAT.set_hold("tools", False)
+                        continue
+                    # A replayed provider tool call was refused: send the request once
+                    # more without the provider's tool parts (state_model_drivers.md §2.7 B19).
+                    if (
+                        replay_guard.wire == WIRE_ANTHROPIC and is_server_tool_error(e)
+                        and not replay_guard.server_tools_dropped
+                    ):
+                        replay_guard.drop_server_tools()
+                        tlog("SERVER TOOLS: provider refused a replayed search or code step — "
+                             "retrying once without the provider's tool parts")
                         _HEARTBEAT.set_hold("tools", False)
                         continue
                     raise  # non-transient, or retry budget exhausted → crash

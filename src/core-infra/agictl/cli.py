@@ -312,6 +312,21 @@ def system_config_set(key, value):
         sys.exit(1)
 
 
+def _write_setup_ini_value(section: str, key: str, value: str) -> tuple[bool, str]:
+    """Write one setup.ini value and sync the source copy. (ok, error)."""
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if not os.path.isfile(ini_path):
+        return False, "setup.ini not found"
+    try:
+        _update_ini_key(ini_path, section, key, value)
+        _sync_ini_to_source(ini_path)
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+    return True, ""
+
+
 @config.command("set-ini")
 @click.argument("section")
 @click.argument("key")
@@ -415,7 +430,8 @@ def system_config_set_ini(section, key, value):
     elif section_l == "live_call" or (section_l == "features" and key_l == "live_call"):
         if os.getenv("AGICTL_AGENT_USER"):
             json_response(False, error="Live Call settings are Primary User only "
-                                       "(agitop → System Settings → Live Call).")
+                                       "(agitop → System Settings → Live Call). COA changes the "
+                                       "call model with: agictl model live-call use <key>")
             sys.exit(1)
         import live_call_config
         ok, err, value = live_call_config.validate_setting(section_l, key_l, value_s)
@@ -15670,6 +15686,7 @@ try:
         upsert_ini_entry=_upsert_models_ini_entry,
         remove_ini_entry=_remove_ini_entry,
         load_catalog=_load_catalog,
+        write_setting=lambda section, key, value: _write_setup_ini_value(section, key, value),
     )
 except ImportError:
     pass  # live call commands unavailable on server-only topology

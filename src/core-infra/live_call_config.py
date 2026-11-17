@@ -30,6 +30,19 @@ DEFAULT_VOICE_MODEL = "gpt-live-1"
 DEFAULT_MAX_MINUTES = 15
 DEFAULT_JOIN_TIMEOUT_SECONDS = 45
 DEFAULT_CALLS_PER_CYCLE = 1
+# Reasoning level asked of the call model. The call model does the work the person asked
+# for, so it reasons. `auto` uses the level shipped for that model in
+# [catalog_live_call_reasoning]: the highest of low / medium at which a harder spoken
+# request was still answered in about 10 seconds (measured 2026-11-16,
+# state_live_voice_call.md §6). A model with no shipped level gets FALLBACK_CALL_REASONING.
+# low / medium / high ask every call model for that level.
+CALL_REASONING_AUTO = "auto"
+DEFAULT_CALL_REASONING = CALL_REASONING_AUTO
+FALLBACK_CALL_REASONING = "medium"
+CALL_REASONING_LEVELS = ("low", "medium", "high")
+CALL_REASONING_CHOICES = (CALL_REASONING_AUTO,) + CALL_REASONING_LEVELS
+CALL_REASONING_SECTION = "catalog_live_call_reasoning"
+_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # Longest call (minutes). A choice, not a range: the largest (25) fits inside the
 # shortest agent Timeout (30, agent_limits.py). state_live_chat.md D7.
 MAX_MINUTES_CHOICES = (5, 10, 15, 25)
@@ -92,6 +105,7 @@ class LiveCallSettings:
     join_timeout_seconds: int
     narrate_progress: bool = True
     calls_per_cycle: int = DEFAULT_CALLS_PER_CYCLE
+    reasoning_effort: str = DEFAULT_CALL_REASONING
 
 
 def read_settings(setup_ini: str | None = None) -> LiveCallSettings:
@@ -124,7 +138,52 @@ def read_settings(setup_ini: str | None = None) -> LiveCallSettings:
             DEFAULT_CALLS_PER_CYCLE,
             CALLS_PER_CYCLE_RANGE,
         ),
+        reasoning_effort=snap_call_reasoning(
+            _setup_value(LIVE_CALL_SECTION, "reasoning_effort", DEFAULT_CALL_REASONING, setup_ini),
+        ),
     )
+
+
+def snap_call_reasoning(raw) -> str:
+    """A stored reasoning choice, or the default when it is not one of the choices."""
+    value = str(raw or "").strip().lower()
+    return value if value in CALL_REASONING_CHOICES else DEFAULT_CALL_REASONING
+
+
+def shipped_call_reasoning(key: str, models_ini: str | None = None) -> str:
+    """The level measured for a call model (``[catalog_live_call_reasoning]``), or ""."""
+    path = models_ini or resolve_models_ini_path()
+    level = str(_read_raw_section(path, CALL_REASONING_SECTION).get((key or "").strip(), "")).strip().lower()
+    return level if level in CALL_REASONING_LEVELS else ""
+
+
+def call_effort(allowed, wanted: str = DEFAULT_CALL_REASONING, shipped: str = "") -> str | None:
+    """The reasoning level a call turn asks of a model that allows ``allowed``.
+
+    The target is ``wanted``; with ``auto`` it is the model's shipped level (``shipped``), or
+    FALLBACK_CALL_REASONING when it has none. The model gets the target when it has that level;
+    else the nearest level below it; else the lowest reasoning level it has (a model that
+    cannot reason answers ``none``). None when nothing is allowed.
+    """
+    allowed = {str(level).strip().lower() for level in (allowed or ())}
+    ranked = [level for level in _EFFORT_ORDER if level in allowed]
+    if not ranked:
+        return None
+    target = snap_call_reasoning(wanted)
+    if target == CALL_REASONING_AUTO:
+        target = shipped if shipped in CALL_REASONING_LEVELS else FALLBACK_CALL_REASONING
+    at_or_below = [level for level in ranked if _EFFORT_ORDER.index(level) <= _EFFORT_ORDER.index(target)]
+    reasoning = [level for level in at_or_below if level != "none"]
+    if reasoning:
+        return reasoning[-1]
+    above = [level for level in ranked if level != "none"]
+    return above[0] if above else ranked[0]
+
+
+def call_effort_for(key: str, allowed, wanted: str = DEFAULT_CALL_REASONING,
+                    models_ini: str | None = None) -> str | None:
+    """call_effort for one catalog key, with its shipped level looked up."""
+    return call_effort(allowed, wanted, shipped_call_reasoning(key, models_ini))
 
 
 def call_capable_keys(models_ini: str | None = None) -> set[str]:
@@ -141,6 +200,20 @@ def call_capable_keys(models_ini: str | None = None) -> set[str]:
         else:
             keys.discard(key)
     return keys
+
+
+def call_order(models_ini: str | None = None) -> list[str]:
+    """Call-capable keys, best first.
+
+    The shipped ``[catalog_live_call]`` section is written in order of preference, and for each
+    model the provider's own key comes before its OpenRouter alias. Keys a site added follow,
+    by name.
+    """
+    path = models_ini or resolve_models_ini_path()
+    effective = call_capable_keys(path)
+    shipped = [k for k, v in _read_raw_section(path, CALL_CAPABLE_SECTION).items() if _truthy(v)]
+    ordered = [k for k in shipped if k in effective]
+    return ordered + sorted(effective - set(ordered))
 
 
 def is_call_capable(key: str, models_ini: str | None = None) -> bool:
@@ -206,7 +279,7 @@ def selectable_call_models(
     labels = provider_labels(models_ini)
     out: list[dict] = []
     keyed: dict[str, bool] = {}
-    for key in call_capable_keys(models_ini):
+    for key in call_order(models_ini):
         entry = cat.get(key)
         if not entry or not entry.get("enabled"):
             continue
@@ -219,9 +292,26 @@ def selectable_call_models(
                 "label": entry.get("label") or key,
                 "provider": slug,
                 "display": model_display(key, entry, labels),
+                # The first usable key in order of preference (call_order).
+                "suggested": not out,
+                # "" when no level is shipped for it (auto then asks for medium).
+                "reasoning": shipped_call_reasoning(key, models_ini),
             })
     out.sort(key=lambda r: r["display"].casefold())
     return out
+
+
+def suggested_call_model(
+    *,
+    models_ini: str | None = None,
+    catalog: dict | None = None,
+    key_check: Callable[[str], bool] = default_key_check,
+) -> str:
+    """The call model to offer first: the best call-capable key that can run here, or ""."""
+    for row in selectable_call_models(models_ini=models_ini, catalog=catalog, key_check=key_check):
+        if row["suggested"]:
+            return row["key"]
+    return ""
 
 
 @dataclass
@@ -303,6 +393,10 @@ def validate_setting(section: str, key: str, value: str, *, models_ini: str | No
         return True, "", value
     if key == "voice_model":
         return (True, "", value) if value else (False, "voice_model cannot be empty", value)
+    if key == "reasoning_effort":
+        if value.lower() not in CALL_REASONING_CHOICES:
+            return False, "reasoning_effort must be one of " + ", ".join(CALL_REASONING_CHOICES), value
+        return True, "", value.lower()
     if key == "narrate_progress":
         if value.lower() not in ("true", "false"):
             return False, "narrate_progress must be 'true' or 'false'", value

@@ -33,6 +33,7 @@ class CoaShippedMap(unittest.TestCase):
             keys_for_provider("openrouter", STOCK),
             [
                 "anthropic/claude-opus-5.5",
+                "anthropic/claude-sonnet-5.5",
                 "x-ai/grok-4.7",
                 "x-ai/grok-4.6",
                 "google/gemini-4-carbon",
@@ -41,6 +42,7 @@ class CoaShippedMap(unittest.TestCase):
                 "openai/gpt-6-sol",
                 "openai/gpt-5.6-terra",
                 "anthropic/claude-opus-4.8",
+                "anthropic/claude-sonnet-5",
                 "anthropic/claude-fable-5.2",
                 "google/gemini-4-hydrogen",
                 "openai/gpt-5.6-sol",
@@ -65,6 +67,7 @@ class CoaShippedMap(unittest.TestCase):
             labels,
             [
                 "Opus 5.5",
+                "Sonnet 5.5",
                 "Grok 4.7",
                 "Grok 4.6",
                 "Gemini 4 Carbon",
@@ -73,6 +76,7 @@ class CoaShippedMap(unittest.TestCase):
                 "GPT-6 Sol",
                 "GPT-5.6 Terra",
                 "Opus 4.8",
+                "Sonnet 5",
                 "Fable 5.2",
                 "Gemini 4 Hydrogen",
                 "GPT-5.6 Sol",
@@ -88,6 +92,7 @@ class CoaShippedMap(unittest.TestCase):
             [oid for oid, _, _ in offerings],
             [
                 "claude-opus-5-5",
+                "claude-sonnet-5-5",
                 "grok-4.7",
                 "grok-4.6",
                 "gemini-4-carbon",
@@ -96,6 +101,7 @@ class CoaShippedMap(unittest.TestCase):
                 "gpt-6-sol",
                 "gpt-5.6-terra",
                 "claude-opus-4-8",
+                "claude-sonnet-5",
                 "claude-fable-5-2",
                 "gemini-4-hydrogen",
                 "gpt-5.6-sol",
@@ -173,6 +179,10 @@ class StockLayerParity(unittest.TestCase):
             "claude-opus-4-8": 1_000_000,
             "claude-opus-5-5": 1_000_000,
             "claude-fable-5-2": 1_000_000,
+            "claude-sonnet-5-5": 1_000_000,
+            "claude-sonnet-5": 1_000_000,
+            "anthropic/claude-sonnet-5.5": 1_000_000,
+            "anthropic/claude-sonnet-5": 1_000_000,
             "gemini-4-hydrogen": 1_048_576,
             "gemini-4-carbon": 1_048_576,
             "anthropic/claude-opus-5.5": 1_000_000,
@@ -218,6 +228,12 @@ class StockLayerParity(unittest.TestCase):
             # Reasoning cannot be turned off on these four: no "none".
             "claude-opus-5-5": ("high", ["low", "medium", "high", "xhigh", "max"]),
             "claude-fable-5-2": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            # Sonnet 5.5 cannot have thinking off; Sonnet 5 can, but the harness has no
+            # request for it (leaving thinking out runs it), so "none" is not offered.
+            "claude-sonnet-5-5": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            "claude-sonnet-5": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            "anthropic/claude-sonnet-5.5": ("high", ["low", "medium", "high", "xhigh", "max"]),
+            "anthropic/claude-sonnet-5": ("high", ["low", "medium", "high", "xhigh", "max"]),
             "gemini-4-hydrogen": ("high", ["low", "medium", "high"]),
             "gemini-4-carbon": ("high", ["low", "medium", "high"]),
             "google/gemini-4-hydrogen": ("high", ["low", "medium", "high", "xhigh"]),

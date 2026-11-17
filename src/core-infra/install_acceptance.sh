@@ -927,8 +927,29 @@ _install_acceptance_section_get() {
   ' "${ini}" 2>/dev/null || echo "${default}"
 }
 
+# Provider slugs that have an API key in setup.ini [third_party] (<slug>_api_key), one per
+# line. The deployed file first (an update), then the source copy (a fresh install).
+_install_acceptance_keyed_providers() {
+  local ini
+  for ini in "${INSTALL_ACCEPTANCE_SETUP_INI:-}" "${INSTALL_ACCEPTANCE_SOURCE_INI:-}"; do
+    [ -n "${ini}" ] && [ -f "${ini}" ] || continue
+    awk '
+      /^\[/ { current=$0; gsub(/[][]/, "", current); next }
+      current == "third_party" && /^[a-z0-9_]+_api_key[ \t]*=/ {
+        eq = index($0, "="); k = substr($0, 1, eq - 1); v = substr($0, eq + 1)
+        gsub(/[ \t]/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", v)
+        sub(/_api_key$/, "", k)
+        if (v != "") print k
+      }
+    ' "${ini}" 2>/dev/null
+    return 0
+  done
+}
+
 # Call-capable keys shipped in models.ini.stock [catalog_live_call], as
-# "Provider — Model name<TAB>key" lines sorted like Model Manager.
+# "Provider — Model name<TAB>key<TAB>provider slug" lines in the order of that section:
+# best first, and for each model the provider's own key before its OpenRouter alias
+# (state_live_voice_call.md §3.13).
 _install_acceptance_live_call_keys() {
   local stock
   stock="$(dirname "${INSTALL_ACCEPTANCE_SOURCE_INI}")/models.ini.stock"
@@ -951,20 +972,23 @@ _install_acceptance_live_call_keys() {
       for (i = 1; i <= count; i++) {
         k = live[i]; prov = plabel[mprov[k]]; if (prov == "") prov = mprov[k]
         name = (k in mname) ? mname[k] : k
-        printf "%s — %s\t%s\n", prov, name, k
+        printf "%s — %s\t%s\t%s\n", prov, name, k, mprov[k]
       }
     }
-  ' "${stock}" | LC_ALL=C sort -f
+  ' "${stock}"
 }
 
 # Numbered pick of the call model. Echoes the chosen key ("" = choose later in agitop).
+# Offered first: the model in use (an update), else the best model whose provider has a key.
 # Prompts go to stderr — this runs in $().
 _install_acceptance_live_call_model_pick() {
-  local current="$1" keys=() labels=() reply idx=1 default_idx=0 k line
-  while IFS=$'\t' read -r line k; do
+  local current="$1" keys=() labels=() slugs=() reply idx=1 default_idx=0 suggested_idx=0 k line slug keyed
+  keyed="$(_install_acceptance_keyed_providers)"
+  while IFS=$'\t' read -r line k slug; do
     [ -n "${k}" ] || continue
     labels+=("${line}")
     keys+=("${k}")
+    slugs+=("${slug}")
   done < <(_install_acceptance_live_call_keys)
   if [ "${#keys[@]}" -eq 0 ]; then
     echo "${current}"
@@ -972,15 +996,29 @@ _install_acceptance_live_call_model_pick() {
   fi
   {
     echo ""
-    echo "    Call model — COA thinks on this model while you talk:"
+    echo "    Call model — COA thinks on this model while you talk."
+    echo "    Listed best first. With a provider's own key and an OpenRouter key, the"
+    echo "    provider's own version is suggested."
     for k in "${keys[@]}"; do
+      slug="${slugs[$((idx - 1))]}"
+      line="${labels[$((idx - 1))]}"
       [ "${k}" = "${current}" ] && default_idx="${idx}"
-      echo "      ${idx}) ${labels[$((idx - 1))]}"
+      if [ -n "${keyed}" ]; then
+        if printf '%s\n' "${keyed}" | grep -qx "${slug}"; then
+          [ "${suggested_idx}" -eq 0 ] && suggested_idx="${idx}"
+        else
+          line="${line} (no API key yet)"
+        fi
+      fi
+      echo "      ${idx}) ${line}"
       idx=$((idx + 1))
     done
     echo "      0) Choose later (agitop → System Settings → Live Call)"
   } >&2
-  [ "${default_idx}" -eq 0 ] && [ -z "${current}" ] && default_idx=1
+  if [ "${default_idx}" -eq 0 ] && [ -z "${current}" ]; then
+    default_idx="${suggested_idx}"
+    [ "${default_idx}" -eq 0 ] && default_idx=1
+  fi
   _install_acceptance_read_line "    Select [${default_idx}]: " reply
   reply="$(printf '%s' "${reply}" | tr -d '[:space:]')"
   reply="${reply:-${default_idx}}"

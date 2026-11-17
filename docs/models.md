@@ -31,22 +31,24 @@ Remote class is **`cloud`**. Google is an ordinary provider. Extra / utility rem
 - Neither Import path writes generic `[model_params_custom]`.
 - **COA eligibility** is the live catalog `coa` flag only.
 
-Current shipped offerings (picker order): Opus 5.5, Grok 4.7, Grok 4.6, Gemini 4 Carbon, Gemini 3.7 Flash, GPT-6.1 Sol, GPT-6 Sol, GPT-5.6 Terra, Opus 4.8, Fable 5.2, Gemini 4 Hydrogen, GPT-5.6 Sol, GLM 5.3 Flash, DeepSeek V4Flash0731, GPT-5.6 Luna. COA Setup suggests the first offering the chosen provider has: Opus 5.5 for Anthropic and for OpenRouter, Grok 4.7 for xAI, Gemini 4 Carbon for Google, GPT-6.1 Sol for OpenAI. Dual-provider offerings import both keys when both providers are enabled. Grok 4.6 and Grok 4.7 default to high reasoning (`low` / `medium` / `high` / `xhigh`) and image ingest is ◆ on both native xAI and OpenRouter keys.
+Current shipped offerings (picker order): Opus 5.5, Sonnet 5.5, Grok 4.7, Grok 4.6, Gemini 4 Carbon, Gemini 3.7 Flash, GPT-6.1 Sol, GPT-6 Sol, GPT-5.6 Terra, Opus 4.8, Sonnet 5, Fable 5.2, Gemini 4 Hydrogen, GPT-5.6 Sol, GLM 5.3 Flash, DeepSeek V4Flash0731, GPT-5.6 Luna. COA Setup suggests the first offering the chosen provider has: Opus 5.5 for Anthropic and for OpenRouter, Grok 4.7 for xAI, Gemini 4 Carbon for Google, GPT-6.1 Sol for OpenAI. Dual-provider offerings import both keys when both providers are enabled. Grok 4.6 and Grok 4.7 default to high reasoning (`low` / `medium` / `high` / `xhigh`) and image ingest is ◆ on both native xAI and OpenRouter keys.
 
 **GLM 5.3 Flash** (`z-ai/glm-5.3-flash`, OpenRouter) is native multimodal: image and video ingest (◆). Reasoning cannot be turned off — stock default is `max` (`low` / `high` / `max`). Use `agictl_view_image` / `agictl_view_video` (mp4, mkv, mov, 200 MB max).
 
 **Gemini 3.7 Flash** is two catalog offerings. Image ingest is ◆ on both. Video ingest is ◆ on native Google (`gemini-3.7-flash`, inline ~20 MB) and on OpenRouter (`google/gemini-3.7-flash`, same `video_url` path as GLM, 200 MB VIEW gate). Declared audio input stays ◇. Use `agictl_view_image` / `agictl_view_video`.
 
-**Claude Opus 5.5, Claude Fable 5.2, Gemini 4 Hydrogen and Gemini 4 Carbon** are each two catalog offerings: the provider's own API and OpenRouter. Image ingest is ◆ on all eight keys. Audio and video on the Gemini 4 models stay ◇.
+**Claude Opus 5.5, Claude Sonnet 5.5, Claude Sonnet 5, Claude Fable 5.2, Gemini 4 Hydrogen and Gemini 4 Carbon** are each two catalog offerings: the provider's own API and OpenRouter. Image ingest is ◆ on all twelve keys. Audio and video on the Gemini 4 models stay ◇.
 
 | Model | Own API key | OpenRouter key | Reasoning levels (stock default) |
 |---|---|---|---|
 | Claude Fable 5.2 | `claude-fable-5-2` | `anthropic/claude-fable-5.2` | low, medium, **high**, xhigh, max |
 | Claude Opus 5.5 | `claude-opus-5-5` | `anthropic/claude-opus-5.5` | low, medium, **high**, xhigh, max |
+| Claude Sonnet 5.5 | `claude-sonnet-5-5` | `anthropic/claude-sonnet-5.5` | low, medium, **high**, xhigh, max |
+| Claude Sonnet 5 | `claude-sonnet-5` | `anthropic/claude-sonnet-5` | low, medium, **high**, xhigh, max |
 | Gemini 4 Hydrogen | `gemini-4-hydrogen` | `google/gemini-4-hydrogen` | low, medium, **high**; xhigh through OpenRouter only |
 | Gemini 4 Carbon | `gemini-4-carbon` | `google/gemini-4-carbon` | low, medium, **high** |
 
-- **Reasoning cannot be turned off** on these four. An agent set to `none` runs at the model's default level.
+- **Reasoning cannot be turned off** on these six. An agent set to `none` runs at the model's default level. (Claude Sonnet 5 can run without thinking at the provider, but Versa AGi does not offer that.)
 - **Fable 5.2 needs 30-day data retention at the provider.** On Anthropic's own API that is an account setting. Through OpenRouter, an account whose privacy setting allows only zero-retention endpoints gets a 404 (see [troubleshooting](troubleshooting.md#a-model-is-refused-through-openrouter-404-zdr)).
 - **Fable 5.2 is not offered to model routing** in stock (it is the most expensive model). Model Manager → Edit Model → Router eligible changes that.
 - A reply on these models is streamed, so a long reply is not stopped by the stall timer while it is still arriving.
@@ -56,6 +58,26 @@ Current shipped offerings (picker order): Opus 5.5, Grok 4.7, Grok 4.6, Gemini 4
 **GPT-5.6 and later with an OpenAI key** are called on OpenAI's Responses endpoint, the only one that takes tools and reasoning together. Nothing is stored at OpenAI: each reply carries its reasoning record, encrypted, and the conversation sends it back. Before 3.9.0 the three GPT-5.6 models failed with an OpenAI key at every reasoning level except none.
 
 **Changing an agent's model keeps its conversation.** A reply holds parts only its own provider reads (reasoning records, the provider's search calls and results). When the conversation continues on another provider, the reply goes as its text and tool calls, and a provider search becomes one line naming the pages it returned.
+
+## Live Call models
+
+A Live Call runs its work on a **call model**. These are the shipped ones, best first. Setup, the installer and agitop suggest the first one you have a key for; with both a provider's own key and an OpenRouter key, the provider's own version is suggested.
+
+| # | Model | Own API key | OpenRouter key | Reasoning on Auto |
+|---|---|---|---|---|
+| 1 | Claude Sonnet 5.5 | `claude-sonnet-5-5` | `anthropic/claude-sonnet-5.5` | medium |
+| 2 | Gemini 4 Hydrogen | `gemini-4-hydrogen` | `google/gemini-4-hydrogen` | low with a Google key, medium through OpenRouter |
+| 3 | Claude Opus 5.5 | `claude-opus-5-5` | `anthropic/claude-opus-5.5` | medium |
+| 4 | Claude Sonnet 5 | `claude-sonnet-5` | `anthropic/claude-sonnet-5` | medium |
+| 5 | Claude Opus 4.8 | `claude-opus-4-8` | `anthropic/claude-opus-4.8` | medium |
+| 6 | Grok 4.6 | `grok-4.6` | `x-ai/grok-4.6` | low |
+| 7 | Gemini 3.7 Flash | `gemini-3.7-flash` | `google/gemini-3.7-flash` | low |
+
+- **Choose one:** agitop → System Settings → **Live Call** → Call model, or `sudo agictl model live-call use <key>`. You can also ask COA to change it. The change applies from COA's next cycle.
+- **Reasoning on a call:** **Auto** (stock) uses the level in the table, measured so a spoken answer stays quick. Low, Medium or High asks every call model for that level: agitop, same tab, or `sudo agictl model live-call use --reasoning medium`.
+- **What you have:** `sudo agictl model live-call list` shows the order, the suggested model, the ones you can select, and the settings.
+- **Another model:** Model Manager → Edit Model → **Call-capable** (or `sudo agictl model live-call set <key>`). Gemini 4 Carbon and Fable 5.2 are not shipped as call models: Carbon took about 35 seconds to answer, and Fable is the most expensive model.
+- The voice itself runs on GPT-Live, so Live Call also needs an OpenAI key.
 
 ## Provider web search
 

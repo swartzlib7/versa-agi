@@ -64,6 +64,11 @@ EXPECTED_INPUT_BINDINGS = {
     "claude-fable-5-2": "anthropic",
     "anthropic/claude-opus-5.5": "openrouter",
     "anthropic/claude-fable-5.2": "openrouter",
+    # DR-ANTH-02
+    "claude-sonnet-5-5": "anthropic",
+    "claude-sonnet-5": "anthropic",
+    "anthropic/claude-sonnet-5.5": "openrouter",
+    "anthropic/claude-sonnet-5": "openrouter",
     # DR-CM-08
     "grok-4.5": "xai",
     "grok-4.6": "xai",
@@ -179,6 +184,8 @@ class RegistryTestCase(unittest.TestCase):
                 "google/gemini-4-hydrogen", "google/gemini-4-carbon",
                 "claude-opus-5-5", "claude-fable-5-2",
                 "anthropic/claude-opus-5.5", "anthropic/claude-fable-5.2",
+                "claude-sonnet-5-5", "claude-sonnet-5",
+                "anthropic/claude-sonnet-5.5", "anthropic/claude-sonnet-5",
                 "gpt-6-sol", "openai/gpt-6-sol", "gpt-6.1-sol", "openai/gpt-6.1-sol",
             ):
                 if key in cls.catalog or not cfg.has_option("catalog_library", key):

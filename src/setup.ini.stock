@@ -436,12 +436,19 @@ live_call=false
 # join_timeout_seconds — how long the call rings before it is missed (15–120).
 # narrate_progress — while COA works on a request, speak its short progress lines.
 # calls_per_cycle — calls COA may place in one cycle (1–5).
+# reasoning_effort — how much the call model reasons on a call: auto, low, medium or high.
+#   auto uses the level shipped for that model (models.ini [catalog_live_call_reasoning]),
+#   measured to keep spoken answers quick. A model without the chosen level uses the
+#   nearest one below.
+# COA may change call_model and reasoning_effort when the Primary User asks
+#   (agictl model live-call use). Everything else here is Primary User only.
 call_model=
 voice_model=gpt-live-1
 max_minutes=15
 join_timeout_seconds=45
 narrate_progress=true
 calls_per_cycle=1
+reasoning_effort=auto
 
 [live_chat]
 # Live Chat listening window (state_live_chat.md). After a person writes to an agent,

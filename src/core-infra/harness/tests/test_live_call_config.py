@@ -70,6 +70,53 @@ class TestSettings(_Files):
         self.assertEqual(s.call_model, "")
         self.assertEqual(s.max_minutes, lcc.DEFAULT_MAX_MINUTES)
         self.assertEqual(s.calls_per_cycle, 1)
+        self.assertEqual(s.reasoning_effort, "auto")
+
+    def test_reasoning_level_is_read_and_a_wrong_value_falls_back(self):
+        for stored, expected in (("low", "low"), ("HIGH", "high"), ("auto", "auto"), ("max", "auto"), ("", "auto")):
+            path = os.path.join(self.tmp.name, "r.ini")
+            with open(path, "w") as f:
+                f.write(f"[live_call]\nreasoning_effort={stored}\n")
+            self.assertEqual(lcc.read_settings(path).reasoning_effort, expected, stored)
+
+
+class TestCallEffort(unittest.TestCase):
+    """The reasoning level a call turn asks for (state_live_voice_call.md §3.13)."""
+
+    def test_auto_uses_the_level_shipped_for_the_model(self):
+        allowed = ("low", "medium", "high")
+        self.assertEqual(lcc.call_effort(allowed, "auto", "low"), "low")
+        self.assertEqual(lcc.call_effort(allowed, "auto", "medium"), "medium")
+        self.assertEqual(lcc.call_effort(allowed, "auto", ""), "medium")       # nothing shipped
+        self.assertEqual(lcc.call_effort(allowed, "auto", "xhigh"), "medium")  # not a call level
+
+    def test_a_chosen_level_overrides_the_shipped_one(self):
+        allowed = ("low", "medium", "high")
+        self.assertEqual(lcc.call_effort(allowed, "medium", "low"), "medium")
+        self.assertEqual(lcc.call_effort(allowed, "low", "medium"), "low")
+        self.assertEqual(lcc.call_effort(allowed, "high", "low"), "high")
+
+    def test_medium_where_the_model_has_it(self):
+        self.assertEqual(lcc.call_effort(("low", "medium", "high")), "medium")
+        self.assertEqual(lcc.call_effort(("none", "low", "medium", "high", "xhigh", "max")), "medium")
+
+    def test_nearest_level_below_when_medium_is_missing(self):
+        self.assertEqual(lcc.call_effort(("low", "high", "max")), "low")
+        self.assertEqual(lcc.call_effort(("none", "low", "high", "max")), "low")
+
+    def test_lowest_reasoning_level_when_nothing_is_at_or_below(self):
+        self.assertEqual(lcc.call_effort(("high", "xhigh")), "high")
+        self.assertEqual(lcc.call_effort(("none", "high")), "high")
+
+    def test_a_model_that_cannot_reason(self):
+        self.assertEqual(lcc.call_effort(("none",)), "none")
+        self.assertIsNone(lcc.call_effort(()))
+
+    def test_the_setting_moves_the_level(self):
+        allowed = ("low", "medium", "high", "xhigh")
+        self.assertEqual(lcc.call_effort(allowed, "low"), "low")
+        self.assertEqual(lcc.call_effort(allowed, "high"), "high")
+        self.assertEqual(lcc.call_effort(allowed, "nonsense"), "medium")
 
 
 class TestCallCapable(_Files):
@@ -105,6 +152,18 @@ class TestCallCapable(_Files):
                                         return_value={"google": "Google", "openai": "OpenAI"}):
             rows = lcc.selectable_call_models(models_ini=self.models, key_check=lambda slug: True)
         self.assertEqual([r["display"] for r in rows], ["Google — Gemini 3.7 Flash", "OpenAI — GPT-5.6 Luna"])
+
+    def test_order_is_the_shipped_order_then_site_keys_by_name(self):
+        self.assertEqual(lcc.call_order(self.models), ["gemini-3.7-flash", "gemma4:e4b", "gpt-5.6-luna"])
+
+    def test_suggested_is_the_first_usable_key_in_order(self):
+        both = lcc.selectable_call_models(models_ini=self.models, key_check=lambda slug: True)
+        self.assertEqual([r["key"] for r in both if r["suggested"]], ["gemini-3.7-flash"])
+        self.assertEqual(lcc.suggested_call_model(models_ini=self.models, key_check=lambda slug: True),
+                         "gemini-3.7-flash")
+        self.assertEqual(lcc.suggested_call_model(models_ini=self.models, key_check=lambda slug: slug == "openai"),
+                         "gpt-5.6-luna")
+        self.assertEqual(lcc.suggested_call_model(models_ini=self.models, key_check=lambda slug: False), "")
 
     def test_site_layer_value(self):
         shipped = {"grok-4.6"}
@@ -181,6 +240,13 @@ class TestValidateSetting(_Files):
         self.assertFalse(self._v("live_call", "voice_model", "")[0])
         self.assertFalse(self._v("live_call", "ringtone", "x")[0])
 
+    def test_reasoning_effort(self):
+        self.assertEqual(self._v("live_call", "reasoning_effort", "High"), (True, "", "high"))
+        self.assertEqual(self._v("live_call", "reasoning_effort", "auto"), (True, "", "auto"))
+        ok, err, _ = self._v("live_call", "reasoning_effort", "max")
+        self.assertFalse(ok)
+        self.assertIn("auto, low, medium, high", err)
+
     def test_narrate_progress(self):
         self.assertEqual(self._v("live_call", "narrate_progress", "False"), (True, "", "false"))
         self.assertFalse(self._v("live_call", "narrate_progress", "sometimes")[0])
@@ -191,12 +257,74 @@ class TestValidateSetting(_Files):
 
 
 class TestShippedStock(unittest.TestCase):
-    def test_stock_ships_gemini_and_grok(self):
-        stock = os.path.join(os.path.dirname(__file__), "..", "..", "..", "models.ini.stock")
-        self.assertEqual(
-            lcc.shipped_call_capable_keys(os.path.abspath(stock)),
-            {"gemini-3.7-flash", "google/gemini-3.7-flash", "grok-4.6", "x-ai/grok-4.6"},
-        )
+    STOCK = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "models.ini.stock"))
+    # Best first; for each model the provider's own key, then its OpenRouter alias (§3.13).
+    ORDER = [
+        "claude-sonnet-5-5", "anthropic/claude-sonnet-5.5",
+        "gemini-4-hydrogen", "google/gemini-4-hydrogen",
+        "claude-opus-5-5", "anthropic/claude-opus-5.5",
+        "claude-sonnet-5", "anthropic/claude-sonnet-5",
+        "claude-opus-4-8", "anthropic/claude-opus-4.8",
+        "grok-4.6", "x-ai/grok-4.6",
+        "gemini-3.7-flash", "google/gemini-3.7-flash",
+    ]
+
+    def test_stock_call_models_in_order_of_preference(self):
+        self.assertEqual(lcc.call_order(self.STOCK), self.ORDER)
+        self.assertEqual(lcc.shipped_call_capable_keys(self.STOCK), set(self.ORDER))
+
+    def test_carbon_and_fable_are_not_shipped_call_models(self):
+        """Carbon answered in about 35 s; Fable is the most expensive model (§6, 2026-11-16)."""
+        for key in ("gemini-4-carbon", "google/gemini-4-carbon", "claude-fable-5-2", "anthropic/claude-fable-5.2"):
+            self.assertNotIn(key, self.ORDER)
+
+    def test_every_stock_call_model_is_a_stock_catalog_model_with_its_own_key_first(self):
+        library = lcc._read_raw_section(self.STOCK, "catalog_library")
+        for own, alias in zip(self.ORDER[0::2], self.ORDER[1::2]):
+            self.assertIn(own, library)
+            self.assertIn(alias, library)
+            self.assertNotEqual(library[own].split("|")[1], "openrouter", own)
+            self.assertEqual(library[alias].split("|")[1], "openrouter", alias)
+
+    def _suggest(self, keyed):
+        library = lcc._read_raw_section(self.STOCK, "catalog_library")
+        catalog = {key: {"enabled": True, "provider": row.split("|")[1], "label": row.split("|")[-1]}
+                   for key, row in library.items()}
+        return lcc.suggested_call_model(models_ini=self.STOCK, catalog=catalog,
+                                        key_check=lambda slug: slug in keyed)
+
+    def test_suggested_call_model_by_which_keys_exist(self):
+        self.assertEqual(self._suggest({"anthropic", "openrouter", "google"}), "claude-sonnet-5-5")
+        self.assertEqual(self._suggest({"openrouter"}), "anthropic/claude-sonnet-5.5")
+        self.assertEqual(self._suggest({"google", "openrouter"}), "anthropic/claude-sonnet-5.5")
+        self.assertEqual(self._suggest({"google"}), "gemini-4-hydrogen")
+        self.assertEqual(self._suggest({"xai"}), "grok-4.6")
+        self.assertEqual(self._suggest({"openai"}), "")
+
+    # Measured 2026-11-16 (state_live_voice_call.md §6).
+    LEVELS = {
+        "claude-sonnet-5-5": "medium", "anthropic/claude-sonnet-5.5": "medium",
+        "gemini-4-hydrogen": "low", "google/gemini-4-hydrogen": "medium",
+        "claude-opus-5-5": "medium", "anthropic/claude-opus-5.5": "medium",
+        "claude-sonnet-5": "medium", "anthropic/claude-sonnet-5": "medium",
+        "claude-opus-4-8": "medium", "anthropic/claude-opus-4.8": "medium",
+        "grok-4.6": "low", "x-ai/grok-4.6": "low",
+        "gemini-3.7-flash": "low", "google/gemini-3.7-flash": "low",
+    }
+
+    def test_every_stock_call_model_has_a_measured_level_it_can_run_at(self):
+        import json
+        params = lcc._read_raw_section(self.STOCK, "model_params")
+        self.assertEqual(set(lcc._read_raw_section(self.STOCK, lcc.CALL_REASONING_SECTION)), set(self.ORDER))
+        for key in self.ORDER:
+            level = lcc.shipped_call_reasoning(key, self.STOCK)
+            self.assertEqual(level, self.LEVELS[key], key)
+            allowed = json.loads(params[f"model:{key}"])["allowed_reasoning_efforts"]
+            self.assertEqual(lcc.call_effort_for(key, allowed, "auto", self.STOCK), level, key)
+
+    def test_a_model_with_no_shipped_level_gets_medium_on_auto(self):
+        self.assertEqual(lcc.shipped_call_reasoning("gpt-6.1-sol", self.STOCK), "")
+        self.assertEqual(lcc.call_effort_for("gpt-6.1-sol", ("low", "medium", "high"), "auto", self.STOCK), "medium")
 
     def test_stock_setup_ini_defaults_off(self):
         stock = os.path.join(os.path.dirname(__file__), "..", "..", "..", "setup.ini.stock")
@@ -205,6 +333,7 @@ class TestShippedStock(unittest.TestCase):
         self.assertEqual(s.call_model, "")
         self.assertEqual((s.voice_model, s.max_minutes, s.join_timeout_seconds), ("gpt-live-1", 15, 45))
         self.assertTrue(s.narrate_progress)
+        self.assertEqual(s.reasoning_effort, "auto")
 
 
 class TestMaxMinutesChoices(unittest.TestCase):

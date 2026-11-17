@@ -65,6 +65,7 @@ def register(
     upsert_ini_entry,
     remove_ini_entry,
     load_catalog,
+    write_setting=None,
 ):
     def _fail(error: str, **extra):
         json_response(False, error=error, **extra)
@@ -111,7 +112,9 @@ def register(
         except Exception as exc:
             selectable = []
             extra["warning"] = str(exc)
+        suggested = next((row["key"] for row in selectable if row.get("suggested")), "")
         json_response(True, shipped=shipped, effective=effective, selectable=selectable,
+                      order=live_call_config.call_order(), suggested=suggested,
                       settings=_settings_payload(), **extra)
 
     def _settings_payload() -> dict:
@@ -123,6 +126,7 @@ def register(
             "max_minutes": s.max_minutes,
             "join_timeout_seconds": s.join_timeout_seconds,
             "calls_per_cycle": s.calls_per_cycle,
+            "reasoning_effort": s.reasoning_effort,
         }
 
     def _write_site(key: str, enabled: bool):
@@ -157,6 +161,50 @@ def register(
     def live_call_unset(key):
         """Remove a catalog key from the call-capable set (PU/root)."""
         _write_site(key, False)
+
+    @live_call_models.command("use")
+    @click.argument("key", required=False, default="")
+    @click.option("--reasoning", type=click.Choice(list(live_call_config.CALL_REASONING_CHOICES)), default=None,
+                  help="Reasoning level asked of the call model on a call.")
+    def live_call_use(key, reasoning):
+        """Choose the call model, the reasoning level on a call, or both (Primary User, root, or COA).
+
+        COA may do this when the Primary User asks. The key must be call-capable, enabled, and
+        its provider must have a key. Marking a model call-capable stays with the Primary User.
+        """
+        caller = _caller()
+        if caller and caller != live_call_config.CALL_AGENT:
+            _fail("Permission denied. Only the Primary User or COA can change the call model.")
+        key = (key or "").strip()
+        if not key and not reasoning:
+            _fail("Give a call model key, --reasoning, or both. See: agictl model live-call list")
+        if write_setting is None:
+            _fail("Settings cannot be written from here.")
+        before = live_call_config.read_settings()
+        changed = {}
+        if key:
+            choices = {row["key"]: row for row in live_call_config.selectable_call_models()}
+            if key not in choices:
+                ok, err, _value = live_call_config.validate_setting(
+                    live_call_config.LIVE_CALL_SECTION, "call_model", key)
+                _fail(err if not ok else
+                      f"'{key}' cannot run a call here: its provider has no API key.",
+                      selectable=sorted(choices))
+            ok, err = write_setting(live_call_config.LIVE_CALL_SECTION, "call_model", key)
+            if not ok:
+                _fail(err or "Could not save the call model")
+            changed["call_model"] = {"was": before.call_model, "now": key, "display": choices[key]["display"]}
+        if reasoning:
+            ok, err = write_setting(live_call_config.LIVE_CALL_SECTION, "reasoning_effort", reasoning)
+            if not ok:
+                _fail(err or "Could not save the reasoning level")
+            changed["reasoning_effort"] = {"was": before.reasoning_effort, "now": reasoning}
+        after = live_call_config.read_settings()
+        gate = live_call_config.evaluate_gate(live_call_config.CALL_AGENT, settings=after)
+        json_response(True, changed=changed, settings=_settings_payload(),
+                      ready=gate.ok, not_ready=gate.reasons,
+                      applies="From COA's next cycle. A cycle that is already running keeps the "
+                              "call model it started with.")
 
     # ── message calls (read-only) ──────────────────────────────────────
     @message_group.group("calls")

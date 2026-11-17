@@ -96,6 +96,103 @@ class TestModelLiveCall(_Base):
         self.assertIn("not in the live catalog", res.output)
 
 
+class TestUseCallModel(_Base):
+    """`agictl model live-call use`: the Primary User, root or COA chooses the call model."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_ini = os.path.join(self.tmp.name, "setup.ini")
+        with open(self.setup_ini, "w") as f:
+            f.write("[features]\nlive_call=true\n\n[live_call]\ncall_model=gemini-3.7-flash\n"
+                    "reasoning_effort=medium\n")
+
+        def write(section, key, value):
+            agictl_cli._update_ini_key(self.setup_ini, section, key, value)
+            return True, ""
+
+        self.keyed = {"google", "xai", "openai"}
+        extra = [
+            patch.object(live_call_config, "_setup_paths", lambda setup_ini: [setup_ini or self.setup_ini]),
+            patch.object(live_call_config, "default_key_check", lambda slug: slug in self.keyed),
+            patch.object(agictl_cli, "_write_setup_ini_value", side_effect=write),
+        ]
+        # selectable_call_models and evaluate_gate bind default_key_check as a default argument.
+        extra.append(patch.object(live_call_config.selectable_call_models, "__kwdefaults__",
+                                  {**live_call_config.selectable_call_models.__kwdefaults__,
+                                   "key_check": lambda slug: slug in self.keyed}))
+        extra.append(patch.object(live_call_config.evaluate_gate, "__kwdefaults__",
+                                  {**live_call_config.evaluate_gate.__kwdefaults__,
+                                   "key_check": lambda slug: slug in self.keyed}))
+        for p in extra:
+            p.start()
+        self._patches.extend(extra)
+
+    def stored(self, key):
+        return live_call_config._setup_value("live_call", key, "", self.setup_ini)
+
+    def payload(self, res):
+        return json.loads(res.output[res.output.index("{"):])
+
+    def test_coa_changes_the_call_model(self):
+        res = self.invoke(["model", "live-call", "use", "grok-4.6"], env={"AGICTL_AGENT_USER": "coa"})
+        self.assertEqual(res.exit_code, 0, res.output)
+        out = self.payload(res)
+        self.assertEqual(out["changed"]["call_model"]["was"], "gemini-3.7-flash")
+        self.assertEqual(out["changed"]["call_model"]["now"], "grok-4.6")
+        self.assertIn("Grok 4.6", out["changed"]["call_model"]["display"])
+        self.assertIn("next cycle", out["applies"])
+        self.assertEqual(self.stored("call_model"), "grok-4.6")
+
+    def test_primary_user_changes_model_and_reasoning_together(self):
+        res = self.invoke(["model", "live-call", "use", "grok-4.6", "--reasoning", "low"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertEqual(self.stored("call_model"), "grok-4.6")
+        self.assertEqual(self.stored("reasoning_effort"), "low")
+        self.assertEqual(self.payload(res)["settings"]["reasoning_effort"], "low")
+
+    def test_reasoning_alone(self):
+        res = self.invoke(["model", "live-call", "use", "--reasoning", "high"], env={"AGICTL_AGENT_USER": "coa"})
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertEqual(self.stored("call_model"), "gemini-3.7-flash")
+        self.assertEqual(self.payload(res)["changed"], {"reasoning_effort": {"was": "medium", "now": "high"}})
+
+    def test_sub_agents_are_refused(self):
+        res = self.invoke(["model", "live-call", "use", "grok-4.6"], env={"AGICTL_AGENT_USER": "web-dev"})
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("Only the Primary User or COA", res.output)
+        self.assertEqual(self.stored("call_model"), "gemini-3.7-flash")
+
+    def test_a_model_that_is_not_call_capable_is_refused(self):
+        res = self.invoke(["model", "live-call", "use", "gpt-5.6-luna"], env={"AGICTL_AGENT_USER": "coa"})
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("not a call-capable model", res.output)
+        self.assertEqual(self.stored("call_model"), "gemini-3.7-flash")
+
+    def test_a_model_whose_provider_has_no_key_is_refused(self):
+        self.keyed.discard("xai")
+        res = self.invoke(["model", "live-call", "use", "grok-4.6"], env={"AGICTL_AGENT_USER": "coa"})
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("its provider has no API key", res.output)
+        self.assertEqual(self.payload(res)["selectable"], ["gemini-3.7-flash"])
+
+    def test_nothing_given(self):
+        res = self.invoke(["model", "live-call", "use"])
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("Give a call model key", res.output)
+
+    def test_coa_still_cannot_mark_a_model_call_capable(self):
+        res = self.invoke(["model", "live-call", "set", "gpt-5.6-luna"], env={"AGICTL_AGENT_USER": "coa"})
+        self.assertNotEqual(res.exit_code, 0)
+
+    def test_list_names_the_order_and_the_suggested_model(self):
+        res = self.invoke(["model", "live-call", "list"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        out = self.payload(res)
+        self.assertEqual(out["order"], ["gemini-3.7-flash", "grok-4.6"])
+        self.assertEqual(out["suggested"], "gemini-3.7-flash")
+        self.assertEqual(out["settings"]["reasoning_effort"], "medium")
+
+
 class TestCallsRead(_Base):
     def setUp(self):
         super().setUp()

@@ -25,7 +25,9 @@ VIEW = {
     "join_timeout_seconds": 45,
     "calls_per_cycle": 1,
     "narrate_progress": True,
-    "options": [("(none)", ""), ("Google — Gemini 3.7 Flash", "gemini-3.7-flash")],
+    "reasoning_effort": "auto",
+    "reasoning_choices": ("auto", "low", "medium", "high"),
+    "options": [("(none)", ""), ("Google — Gemini 3.7 Flash (suggested)", "gemini-3.7-flash")],
     "status": "[bold yellow]● Not ready:[/] Live Call is off",
     "last_call": ssm._format_last_call({
         "created_at": "2026-09-26T04:41:10Z", "voice_seconds": 252, "status": "ended",
@@ -74,6 +76,9 @@ class TestLiveCallTab(unittest.TestCase):
                     per_cycle = screen.query_one("#input-live-call-per-cycle", Input)
                     self.assertEqual(per_cycle.value, "1")
                     per_cycle.value = "2"
+                    reasoning = screen.query_one("#select-live-call-reasoning", Select)
+                    self.assertEqual(reasoning.value, "auto")
+                    reasoning.value = "low"
                     self.assertTrue(screen._save_live_call())
 
         asyncio.run(run())
@@ -83,6 +88,7 @@ class TestLiveCallTab(unittest.TestCase):
             ("live_call", "join_timeout_seconds", "45"),
             ("live_call", "calls_per_cycle", "2"),
             ("live_call", "narrate_progress", "false"),
+            ("live_call", "reasoning_effort", "low"),
             ("features", "live_call", "true"),
         ])
 

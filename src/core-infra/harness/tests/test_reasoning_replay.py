@@ -25,6 +25,7 @@ from harness.reasoning_replay import (  # noqa: E402
     fingerprint,
     has_reasoning,
     is_binding_error,
+    is_server_tool_error,
     same_model,
     strip_reasoning,
 )
@@ -332,6 +333,63 @@ def waiting_reply(id_, call="srv1", answers=None, model=MODEL):
 
 def tool_result(id_):
     return Msg("tool", "5", "tr-" + id_, tool_call_id="t-" + id_)
+
+
+def code_search_reply(id_="k1"):
+    """A Claude reply whose search ran from a code step, whole, followed by one of our tools."""
+    return Msg("ai", [
+        {"type": "text", "text": "Looking."},
+        {"type": "server_tool_use", "id": "code1", "name": "code_execution", "input": {}},
+        {"type": "server_tool_use", "id": "ws1", "name": "web_search", "input": {}},
+        {"type": "web_search_tool_result", "tool_use_id": "ws1",
+         "content": [{"type": "web_search_result", "url": "https://d.example", "title": "D"}]},
+        {"type": "code_execution_tool_result", "tool_use_id": "code1", "content": {}},
+        {"type": "tool_use", "id": "t-" + id_, "name": "add", "input": {}},
+    ], id_, model=MODEL, tool_calls=[{"id": "t-" + id_, "name": "add", "args": {}}])
+
+
+class TestDropServerTools(unittest.TestCase):
+    """After Anthropic refused a replayed server tool call (§2.7 B19)."""
+
+    ERROR = ("Error code: 400 - messages.55: `code_execution` tool use with id `srvtoolu_x` was found "
+             "without a corresponding `code_execution_tool_result` block")
+
+    def test_the_refusal_is_recognized(self):
+        self.assertTrue(is_server_tool_error(Exception(self.ERROR)))
+        self.assertFalse(is_server_tool_error(Exception(
+            "`tool_use` ids were found without `tool_result` blocks immediately after")))
+        self.assertFalse(is_server_tool_error(Exception("Error code: 529 - overloaded")))
+
+    def test_a_whole_pair_stays_until_the_provider_refuses(self):
+        history = [human("wake", "h1"), code_search_reply(), tool_result("k1"), human("next", "h2")]
+        guard = ReplayGuard("", MODEL, wire=WIRE_ANTHROPIC)
+        self.assertEqual(types(guard.apply(history)[1]), types(history[1]))
+        self.assertFalse(guard.server_tools_dropped)
+
+    def test_after_a_refusal_completed_replies_go_as_text_note_and_tool_calls(self):
+        history = [human("wake", "h1"), code_search_reply(), tool_result("k1"), human("next", "h2")]
+        guard = ReplayGuard("", MODEL, wire=WIRE_ANTHROPIC)
+        guard.drop_server_tools()
+        self.assertTrue(guard.server_tools_dropped)
+        out = guard.apply(history)
+        self.assertEqual(types(out[1]), ["text", "text", "tool_use"])
+        self.assertTrue(out[1].content[0]["text"].startswith(SEARCH_NOTE))
+        self.assertIn("https://d.example", out[1].content[0]["text"])
+        self.assertEqual(len(history[1].content), 6)  # the stored reply is untouched
+        self.assertEqual(types(guard.apply(history)[1]), ["text", "text", "tool_use"])  # for the rest of the cycle
+
+    def test_a_call_the_newest_reply_still_waits_for_stays(self):
+        history = [human("wake", "h1"), code_search_reply(), tool_result("k1"),
+                   waiting_reply("a2"), tool_result("a2")]
+        out = settle_server_tools(history, every=True)
+        self.assertEqual(types(out[1]), ["text", "text", "tool_use"])
+        self.assertIn("server_tool_use", types(out[3]))
+
+    def test_it_applies_to_anthropics_own_api_only(self):
+        history = [human("wake", "h1"), code_search_reply(), tool_result("k1"), human("next", "h2")]
+        guard = ReplayGuard("", MODEL, wire="")
+        guard.drop_server_tools()
+        self.assertIs(guard.apply(history), history)
 
 
 class TestSplitServerTools(unittest.TestCase):
