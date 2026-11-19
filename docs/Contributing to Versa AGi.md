@@ -35,6 +35,27 @@ sudo ./src/setup.sh
 sudo ./src/setup.sh --update
 ```
 
+### Running the tests
+
+One command runs the unit tests on the three Python interpreters the product runs on and judges them together:
+
+```bash
+cd src/core-infra
+python3 harness/tests/run_tests.py
+```
+
+It takes about two minutes and ends with `CLEAN` or a list of problems. The result is clean only when no test fails on any interpreter and every test passes on at least one.
+
+| Interpreter | Path | Has |
+|---|---|---|
+| harness | `/usr/local/lib/versa-agi/venv` | LangChain and the model provider SDKs |
+| agictl | `/opt/versa-agi/venv` | click, rich, textual (agictl and agitop) |
+| system | `/usr/bin/python3` | What Lifeline's scripts use |
+
+A test that needs a package its interpreter does not have skips there with a reason, and runs on the interpreter that has it. `--only agictl harness` runs fewer interpreters; `--json FILE` saves every result. To run one file: `python3 -m unittest harness.tests.test_link_service`.
+
+When you add a test module that imports click, rich, textual or LangChain, start it with the same guard the other modules have, so the other interpreters skip it instead of failing to load. Tests use the repository's `src/models.ini` and temporary databases; a test must never read or write this machine's install.
+
 ## How to Contribute
 
 ### Reporting Issues

@@ -197,7 +197,7 @@ class TestExitHandling(unittest.TestCase):
         listed = re.search(r'ACTIVITY_OUTCOMES = \(([^)]*)\)', cli).group(1)
         accepted = set(re.findall(r'"(\w+)"', listed))
         self.assertEqual(sent, accepted)
-        self.assertEqual(accepted, {"ok", "timeout", "runaway", "step_limit", "stall", "loop", "crash"})
+        self.assertEqual(accepted, {"ok", "timeout", "runaway", "step_limit", "stall", "loop", "shutdown", "crash"})
 
     def test_time_limit_queues_a_resume_and_logs(self):
         i = self.text.index('if [ "${EXIT_CODE}" -eq 54 ]; then')
@@ -225,7 +225,7 @@ class TestExitHandling(unittest.TestCase):
     def test_harness_gets_the_heartbeat_file_and_the_local_flag(self):
         self.assertIn("export VERSA_HEARTBEAT_FILE='${HEARTBEAT_FILE}'", self.text)
         self.assertIn("export VERSA_LOCAL_MODEL='1'", self.text)
-        self.assertIn('"${HEARTBEAT_FILE}" "${STALL_LIMIT_SECONDS}" &', self.text)
+        self.assertIn('"${HEARTBEAT_FILE}" "${STALL_LIMIT_SECONDS}" "${ACTIVITY_OPEN_MARKER}" &', self.text)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import configparser
 import os
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -509,6 +510,8 @@ class TestCatalogRemoved(unittest.TestCase):
         cfg = _config(os.path.join(SRC_ROOT, "models.ini.stock"))
         self.assertTrue(cfg.has_section("catalog_removed"))
 
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_catalog_removed_keys_reads_section(self) -> None:
         from agictl import cli as agictl_cli
 
@@ -522,6 +525,8 @@ class TestCatalogRemoved(unittest.TestCase):
                     {"gpt-5.4-2026-03-05"},
                 )
 
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_drop_setup_csv_removes_key(self) -> None:
         from agictl import cli as agictl_cli
 

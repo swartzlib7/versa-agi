@@ -7,6 +7,16 @@ Run from core-infra::
 
 from __future__ import annotations
 
+# This module needs rich. An interpreter without it skips the whole module with that
+# reason instead of failing to load; the agictl interpreter has it and runs it. run_tests.py
+# checks that every test passes on at least one interpreter.
+import importlib.util as _importlib_util
+import unittest as _unittest
+
+if _importlib_util.find_spec("rich") is None:
+    raise _unittest.SkipTest("rich is not installed in this interpreter; "
+                             "the agictl interpreter runs this module")
+
 import json
 import os
 import sqlite3

@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import importlib.util
 import unittest
 from types import SimpleNamespace
 
@@ -682,6 +683,8 @@ class TestRunUtilityModelMedia(_TempAgentsDB):
 
 
 class TestUtilityToolTimeout(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("langchain_core"),
+                         "langchain_core is not installed in this interpreter; the harness interpreter runs this test")
     def test_utility_tool_budget_is_fifteen_minutes(self):
         from harness.agent_harness import (
             AGICTL_TOOL_TIMEOUT_SECONDS,
@@ -695,6 +698,8 @@ class TestUtilityToolTimeout(unittest.TestCase):
 class TestUtilityRunJsonEnvelope(unittest.TestCase):
     """CLI must wrap runner payloads that already include ``success``."""
 
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_json_response_accepts_runner_success_key(self):
         import io
         from contextlib import redirect_stdout

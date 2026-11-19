@@ -13,6 +13,8 @@ HARNESS_NOTE = (
 
 TRIGGER = 0.90
 SPAN = 0.35
+# The active frames in the payload take at most this many characters (§1.8 rule 9).
+FRAMES_BLOCK_MAX_CHARS = 40_000
 
 
 def message_text(msg) -> str:
@@ -56,8 +58,9 @@ def select_oldest_span(messages: list, fraction: float = SPAN) -> tuple[list, li
 
 
 def frame_slots(char_budget: int, frame_chars: int) -> int:
-    """How many frames fit in the 35% budget slice."""
-    slot = int(char_budget * SPAN)
+    """How many frames fit in the frames block: 35% of the budget, at most
+    FRAMES_BLOCK_MAX_CHARS (§1.8 rule 9)."""
+    slot = min(int(char_budget * SPAN), FRAMES_BLOCK_MAX_CHARS)
     if frame_chars <= 0:
         return 1
     return max(1, slot // frame_chars)
@@ -105,6 +108,54 @@ def frame_times(span: list, seen: dict, last_frame_end: str | None,
     start = last_frame_end or cycle_started_at
     last_id = str(getattr(span[-1], "id", "") or "") if span else ""
     end = seen.get(last_id) or now
+    if end < start:
+        end = start
+    return start, end
+
+
+def utc_stamp(value) -> str:
+    """A time as frames store it (`2026-11-19T09:34:40Z`). "" when it cannot be read.
+
+    Takes a datetime or an ISO string, with or without an offset (none means UTC).
+    """
+    from datetime import datetime, timezone
+
+    if not value:
+        return ""
+    try:
+        when = value if isinstance(value, datetime) else datetime.fromisoformat(
+            str(value).strip().replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resume_span(unframed: list, tail: list) -> list:
+    """The messages a resume cut removes from the front (§1.8 rule 8).
+
+    `tail` is what the cut keeps. Everything before the tail's first message
+    that was already in `unframed` is the span to summarize; a placeholder the
+    repair added has a new id and is skipped.
+    """
+    index = {str(getattr(m, "id", "") or ""): i for i, m in enumerate(unframed)}
+    for kept in tail:
+        at = index.get(str(getattr(kept, "id", "") or ""))
+        if at is not None and str(getattr(kept, "id", "") or ""):
+            return list(unframed[:at])
+    return []
+
+
+def resume_frame_times(last_frame_end: str | None, saved_at: str, now: str) -> tuple[str, str]:
+    """(frame_start, frame_end) of a frame written at resume (§1.8 rule 8).
+
+    The span is older than this cycle, so it ends when the thread was last
+    saved. It starts where the newest frame ended, or at that same time.
+    """
+    end = saved_at or now
+    start = last_frame_end or end
     if end < start:
         end = start
     return start, end

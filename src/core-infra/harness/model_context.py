@@ -138,6 +138,22 @@ def resume_message_cap(window_tokens: int) -> int:
     return max(12, min(200, count))
 
 
+def effective_resume_cap(stored_max: int, window_tokens: int) -> int:
+    """Verbatim messages a resumed cycle starts with (state_spawn_context.md §1.8 rule 7).
+
+    The agent's stored Resume max messages, never more than the window rule
+    above. Stored 0 (or less) means the window rule alone.
+    """
+    ceiling = resume_message_cap(window_tokens)
+    try:
+        stored = int(stored_max or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    if stored <= 0:
+        return ceiling
+    return min(stored, ceiling)
+
+
 def _lookup_context(name: str) -> tuple[int, int] | None:
     """Exact match, then longest prefix match. None if unknown."""
     if not name:

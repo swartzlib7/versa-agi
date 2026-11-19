@@ -6,6 +6,16 @@ Run from core-infra:
 
 from __future__ import annotations
 
+# This module needs rich. An interpreter without it skips the whole module with that
+# reason instead of failing to load; the agictl interpreter has it and runs it. run_tests.py
+# checks that every test passes on at least one interpreter.
+import importlib.util as _importlib_util
+import unittest as _unittest
+
+if _importlib_util.find_spec("rich") is None:
+    raise _unittest.SkipTest("rich is not installed in this interpreter; "
+                             "the agictl interpreter runs this module")
+
 import json
 import os
 import sqlite3
@@ -82,6 +92,29 @@ class TestInboxSince(unittest.TestCase):
             self.assertIn("unreadOnly=false", seen["endpoint"])
             self.assertIn("since=2026-10-05T09:02:10Z", seen["endpoint"])
             self.assertIn("markAsRead=true", seen["endpoint"])
+            self.assertNotIn("cycleId", seen["endpoint"], "an idle agent's fetch is no proof of life")
+
+    def test_a_spawned_agents_fetch_names_its_cycle_as_proof_of_life(self):
+        """state_host_services.md §1.4.2: the fetch that runs for the life of a spawn."""
+        import agictl.comms as comms
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "messages.db")
+            _db(path, [])
+            seen = []
+
+            def fake_api(endpoint, token, method="GET", body=None, timeout=None):
+                seen.append(endpoint)
+                return {"messages": []}
+
+            original = comms.api_request
+            comms.api_request = fake_api
+            try:
+                fetch_inbox("coa", tmp, "sub-coa", "tok", path, cycle_id="coa-1792200000")
+                fetch_inbox("coa", tmp, "sub-coa", "tok", path, cycle_id="coa-1&x=1 y")
+            finally:
+                comms.api_request = original
+            self.assertTrue(seen[0].endswith("&cycleId=coa-1792200000"))
+            self.assertTrue(seen[1].endswith("&cycleId=coa-1x1y"), "only id characters reach the address")
 
 
 class TestLastWakeWarning(unittest.TestCase):

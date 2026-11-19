@@ -165,6 +165,11 @@ def _live_call_transcript(row: dict | None) -> str:
         return "No transcript."
 
 
+def _live_link_on() -> bool:
+    """[features] live_link (off unless set). The link service reads the same key."""
+    return _read_ini_value("features", "live_link", "false").strip().lower() == "true"
+
+
 def _live_chat_minutes() -> int:
     """[live_chat] idle_minutes snapped to an allowed choice (default 15)."""
     return agent_limits.snap_listen_minutes(
@@ -1292,8 +1297,10 @@ class SystemSettingsModal(ModalScreen):
                                     with Vertical(classes="settings-section-box"):
                                         yield Static("[bold cyan]Compaction Model[/]")
                                         yield Static(
-                                            "[dim]Writes the summary frames when a long session nears its "
-                                            "context limit. Blank uses each agent's own model.[/]"
+                                            "[dim]Writes the summary frames: when a long session nears its "
+                                            "context limit, and when a cycle resumes with more history than the "
+                                            "agent's Resume Max Messages. Blank uses each agent's own model; a "
+                                            "small, cheap model is enough.[/]"
                                         )
                                         _cm_kwargs = {"id": "select-compaction-model", "allow_blank": True,
                                                       "prompt": "Use the agent's model"}
@@ -1698,7 +1705,8 @@ class SystemSettingsModal(ModalScreen):
                                 "[dim]After someone writes to an agent, its cycle stays open and "
                                 "answers new messages within seconds, until nobody has written for "
                                 "the time below. Off: the agent answers once per cycle, as before. "
-                                "At most 5 of your agents listen at once; any others answer once.[/]"
+                                "At most 20 of your agents listen at once with Live Link on, 5 with "
+                                "it off; any others answer once.[/]"
                             )
                             yield Static("")
                             with Horizontal(classes="task-field-row"):
@@ -1709,6 +1717,26 @@ class SystemSettingsModal(ModalScreen):
                                          for m in agent_limits.LISTEN_MINUTES_CHOICES],
                                         value=str(_live_chat_minutes()),
                                         id="select-live-chat-minutes",
+                                        allow_blank=False,
+                                    )
+                            yield Static("")
+                            yield Static("[bold #f87171]Live Link[/]")
+                            yield Static(
+                                "[dim]On: this machine keeps one outbound request open to the "
+                                "VersaVoice API and is told the moment an agent has a new message, "
+                                "so a resting agent starts waking at once and an agent in a chat "
+                                "reads it at once. No port is opened. Off: messages arrive by the "
+                                "regular fetch, up to a minute resting and up to 10 seconds in a "
+                                "chat. The LINK line under System shows whether it is up.[/]"
+                            )
+                            yield Static("")
+                            with Horizontal(classes="task-field-row"):
+                                with Vertical(classes="task-field-col"):
+                                    yield Static("[#f87171]Live Link[/]")
+                                    yield Select(
+                                        [("On", "true"), ("Off", "false")],
+                                        value="true" if _live_link_on() else "false",
+                                        id="select-live-link",
                                         allow_blank=False,
                                     )
                         with Horizontal(classes="settings-tab-actions"):
@@ -1955,8 +1983,18 @@ class SystemSettingsModal(ModalScreen):
             self.app.notify(err or "Failed to save live_chat.idle_minutes", severity="error",
                             title="Live Chat")
             return False
+        link = "true" if str(self.query_one("#select-live-link", Select).value) == "true" else "false"
+        ok, err = _write_ini_value_err("features", "live_link", link)
+        if not ok:
+            self.app.notify(err or "Failed to save features.live_link", severity="error",
+                            title="Live Link")
+            return False
         label = "Off" if minutes == "0" else f"{minutes} minutes"
-        self.app.notify(f"Chat listening: {label}", title="Settings Saved")
+        self.app.notify(
+            f"Chat listening: {label} · Live Link {'on' if link == 'true' else 'off'} "
+            "(the link service follows within a minute)",
+            title="Settings Saved",
+        )
         return True
 
     def _save_live_call(self) -> bool:

@@ -250,6 +250,21 @@ outage_threshold_minutes=30
 # Override via VERSA_STARTUP_SETTLE_MINUTES env var.
 startup_settle_minutes=5
 
+# Shutdown guard: when the computer shuts down or reboots, agents that are in
+# a cycle get N seconds to hand off and close it before they are stopped.
+# 30 to 300. 0 = off (agents are cut off, as before 3.10.0).
+shutdown_grace_seconds=120
+
+# Sleep hold: the computer is asked not to sleep while an agent's cycle runs
+# (a working cycle until it ends, a chat until it has been quiet for the
+# listening minutes). true / false.
+sleep_hold=true
+
+# Laptops only: true = a shut lid also waits for a working agent (the laptop
+# stays awake with the lid shut until the cycle ends). false = a shut lid
+# puts the computer to sleep. Setup asks on a laptop.
+lid_waits_for_agent=false
+
 # Auto model routing default for newly registered agents (agents.db column is authoritative per agent)
 model_routing_enabled=false
 # pool = triage picks from router-eligible candidates; preferred = triage classifies work_modality only
@@ -424,6 +439,19 @@ utility_models_ui=true
 script_tasks_ui=true
 output_routing_ui=true
 live_call=false
+#   live_link — stock OFF; asked at install / --update, switched in agitop
+#     (System Settings → Live Chat). The machine keeps one outbound HTTPS request
+#     open to the VersaVoice API, which responds the moment an agent has a new
+#     message, so the message does not wait for the next fetch. No inbound port.
+#     Off: fetch only (every minute for a resting agent, every 10 seconds in a chat).
+live_link=false
+#   reply_drafts — stock OFF and not asked. PARKED 2026-11-18 (Primary User): with
+#     Live Link on and a model that streams, the app can show an agent's reply while
+#     it is still being written (state_realtime_link.md §2.2). Switched off so that
+#     a reply never depends on whether the model streams: it arrives whole and the
+#     app may animate it. The code stays in place for a later use (long answers).
+#     true turns it on again; nothing else is needed.
+reply_drafts=false
 
 [live_call]
 # Live voice call (COA → Primary User). Edit via agitop → System Settings →

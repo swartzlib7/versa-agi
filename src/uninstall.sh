@@ -223,6 +223,39 @@ else
   fi
 fi
 
+# Stop and remove the link service and the shutdown guard. Stopping the guard
+# closes no agent: its script acts only while the computer is shutting down.
+for _unit in versa-agi-link versa-agi-shutdown-guard; do
+  if [ ! -f "/etc/systemd/system/${_unit}.service" ]; then
+    continue
+  fi
+  if [ "${DRY_RUN}" = true ]; then
+    info "Would remove: ${_unit} systemd service"
+    continue
+  fi
+  systemctl stop "${_unit}" 2>/dev/null || true
+  systemctl disable "${_unit}" --quiet 2>/dev/null || true
+  rm -f "/etc/systemd/system/${_unit}.service"
+  systemctl daemon-reload 2>/dev/null || true
+  ok "${_unit} service stopped and removed"
+done
+
+# Sleep hold: the permission rule and the lid setting setup wrote.
+for _file in /etc/polkit-1/rules.d/50-versa-agi-sleep.rules /etc/systemd/logind.conf.d/50-versa-agi-lid.conf; do
+  if [ ! -f "${_file}" ]; then
+    continue
+  fi
+  if [ "${DRY_RUN}" = true ]; then
+    info "Would remove: ${_file}"
+    continue
+  fi
+  rm -f "${_file}"
+  case "${_file}" in
+    */logind.conf.d/*) systemctl reload systemd-logind 2>/dev/null || true ;;
+  esac
+  ok "Removed ${_file}"
+done
+
 echo ""
 
 # ─── Step 2: Kill Active Processes ──────────────────

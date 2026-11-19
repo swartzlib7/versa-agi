@@ -10,6 +10,16 @@ Run:  cd core-infra
       /opt/versa-agi/venv/bin/python3 -m unittest harness.tests.test_organization_panel
 """
 
+# This module needs textual. An interpreter without it skips the whole module with that
+# reason instead of failing to load; the agictl interpreter has it and runs it. run_tests.py
+# checks that every test passes on at least one interpreter.
+import importlib.util as _importlib_util
+import unittest as _unittest
+
+if _importlib_util.find_spec("textual") is None:
+    raise _unittest.SkipTest("textual is not installed in this interpreter; "
+                             "the agictl interpreter runs this module")
+
 import os
 import shutil
 import subprocess
@@ -28,8 +38,11 @@ from textual.app import App, ComposeResult             # noqa: E402
 from textual.widgets import DataTable, Button, Input, Tree, Checkbox, Select  # noqa: E402
 from agitop.panels.organization import (                # noqa: E402
     OrganizationEntityPanel, OrganizationTreePanel, ORGANIZATION_TABS,
-    EntityFormModal, ConfirmDeleteModal,
+    EntityFormModal, ConfirmDeleteModal, _MANAGE_BUTTON,
 )
+from agitop.panels.org_record_modal import OrgRecordModal  # noqa: E402
+from agitop.panels.organization_modal import OrganizationModal  # noqa: E402
+from textual.widgets import TabbedContent  # noqa: E402
 
 _INIT_SCRIPT = os.path.join(_CORE_INFRA, "scripts", "init_organization_db.sh")
 
@@ -49,6 +62,31 @@ class _HostApp(App):
                 self._reader, kind, writer=self._writer, id=f"org-{kind}-panel",
             )
         yield OrganizationTreePanel(self._reader, id="org-explorer-panel")
+
+
+class _ModalHost(App):
+    """Opens the Organization window itself: its footer holds the action buttons
+    (New, Edit, Delete, Lines, Manage Types), one set for whichever tab is active."""
+
+    def __init__(self, reader: OrganizationReader, writer: OrganizationWriter | None = None):
+        super().__init__()
+        self._reader = reader
+        self._writer = writer
+
+    def on_mount(self) -> None:
+        self.push_screen(OrganizationModal(self._reader, self._writer))
+
+
+async def _footer_buttons_per_tab(app, pilot) -> dict[str, tuple[bool, bool]]:
+    """For each tab of the Organization window: (Manage Types shown, Lines shown)."""
+    tabs = app.screen.query_one("#org-modal-tabs", TabbedContent)
+    seen = {}
+    for kind, _icon, _label in ORGANIZATION_TABS:
+        tabs.active = f"org-modal-{kind}-tab"
+        await pilot.pause()
+        seen[kind] = (app.screen.query_one("#org-modal-managetypes", Button).display,
+                      app.screen.query_one("#org-modal-lines", Button).display)
+    return seen
 
 
 class OrganizationPanelTest(unittest.IsolatedAsyncioTestCase):
@@ -288,15 +326,19 @@ class OrganizationFormFieldsTest(unittest.IsolatedAsyncioTestCase):
                 app.pop_screen()
                 await pilot.pause()
 
-    async def test_manage_types_button_only_on_org_and_product(self):
-        """The Manage Types button is on Organizations and Products only."""
-        app = _HostApp(self.reader, self.writer)
+    async def test_manage_types_button_follows_the_tabs_that_have_lists(self):
+        """Manage Types shows on the tabs that have a list to manage (`_MANAGE_BUTTON`:
+        organizations, products, invoices, estimates, transactions, credentials) and
+        on no other."""
+        app = _ModalHost(self.reader, self.writer)
         async with app.run_test() as pilot:
             await pilot.pause()
-            for kind in ("organizations", "products"):
-                self.assertEqual(len(app.query(f"#org-{kind}-managetypes")), 1)
-            for kind in ("invoices", "estimates", "transactions", "exchange"):
-                self.assertEqual(len(app.query(f"#org-{kind}-managetypes")), 0)
+            seen = await _footer_buttons_per_tab(app, pilot)
+            for kind, (manage_types, _lines) in seen.items():
+                self.assertEqual(manage_types, kind in _MANAGE_BUTTON, kind)
+            for kind in ("organizations", "products", "invoices", "estimates", "transactions", "credentials"):
+                self.assertTrue(seen[kind][0], kind)
+            self.assertFalse(seen["exchange"][0])
 
     async def test_manage_modal_adds_an_option(self):
         """Adding a value through the Manage Lists modal persists it."""
@@ -348,7 +390,7 @@ class OrganizationFormFieldsTest(unittest.IsolatedAsyncioTestCase):
             modal = app.screen
             self.assertTrue(modal.query_one("#f-slug", Input).disabled)
             modal.query_one("#f-name", Input).value = "Bright & Bold Co"
-            modal.on_button_pressed(Button.Pressed(modal.query_one("#form-save", Button)))
+            modal.on_button_pressed(Button.Pressed(modal.query_one("#org-rec-save", Button)))
             await pilot.pause()
             org = next(o for o in self.reader.list_organizations()
                        if o["name"] == "Bright & Bold Co")
@@ -365,7 +407,7 @@ class OrganizationFormFieldsTest(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 modal = app.screen
                 modal.query_one("#f-name", Input).value = "Dup Name"
-                modal.on_button_pressed(Button.Pressed(modal.query_one("#form-save", Button)))
+                modal.on_button_pressed(Button.Pressed(modal.query_one("#org-rec-save", Button)))
                 await pilot.pause()
             slugs = {o["slug"] for o in self.reader.list_organizations()
                      if o["name"] == "Dup Name"}
@@ -388,14 +430,13 @@ class OrganizationFormFieldsTest(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
     async def test_lines_button_only_on_invoice_and_estimate(self):
-        """The Lines action button is on Invoices and Estimates only."""
-        app = _HostApp(self.reader, self.writer)
+        """The Lines action button shows on Invoices and Estimates only."""
+        app = _ModalHost(self.reader, self.writer)
         async with app.run_test() as pilot:
             await pilot.pause()
-            for kind in ("invoices", "estimates"):
-                self.assertEqual(len(app.query(f"#org-{kind}-lines")), 1)
-            for kind in ("organizations", "products", "transactions", "exchange"):
-                self.assertEqual(len(app.query(f"#org-{kind}-lines")), 0)
+            seen = await _footer_buttons_per_tab(app, pilot)
+            for kind, (_manage_types, lines) in seen.items():
+                self.assertEqual(lines, kind in ("invoices", "estimates"), kind)
 
     async def test_line_editor_adds_line_and_recomputes_totals(self):
         """Adding a line through the editor recomputes the parent subtotal/total."""
@@ -500,12 +541,12 @@ class OrganizationWriteUITest(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(self._dir, ignore_errors=True)
 
     async def test_action_bar_present_with_writer(self):
-        """A writer-backed panel shows the New/Edit/Delete action buttons."""
-        app = _HostApp(self.reader, self.writer)
+        """With a writer, the Organization window's footer shows New, Edit and Delete."""
+        app = _ModalHost(self.reader, self.writer)
         async with app.run_test() as pilot:
             await pilot.pause()
             for action in ("new", "edit", "delete"):
-                app.query_one(f"#org-organizations-{action}", Button)
+                self.assertTrue(app.screen.query_one(f"#org-modal-{action}", Button).display, action)
 
     async def test_form_modal_builds_one_widget_per_column(self):
         """The generic form renders a widget for every writable column, with a
@@ -516,7 +557,7 @@ class OrganizationWriteUITest(unittest.IsolatedAsyncioTestCase):
             panel = app.query_one("#org-organizations-panel", OrganizationEntityPanel)
             panel._open_form(None)
             await pilot.pause()
-            self.assertIsInstance(app.screen, EntityFormModal)
+            self.assertIsInstance(app.screen, OrgRecordModal)
             for col in self.writer.spec("org")["columns"]:
                 app.screen.query_one(f"#f-{col}")           # exists (any widget)
             self.assertIsInstance(app.screen.query_one("#f-is_active"), Checkbox)
@@ -542,7 +583,7 @@ class OrganizationWriteUITest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             modal = app.screen
             modal.query_one("#f-name", Input).value = "Brand New Co"
-            modal.on_button_pressed(Button.Pressed(modal.query_one("#form-save", Button)))
+            modal.on_button_pressed(Button.Pressed(modal.query_one("#org-rec-save", Button)))
             await pilot.pause()
             self.assertEqual(self.reader.summary()["organizations"], before + 1)
 
@@ -557,7 +598,7 @@ class OrganizationWriteUITest(unittest.IsolatedAsyncioTestCase):
             modal = app.screen
             modal.query_one("#f-name", Input).value = "Inactive Co"
             modal.query_one("#f-is_active", Checkbox).value = False
-            modal.on_button_pressed(Button.Pressed(modal.query_one("#form-save", Button)))
+            modal.on_button_pressed(Button.Pressed(modal.query_one("#org-rec-save", Button)))
             await pilot.pause()
             row = next(o for o in self.reader.list_organizations()
                        if o["name"] == "Inactive Co")

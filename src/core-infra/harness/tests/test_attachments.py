@@ -362,5 +362,142 @@ class TestSendRefuses(_Files):
         internal.assert_not_called()
 
 
+class TestReceivedNamesAndAddresses(unittest.TestCase):
+    """A received attachment's file name and address are not used as given."""
+
+    def test_only_the_last_part_of_a_name_is_kept(self):
+        for given, kept in (
+            ("report.pdf", "report.pdf"),
+            ("../../../etc/cron.d/job", "job"),
+            ("/home/watchdog/.ssh/authorized_keys", "authorized_keys"),
+            ("..\\..\\windows\\win.ini", "win.ini"),
+            ("Résumé 2026 (final).docx", "Résumé 2026 (final).docx"),
+            (".bashrc", "bashrc"),
+            ("a\x00b\n.txt", "ab.txt"),
+        ):
+            self.assertEqual(rules.inbound_file_name(given, "media_0"), kept)
+
+    def test_a_name_with_nothing_usable_gets_the_fallback(self):
+        for given in (None, "", "   ", ".", "..", "../", "/", "...", 7 * "\x00"):
+            self.assertEqual(rules.inbound_file_name(given, "media_3"), "media_3")
+
+    def test_a_long_name_is_cut_and_keeps_its_extension(self):
+        name = rules.inbound_file_name("x" * 500 + ".pdf", "media_0")
+        self.assertEqual(len(name), rules.INBOUND_NAME_MAX)
+        self.assertTrue(name.endswith(".pdf"))
+
+    def test_a_kept_name_never_leaves_its_folder(self):
+        folder = os.path.join(os.sep, "home", "agent", ".agent", "attachments", "m1", "media")
+        for given in ("../../x", "/etc/passwd", "..", "a/../../b", "..\\..\\c", "ok.png"):
+            path = os.path.normpath(os.path.join(folder, rules.inbound_file_name(given, "media_0")))
+            self.assertEqual(os.path.dirname(path), folder)
+
+    def test_only_https_addresses_are_fetched(self):
+        self.assertTrue(rules.inbound_address_ok("https://storage.example/v0/b/x/o/file.pdf?alt=media"))
+        self.assertTrue(rules.inbound_address_ok("HTTPS://storage.example/x"))
+        for address in ("http://storage.example/x", "file:///etc/hostname", "ftp://host/x", "/etc/hostname",
+                        "https://", "https:///x", "", None, 5, "javascript:alert(1)", "data:text/plain,hi"):
+            self.assertFalse(rules.inbound_address_ok(address), address)
+
+
+class _Answer:
+    def __init__(self, body: bytes, final: str, length=None):
+        self._body, self._final = body, final
+        self.headers = {} if length is None else {"Content-Length": str(length)}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def geturl(self):
+        return self._final
+
+    def read(self, limit=-1):
+        return self._body if limit < 0 else self._body[:limit]
+
+
+@unittest.skipIf(comms is None, "agictl.comms is not importable in this interpreter")
+class TestReceivedFilesAreSaved(unittest.TestCase):
+    """The inbox fetch itself: where a received file lands, and what is refused."""
+
+    SCHEMA = ("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT, direction TEXT, "
+              "status TEXT, from_user_id TEXT, to_user_id TEXT, original_text TEXT, text TEXT, attachment_path TEXT, "
+              "created_at TEXT, mode TEXT, raw_payload TEXT, display_name TEXT, channel_id TEXT, "
+              "has_attachments INTEGER DEFAULT 0, channel TEXT DEFAULT 'vv')")
+
+    def fetch(self, attachments, answer=None, message_id="m1"):
+        """Returns (files saved under the workspace, addresses fetched, has_attachments)."""
+        import sqlite3
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        workspace = os.path.join(tmp.name, "workspace")
+        os.makedirs(workspace)
+        database = os.path.join(tmp.name, "messages.db")
+        conn = sqlite3.connect(database)
+        conn.execute(self.SCHEMA)
+        conn.commit()
+        conn.close()
+        fetched = []
+
+        def opened(request, timeout=None):
+            fetched.append(request.full_url)
+            return answer or _Answer(b"file body", request.full_url, 9)
+
+        inbox = {"messages": [{"messageId": message_id, "from": {"uid": "pu"}, "text": "see attached",
+                               "timestamp": "2026-11-18T10:00:00Z", "attachments": attachments}]}
+        with patch.object(comms, "api_request", return_value=inbox), \
+                patch.object(comms.urllib.request, "urlopen", side_effect=opened):
+            self.assertEqual(comms.fetch_inbox("coa", workspace, "sub-coa", "tok", database), (True, 1))
+        saved = sorted(os.path.relpath(os.path.join(folder, name), tmp.name)
+                       for folder, _, names in os.walk(tmp.name) for name in names
+                       if name != "messages.db" and not name.startswith(".inbox_fetch_"))
+        conn = sqlite3.connect(database)
+        flag = conn.execute("SELECT has_attachments FROM messages").fetchone()[0]
+        conn.close()
+        return saved, fetched, flag
+
+    def media(self, name, address="https://storage.example/o/file"):
+        return {"type": "media", "value": address, "meta": {"fileName": name}}
+
+    def test_a_plain_file_is_saved_in_the_messages_media_folder(self):
+        saved, fetched, flag = self.fetch([self.media("report.pdf")])
+        self.assertEqual(saved, ["workspace/.agent/attachments/m1/media/report.pdf"])
+        self.assertEqual((len(fetched), flag), (1, 1))
+
+    def test_a_name_that_climbs_out_is_saved_inside(self):
+        saved, _, _ = self.fetch([self.media("../../../../../escaped.txt"), self.media("/tmp/absolute.txt")])
+        self.assertEqual(saved, ["workspace/.agent/attachments/m1/media/absolute.txt",
+                                 "workspace/.agent/attachments/m1/media/escaped.txt"])
+
+    def test_an_address_that_is_not_https_is_never_opened(self):
+        for address in ("file:///etc/hostname", "http://storage.example/o/file", "ftp://host/file"):
+            saved, fetched, flag = self.fetch([self.media("x.txt", address)])
+            self.assertEqual((saved, fetched, flag), ([], [], 0), address)
+
+    def test_a_refused_file_does_not_stop_the_next_one(self):
+        saved, fetched, _ = self.fetch([self.media("bad.txt", "file:///etc/hostname"), self.media("good.txt")])
+        self.assertEqual(saved, ["workspace/.agent/attachments/m1/media/good.txt"])
+        self.assertEqual(len(fetched), 1)
+
+    def test_a_redirect_off_https_is_not_saved(self):
+        saved, _, flag = self.fetch([self.media("x.txt")], _Answer(b"body", "http://elsewhere.example/x", 4))
+        self.assertEqual((saved, flag), ([], 0))
+
+    def test_a_file_larger_than_it_says_is_not_saved(self):
+        with patch.object(comms, "MAX_FILE_SIZE", 10):
+            saved, _, _ = self.fetch([self.media("big.bin")], _Answer(b"x" * 500, "https://storage.example/o/file"))
+            self.assertEqual(saved, [])
+            saved, _, _ = self.fetch([self.media("big.bin")], _Answer(b"x" * 500, "https://storage.example/o/file", 500))
+            self.assertEqual(saved, [])
+            saved, _, _ = self.fetch([self.media("ok.bin")], _Answer(b"x" * 10, "https://storage.example/o/file"))
+            self.assertEqual(saved, ["workspace/.agent/attachments/m1/media/ok.bin"])
+
+    def test_a_message_id_that_is_not_a_plain_name_saves_nothing(self):
+        saved, fetched, flag = self.fetch([self.media("x.txt")], message_id="../../outside")
+        self.assertEqual((saved, fetched, flag), ([], [], 0))
+
+
 if __name__ == "__main__":
     unittest.main()

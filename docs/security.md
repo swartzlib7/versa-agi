@@ -29,6 +29,8 @@ Strict separation between the **agent**, the **monitoring layer** (Watchdog), an
 | Read raw cycle stdout/stderr | Archives owned by `watchdog`. Structured memory/awareness via `agictl` is allowed |
 | Modify system skills | Deployed read-only |
 | Tamper with the Data Gateway | Root-owned |
+| Read the Primary User's VersaVoice API token from the process list | Lifeline and the link service pass it in the environment, never as a command argument |
+| Be handed a file outside its attachments folder | A received file keeps only its plain file name and is fetched from an `https` address only |
 
 If the agent needs a system package (`imagemagick`, `ffmpeg`), it **requests** it; the Primary User (or package registry) installs it.
 

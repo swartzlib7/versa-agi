@@ -2,6 +2,16 @@
 
 from __future__ import annotations
 
+# This module needs langchain_core. An interpreter without it skips the whole module with that
+# reason instead of failing to load; the harness interpreter has it and runs it. run_tests.py
+# checks that every test passes on at least one interpreter.
+import importlib.util as _importlib_util
+import unittest as _unittest
+
+if _importlib_util.find_spec("langchain_core") is None:
+    raise _unittest.SkipTest("langchain_core is not installed in this interpreter; "
+                             "the harness interpreter runs this module")
+
 import os
 import sys
 import tempfile

@@ -2,6 +2,16 @@
 
 from __future__ import annotations
 
+# This module needs click. An interpreter without it skips the whole module with that
+# reason instead of failing to load; the agictl interpreter has it and runs it. run_tests.py
+# checks that every test passes on at least one interpreter.
+import importlib.util as _importlib_util
+import unittest as _unittest
+
+if _importlib_util.find_spec("click") is None:
+    raise _unittest.SkipTest("click is not installed in this interpreter; "
+                             "the agictl interpreter runs this module")
+
 import json
 import os
 import sqlite3
@@ -62,6 +72,10 @@ class _Dbs(unittest.TestCase):
             patch.object(agictl_cli, "cycles_db", self.cycles_db),
             patch.object(agictl_cli, "tasks_db", self.tasks_db),
             patch.object(agictl_cli, "agents_db", self.agents_db),
+            # Without this the command uses agictl's own reader, which points at the
+            # live install: `cycle tokens` then tries to close a real cycle row.
+            patch.object(agictl_cli, "agent_reader",
+                         AgentReader(self.agents_db, self.cycles_db, "", self.tasks_db)),
             patch.object(agictl_cli, "_caller_agent_name", return_value=caller),
             patch.object(agictl_cli, "get_agent_name", return_value=caller),
         ):
@@ -254,6 +268,86 @@ class TestOneCycleOneRow(_Dbs):
         block = self.handoff_block()
         self.assertIn("Exit code 124.", block)
         self.assertIn("Your last cycle ended without a handoff.", block)
+
+
+class TestCutCycles(_Dbs):
+    """state_host_services.md §1.6.3 and §1.6.4: a cycle that was cut off, and what the agent is told."""
+
+    def _rows(self):
+        with sqlite3.connect(self.cycles_db) as conn:
+            conn.row_factory = sqlite3.Row
+            return {r["id"]: dict(r) for r in conn.execute("SELECT * FROM cycles")}
+
+    def _reader(self):
+        return AgentReader(self.agents_db, self.cycles_db, "", self.tasks_db)
+
+    def test_an_open_row_is_closed_with_the_time_it_was_last_alive(self):
+        self.add_cycle("web-dev-100", "2026-11-18 21:29:56", summary=None)
+        state = self._reader().close_cut_cycle("web-dev-100", 1795037599, 98)  # 2026-11-18 21:33:19 UTC
+        row = self._rows()["web-dev-100"]
+        self.assertEqual(state, "closed")
+        self.assertEqual(row["ended_at"], "2026-11-18 21:33:19")
+        self.assertEqual(row["exit_code"], 98)
+        self.assertEqual(row["summary"],
+                         "[Lifeline] The computer went off while this cycle was running. No summary was written.")
+
+    def test_lifeline_stopped_has_its_own_code_and_note_and_a_saved_summary_is_kept(self):
+        self.add_cycle("web-dev-100", _ago(minutes=30), summary="Chat with Stephen")
+        self.assertEqual(self._reader().close_cut_cycle("web-dev-100", 1795037599, 96), "closed")
+        row = self._rows()["web-dev-100"]
+        self.assertEqual((row["exit_code"], row["summary"]), (96, "Chat with Stephen"))
+
+    def test_a_row_the_agent_closed_is_left_alone(self):
+        ended = _ago(minutes=10)
+        self.add_cycle("web-dev-100", _ago(minutes=30), ended=ended, summary="Did X", exit_code=None)
+        self.assertEqual(self._reader().close_cut_cycle("web-dev-100", 1795037599, 98), "already_ended")
+        row = self._rows()["web-dev-100"]
+        self.assertEqual((row["ended_at"], row["summary"], row["exit_code"]), (ended, "Did X", None))
+        self.assertEqual(self._reader().close_cut_cycle("web-dev-999", 1795037599, 98), "missing")
+
+    def test_the_command_is_lifeline_only_and_checks_the_agent(self):
+        self.add_cycle("web-dev-100", _ago(minutes=30), summary=None)
+        args = ["cycle", "close-cut", "web-dev", "--cycle-id", "web-dev-100",
+                "--ended-epoch", "1795037599", "--exit-code", "98"]
+        refused = self.invoke(args)
+        self.assertEqual(refused.exit_code, 1)
+        self.assertIn("Lifeline only", refused.output)
+        wrong = self.invoke(["cycle", "close-cut", "clerk"] + args[3:], agent_user=None)
+        self.assertEqual(wrong.exit_code, 1)
+        self.assertIsNone(self._rows()["web-dev-100"]["ended_at"])
+        done = self.invoke(args, agent_user=None)
+        self.assertEqual(done.exit_code, 0, done.output)
+        self.assertEqual(json.loads(done.output.strip().splitlines()[-1])["state"], "closed")
+        bad = self.invoke(args[:-1] + ["1"], agent_user=None)
+        self.assertNotEqual(bad.exit_code, 0, "only the two cut codes are accepted")
+
+    def test_the_agent_is_warned_after_a_cut_and_told_why(self):
+        self.add_cycle("web-dev-100", _ago(hours=3), summary=None, reason="1 new message(s)")
+        self._reader().close_cut_cycle("web-dev-100", 1795037599, 98)
+        block = self.handoff_block()
+        self.assertIn("Exit code 98. The computer went off while it was running", block)
+        self.assertIn("⚠ YOUR LAST CYCLE WAS INTERRUPTED.", block)
+        self.assertIn("check the result of the last thing you were doing", block)
+        self.assertLess(block.index("Exit code 98."), block.index("⚠ YOUR LAST CYCLE WAS INTERRUPTED."))
+
+    def test_every_interrupted_end_is_warned_and_every_clean_one_is_not(self):
+        cases = {96: True, 97: True, 124: True, 143: True, 1: True, 137: True,
+                 0: False, 53: False, 54: False, 55: False, None: False}
+        for code, warned in cases.items():
+            with sqlite3.connect(self.cycles_db) as conn:
+                conn.execute("DELETE FROM cycles")
+            self.add_cycle("web-dev-100", _ago(minutes=50), ended=_ago(minutes=20), exit_code=code)
+            self.assertEqual("YOUR LAST CYCLE WAS INTERRUPTED" in self.handoff_block(), warned, code)
+
+    def test_a_cycle_that_never_closed_is_warned(self):
+        self.add_cycle("web-dev-100", _ago(minutes=50), summary=None)
+        block = self.handoff_block()
+        self.assertIn("never closed (no cycle end)", block)
+        self.assertIn("⚠ YOUR LAST CYCLE WAS INTERRUPTED.", block)
+
+    def test_a_shutdown_stop_names_the_shutdown(self):
+        self.add_cycle("web-dev-100", _ago(minutes=50), ended=_ago(minutes=20), exit_code=143)
+        self.assertIn("It was stopped while the computer was shutting down", self.handoff_block())
 
 
 class TestFramesForHarness(_Dbs):

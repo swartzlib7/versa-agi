@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.9.3"
+PRODUCT_VERSION="3.10.1"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -4236,6 +4236,79 @@ if [ -f "${SENTINEL_UNIT_SRC}" ]; then
   fi
 else
   warn "Sentinel service unit not found at ${SENTINEL_UNIT_SRC} — skipping"
+fi
+
+# ─── Step 11b: Link Service (mail signals pushed from VersaVoice) ──
+# state_realtime_link.md RL-05. The service dials out and holds one request
+# open; no inbound port. [versavoice] link=false makes it idle. Without
+# systemd (some WSL installs) it is not installed and Lifeline's own fetch
+# carries the mail, as before.
+section "Step 11b — Link Service"
+
+# shellcheck source=core-infra/scripts/link_service.sh
+source "${SRC_CORE_INFRA}/scripts/link_service.sh"
+if [ -d /run/systemd/system ]; then
+  if install_link_service "${SRC_CORE_INFRA}" "${WATCHDOG_USER}" "${WATCHDOG_HOME}/core-infra"; then
+    systemctl enable versa-agi-link --quiet 2>/dev/null || true
+    systemctl restart versa-agi-link 2>/dev/null || true
+    ok "Link service installed and started ([versavoice] link=$(ini_get versavoice link true))"
+  else
+    systemctl enable versa-agi-link --quiet 2>/dev/null || true
+    systemctl start versa-agi-link 2>/dev/null || true
+    ok "Link service already current"
+  fi
+else
+  warn "systemd is not running here — link service not installed; Lifeline's own fetch carries the mail"
+fi
+
+# ─── Step 11c: Shutdown Guard (agents hand off before the computer goes down) ──
+# state_host_services.md §1.4.1. The unit does its work when systemd stops it
+# at shutdown or reboot. It is enabled and started here and never restarted:
+# a restart would run its ExecStop.
+section "Step 11c — Shutdown Guard"
+
+# shellcheck source=core-infra/scripts/shutdown_guard_service.sh
+source "${SRC_CORE_INFRA}/scripts/shutdown_guard_service.sh"
+if [ -d /run/systemd/system ]; then
+  if install_shutdown_guard "${SRC_CORE_INFRA}"; then
+    ok "Shutdown guard installed ([agent] shutdown_grace_seconds=$(ini_get agent shutdown_grace_seconds 120))"
+  else
+    ok "Shutdown guard already current"
+  fi
+  systemctl enable versa-agi-shutdown-guard --quiet 2>/dev/null || true
+  systemctl start versa-agi-shutdown-guard 2>/dev/null || true
+else
+  warn "systemd is not running here — shutdown guard not installed; an agent in a cycle is cut off when the computer shuts down"
+fi
+
+# ─── Step 11d: Sleep Hold (the computer stays awake while an agent works) ──
+# state_host_services.md §1.6.1, §1.6.2. Lifeline takes the hold; only root can
+# give the watchdog account the permission and set how the lid behaves.
+section "Step 11d — Sleep Hold"
+
+# shellcheck source=core-infra/scripts/sleep_hold.sh
+source "${SRC_CORE_INFRA}/scripts/sleep_hold.sh"
+if [ -d /run/systemd/system ]; then
+  _SLEEP_HOLD="$(ini_get agent sleep_hold true)"
+  _SLEEP_RC=0
+  install_sleep_hold_rule "${WATCHDOG_USER}" "${_SLEEP_HOLD}" || _SLEEP_RC=$?
+  case "${_SLEEP_RC}" in
+    0) ok "Sleep hold permission updated ([agent] sleep_hold=${_SLEEP_HOLD})" ;;
+    1) ok "Sleep hold permission already current ([agent] sleep_hold=${_SLEEP_HOLD})" ;;
+    *) warn "No polkit rules folder here — the computer can sleep while an agent works" ;;
+  esac
+  _LID_WAITS="false"
+  if machine_is_laptop; then
+    _LID_WAITS="$(ini_get agent lid_waits_for_agent false)"
+  fi
+  [ "${_SLEEP_HOLD}" = "true" ] || _LID_WAITS="false"
+  if apply_lid_setting "${_LID_WAITS}"; then
+    ok "Lid setting updated: a shut lid $([ "${_LID_WAITS}" = "true" ] && echo "waits for a working agent" || echo "puts the computer to sleep")"
+  else
+    ok "Lid setting already current ([agent] lid_waits_for_agent=${_LID_WAITS})"
+  fi
+else
+  warn "systemd is not running here — no sleep hold; nothing puts this machine to sleep through systemd either"
 fi
 # ─── System Permissions Restabilization ───────────────
 # This is the AUTHORITATIVE, FINAL pass. It enforces the System Design §IX

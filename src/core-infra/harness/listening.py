@@ -23,6 +23,8 @@ import time
 from typing import Callable, Iterable
 
 WAIT_POLL_SECONDS = 3.0
+# How often the listening wait looks at the mail signal file.
+SIGNAL_CHECK_SECONDS = 0.25
 # Close the window this long before the time limit: the last time warning
 # (state_long_cycles.md §1.7), so `cycle end` is accepted from then on. The
 # harness passes the warning's real lead, which is longer for slow steps.
@@ -98,6 +100,41 @@ def read_close_request(path: str | None, cycle_id: str | None) -> str | None:
     if len(parts) >= 2 and parts[0] == cycle_id and parts[1] in ("requested", "shutdown"):
         return parts[1]
     return None
+
+
+def read_close_deadline(path: str | None, cycle_id: str | None) -> float | None:
+    """Epoch seconds by which this cycle must be closed, when the close request names one.
+
+    The shutdown guard writes "<cycleId> shutdown <epoch>" (state_host_services.md §1.4.1).
+    """
+    if not path or not cycle_id:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            parts = fh.read().split()
+    except OSError:
+        return None
+    if len(parts) >= 3 and parts[0] == cycle_id:
+        try:
+            return float(parts[2])
+        except ValueError:
+            return None
+    return None
+
+
+def shutdown_message(seconds_left: float | None = None) -> str:
+    """Told once, at a safe point, when the computer is shutting down mid-cycle (§1.4.1 rule 5)."""
+    left = ""
+    if seconds_left is not None:
+        left = f" You have about {max(10, int(round(seconds_left / 10.0)) * 10)} seconds."
+    return (
+        "⏻ SHUTDOWN — This computer is shutting down now. Stop the work you are doing; do not "
+        "start anything new. If a person is waiting for your reply, send them one short message "
+        "saying the computer is shutting down and you will carry on when it is back. Then close "
+        "your cycle at once: run `agictl cycle end \"summary\" --handoff \"Open: … | Next: …\"`."
+        + left +
+        " Anything unfinished continues in your next spawn."
+    )
 
 
 def closing_message(reason: str, minutes: int) -> str:
@@ -196,21 +233,58 @@ class ListeningWindow:
         return closing_message(reason, self.minutes)
 
 
+class MailSignal:
+    """The file the link service rewrites when it has stored new mail for this
+    agent (state_realtime_link.md RL-07). ``raised()`` is true once per rewrite."""
+
+    def __init__(self, path: str | None):
+        self.path = path or ""
+        self._seen = self._stamp()
+
+    def _stamp(self) -> int:
+        if not self.path:
+            return 0
+        try:
+            return os.stat(self.path).st_mtime_ns
+        except OSError:
+            return 0
+
+    def raised(self) -> bool:
+        stamp = self._stamp()
+        if stamp == self._seen:
+            return False
+        self._seen = stamp
+        return True
+
+
 def wait_for_mail(window: ListeningWindow, inject: Callable[[], bool],
                   sleep: Callable[[float], None] = time.sleep,
                   poll_seconds: float = WAIT_POLL_SECONDS,
-                  tick: Callable[[], object] | None = None) -> str:
+                  tick: Callable[[], object] | None = None,
+                  signal: Callable[[], bool] | None = None,
+                  signal_seconds: float = SIGNAL_CHECK_SECONDS) -> str:
     """Block between turns until mail is injected or the window must close.
 
     Returns "mail" (``inject`` fed a new turn), or the close reason
     ("idle" / "deadline"). ``inject`` is the harness's mid-cycle mail hook.
     ``tick`` runs on every poll that brought no mail (the cache keep-alive).
+    ``signal`` is looked at every ``signal_seconds``; when it is true the
+    poll runs at once instead of at the end of ``poll_seconds``.
     """
     while True:
         reason = window.close_reason()
         if reason:
             return reason
-        sleep(poll_seconds)
+        if signal is None:
+            sleep(poll_seconds)
+        else:
+            waited = 0.0
+            while waited < poll_seconds:
+                step = min(signal_seconds, poll_seconds - waited)
+                sleep(step)
+                waited += step
+                if signal():
+                    break
         if inject():
             return "mail"
         if tick is not None:

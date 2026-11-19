@@ -36,6 +36,25 @@ agictl task unfreeze-all <name>
 
 COA with an empty model after a fresh install is **held** until first-login assign — see [Models](models.md). That is not a circuit breaker.
 
+## Messages reach an agent slowly
+
+A message should wake a sleeping agent at once and reach an agent in a chat within a second or two. If it takes up to a minute (asleep) or up to 10 seconds (in a chat), the link to VersaVoice is down and messages are arriving by the fetch. Nothing is lost.
+
+1. Look at the `LINK` line in agitop's System column, or `cat /var/lib/versa-agi/link_state` — `up` is healthy. `down` names the reason. `off` means Live Link is off (agitop → System Settings → Live Chat → Live Link) or no agent has a VersaVoice account.
+2. `systemctl status versa-agi-link` — the service should be active. `sudo systemctl restart versa-agi-link` starts it again.
+3. `grep '\[LINK\]' /var/log/versa-agi-lifeline.log | tail` — `the VersaVoice API answered 404` means VersaVoice does not have the link route yet; the service asks again every 30 minutes. `the VersaVoice API answered 401` means the API token is refused.
+4. No `versa-agi-link` service at all: the machine has no systemd (some WSL installs). The fetch is the only path there.
+
+A woken agent still needs its pass and its model: the link removes the wait before those, not the work itself.
+
+## The machine was offline
+
+`grep -E 'OFFLINE|ONLINE' /var/log/versa-agi-lifeline.log | tail` shows each outage: one `OFFLINE` line when Lifeline first could not reach VersaVoice AI, one `ONLINE` line with the length when it came back. In between, inbox fetches wait and agents on cloud models are not started, so nothing fails and the circuit breaker is not touched. Agents on local models keep running. Work that came due during the outage starts on the first pass after it.
+
+**The app shows an agent resting although it is working.** While a cycle runs, the machine proves about once a minute to VersaVoice AI that it is alive. After 3 minutes without a proof the app shows the agent resting, and working again when the proofs return. So a network gap of more than 3 minutes shows as resting. Before 3.10.0 the app kept showing a working agent for up to the rest of its time limit after the machine went off.
+
+If messages are slow while the machine is online, check for a second network connection that carries nothing (a phone tethered by USB, a VPN): `ip route` and `ip -6 route` show which connection is the default.
+
 ## Circuit breaker
 
 5+ consecutive failures or 20+ failures in 60 minutes:
@@ -73,6 +92,10 @@ The reason is in the Lifeline log (`/var/log/versa-agi-lifeline.log`) and in agi
 | `TIMEOUT: … stopped by the backstop` | One model call was still running 5 minutes after the time limit. | The cycle is stopped and its record closed with a note. The agent wakes again when work is due. | If it repeats, check that the model server or provider is answering. |
 | `STALL:` | The model gave no reply for 10 minutes (20 minutes on a local model). A reply that is streamed counts from its last piece, so a long reply that is still arriving is not a stall. | The cycle is stopped. Tasks are not frozen. The agent wakes again when work is due. | Check that the model server or provider is answering. Five stalls in a row trip the circuit breaker. |
 | `CACHE KEEP-ALIVE: off for this cycle` (cycle log) | While a chat was waiting, a request that keeps a Claude model's cached price alive failed, or found nothing cached. | The chat carries on. The next message costs more, once. Keep-alive starts again in the next cycle. | Nothing. If it appears in every chat, check the provider's status, and through OpenRouter the account's privacy setting. |
+| `RESUME FRAME: no summary was stored` or `the summary call failed` (cycle log) | A cycle started with more saved conversation than the agent's Resume Max Messages, and the summary of the older part could not be written: the Compaction Model, or the agent's own model, did not answer. | Nothing is lost. For that cycle the agent keeps more of its conversation, up to what its model allows, and the next cycle tries again. | If the line repeats, check the Compaction Model in agitop → System Settings → General. |
+| The `CACHE:` line shows a large **written** figure after the agent looked at several photos (cycle log) | On a version before this was fixed, each photo after the first made a Claude model bill most of the conversation again. | The cycle costs more than it should. Nothing else is affected. | Update. A cycle with photos then shows `VIEW HOLD` lines, and its `CACHE:` line reads near 95% from the cache. |
+| `SHUTDOWN: … cycle ended because the computer is shutting down` | The machine was shut down or restarted while the cycle ran. The agent was told and given `shutdown_grace_seconds` (default 120) to hand off; one still running after that was stopped. | The cycle shows as **Shutdown** on the agent card and does not count toward the circuit breaker. The agent carries on at its next start, after the startup pause. | Nothing. If agents are often stopped before they finish, raise `shutdown_grace_seconds` under `[agent]` in `setup.ini` (up to 300). |
+| `CUT: … was cut off at …` | The cycle never ended: the computer lost power or was forced off, or Lifeline was stopped. | Lifeline closed the record with the time the cycle stopped and told VersaVoice AI. The agent's next wake says its last cycle was interrupted, and it checks the last thing it was doing. Not counted by the circuit breaker. | Nothing. Look at what the agent was doing if it was changing files or sending messages. |
 | `LOOP:` | The agent made the same tool call and got the same result 6 times. It was told at the third. | The cycle is closed with a summary and a handoff. Tasks are not frozen. | Open the cycle in **Cycle Logs** and read what was blocked. |
 | `RUNAWAY:` then `HALTED:` | The cycle wrote more output in 15 minutes than the agent's runaway thresholds allow (2500 lines or 2048 KB by default). | The cycle is stopped, all of the agent's tasks are frozen, and the Primary User is told. | Read the cycle log, then `agictl task unfreeze-all <name>`. |
 

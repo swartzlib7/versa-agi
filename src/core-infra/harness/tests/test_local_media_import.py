@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -318,6 +319,8 @@ class TestValidateComponent(unittest.TestCase):
 
 
 class TestUnionSection(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_media_bundles_reconciled(self):
         sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
         from cli import _MODELS_UNION_SECTIONS  # noqa: WPS433

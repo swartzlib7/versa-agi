@@ -18,7 +18,7 @@
   </p>
   <p>
     <!-- VERSION -->
-    <img src="https://img.shields.io/badge/version-3.9.3-FF9800" alt="Versa AGi version 3.9.3">
+    <img src="https://img.shields.io/badge/version-3.10.1-FF9800" alt="Versa AGi version 3.10.1">
     <!-- /VERSION -->
   </p>
   <p align="center">
@@ -165,6 +165,14 @@ When a person writes to an agent in the VersaVoice app, the agent's cycle stays 
 
 **Setting:** `sudo agitop` → System Settings → **Live Chat** → **Chat listening (minutes)**: Off, 5, 10, 15 or 30 (default 15). Off answers once per cycle, as before.
 
+**Live Link — no waiting for the next fetch:** the machine holds one outbound HTTPS request open to the VersaVoice API (the link service, `versa-agi-link`), and the API responds the moment an agent has new mail. A sleeping agent is woken at once instead of at the next minute; an agent in a chat reads the message at once instead of within 10 seconds. The machine still accepts no inbound connection. If the link is down, messages arrive by the fetch, as before. Live Link is optional and off by default: answer the question during `setup.sh` / `setup.sh --update`, or `sudo agitop` → System Settings → **Live Chat** → **Live Link**.
+
+**Shutting down:** when you shut down or restart the machine while an agent is working or in a chat, the agent is told, hands off and closes its cycle before the machine goes down (up to 2 minutes; `shutdown_grace_seconds` under `[agent]` in `setup.ini`, 30 to 300, `0` = off). The app then shows the agent resting. After a power cut or a lost network it shows resting within about 3 minutes.
+
+**Sleep:** the machine does not go to sleep while an agent's cycle runs (a working cycle until it ends, a chat until it has been quiet for the listening time). On a laptop, setup asks whether a shut lid should wait too; the default is that a shut lid sleeps the machine. `sleep_hold=false` under `[agent]` turns it off.
+
+**After an interruption:** a cycle cut off by a power loss, a shutdown, a stall or a crash is closed out by Lifeline, and the agent's next wake tells it to check the last thing it was doing before it carries on.
+
 **How long a chat can last:** until nobody has written for the listening time, or until shortly before the agent's time limit (30 to 240 minutes, default 90). You can ask your Chief Orchestrator Agent to change a time limit; it holds from the agent's next cycle.
 
 **In the app:** a status line above the recording box in each agent chat (resting, waking, working, here); a status icon and an **ACTIVITY** section on each agent card (all-time cycles, 48-hour busy graph, last 20 cycles with details, outcomes, what woke it, cycle lengths).
@@ -242,7 +250,7 @@ New here? Start with the **[Versa AGi Manual](https://versavoice.ai/manual/versa
 | **Same tool call with the same result** | 6 times within the last 20 tool calls | Agent told at 3, cycle stopped at 6; counts toward the circuit breaker |
 | **Cycle output (runaway)** | 2500 lines or 2048 KB in 15 min, per agent | Cycle stopped, the agent's tasks frozen, Primary User told |
 | **Live chat listening** | Off, 5, 10, 15 or 30 min since the last message (default 15) | Chat closes at the last time warning (8 min before the time limit, earlier for a slow model) |
-| **Listening agents** | 5 per Primary User at once | Server-side; others answer once per cycle |
+| **Listening agents** | 20 per Primary User at once with the link up; 5 without it | Server-side; others answer once per cycle |
 | **Message text** | 2048 characters | Server-side hard block |
 | **Attachments** | 10 per message, 50MB per file | Client + server |
 | **Live call length** | 5, 10, 15 or 25 min (default 15) | 5-minute notice, spoken wrap-up, then close |

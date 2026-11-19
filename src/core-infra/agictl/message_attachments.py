@@ -12,6 +12,7 @@ skills/communication.md.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 
 MAX_ATTACHMENTS = 10
 MEDIA_MAX_BYTES = 20 * 1024 * 1024
@@ -119,6 +120,41 @@ def _url_problem(url: str) -> str:
         return ""
     return (f"--url {url}: this is not a web address (it must start with http:// or https://). "
             "A file on this machine is attached with --markdown, --media or --file.")
+
+
+# ── Received attachments ──────────────────────────────────────────────
+# A received message names its attachment's file and gives the address to
+# fetch it from. Both come from outside this machine, so neither is used as given.
+
+INBOUND_NAME_MAX = 200
+
+
+def inbound_file_name(name, fallback: str) -> str:
+    """A received file name made safe to save inside the message's attachments folder.
+
+    Keeps the last path part only (either separator), so `../../x` and `/etc/x`
+    become `x`. Drops control characters and leading dots. Returns ``fallback``
+    when nothing usable is left.
+    """
+    text = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    text = "".join(ch for ch in text if ch.isprintable()).strip().lstrip(".").strip()
+    if not text:
+        return fallback
+    if len(text) > INBOUND_NAME_MAX:
+        root, ext = os.path.splitext(text)
+        ext = ext[:20]
+        text = root[:INBOUND_NAME_MAX - len(ext)] + ext
+    return text
+
+
+def inbound_address_ok(address) -> bool:
+    """True for an `https` address with a host: the only kind a received file is fetched from.
+    `file:`, `ftp:` and plain `http:` are refused."""
+    try:
+        parts = urlsplit(str(address or "").strip())
+        return parts.scheme.lower() == "https" and bool(parts.hostname)
+    except ValueError:
+        return False
 
 
 def problems(media_paths, markdown_paths, urls, to_versavoice: bool = True) -> list[str]:

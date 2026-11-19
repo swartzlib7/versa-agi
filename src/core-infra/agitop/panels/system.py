@@ -20,6 +20,26 @@ from agitop.feature_flags import UTILITY_MODELS_UI_VISIBLE, SCRIPT_TASKS_UI_VISI
 _DETERMINISTIC_UI_VISIBLE = UTILITY_MODELS_UI_VISIBLE or SCRIPT_TASKS_UI_VISIBLE
 
 
+def link_status_markup(status: dict) -> str:
+    """The LINK line of the System column (TD-LINK-001).
+
+    up: messages reach agents at once. down or off: they arrive by Lifeline's
+    own fetch. No report: the line stays empty (no link service on this machine).
+    """
+    state = status.get("state")
+    detail = (status.get("detail") or "").replace("[", "(").replace("]", ")")
+    if len(detail) > 28:
+        detail = detail[:27] + "…"
+    note = f" [dim]{detail}[/]" if detail else ""
+    if state == "up":
+        return f" LINK:      [bold green]●[/] up{note}"
+    if state == "down":
+        return f" LINK:      [bold red]●[/] down{note}"
+    if state == "off":
+        return f" LINK:      [dim]○ off[/]{note}"
+    return ""
+
+
 class MetricLabel(Static):
     """A single metric cell: label + value."""
     pass
@@ -137,6 +157,7 @@ class SystemPanel(Static):
             with Vertical(classes="sys-col"):
                 yield Static(" [b]System[/b]", classes="col-header")
                 yield MetricLabel(id="m-cron")
+                yield MetricLabel(id="m-link")
                 yield MetricLabel(id="m-inference_endpoint")
                 yield MetricLabel(id="m-localai")
                 yield MetricLabel(id="m-cloudproxy")
@@ -387,6 +408,10 @@ class SystemPanel(Static):
 
         self.query_one("#m-cron").update(
             f" LIFELINE:  {self._dot(cron_on)} {'active' if cron_on else 'idle'}"
+        )
+
+        self.query_one("#m-link").update(
+            link_status_markup(self.system_reader.get_link_status())
         )
 
         log_on = self.system_reader.is_logging_enabled()

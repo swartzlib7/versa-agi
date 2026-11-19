@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -293,6 +294,8 @@ class TestAtomicImportAndMeta(unittest.TestCase):
             leftovers = [n for n in os.listdir(dest_dir) if n.endswith(".partial")]
             self.assertEqual(leftovers, [])
 
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_meta_roundtrip_and_reconcile_union_section(self):
         sys.path.insert(0, os.path.join(CORE_INFRA, "agictl"))
         from cli import _MODELS_UNION_SECTIONS, _reconcile_models_ini  # noqa: WPS433
@@ -343,6 +346,8 @@ class TestMediaRefusalZeroMutation(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(importlib.util.find_spec("click"),
+                     "click is not installed in this interpreter; the agictl interpreter runs this test")
 class TestCliInspectImport(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -516,6 +521,8 @@ class TestActivateSizeAndRestart(unittest.TestCase):
         self.assertEqual(resolve_activate_parallel(2, 4, None), 2)
 
 
+@unittest.skipUnless(importlib.util.find_spec("click"),
+                     "click is not installed in this interpreter; the agictl interpreter runs this test")
 class TestSyclImagePin(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -616,6 +623,8 @@ class TestSyclRemoveHelpers(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(importlib.util.find_spec("click"),
+                     "click is not installed in this interpreter; the agictl interpreter runs this test")
 class TestSyclRemoveCli(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

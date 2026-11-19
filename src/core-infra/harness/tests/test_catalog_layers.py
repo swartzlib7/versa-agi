@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -209,6 +210,8 @@ class OverlayUpgrade(unittest.TestCase):
 
 
 class ImportBehavior(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_known_import_writes_selection_only(self):
         from agictl import cli as agictl_cli
 
@@ -395,6 +398,8 @@ class GeminiSectionSplit(unittest.TestCase):
         self.assertEqual(cfg.get("system", "model"), "keep-me")
         self.assertEqual(cfg.get("third_party", "google_api_key"), "AIza-new")
 
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_transients_consumed_then_dropped_by_reconcile(self):
         from cli import _reconcile_setup_ini
 

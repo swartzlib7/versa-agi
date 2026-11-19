@@ -1,7 +1,10 @@
 
 import db_connect
+import contextlib
+import fcntl
 import os
 import json
+import re
 import base64
 import mimetypes
 import time
@@ -211,7 +214,40 @@ def inbox_since(messages_db, sub_account_id, full_sync=False):
     return (latest - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False):
+@contextlib.contextmanager
+def inbox_fetch_lock(messages_db, sub_account_id):
+    """One inbox fetch at a time per sub-account (state_realtime_link.md RL-03).
+
+    Lifeline, the poll of a spawned agent and the link service can all fetch
+    the same agent's inbox. The fetch reads its cursor, asks the cloud, then
+    checks and inserts; two at once could store one message twice. The lock
+    file sits beside messages.db. If it cannot be opened the fetch still runs.
+    """
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", str(sub_account_id or "none"))
+    path = os.path.join(os.path.dirname(os.path.abspath(messages_db)), f".inbox_fetch_{name}.lock")
+    try:
+        handle = os.open(path, os.O_CREAT | os.O_RDWR, 0o660)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            os.close(handle)
+
+
+def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False, cycle_id=""):
+    """Fetch one sub-account's inbox, one fetch at a time (``inbox_fetch_lock``)."""
+    with inbox_fetch_lock(messages_db, sub_account_id):
+        return _fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db,
+                            full_sync=full_sync, cycle_id=cycle_id)
+
+
+def _fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False, cycle_id=""):
     """Fetches messages from VersaVoice Cloud and persists them cleanly to messages.db.
 
     Returns ``(success, inserted)`` — ``inserted`` is new SQLite rows this fetch.
@@ -224,12 +260,19 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
     removed and will not be returned by the inbox API.
 
     full_sync=True ignores the cursor and pulls from the beginning (manual catch-up).
+
+    ``cycle_id``: the agent's running cycle, sent by the fetch that runs for
+    the life of a spawn. VersaVoice takes it as proof that the machine is
+    alive (state_host_services.md §1.4.2).
     """
     since = inbox_since(messages_db, sub_account_id, full_sync=full_sync)
     endpoint = (
         f"/messages/inbox?subAccountId={sub_account_id}"
         f"&unreadOnly=false&markAsRead=true&since={since}"
     )
+    cycle_id = re.sub(r"[^A-Za-z0-9._-]", "", str(cycle_id or ""))[:120]
+    if cycle_id:
+        endpoint += f"&cycleId={cycle_id}"
     response = api_request(endpoint, token)
     
     if isinstance(response, list):
@@ -289,6 +332,10 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
             # Determine workspace base for attachments
             attach_base = os.path.join(agent_path, ".agent", "attachments", msg_id)
             has_any_attachment = False
+            if message_attachments.inbound_file_name(msg_id, "") != msg_id:
+                # The folder is named for the message; an id that is not a plain name is not used as one.
+                console.print(f"[red]Attachments not saved: message id {msg_id!r} is not a plain name[/red]")
+                attachments = []
             
             # 1. Handle structured attachments array (media, markdown, url)
             if attachments and isinstance(attachments, list):
@@ -302,16 +349,24 @@ def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full
                     
                     try:
                         if att_type == "media":
+                            if not message_attachments.inbound_address_ok(att_value):
+                                console.print(f"[red]Attachment refused for {msg_id}: its address is not an https address[/red]")
+                                continue
                             media_dir = os.path.join(attach_base, "media")
                             os.makedirs(media_dir, exist_ok=True)
-                            file_name = att_meta.get("fileName", f"media_{att_idx}")
+                            file_name = message_attachments.inbound_file_name(
+                                att_meta.get("fileName"), f"media_{att_idx}")
                             local_path = os.path.join(media_dir, file_name)
                             req = urllib.request.Request(att_value)
                             with urllib.request.urlopen(req, timeout=30) as resp:
+                                if not message_attachments.inbound_address_ok(resp.geturl()):
+                                    console.print(f"[red]Attachment refused for {msg_id}: it was redirected off https[/red]")
+                                    continue
                                 size = int(resp.headers.get('Content-Length', 0))
-                                if size <= MAX_FILE_SIZE:
+                                data = resp.read(MAX_FILE_SIZE + 1) if size <= MAX_FILE_SIZE else b""
+                                if size <= MAX_FILE_SIZE and len(data) <= MAX_FILE_SIZE:
                                     with open(local_path, 'wb') as f:
-                                        f.write(resp.read())
+                                        f.write(data)
                                     try:
                                         os.chmod(local_path, 0o644)
                                     except: pass

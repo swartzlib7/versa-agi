@@ -11,8 +11,9 @@ Anthropic's API and through OpenRouter alike. Three marks go out:
 
 A mark is not part of the conversation: it does not disturb a reasoning
 record (reasoning_replay.py). What restarts the cache is what changes the
-bytes before a mark: a new system prompt, trim, a compaction frame, a viewed
-image removed, a settled search pair.
+bytes before a mark: a new system prompt, trim, a compaction frame, a settled
+search pair. A viewed image is not one of them inside a cycle: it stays in
+the request until the cycle ends (view_hold.py).
 """
 
 from __future__ import annotations

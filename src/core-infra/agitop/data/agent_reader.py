@@ -422,7 +422,45 @@ class AgentReader:
         "crash": "[Lifeline] The cycle stopped on an error before it was closed. No summary was written.",
         "stall": "[Lifeline] Stopped by the stall timer: no model reply within the stall limit. No summary was written.",
         "loop": "[Lifeline] Stopped: the same tool call was repeated. No summary was written.",
+        "shutdown": "[Lifeline] Stopped because the computer was shut down. No summary was written.",
     }
+
+    # Summary on a row Lifeline closes for a cut cycle (state_host_services.md §1.6.3).
+    CUT_EXIT_MACHINE_OFF = 98
+    CUT_EXIT_LIFELINE_STOPPED = 96
+    LIFELINE_CUT_NOTES = {
+        98: "[Lifeline] The computer went off while this cycle was running. No summary was written.",
+        96: "[Lifeline] Lifeline was stopped while this cycle was running. No summary was written.",
+    }
+
+    def close_cut_cycle(self, cycle_id: str, ended_epoch: int, exit_code: int) -> str:
+        """Close the row of a cycle that was cut off (no end was ever recorded).
+
+        Returns "closed" (the row was open: end time, exit code and a note are
+        written), "already_ended" (the agent had closed it; nothing is changed),
+        "missing" (no such row) or "error".
+        """
+        try:
+            conn = db_connect.connect_compat(self.cycles_db_path, timeout=5)
+            row = conn.execute("SELECT ended_at FROM cycles WHERE id=?", (cycle_id,)).fetchone()
+            if row is None:
+                conn.close()
+                return "missing"
+            if row[0]:
+                conn.close()
+                return "already_ended"
+            note = self.LIFELINE_CUT_NOTES.get(exit_code, self.LIFELINE_CUT_NOTES[self.CUT_EXIT_LIFELINE_STOPPED])
+            conn.execute(
+                """UPDATE cycles SET ended_at=datetime(?, 'unixepoch'), exit_code=?,
+                   summary=CASE WHEN summary IS NULL OR TRIM(summary)='' THEN ? ELSE summary END
+                   WHERE id=? AND ended_at IS NULL""",
+                (int(ended_epoch), int(exit_code), note, cycle_id),
+            )
+            conn.commit()
+            conn.close()
+            return "closed"
+        except Exception:
+            return "error"
 
     def update_last_cycle_tokens(self, agent_name: str, t_in: int, t_out: int, t_think: int, t_total: int, exit_code: int = None, t_cached: int = 0, session_path: str = None, cycle_id: str = None, outcome: str = None) -> bool:
         """Record tokens and exit code on one cycle row.

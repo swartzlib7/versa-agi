@@ -95,6 +95,9 @@ agictl agent request-remove <name> [--reason TEXT]    # Flag for removal (sets r
 agictl agent cancel-remove <name>                     # Cancel pending removal (reactivates agent)
 agictl agent remove <name>                            # Context-aware: non-root → request-remove, root → confirm-remove
 agictl agent set-timeout <name> <minutes>             # Set the cycle time limit (30–240). COA or Primary User only; holds from the agent's next cycle
+agictl system live-chat                               # Is Live Chat on, the listening time, Live Link on/off and up/down
+agictl system live-chat set <off|5|10|15|30>          # Chat listening time for every agent. COA or Primary User only; holds from each agent's next cycle
+agictl system live-chat link <on|off>                 # Switch Live Link. COA or Primary User only; the link service follows within a minute
                                                       #   When the PU asks how long a chat can last: versa_agi_operations_guide.md → Live chat
 sudo agictl agent set-model <name> <model>            # Assign catalog model to agent (COA or Primary User only)
 sudo agictl agent set-model <name> --clear            # Clear assignment → inherit system default

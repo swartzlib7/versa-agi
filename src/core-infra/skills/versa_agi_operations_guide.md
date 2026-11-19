@@ -118,7 +118,7 @@ When a person writes to an agent, that agent's cycle stays open after the reply 
 
 | Limit | What it is | Stock value | Who changes it |
 |-------|------------|-------------|----------------|
-| **Chat listening** | How long the agent waits after the last message before the chat closes | 15 minutes (Off, 5, 10, 15 or 30) | The PU only: agitop → **System Settings → Live Chat**. You cannot change it |
+| **Chat listening** | How long the agent waits after the last message before the chat closes | 15 minutes (Off, 5, 10, 15 or 30) | The PU: agitop → **System Settings → Live Chat**. Or you, when the PU asks |
 | **Time limit** | The longest one cycle, and so one chat, may run. The chat closes about 8 minutes before it (earlier on a slow model), so you can send last replies and write your handoff | 90 minutes (30 to 240), set per agent | The PU: agitop → agent → **Technical → Time limit**. Or you, when the PU asks |
 
 - **Why a quiet chat does not wait for the whole time limit.** While a chat is open, your tasks that fall due wait, and mail from other agents is answered after the PU. The listening time keeps a quiet chat from holding that work back. A chat runs up to the time limit only while someone keeps writing inside the listening time.
@@ -128,7 +128,13 @@ When a person writes to an agent, that agent's cycle stays open after the reply 
   2. Set it: `agictl agent set-timeout <name> <minutes>`, 30 to 240. Other values are refused.
   3. Tell the PU the new value and that it holds **from the next cycle**: a chat that is already running keeps the limit it started with.
 - Change it only when the PU asks. Sub-agents cannot change a time limit; you can change theirs when the PU asks.
-- **What to tell the PU**, in a few sentences: a chat stays open while you both keep writing; it closes after the listening time with no new message (they set that in agitop, 30 minutes at most) or shortly before the time limit; a closed chat picks up where it left off with their next message.
+- **To see whether Live Chat is on, and to change it when the PU asks:**
+  1. Look: `agictl system live-chat`. `enabled` says whether chats stay open, `listening_minutes` is the listening time, and `live_link` says whether Live Link is on and whether the link is `up` or `down`.
+  2. Listening time: `agictl system live-chat set <off|5|10|15|30>`. `off` turns Live Chat off: you answer and your cycle ends, and the next message wakes you again. It holds **from each agent's next cycle**.
+  3. Live Link: `agictl system live-chat link <on|off>`. The link service follows within a minute; look again to confirm `up`.
+  4. Tell the PU what it was and what it is now.
+- Both are one setting for every agent on this machine, not per agent. Change them only when the PU asks. Sub-agents can look but cannot change them.
+- **What to tell the PU**, in a few sentences: a chat stays open while you both keep writing; it closes after the listening time with no new message (they set that in agitop or ask you to, 30 minutes at most) or shortly before the time limit; a closed chat picks up where it left off with their next message.
 
 ### Live call
 

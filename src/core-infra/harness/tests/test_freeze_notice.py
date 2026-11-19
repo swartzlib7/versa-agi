@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import importlib.util
 import unittest
 
 CORE_INFRA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -79,6 +80,8 @@ class TestFreezeNotice(unittest.TestCase):
         con.close()
         self.assertEqual(attempts, {1: 0, 2: 0, 3: 3, 4: 3, 5: 3, 6: 3})
 
+    @unittest.skipUnless(importlib.util.find_spec("click"),
+                         "click is not installed in this interpreter; the agictl interpreter runs this test")
     def test_from_lifeline_is_inbox_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             messages = os.path.join(tmp, "messages.db")

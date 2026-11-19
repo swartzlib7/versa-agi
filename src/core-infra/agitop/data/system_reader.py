@@ -53,6 +53,34 @@ def list_spawn_holds(directory: str = SPAWN_HOLD_DIR, now: Optional[int] = None)
     return holds
 
 
+# The link service's own report (TD-LINK-001): "<up|down|off> <epoch> <detail>".
+LINK_STATE_FILE = "/var/lib/versa-agi/link_state"
+LINK_FRESH_SECONDS = 120   # the limit lifeline.sh uses (_vv_link_up)
+
+
+def read_link_state(path: str = LINK_STATE_FILE, now: Optional[int] = None) -> dict:
+    """The link to VersaVoice as the link service last reported it.
+
+    Returns {state, detail}. state is ``up``, ``down``, ``off``, or ``none``
+    when there is no report (the service is not installed or has not run).
+    ``up`` holds only while the report is fresh, as it does for Lifeline: a
+    service that stopped reporting is ``down``.
+    """
+    if now is None:
+        now = int(time.time())
+    try:
+        stamp = int(os.stat(path).st_mtime)
+        with open(path, encoding="utf-8") as handle:
+            words = handle.readline().strip().split(" ", 2)
+    except (OSError, ValueError):
+        return {"state": "none", "detail": ""}
+    state = words[0] if words and words[0] in ("up", "down", "off") else "none"
+    detail = words[2] if len(words) > 2 else ""
+    if state == "up" and now - stamp > LINK_FRESH_SECONDS:
+        return {"state": "down", "detail": f"no report for {(now - stamp) // 60} min"}
+    return {"state": state, "detail": detail}
+
+
 def lift_spawn_hold(agent: str, directory: str = SPAWN_HOLD_DIR) -> bool:
     """Delete one agent's cooldown file. Does not change model or agent status.
 
@@ -407,6 +435,10 @@ class SystemReader:
             return True, "Lifeline started (manual)."
         except Exception as e:
             return False, f"Failed to start Lifeline: {e}"
+
+    def get_link_status(self) -> dict:
+        """The link to VersaVoice: {state, detail} (see read_link_state)."""
+        return read_link_state()
 
     def is_sentinel_running(self) -> bool:
         """Check if the Sentinel file watcher (inotifywait) is running."""

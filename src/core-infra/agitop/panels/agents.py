@@ -878,8 +878,8 @@ def compose_technical_setup_fields(agents_panel, agent_name) -> ComposeResult:
         id="select-resume-enabled",
         allow_blank=False,
     )
-    yield Static("[cyan]Resume Max Messages[/] — on resume, keep only the last N messages of rolled history (0 = unlimited; ignored when Resume is off)")
-    yield Input(value=str(agent.get("resume_max_messages", 50)), placeholder="e.g. 50 (0=unlimited)", id="input-resume-max-msgs", type="integer")
+    yield Static("[cyan]Resume Max Messages[/] — a resumed cycle starts with the last N messages; older ones are kept as a summary. Never more than the model's window allows (0 = from the model's window; ignored when Resume is off)")
+    yield Input(value=str(agent.get("resume_max_messages", 50)), placeholder="e.g. 50 (0 = from the model's window)", id="input-resume-max-msgs", type="integer")
     yield Static("[dim]Thread-level resets: use 🧵 Manage Threads on the Agent Prompt Menu modal.[/]")
 
 

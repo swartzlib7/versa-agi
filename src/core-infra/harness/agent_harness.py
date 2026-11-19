@@ -30,12 +30,17 @@ from harness.repeat_guard import RepeatGuard, call_label
 from harness.step_clock import StepClock
 import local_time
 from harness.cache_keepalive import KeepAlive, LastRequest
+from harness import reply_draft as reply_draft_mod
 from harness.prompt_cache import cache_log_line, cache_totals, session_id as cache_session_id
 from harness.prompt_cache import system_prompt as cached_system_prompt
 from harness.listening import (
     ListeningWindow,
+    MailSignal,
     agent_ids_from_env,
     conversations_block,
+    read_close_deadline,
+    read_close_request,
+    shutdown_message,
     wait_for_mail,
 )
 import warnings
@@ -430,7 +435,9 @@ def _is_transient_transport_error(e) -> bool:
             return True
     return False
 
-from harness.model_context import get_model_context, get_trimmer_char_limit, resume_message_cap
+from harness.model_context import (
+    effective_resume_cap, get_model_context, get_trimmer_char_limit, resume_message_cap,
+)
 
 from pydantic import BaseModel, Field
 
@@ -491,6 +498,8 @@ def agictl_system(command: str) -> str:
       - 'system config set key value'
       - 'system workspace-link /path/to/project'
       - 'system sync-instance --status'
+      - 'system live-chat' (is Live Chat on, the listening time, Live Link)
+      - 'system live-chat set 15' or 'set off'; 'system live-chat link on' (only when the Primary User asks)
     """
     return _run_agictl(command)
 
@@ -1801,7 +1810,7 @@ def main():
     parser.add_argument("--inbox-file", default=None, help="Unread inbound digest for triage (optional; else built from DB)")
     parser.add_argument("--registry-file", default=None, help="Project/task registry for triage (optional; else built from DB)")
     parser.add_argument("--routing-file", default=None, help="Path to ephemeral model routing JSON from lifeline")
-    parser.add_argument("--resume-max-messages", type=int, default=0, help="Trim checkpoint to last N messages on resume (0 = unlimited)")
+    parser.add_argument("--resume-max-messages", type=int, default=0, help="Verbatim messages a resumed cycle starts with; never more than the model window allows (0 = the window rule alone)")
     parser.add_argument("--skill-mode", default="hybrid", choices=["full", "lazy", "hybrid"], help="Skill injection mode: full (inject all), lazy (manifest only), hybrid (core injected + lazy manifest)")
     parser.add_argument("--deadline-epoch", type=float, default=None, help="Epoch seconds when Lifeline's timeout stops this run (time warnings at 10 and 5 minutes left)")
     parser.add_argument("--listen-minutes", type=int, default=0, help="Live Chat listening window granted by VersaVoice (0 = one-shot cycle)")
@@ -2052,10 +2061,21 @@ def main():
 
     # What the cycle model was last sent: the cache keep-alive sends it again while a chat waits.
     last_request = LastRequest()
+    # The reply as it is written, for the "being written" bubble in the app
+    # (state_realtime_link.md §2.2). None when Lifeline gave no draft file.
+    reply_draft = None
+    cycle_callbacks = [last_request]
+    try:
+        reply_draft = reply_draft_mod.from_environment(cycle_id)
+        if reply_draft is not None:
+            cycle_callbacks.append(reply_draft_mod.callback_for(reply_draft))
+    except Exception as e:
+        reply_draft = None
+        tlog(f"DRAFT: off for this cycle — {e}")
     llm = get_llm(execution_model, num_ctx=args.num_ctx, agent_overrides=agent_param_overrides,
                   prompt_cache=True,
                   cache_session=cache_session_id(args.agent, args.thread_id or ""),
-                  extra_callbacks=[last_request])
+                  extra_callbacks=cycle_callbacks)
 
     from harness.model_params import detect_provider_family
     from model_catalog import catalog_entry_for_model
@@ -2277,6 +2297,11 @@ def main():
     # Full base64 would blow the trim window and drop the entire history (23→0).
     VISION_PART_CHAR_BUDGET = 16_000
 
+    # Viewed media stay in what the model is sent until the cycle ends; the
+    # checkpoint keeps a text note (state_spawn_context.md §1.15).
+    from harness.view_hold import ViewHold, hold_limit
+    view_hold = ViewHold(hold_limit(CONTEXT_WINDOW_CHARS, VISION_PART_CHAR_BUDGET))
+
     def _count_dict_part(part: dict) -> int:
         """Count all string payloads in a content part — not just 'text'.
 
@@ -2337,6 +2362,75 @@ def main():
                 total += len(m.tool_call_id)
         return total
 
+    def _utc_now():
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _span_text(span):
+        from harness.compaction import message_text
+        lines = []
+        for m in span:
+            text = message_text(m)[:4000]
+            calls = getattr(m, "tool_calls", None) or []
+            if calls:
+                named = "; ".join(
+                    f"{c.get('name', '')}({str(c.get('args', ''))[:600]})" for c in calls
+                )
+                text = (text + "\n" if text else "") + f"TOOL CALLS: {named}"
+            lines.append(f"{type(m).__name__}: {text}")
+        return "\n".join(lines)[:COMPACTION_SPAN_CHARS]
+
+    def _store_frame(span, frame_start, frame_end):
+        """Summarize a span and store it as one frame of this thread.
+
+        Returns what `agictl cycle frames add` answered, with the summary and
+        the covered ids added; None when the summary came back empty.
+        """
+        import json as _json
+        from harness.compaction import message_text
+        prompt = (
+            "Summarize these agent turns as one compaction frame. In order: motivations, "
+            "actions, tool calls with their results, outcomes, conclusions. Plain prose. "
+            "Keep names, ids, file paths, and numbers the agent may need later."
+        )
+        _HEARTBEAT.beat()  # the summary call starts
+        reply = (compaction_llm or llm).invoke(
+            [HumanMessage(content=prompt + "\n\n" + _span_text(span))]
+        )
+        _HEARTBEAT.beat()  # the summary came back; the cycle model's call is next
+        summary = message_text(reply).strip()
+        if not summary:
+            return None
+        ids = ",".join(str(getattr(m, "id", "") or "") for m in span if getattr(m, "id", None))
+        proc = subprocess.run(
+            ["agictl", "cycle", "frames", "add", "--thread", args.thread_id or "",
+             "--start", frame_start, "--end", frame_end, "--ids", ids or "-",
+             "--cycle-id", os.environ.get("VERSA_CYCLE_ID", "")],
+            input=summary, capture_output=True, text=True, timeout=20,
+        )
+        try:
+            written = _json.loads(proc.stdout or "{}")
+        except Exception:
+            return None
+        if isinstance(written, dict):
+            written.setdefault("summary", summary)
+            written.setdefault("message_ids", ids)
+        return written
+
+    def _roll_extra_frames(rows):
+        """Mark the oldest active frames `rolled` when the frames block is over
+        its size (§1.8 rule 9). `rows` is every frame of the thread. Returns how many."""
+        from harness.compaction import active_frames, frame_slots
+        live = active_frames(rows)
+        size = max(len(str(r.get("summary") or "")) for r in live) if live else 1
+        keep = frame_slots(CONTEXT_WINDOW_CHARS, size)
+        extra = live[:-keep] if len(live) > keep else []
+        for old in extra:
+            subprocess.run(
+                ["agictl", "cycle", "frames", "roll", "--id", str(old.get("id"))],
+                capture_output=True, text=True, timeout=20,
+            )
+        return len(extra)
+
     def pre_model_hook(state):
         """Trim messages to fit context window before LLM call.
         Returns llm_input_messages (not messages) to preserve full checkpoint history.
@@ -2352,7 +2446,7 @@ def main():
             verbatim_start_types,
         )
 
-        all_msgs = list(state["messages"])
+        all_msgs = view_hold.expand(list(state["messages"]))
         in_call = False
         try:
             in_call = live_runtime is not None and (live_runtime.in_turn() or live_runtime.live)
@@ -2379,47 +2473,11 @@ def main():
             _FRAME_CACHE.update(thread=thread, rows=rows)
             return rows
 
-        def _span_text(span):
-            lines = []
-            for m in span:
-                text = message_text(m)[:4000]
-                calls = getattr(m, "tool_calls", None) or []
-                if calls:
-                    named = "; ".join(
-                        f"{c.get('name', '')}({str(c.get('args', ''))[:600]})" for c in calls
-                    )
-                    text = (text + "\n" if text else "") + f"TOOL CALLS: {named}"
-                lines.append(f"{type(m).__name__}: {text}")
-            return "\n".join(lines)[:COMPACTION_SPAN_CHARS]
-
         def _write_frame(span, last_frame_end):
-            import json as _json
-            prompt = (
-                "Summarize these agent turns as one compaction frame. In order: motivations, "
-                "actions, tool calls with their results, outcomes, conclusions. Plain prose. "
-                "Keep names, ids, file paths, and numbers the agent may need later."
-            )
-            reply = (compaction_llm or llm).invoke(
-                [HumanMessage(content=prompt + "\n\n" + _span_text(span))]
-            )
-            _HEARTBEAT.beat()  # the summary came back; the cycle model's call is next
-            summary = message_text(reply).strip()
-            if not summary:
-                return None
             frame_start, frame_end = frame_times(
                 span, _MSG_SEEN_AT, last_frame_end, _CYCLE_STARTED_AT, _utc_now(),
             )
-            ids = ",".join(str(getattr(m, "id", "") or "") for m in span if getattr(m, "id", None))
-            proc = subprocess.run(
-                ["agictl", "cycle", "frames", "add", "--thread", args.thread_id or "",
-                 "--start", frame_start, "--end", frame_end, "--ids", ids or "-",
-                 "--cycle-id", os.environ.get("VERSA_CYCLE_ID", "")],
-                input=summary, capture_output=True, text=True, timeout=20,
-            )
-            try:
-                return _json.loads(proc.stdout or "{}")
-            except Exception:
-                return None
+            return _store_frame(span, frame_start, frame_end)
 
         def _frames_block(rows):
             if not rows:
@@ -2432,9 +2490,6 @@ def main():
                     f"{local_time.show(row.get('frame_end'))}:\n{row.get('summary')}"
                 )
             return HumanMessage(content="\n\n".join(parts))
-
-        def _utc_now():
-            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         note_seen(_MSG_SEEN_AT, all_msgs, _CYCLE_STARTED_AT, _utc_now())
         # A message is framed once: rolled frames still cover their messages,
@@ -2460,17 +2515,9 @@ def main():
                 tlog(f"COMPACTION: framed {len(span)} messages as frame {written.get('id')}")
                 _FRAME_CACHE.clear()
                 frames = _frames()
-                live = active_frames(frames)
-                size = max(len(str(r.get("summary") or "")) for r in live) if live else 1
-                keep = frame_slots(CONTEXT_WINDOW_CHARS, size)
-                extra = live[:-keep] if len(live) > keep else []
-                for old in extra:
-                    subprocess.run(
-                        ["agictl", "cycle", "frames", "roll", "--id", str(old.get("id"))],
-                        capture_output=True, text=True, timeout=20,
-                    )
+                extra = _roll_extra_frames(frames)
                 if extra:
-                    tlog(f"COMPACTION: rolled {len(extra)} oldest frame(s) out of the payload")
+                    tlog(f"COMPACTION: rolled {extra} oldest frame(s) out of the payload")
                     _FRAME_CACHE.clear()
                     frames = _frames()
                 covered = covered | framed_ids(frames)
@@ -2617,7 +2664,10 @@ def main():
                     window = args.num_ctx if args.num_ctx and args.num_ctx > 0 else 0
                     if window <= 0:
                         _, window = get_model_context(args.model or "")
-                    resume_cap = resume_message_cap(window)
+                    # The stored Resume max messages, never more than the window
+                    # allows (state_spawn_context.md §1.8 rule 7).
+                    resume_ceiling = resume_message_cap(window)
+                    resume_cap = effective_resume_cap(args.resume_max_messages, window)
                     # A framed message is never sent again, so it leaves the
                     # checkpoint here and the resume tail is counted over the
                     # rest (state_spawn_context.md §1.8 rule 5). With frames the
@@ -2625,6 +2675,7 @@ def main():
                     # at an AI message.
                     _framed = 0
                     _has_frames = False
+                    _rows = []
                     unframed = current
                     try:
                         import json as _json
@@ -2643,9 +2694,53 @@ def main():
                         unframed = current
                     tlog(
                         f"RESUME CAP: {resume_cap} messages "
-                        f"(window {window} tokens; stored max {args.resume_max_messages}; "
-                        f"{_framed} framed removed)"
+                        f"(stored max {args.resume_max_messages}; window {window} tokens "
+                        f"allows {resume_ceiling}; {_framed} framed removed)"
                     )
+                    # Messages past the tail are summarized into a frame before
+                    # the cut (§1.8 rule 8). The provider's cache is cold at
+                    # resume, so the cut costs no cached input.
+                    if len(unframed) > resume_cap:
+                        from harness.compaction import resume_frame_times, resume_span, utc_stamp
+                        _tail, _, _ = _canonicalize_messages(unframed, resume_cap, anchor_ai=True)
+                        _span = resume_span(unframed, _tail)
+                        _stored = None
+                        if _span:
+                            try:
+                                _start, _end = resume_frame_times(
+                                    _rows[-1].get("frame_end") if _rows else None,
+                                    utc_stamp(getattr(snapshot, "created_at", None)),
+                                    _utc_now(),
+                                )
+                                _stored = _store_frame(_span, _start, _end)
+                            except Exception as exc:
+                                _stored = None
+                                tlog(f"RESUME FRAME: the summary call failed — {exc}")
+                        if _stored and _stored.get("success"):
+                            tlog(
+                                f"RESUME FRAME: {len(_span)} messages summarized as frame "
+                                f"{_stored.get('id')}"
+                            )
+                            _rows.append({
+                                "id": _stored.get("id"), "status": "active",
+                                "summary": _stored.get("summary"),
+                                "message_ids": _stored.get("message_ids"),
+                                "frame_start": _start, "frame_end": _end,
+                            })
+                            _rolled = _roll_extra_frames(_rows)
+                            if _rolled:
+                                tlog(f"RESUME FRAME: rolled {_rolled} oldest frame(s) out of the payload")
+                            _has_frames = True
+                            _framed += len(_span)
+                            unframed = unframed[len(_span):]
+                        elif _span:
+                            # Nothing is dropped unread below the ceiling.
+                            if resume_cap < resume_ceiling:
+                                tlog(
+                                    f"RESUME FRAME: no summary was stored — the tail is cut at "
+                                    f"{resume_ceiling} messages for this cycle"
+                                )
+                            resume_cap = resume_ceiling
                     clean, changed, stats = _canonicalize_messages(
                         unframed, resume_cap, anchor_ai=_has_frames,
                     )
@@ -2719,7 +2814,7 @@ def main():
     if getattr(triage_result, "recommended_model", None):
         tlog(f"  TRIAGE RECOMMENDED: {triage_result.recommended_model}")
     num_ctx_display = f"{args.num_ctx:,}" if args.num_ctx > 0 else "default"
-    resume_display = f"{args.resume_max_messages}" if args.resume_max_messages > 0 else "unlimited"
+    resume_display = f"{args.resume_max_messages}" if args.resume_max_messages > 0 else "from the model window"
     tlog(f"BUDGET: {args.max_steps} steps | TOOL LIMIT: {args.tool_budget} chars | NUM_CTX: {num_ctx_display} | RESUME DEPTH: {resume_display}")
     tlog(f"SYSTEM PROMPT: {len(enhanced_prompt)} chars ({len(enhanced_prompt.splitlines())} lines)")
     sections = [s.strip().lstrip("#").strip() for s in enhanced_prompt.splitlines() if s.strip().startswith("## ")]
@@ -2790,7 +2885,6 @@ def main():
     binding_retry_used = False   # one retry without reasoning records (§2.7 B4)
     input_messages = messages  # Initial input for first stream invocation
     _harness_crashed = False
-    pending_view_trims: list[dict] = []
     pending_view_injects: list[HumanMessage] = []
 
     # Bounded retry for transient transport errors
@@ -2820,12 +2914,34 @@ def main():
         close_file=os.environ.get("VERSA_CHAT_CLOSE_FILE"), cycle_id=os.environ.get("VERSA_CYCLE_ID"),
         close_lead=deadline_warnings.close_now_lead,
     )
+    # The link service rewrites this file when it has stored new mail for this
+    # agent, so the wait reads it at once (state_realtime_link.md RL-07).
+    mail_signal = MailSignal(os.environ.get("VERSA_MAIL_SIGNAL_FILE"))
     turn_base = 0  # steps spent before the current chat turn (per-turn budget)
     # Stall timer: startup is done; a live call in progress keeps the heartbeat going (§1.2).
     _HEARTBEAT.set_busy(lambda: live_runtime is not None and bool(getattr(live_runtime, "live", False)))
     _HEARTBEAT.beat()
     if listening.enabled and listening.note_rows(midcycle_inbox.unread_rows()):
         tlog(f"LISTEN: window open — a person woke this cycle ({listening.minutes} min idle)")
+
+    # ── Shutdown (state_host_services.md §1.4.1 rule 5) ──
+    # The shutdown guard writes a close request for this cycle. The agent is
+    # told once, at the next safe point, in any cycle, listening or not.
+    shutdown_told = False
+
+    def _shutdown_requested() -> bool:
+        return read_close_request(listening.close_file, listening.cycle_id) == "shutdown"
+
+    def _shutdown_seconds_left() -> float | None:
+        deadline = read_close_deadline(listening.close_file, listening.cycle_id)
+        return None if deadline is None else deadline - time.time()
+
+    def _mark_shutdown_told() -> None:
+        nonlocal shutdown_told
+        shutdown_told = True
+        # An open window is closed in the same step, so `cycle end` is accepted.
+        if listening.should_wait():
+            listening.begin_closing("shutdown")
 
     def _inject_midcycle_mail() -> bool:
         """Fold unread mail that arrived after the wake prompt into this cycle.
@@ -2836,6 +2952,8 @@ def main():
         nonlocal input_messages
         if _in_call_turn() or _unresolved_tool_call_ids(messages):
             return False
+        if shutdown_told:
+            return False  # the computer is going down: new mail waits for the next spawn
         found = midcycle_inbox.poll()
         if not found:
             return False
@@ -2937,13 +3055,12 @@ def main():
                                 content = _reply_text(msg)
                                 preview = content[:200].replace("\n", " ")
                                 tlog(f"[STEP {step_count}/{max_steps}] AGENT → {preview}")
-                            # Trim after any agent turn once the model has consumed the inject
-                            # (previously only ran on non-tool replies, so tool-heavy cycles
-                            # left full base64 images in the checkpoint).
-                            if pending_view_trims:
-                                _trim_view_inject_payloads(agent, config, pending_view_trims)
-                                pending_view_trims.clear()
+                            # The model has replied to a viewed video: from here it is a note (§1.15 rule 5).
+                            if view_hold.release_once():
+                                tlog("VIEW HOLD: the video is now a note")
                         elif "tools" in chunk:
+                            if reply_draft is not None:
+                                reply_draft.finish()  # the send has run: the message replaces the draft
                             msg = chunk["tools"]["messages"][0]
                             messages.append(msg)
                             content = msg.content if isinstance(msg.content, str) else str(msg.content)
@@ -2971,14 +3088,38 @@ def main():
                                         _HARNESS_VIEW_CTX.get("provider_family", "openai_compat"),
                                     )
                                     if inject_msg and inject_msg.id:
+                                        # The media is held in memory and put back on every
+                                        # call (pre_model_hook); the message that enters the
+                                        # checkpoint is the text note (§1.15). Taking the media
+                                        # out between two calls would restart the provider's
+                                        # prompt cache on every viewed item.
+                                        from model_drivers.message_adapters import trim_image_parts_from_message
+                                        # A video is sent once: it is too large to upload on every call.
+                                        _is_video = tool_name == "agictl_view_video"
+                                        became_notes = view_hold.hold(
+                                            inject_msg.id, inject_msg.content, once=_is_video,
+                                        )
+                                        if _is_video:
+                                            tlog("VIEW HOLD: the video goes with the next model call only")
+                                        else:
+                                            tlog(
+                                                f"VIEW HOLD: {len(view_hold)} viewed item(s) stay in what the "
+                                                f"model is sent until the cycle ends (limit {view_hold.limit})"
+                                            )
+                                        if became_notes:
+                                            tlog(
+                                                f"VIEW HOLD: limit reached — the {became_notes} oldest "
+                                                f"are now notes"
+                                            )
                                         # Queue for break-and-reinvoke (see VIEW RE-INVOKE
                                         # below). Mid-stream update_state does NOT reach the
                                         # running agent node, so we must re-invoke the stream.
-                                        pending_view_injects.append(inject_msg)
-                                        pending_view_trims.append({
-                                            "message_id": inject_msg.id,
-                                            "path": view_payload.get("path", ""),
-                                        })
+                                        pending_view_injects.append(HumanMessage(
+                                            content=trim_image_parts_from_message(
+                                                inject_msg.content, view_payload.get("path", ""),
+                                            ),
+                                            id=inject_msg.id,
+                                        ))
 
                             # ── Cycle End Detection ──
                             # When the agent calls `agictl cycle end`, break immediately so
@@ -3135,6 +3276,11 @@ def main():
                                 if not warning and not listening.should_wait() and not _in_wrap_up:
                                     warning, warn_tag = checkin_message(checkin_minutes), "[CHECK-IN]"
 
+                        # Shutdown comes before any other notice in this step.
+                        if gate_open and not shutdown_told and _shutdown_requested():
+                            warning = shutdown_message(_shutdown_seconds_left())
+                            warn_tag, time_stage, on_sent = "[SHUTDOWN]", None, _mark_shutdown_told
+
                         if warning:
                             tlog(f"{warn_tag} Injecting warning into agent conversation (step {step_count})")
                             tlog(f"{warn_tag} {warning}")
@@ -3256,10 +3402,13 @@ def main():
                     tlog(f"LISTEN: waiting for messages ({listening.minutes} min idle window)")
                     step_clock.skip()  # waiting is not step time (§1.7 rule 1)
                     with _HEARTBEAT.holding("mail"):
-                        close_reason = wait_for_mail(listening, _inject_midcycle_mail,
-                                                     tick=_CACHE_KEEPALIVE.tick)
+                        close_reason = wait_for_mail(
+                            listening, _inject_midcycle_mail, tick=_CACHE_KEEPALIVE.tick,
+                            signal=mail_signal.raised if mail_signal.path else None)
                     if close_reason == "mail":
                         continue
+                    if close_reason == "shutdown":
+                        shutdown_told = True
                     closing = listening.begin_closing(close_reason)
                     tlog(f"LISTEN: window closed ({close_reason}) — asking the agent to end the cycle")
                     flush_note = _flush_stream_messages_to_checkpoint(agent, config, messages)
@@ -3323,10 +3472,8 @@ def main():
     write_telemetry(args.agent, total_tokens, prompt_tokens, completion_tokens, result_messages,
                     cached_tokens=cache_read, cache_write_tokens=cache_write)
 
-    if pending_view_trims:
-        _trim_view_inject_payloads(agent, config, pending_view_trims)
-        pending_view_trims.clear()
-    elif checkpointer:
+    # Viewed media are never saved (§1.15); this cleans a checkpoint written before that.
+    if checkpointer:
         _trim_view_inject_payloads(agent, config)
 
     # ── Cleanup checkpointer connection ──

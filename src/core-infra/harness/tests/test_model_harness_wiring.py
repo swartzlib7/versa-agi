@@ -116,10 +116,16 @@ class TestHarnessWiring(unittest.TestCase):
 
     def test_the_keep_alive_runs_in_the_chat_wait_and_its_tokens_are_counted(self):
         """§2.7 B17: built from the cycle model, its tools and what it was last sent."""
-        self.after("extra_callbacks=[last_request])", "_CACHE_KEEPALIVE = KeepAlive(")
+        # last_request is always the cycle model's first callback; the reply draft
+        # callback joins it when Lifeline gave a draft file (state_realtime_link.md §2.2).
+        self.after("cycle_callbacks = [last_request]", "extra_callbacks=cycle_callbacks)")
+        self.after("extra_callbacks=cycle_callbacks)", "_CACHE_KEEPALIVE = KeepAlive(")
         self.assertIn('execution_traits, llm, agent_kwargs["tools"], last_request,', self.source)
-        self.assertIn("close_reason = wait_for_mail(listening, _inject_midcycle_mail,\n"
-                      "                                                     tick=_CACHE_KEEPALIVE.tick)", self.source)
+        # The same wait also watches the mail signal file (state_realtime_link.md RL-07).
+        self.assertIn("close_reason = wait_for_mail(\n"
+                      "                            listening, _inject_midcycle_mail, tick=_CACHE_KEEPALIVE.tick,\n"
+                      "                            signal=mail_signal.raised if mail_signal.path else None)",
+                      self.source)
         self.assertEqual(self.source.count("ping_in, ping_out, ping_read, ping_write = _keepalive_usage()"), 2)
         self.assertIn("cache_session=cache_session_id(args.agent, args.thread_id or \"\"),", self.source)
 

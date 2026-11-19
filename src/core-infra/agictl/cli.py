@@ -376,7 +376,9 @@ def system_config_set_ini(section, key, value):
             json_response(False, error="model_routing_mode must be 'pool' or 'preferred'")
             sys.exit(1)
     elif section_l == "agent" and key_l == "timeout_minutes":
-        import agent_limits
+        # agent_limits is imported at the top of this file. A second import here made the
+        # name local to this function, so the live_chat branch below failed with
+        # UnboundLocalError and agitop could not save Live Chat (3.7.0 to 3.9.3).
         err = agent_limits.timeout_error(value_s)
         if err:
             json_response(False, error=err)
@@ -418,8 +420,10 @@ def system_config_set_ini(section, key, value):
                 sys.exit(1)
     elif section_l == "live_chat" and key_l == "idle_minutes":
         if os.getenv("AGICTL_AGENT_USER"):
-            json_response(False, error="Live Chat settings are Primary User only "
-                                       "(agitop → System Settings → Live Chat).")
+            json_response(False, error="Live Chat is not changed with set-ini. COA, when the "
+                                       "Primary User asks: agictl system live-chat set "
+                                       "off|5|10|15|30. The Primary User: agitop → System "
+                                       "Settings → Live Chat.")
             sys.exit(1)
         err = agent_limits.listen_minutes_error(value_s)
         if err:
@@ -1161,6 +1165,124 @@ def system_update_notes(deliver, mark_delivered, notes_dir, installed_version):
         sys.exit(1)
 
 
+def _live_chat_ini_path() -> str:
+    """setup.ini as `system config set-ini` resolves it ("" when there is none)."""
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    return ini_path if os.path.isfile(ini_path) else ""
+
+
+def _live_chat_state() -> dict:
+    """Both settings of agitop → System Settings → Live Chat, as they are stored."""
+    import agent_limits
+    minutes = agent_limits.snap_listen_minutes(
+        _read_ini_value("live_chat", "idle_minutes", str(agent_limits.DEFAULT_LISTEN_MINUTES))
+    )
+    link_on = _read_ini_value("features", "live_link", "false").strip().lower() == "true"
+    link = {"enabled": link_on}
+    try:
+        from agitop.data.system_reader import read_link_state
+        report = read_link_state()
+        link["state"] = report.get("state", "none") if link_on else "off"
+        if link_on and report.get("detail"):
+            link["detail"] = report["detail"]
+    except Exception:
+        link["state"] = "none" if link_on else "off"
+    return {
+        "enabled": minutes > 0,
+        "listening_minutes": minutes,
+        "listening_choices": ["off"] + [str(c) for c in agent_limits.LISTEN_MINUTES_CHOICES if c],
+        "live_link": link,
+    }
+
+
+def _live_chat_refusal() -> str:
+    """Empty when the caller may change Live Chat: COA or the Primary User (state_live_chat.md D24)."""
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        return ("Permission denied: only COA or the Primary User can change Live Chat "
+                f"(caller: {caller})")
+    return ""
+
+
+def _live_chat_write(section: str, key: str, value: str) -> str:
+    """Write one Live Chat key. Returns an error message, or ""."""
+    ini_path = _live_chat_ini_path()
+    if not ini_path:
+        return "setup.ini not found"
+    try:
+        _update_ini_key(ini_path, section, key, value)
+        _sync_ini_to_source(ini_path)
+    except Exception as e:
+        return str(e)
+    return ""
+
+
+@system.group("live-chat", invoke_without_command=True)
+@click.pass_context
+def system_live_chat(ctx):
+    """Live Chat: whether it is on, the listening time, and Live Link.
+
+    The same two settings as agitop → System Settings → Live Chat. With no
+    subcommand, shows them. COA changes them only when the Primary User asks.
+    """
+    if ctx.invoked_subcommand is None:
+        json_response(True, **_live_chat_state())
+
+
+@system_live_chat.command("set")
+@click.argument("minutes")
+def system_live_chat_set(minutes):
+    """Set the chat listening time: off, 5, 10, 15 or 30 (minutes).
+
+    COA or the Primary User only. Off means an agent answers and its cycle
+    ends; the next message wakes it again. Holds from each agent's next cycle.
+    """
+    import agent_limits
+    denied = _live_chat_refusal()
+    if denied:
+        json_response(False, error=denied)
+        sys.exit(1)
+    wanted = str(minutes).strip().lower()
+    wanted = "0" if wanted == "off" else wanted
+    err = agent_limits.listen_minutes_error(wanted)
+    if err:
+        json_response(False, error=err + " Use off, 5, 10, 15 or 30.")
+        sys.exit(1)
+    before = _live_chat_state()["listening_minutes"]
+    err = _live_chat_write("live_chat", "idle_minutes", str(int(wanted)))
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
+    json_response(True, was_minutes=before, **_live_chat_state(),
+                  applies="From each agent's next cycle. A chat that is open keeps the "
+                          "listening time it started with.")
+
+
+@system_live_chat.command("link")
+@click.argument("switch", type=click.Choice(["on", "off"], case_sensitive=False))
+def system_live_chat_link(switch):
+    """Switch Live Link on or off.
+
+    COA or the Primary User only. With Live Link on, this machine keeps one
+    outbound request open to the VersaVoice AI API and is told the moment an
+    agent has a new message. No inbound connection is accepted either way.
+    """
+    denied = _live_chat_refusal()
+    if denied:
+        json_response(False, error=denied)
+        sys.exit(1)
+    before = _live_chat_state()["live_link"]["enabled"]
+    err = _live_chat_write("features", "live_link", "true" if switch.lower() == "on" else "false")
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
+    json_response(True, was_enabled=before, **_live_chat_state(),
+                  applies="The link service follows within a minute. Until it reports, "
+                          "live_link.state still shows the earlier state.")
+
+
 @system.command("whoami")
 def system_whoami():
     """Print agent identity (name, role, OS user, VV-UID) as JSON."""
@@ -1708,14 +1830,16 @@ def _apply_remote_package_decision(name, status):
     return status
 
 
-# The seven outcomes the VersaVoice cloud and app know (state_long_cycles.md §1.8).
-ACTIVITY_OUTCOMES = ("ok", "timeout", "runaway", "step_limit", "stall", "loop", "crash")
+# The outcomes the VersaVoice API and app know (state_long_cycles.md §1.8).
+# shutdown: the computer was shut down with the cycle running (state_host_services.md §1.4.1).
+ACTIVITY_OUTCOMES = ("ok", "timeout", "runaway", "step_limit", "stall", "loop", "shutdown", "crash")
 
 
 @system.command("activity", hidden=True)
 @click.argument("event", type=click.Choice(["start", "end"]))
 @click.option("--sub-account", "sub_account", required=True, help="Agent VersaVoice sub-account id")
-@click.option("--token", required=True, help="VersaVoice API token")
+@click.option("--token", required=True, envvar="AGICTL_VV_TOKEN",
+              help="VersaVoice API token; AGICTL_VV_TOKEN in the environment keeps it off the command line")
 @click.option("--cycle-id", "cycle_id", required=True, help="cycles.db id of this spawn")
 @click.option("--wake", type=click.Choice(["messages", "tasks", "forced"]), default="messages")
 @click.option("--listen-minutes", "listen_minutes", type=int, default=0,
@@ -1727,8 +1851,15 @@ ACTIVITY_OUTCOMES = ("ok", "timeout", "runaway", "step_limit", "stall", "loop", 
 @click.option("--cycles-total", "cycles_total", type=int, default=0)
 @click.option("--channel-id", "channel_ids", multiple=True,
               help="Channel of a waking message (repeatable); presence for the chat strip")
+@click.option("--link", "link_up", is_flag=True,
+              help="The link service is carrying mail, so the spawned fetch runs once a minute (start only)")
+@click.option("--proof-of-life", "proof_of_life", is_flag=True,
+              help="This spawn's inbox fetch will name the cycle about once a minute (start only)")
+@click.option("--ended-epoch", "ended_epoch", type=int, default=0,
+              help="Epoch seconds when a cut cycle really stopped (end only; a late report)")
 def system_activity(event, sub_account, token, cycle_id, wake, listen_minutes, hard_cap_epoch,
-                    outcome, duration_seconds, cycles_total, channel_ids):
+                    outcome, duration_seconds, cycles_total, channel_ids, link_up, proof_of_life,
+                    ended_epoch):
     """Report one agent spawn's start or end to VersaVoice (Lifeline only).
 
     POST /agi/activity (state_live_chat.md §1.8). The app shows it in the chat
@@ -1752,12 +1883,22 @@ def system_activity(event, sub_account, token, cycle_id, wake, listen_minutes, h
         body["wake"] = wake
         body["listenMinutes"] = max(0, listen_minutes)
         body["channelIds"] = [c for c in dict.fromkeys(channel_ids) if c][:20]
+        if link_up:
+            body["link"] = True
+        # Proof of life (state_host_services.md §1.4.2): VersaVoice then counts
+        # the cycle as ended when the fetch stops naming it for 3 minutes.
+        if proof_of_life:
+            body["proofOfLife"] = True
         if hard_cap_epoch > 0:
             body["hardCapAt"] = datetime.fromtimestamp(hard_cap_epoch, timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ")
     else:
         body["outcome"] = outcome or "crash"
         body["durationSeconds"] = max(0, duration_seconds)
+        # A late report for a cycle that was cut off (state_host_services.md §1.6.3).
+        if ended_epoch > 0:
+            body["endedAt"] = datetime.fromtimestamp(ended_epoch, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
     resp = api_request("/agi/activity", token, method="POST", body=body, timeout=15)
     if isinstance(resp, dict) and resp.get("success"):
         data = resp.get("data") or {}
@@ -1774,7 +1915,8 @@ def system_activity(event, sub_account, token, cycle_id, wake, listen_minutes, h
 
 @system.command("activity-backfill", hidden=True)
 @click.option("--sub-account", "sub_account", required=True, help="Agent VersaVoice sub-account id")
-@click.option("--token", required=True, help="VersaVoice API token")
+@click.option("--token", required=True, envvar="AGICTL_VV_TOKEN",
+              help="VersaVoice API token; AGICTL_VV_TOKEN in the environment keeps it off the command line")
 @click.option("--agent", "agent_name", required=True, help="Agent name (cycles.db id prefix)")
 def system_activity_backfill(sub_account, token, agent_name):
     """Send this agent's cycle history to VersaVoice once (Lifeline only).
@@ -2003,13 +2145,19 @@ def system_vacuum():
                                 (tid, latest)
                             )
                             pruned += cursor.rowcount
-                    # Clean orphaned writes
-                    if pruned > 0:
-                        conn.execute(
-                            "DELETE FROM writes WHERE thread_id NOT IN "
-                            "(SELECT DISTINCT thread_id FROM checkpoints)"
-                        )
-                        conn.commit()
+                    # Clean orphaned writes: every write whose own checkpoint is
+                    # gone. Matching on the thread alone left the writes of every
+                    # pruned checkpoint behind, because the thread still has its
+                    # newest one (found 2026-11-19: 16,686 of 22,834 rows in COA's
+                    # database, about 1.5 GB on threads that had one checkpoint).
+                    cursor = conn.execute(
+                        "DELETE FROM writes WHERE NOT EXISTS ("
+                        "SELECT 1 FROM checkpoints c WHERE c.thread_id = writes.thread_id "
+                        "AND c.checkpoint_ns = writes.checkpoint_ns "
+                        "AND c.checkpoint_id = writes.checkpoint_id)"
+                    )
+                    pruned += cursor.rowcount
+                    conn.commit()
                 except Exception:
                     pass  # Pruning is best-effort — VACUUM still runs
             conn.execute("VACUUM")
@@ -8767,12 +8915,17 @@ def _open_cycle_id(agent_name: str) -> str:
 @click.argument("name")
 @click.option("--reason", type=click.Choice(["requested", "shutdown"]), default="requested",
               help="Why the chat closes (the agent is told)")
-def agent_chat_close(name, reason):
+@click.option("--deadline-epoch", "deadline_epoch", type=int, default=0,
+              help="Epoch seconds by which the cycle must be closed (the shutdown guard)")
+def agent_chat_close(name, reason, deadline_epoch):
     """Close an agent's live chat gracefully (Primary User only).
 
     The agent finishes its current reply, then gets a closing message and ends
     its cycle with a handoff (state_live_chat.md LCH-23). Unlike `agent kill`,
     nothing is halted; the next message wakes the agent as usual.
+
+    With --reason shutdown the agent is told at its next safe point, in any
+    cycle, listening or not (state_host_services.md §1.4.1).
     """
     if os.getenv("AGICTL_AGENT_USER"):
         json_response(False, error="Permission denied. Only the Primary User can close an agent's chat "
@@ -8794,7 +8947,7 @@ def agent_chat_close(name, reason):
             raise FileNotFoundError(agent_dir)
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(f"{cycle_id} {reason}\n")
+            fh.write(f"{cycle_id} {reason}" + (f" {deadline_epoch}" if deadline_epoch > 0 else "") + "\n")
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except Exception as e:
@@ -10439,12 +10592,15 @@ def message_delete_local(message_ids, agent_name, channel, other, before, includ
 @click.argument("agent_user")
 @click.option("--agent-path", required=True)
 @click.option("--sub-account", required=True)
-@click.option("--token", required=True)
+@click.option("--token", required=True, envvar="AGICTL_VV_TOKEN",
+              help="VersaVoice API token; AGICTL_VV_TOKEN in the environment keeps it off the command line")
 @click.option("--full", is_flag=True, help="Ignore the stored cursor and pull the inbox from the beginning")
-def message_sync_inbox(agent_user, agent_path, sub_account, token, full):
+@click.option("--cycle-id", "cycle_id", default="",
+              help="The agent's running cycle: this fetch is also its proof of life (Lifeline only)")
+def message_sync_inbox(agent_user, agent_path, sub_account, token, full, cycle_id):
     """Pull messages from VersaVoice REST API and persist to SQLite."""
     success, inserted = fetch_inbox(
-        agent_user, agent_path, sub_account, token, messages_db, full_sync=full
+        agent_user, agent_path, sub_account, token, messages_db, full_sync=full, cycle_id=cycle_id
     )
     if not success:
         sys.exit(1)
@@ -11313,6 +11469,30 @@ def cycle_end(summary, handoff, no_handoff, agent_name):
     # telemetry could be written and caused repeated cycle end calls.
     sys.exit(0)
 
+@cycle.command("close-cut", hidden=True)
+@click.argument("agent_name")
+@click.option("--cycle-id", required=True, help="The cut cycle's row")
+@click.option("--ended-epoch", type=int, required=True, help="Epoch seconds when the cycle was last alive")
+@click.option("--exit-code", type=click.Choice(["96", "98"]), required=True,
+              help="98 = the computer went off; 96 = Lifeline was stopped while the computer stayed on")
+def cycle_close_cut(agent_name, cycle_id, ended_epoch, exit_code):
+    """Close the row of a cycle that was cut off (Lifeline only).
+
+    state_host_services.md §1.6.3. Prints {success, state}: closed,
+    already_ended (the agent had closed it), missing or error.
+    """
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="agictl cycle close-cut is Lifeline only.")
+        sys.exit(1)
+    if not cycle_id.startswith(f"{agent_name}-"):
+        json_response(False, error=f"Cycle '{cycle_id}' is not a cycle of '{agent_name}'.")
+        sys.exit(1)
+    state = agent_reader.close_cut_cycle(cycle_id, ended_epoch, int(exit_code))
+    json_response(state != "error", state=state, cycleId=cycle_id)
+    if state == "error":
+        sys.exit(1)
+
+
 @cycle.command("tokens")
 @click.argument("agent_name")
 @click.argument("t_in", type=int)
@@ -11579,7 +11759,18 @@ HARNESS_STOP_REASONS = {
     55: "The harness stopped it because the same tool call was repeated with the same result.",
     97: "It was stopped by the stall timer: a model call did not return.",
     124: "It was stopped at the time limit before it could be closed.",
+    143: "It was stopped while the computer was shutting down, before it could close.",
+    98: "The computer went off while it was running (a power loss, or a shutdown it could not finish before).",
+    96: "It was cut off while the computer stayed on: Lifeline was stopped.",
 }
+# Ends the agent or the harness wrote a close for. Any other exit code, or a
+# cycle that never closed, was interrupted (state_host_services.md §1.6.4).
+CLEAN_EXIT_CODES = (0, 53, 54, 55)
+INTERRUPTED_WARNING = (
+    "⚠ YOUR LAST CYCLE WAS INTERRUPTED. It did not close itself, so its last step may be "
+    "unfinished or half done. Before you carry on, check the result of the last thing you were "
+    "doing (a file being written, a message being sent, a task being updated), then proceed."
+)
 
 
 def render_handoff_block(agent_name: str, now: _dt | None = None) -> str:
@@ -11614,6 +11805,8 @@ def render_handoff_block(agent_name: str, now: _dt | None = None) -> str:
         if reason:
             when += f" {reason}"
     lines.append(when)
+    if not ended or (last["exit_code"] is not None and last["exit_code"] not in CLEAN_EXIT_CODES):
+        lines.append(INTERRUPTED_WARNING)
 
     for g in gaps:
         g_start, g_end = _parse_utc(g["start"]), _parse_utc(g["end"])

@@ -4,6 +4,16 @@ Run:  cd core-infra
       /opt/versa-agi/venv/bin/python3 -m unittest harness.tests.test_live_call_settings_ui
 """
 
+# This module needs textual. An interpreter without it skips the whole module with that
+# reason instead of failing to load; the agictl interpreter has it and runs it. run_tests.py
+# checks that every test passes on at least one interpreter.
+import importlib.util as _importlib_util
+import unittest as _unittest
+
+if _importlib_util.find_spec("textual") is None:
+    raise _unittest.SkipTest("textual is not installed in this interpreter; "
+                             "the agictl interpreter runs this module")
+
 import asyncio
 import os
 import sys

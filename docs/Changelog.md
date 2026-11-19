@@ -6,6 +6,66 @@ All notable changes to this project are documented here. This changelog follows 
 
 From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
 
+## [Unreleased]
+
+### Versa Desktop
+
+#### Added
+- **The lid, as a setting** — Settings has "When the lid closes" and "When the lid closes with another screen attached": Sleep, Lock or Nothing for each. They start as Ubuntu has them (Sleep, and Nothing with another screen). Sleep locks the session first, so the computer wakes to the lock.
+- **A program can hold sleep back, and the lock says so** — When a program has asked the system not to sleep, a lid set to Sleep and "Sleep after locked for" wait for it. The lock screen shows "Sleep is waiting for" and the program's name and reason, and the computer sleeps once the hold ends.
+- **Sleep after the lock** — "Sleep after locked for" puts the computer to sleep once it has been locked for the time you set. It starts as Never. Sleep stops everything on the computer, your agents included, until it wakes.
+
+#### Changed
+- **Settings is easier to read** — Each group is in a box of its own with a symbol and a larger name. "Lock now" is a filled button with a lock symbol on the first line of "Screen, lock and sleep".
+- **An app with several windows shows the one you had before** — When the window an app's box shows is closed, the box goes back to the window shown before it, not to the last one in the row.
+
+## [3.10.1] — 2026-11-19
+
+### Updates
+
+#### Added
+- **Ask your agent about Live Chat** — The Chief Orchestrator Agent can tell you whether Live Chat is on, what the listening time is, and whether Live Link is on and connected. It can change the listening time (Off, 5, 10, 15 or 30 minutes) and switch Live Link when you ask. Before, these were changed in agitop only. Other agents can look but cannot change them. Command line: `agictl system live-chat`.
+
+#### Changed
+- **Resume Max Messages takes effect again** — An agent's Resume Max Messages (agitop → agent → Technical Setup) is the number of recent messages a cycle starts with. Since September the system ignored it and sized the history from the model, which meant 200 messages on a large model. The model's size is now only an upper limit. Set it to 0 to let the model's size decide.
+- **Older conversation is summarized, not dropped** — When a cycle starts with more history than Resume Max Messages, the older part is written up as a summary frame first, and the agent starts with its summaries followed by the recent messages. Before, the older part was dropped. The summary is written by the Compaction Model (agitop → System Settings → General); when that is blank the agent's own model writes it, so a small model there keeps it cheap. If the summary cannot be written, nothing is cut at your setting for that cycle.
+- **Summaries in the prompt are held to a size** — An agent carries its newest summary frames, up to about 40,000 characters. Older ones stay searchable.
+
+#### Fixed
+- **Looking at several photos in a row no longer multiplies the cost** — With a Claude model, each photo an agent viewed after the first made the provider bill most of the conversation again at the full price. A photo now stays in the conversation until the cycle ends, and the next cycle carries only a note of what was viewed.
+- **Agent history files no longer grow without limit** — Each agent keeps a file of saved conversation steps. Lifeline was meant to keep the newest 50 steps of each thread and never did, so the file only grew (8.5 GB for one agent after a week). It is trimmed after every cycle now. The first cycle after this update takes a few minutes longer to finish while the file is cleaned.
+
+## [3.10.0] — 2026-11-18
+
+### Updates
+
+#### Added
+- **Live Link (optional) — messages reach agents at once** — With Live Link on, your machine keeps one outbound request open to the VersaVoice AI API and is told the moment an agent has a new message. A resting agent starts waking at once instead of at the next minute, and an agent in a chat reads a new message at once instead of within 10 seconds. The machine still accepts no connection from outside; if the link is down, messages arrive by the regular fetch. Off by default: setup asks **Enable Live Link?**, and agitop has the switch under System Settings → Live Chat.
+- **Link state in agitop** — The System column shows `LINK: up`, `down` with the reason, or `off`.
+- **The computer stays awake while an agent works** — Sleep waits until the agent's cycle has ended; in a chat, until it has been quiet for the listening time. Between cycles the machine sleeps as usual. Turn it off with `sleep_hold=false` under `[agent]` in `setup.ini`.
+- **Lid question on laptops** — Setup detects a laptop, says so, and asks whether a shut lid should also wait for a working agent. The default is No: a shut lid puts the laptop to sleep.
+- **Agents are told when their last cycle was interrupted** — After a power cut, a stop at shutdown, a stall or a crash, the agent's next wake says its last cycle did not close itself and tells it to check the last thing it was doing before it carries on.
+- **Agents hand off before the computer shuts down** — When you shut down or restart the machine while an agent is working or in a chat, the agent is told, gets up to 2 minutes to hand off and close its cycle, and carries on at its next start. A shutdown can take that much longer while an agent is busy. Change the time with `shutdown_grace_seconds` under `[agent]` in `setup.ini` (30 to 300 seconds; `0` turns it off). Such a cycle shows as **Shutdown** on the agent card.
+
+#### Changed
+- **More agents in a chat at once** — Up to 20 of your agents can stay in a chat at the same time while Live Link is up. It was 5, and stays 5 where Live Link is down or off.
+
+#### Fixed
+- **agitop saves the Live Chat settings again** — Saving the Live Chat tab (chat listening minutes) ended in an error since 3.7.0.
+- **A network outage no longer fails cycles** — When your machine cannot reach VersaVoice AI, Lifeline holds agents on cloud models instead of starting cycles that would fail and count toward the circuit breaker. It logs one line when the outage starts and one when it ends. Agents on local models keep working.
+- **API token no longer visible to other accounts** — Lifeline passed your VersaVoice API token as a command argument, where any account on the machine could read it while the command ran. It now travels in the environment, which only the same account can read.
+- **Received attachments are checked** — A received file is saved under its plain file name inside the message's attachments folder, whatever path the name carried, and is fetched from an `https` address only.
+- **The app no longer shows an agent that is not there** — After the machine was turned off with an agent in a chat, the VersaVoice app kept showing the agent as here, then working, for up to the rest of its time limit. Now it shows resting at once after a shutdown, and within about 3 minutes after a power cut or a lost network. Needs the VersaVoice app update released with 3.10.0.
+- **A cycle cut by a power loss is closed out** — Its record used to stay open, the agent stayed marked active, and the VersaVoice app's statistics missed it. On the next pass Lifeline now closes the record with the time the cycle stopped, sets the agent back to idle, and reports the end to VersaVoice AI. Such a cycle shows as **Shutdown** on the agent card.
+- **A sleeping computer is no longer read as a stalled agent** — Time the machine spent asleep counted toward the stall timer, so an agent could be stopped the moment the machine woke, and that counted toward the circuit breaker.
+- **Uninstall removes the link service** — `versa-agi-uninstall` left the link service's unit behind. It now stops and removes it, and backup captures it.
+- **Restarting the link service no longer ends a cycle** — An agent woken by a new message runs under the link service. An update, or a crash of that service, could have stopped the agent in the middle of its cycle. Only the service itself is restarted now.
+
+### Versa Desktop
+
+#### Changed
+- **Computer use and the clipboard list's two Clear buttons** — The clipboard list now has "Clear All" and a Clear for the tab that is open ("Clear Text", "Clear Images", "Clear Files", "Clear Screenshots"). The agent's skill knows both, so "clear my copied images" removes only those.
+
 ## [3.9.3] — 2026-11-17
 
 ### Updates

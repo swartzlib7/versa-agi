@@ -35,6 +35,16 @@ Design facts under test (see the plan §9):
     ``connections`` table lives in a different database file (tasks.db).
 """
 
+# This module needs click. An interpreter without it skips the whole module with that
+# reason instead of failing to load; the agictl interpreter has it and runs it. run_tests.py
+# checks that every test passes on at least one interpreter.
+import importlib.util as _importlib_util
+import unittest as _unittest
+
+if _importlib_util.find_spec("click") is None:
+    raise _unittest.SkipTest("click is not installed in this interpreter; "
+                             "the agictl interpreter runs this module")
+
 import json
 import os
 import shutil
@@ -1134,6 +1144,7 @@ class TestCredentials(OrgDBTestBase):
     def test_credential_crud_roundtrip(self):
         """Insert + get for a credential with JSON config."""
         cid = store.insert("credential", {
+            "name": "Test credential",
             "auth_type": "imap",
             "configuration": '{"host":"imap.gmail.com","port":993}',
             "notes": "Gmail",
@@ -1147,6 +1158,7 @@ class TestCredentials(OrgDBTestBase):
         """Invalid JSON in configuration raises a type_error."""
         with self.assertRaises(store.OrganizationStoreError) as ctx:
             store.insert("credential", {
+                "name": "Test credential",
                 "auth_type": "api",
                 "configuration": "not-json{",
             })
@@ -1155,6 +1167,7 @@ class TestCredentials(OrgDBTestBase):
     def test_credential_json_validation_accepts_dict(self):
         """A valid JSON dict is accepted."""
         cid = store.insert("credential", {
+            "name": "Test credential",
             "auth_type": "mcp",
             "configuration": '{"server":"stdio"}',
         })
@@ -1163,6 +1176,7 @@ class TestCredentials(OrgDBTestBase):
     def test_email_usage_notes_and_credential_id(self):
         """email_addresses supports usage_notes and credential_id."""
         cid = store.insert("credential", {
+            "name": "Test credential",
             "auth_type": "imap",
             "configuration": '{}',
         })
@@ -1194,6 +1208,7 @@ class TestCredentials(OrgDBTestBase):
     def test_reader_list_credentials(self):
         """list_credentials() returns credentials with auth_type."""
         store.insert("credential", {
+            "name": "Test credential",
             "auth_type": "api",
             "configuration": '{"key":"abc"}',
         })
@@ -1205,6 +1220,7 @@ class TestCredentials(OrgDBTestBase):
         """list_emails() resolves credential type and org name."""
         org = store.insert("org", {"name": "Acme"})
         cid = store.insert("credential", {
+            "name": "Test credential",
             "auth_type": "imap",
             "configuration": '{}',
         })

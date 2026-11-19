@@ -20,7 +20,9 @@ from harness.listening import (  # noqa: E402
     agent_ids_from_env,
     conversations_block,
     is_person,
+    read_close_deadline,
     read_close_request,
+    shutdown_message,
     wait_for_mail,
 )
 from harness.midcycle_mail import format_arrival_block  # noqa: E402
@@ -319,6 +321,40 @@ class TestCallClamp(unittest.TestCase):
         self.assertEqual(self.placed, [15])
 
 
+class TestShutdownNoticeWiring(unittest.TestCase):
+    """state_host_services.md §1.4.1 rule 5: where the harness loop reads a shutdown request."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agent_harness.py")
+        with open(path, encoding="utf-8") as fh:
+            cls.text = fh.read()
+
+    def test_told_once_at_the_safe_point_before_any_other_notice(self):
+        notice = self.text.index("if gate_open and not shutdown_told and _shutdown_requested():")
+        # After every other notice is chosen, so it replaces them; before the one place that sends.
+        self.assertLess(self.text.index("warning, warn_tag = checkin_message(checkin_minutes)"), notice)
+        self.assertLess(notice, self.text.index('tlog(f"{warn_tag} Injecting warning into agent conversation'))
+        self.assertIn('warn_tag, time_stage, on_sent = "[SHUTDOWN]", None, _mark_shutdown_told', self.text)
+        self.assertIn("gate_open = not pending_tool_calls and not _in_call_turn()", self.text)
+
+    def test_an_open_window_is_closed_so_cycle_end_is_accepted(self):
+        mark = self.text[self.text.index("def _mark_shutdown_told()"):self.text.index("def _inject_midcycle_mail()")]
+        self.assertIn("shutdown_told = True", mark)
+        self.assertIn('listening.begin_closing("shutdown")', mark)
+
+    def test_no_new_mail_turn_starts_once_the_agent_was_told(self):
+        inject = self.text[self.text.index("def _inject_midcycle_mail()"):self.text.index("found = midcycle_inbox.poll()")]
+        self.assertIn("if shutdown_told:\n            return False", inject)
+
+    def test_a_shutdown_between_turns_is_not_told_twice(self):
+        self.assertIn('if close_reason == "shutdown":\n                        shutdown_told = True', self.text)
+
+    def test_there_is_no_sigterm_handler(self):
+        # `timeout` stops a cycle with SIGTERM and waits for the process to go (§1.4.1).
+        self.assertNotIn("signal.signal(", self.text)
+
+
 class TestChatCloseRequest(unittest.TestCase):
     """LCH-23: `agictl agent chat-close` → the window closes gracefully."""
 
@@ -343,6 +379,27 @@ class TestChatCloseRequest(unittest.TestCase):
         self._write("coa-2 bogus")
         self.assertIsNone(read_close_request(self.path, "coa-2"))
         self.assertIsNone(read_close_request(None, "coa-2"))
+
+    def test_the_shutdown_guard_names_a_deadline(self):
+        """state_host_services.md §1.4.1: "<cycleId> shutdown <epoch>"."""
+        self.assertIsNone(read_close_deadline(self.path, "coa-2"))  # no file
+        self._write("coa-2 shutdown 1792200120\n")
+        self.assertEqual(read_close_request(self.path, "coa-2"), "shutdown")
+        self.assertEqual(read_close_deadline(self.path, "coa-2"), 1792200120.0)
+        self.assertIsNone(read_close_deadline(self.path, "coa-1"))  # another cycle's request
+        self._write("coa-2 requested")
+        self.assertIsNone(read_close_deadline(self.path, "coa-2"))
+        self._write("coa-2 shutdown soon")
+        self.assertIsNone(read_close_deadline(self.path, "coa-2"))
+
+    def test_shutdown_message_tells_the_agent_what_to_do(self):
+        text = shutdown_message(112.0)
+        self.assertIn("This computer is shutting down now", text)
+        self.assertIn("If a person is waiting for your reply, send them one short message", text)
+        self.assertIn("agictl cycle end", text)
+        self.assertIn("You have about 110 seconds.", text)
+        self.assertIn("You have about 10 seconds.", shutdown_message(-4))
+        self.assertNotIn("You have about", shutdown_message())
 
     def test_window_closes_on_request(self):
         clock = Clock()
@@ -396,6 +453,14 @@ class TestChatCloseCli(unittest.TestCase):
         self._run(["coa", "--reason", "shutdown"])
         with open(os.path.join(self.tmp.name, "coa", "chat_close"), encoding="utf-8") as fh:
             self.assertEqual(fh.read().split(), ["coa-200", "shutdown"])
+
+    def test_shutdown_with_a_deadline(self):
+        self._run(["coa", "--reason", "shutdown", "--deadline-epoch", "1792200120"])
+        path = os.path.join(self.tmp.name, "coa", "chat_close")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().split(), ["coa-200", "shutdown", "1792200120"])
+        self.assertEqual(read_close_request(path, "coa-200"), "shutdown")
+        self.assertEqual(read_close_deadline(path, "coa-200"), 1792200120.0)
 
     def test_no_cycle_running(self):
         with sqlite3.connect(self.db) as conn:

@@ -433,6 +433,10 @@ ok "System binaries captured"
 info "3h: Systemd units..."
 capture "/etc/systemd/system/versa-agi-sentinel.service" "Sentinel service unit"
 capture "/etc/systemd/system/versa-agi-tunnel.service" "SSH tunnel service unit"
+capture "/etc/systemd/system/versa-agi-link.service" "Link service unit"
+capture "/etc/systemd/system/versa-agi-shutdown-guard.service" "Shutdown guard unit"
+capture "/etc/polkit-1/rules.d/50-versa-agi-sleep.rules" "Sleep hold permission (polkit rule)"
+capture "/etc/systemd/logind.conf.d/50-versa-agi-lid.conf" "Lid setting (logind)"
 capture "/etc/logrotate.d/versa-agi" "Lifeline / Sentinel log rotation"
 
 # ── 3i: Sudoers ──

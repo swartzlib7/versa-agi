@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.9.3 · November 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.10.1 · November 2026</p>
 </div>
 
 ## At a glance
@@ -213,13 +213,20 @@ In a chat with an agent, one line above the recording box shows where it is:
 - **More than one person.** Several people can chat with the same agent at once. Each sees the status line in their own chat with the agent. You can ask the agent to bring someone in; their replies reach the same session. The agent keeps each conversation separate and shares one person's matters with another only when that serves your purpose.
 - **Tasks wait.** Tasks that fall due during a chat wait until it ends. The agent is woken for them afterwards.
 - **The time limit still holds.** Every cycle has a time limit (Part 5). At about 15 minutes left the agent is told to keep chatting; at about 8 minutes left the chat closes and the agent hands off. A slow model reaches both points earlier. Your next message starts a new cycle. For a longer chat, raise the agent's time limit (Part 5), or ask your Chief Orchestrator Agent to raise it; a chat still closes after the listening time with no new message.
-- **Five at a time.** At most 5 of your agents listen at once. Any others answer once per cycle, as before.
+- **Twenty at a time.** At most 20 of your agents listen at once (5 on a machine where the link to VersaVoice AI is down or switched off). Any others answer once per cycle, as before.
+- **Live Link: no waiting for the next fetch.** This is optional and off until you turn it on (setup asks **Enable Live Link?**; in agitop it is under **Settings → Live Chat → Live Link**). With it on, your machine keeps one outbound request open to VersaVoice AI and is told the moment an agent has a new message. A resting agent starts waking at once, and an agent that is here reads your message at once. Your machine still accepts no connection from outside. If that link is down, messages arrive by the regular fetch: up to a minute for a resting agent, up to 10 seconds in a chat. agitop shows the link on its **LINK** line under System: up, down with the reason, or off.
 
 On each agent's card in the app, a small icon shows the same state: resting, working, or here. The card's **ACTIVITY** section shows how many cycles the agent has run, a busy graph for the last 48 hours, its last 20 cycles (the newest is selected; tap another to see when it ran, how long, what woke it and how it ended), how its cycles ended (ok, timeout, runaway, step limit, crash), what woke it (messages, tasks, or a forced run), and how long its cycles take (average, longest, and how they spread). After an update, past cycles from the machine's history are filled in once, so the charts start with history, not empty.
 
-A cycle closed at its time limit shows as **Timeout**. A cycle stopped by the stall timer shows as **Stall**, and one stopped for repeating the same call shows as **Repeated call** (Part 5).
+A cycle closed at its time limit shows as **Timeout**. A cycle stopped by the stall timer shows as **Stall**, and one stopped for repeating the same call shows as **Repeated call** (Part 5). A cycle that ended because you shut down or restarted your computer shows as **Shutdown**.
 
-Change the listening time in agitop under **Settings → Live Chat**. To end a chat early, use **💤 End chat** on the agent's window (Part 5).
+**When you turn your computer off.** An agent that is working or in a chat is told that the computer is shutting down. It gets up to 2 minutes to hand off and close its cycle, so shutting down can take that much longer while an agent is busy. It carries on the next time it starts. In the app the agent then shows as resting. If the computer loses power or its network instead, the app shows the agent as resting within about 3 minutes. You can change the 2 minutes with `shutdown_grace_seconds` under `[agent]` in `setup.ini` (30 to 300 seconds; `0` turns it off).
+
+**Sleep.** Your computer does not go to sleep while an agent is working. Sleep waits until the agent's cycle has ended; in a chat, until it has been quiet for the listening time. Then it sleeps as usual. On a laptop, shutting the lid still puts it to sleep, unless you answered yes when setup asked whether a shut lid should wait for a working agent. If you answer yes, the laptop stays awake with the lid shut until the agent has finished, so mind the heat if it goes into a bag.
+
+**After a power cut.** The agent could not hand off. The next time it starts, it is told that its last cycle was interrupted and checks the last thing it was doing before it carries on. On its card that cycle shows as **Shutdown**.
+
+Change the listening time in agitop under **Settings → Live Chat**, or ask your Chief Orchestrator Agent: it can tell you whether Live Chat and Live Link are on, and change either for you. To end a chat early, use **💤 End chat** on the agent's window (Part 5).
 
 ### Live Calling
 
@@ -568,7 +575,7 @@ On **Technical**, **Time limit** is the longest one cycle may run: 30 to 240 min
 - **Before the limit.** The agent is told to wrap up at 15 minutes left, and to close at 8 minutes left. A slow model is told earlier.
 - **At the limit.** If the agent has not closed its cycle, the system closes it and writes a short summary and a handoff. The agent's next cycle starts on the scheduler's next pass and carries on in the same conversation.
 - **During a long cycle.** Every 30 minutes the system writes a check-in line to the cycle log and asks the agent to record where each task stands.
-- **Cached input.** Each step sends the agent's prompt and conversation again, and providers bill that repeated input at a lower price. With a Claude model the system asks for this on every request; other providers do it by themselves. The cycle log ends with a `CACHE:` line that says how much was read from the cache. With Claude, the system keeps the cache alive while a chat waits for your next message, so a quiet stretch costs very little. A tool run or a call longer than 5 minutes makes the next request pay the full price once.
+- **Cached input.** Each step sends the agent's prompt and conversation again, and providers bill that repeated input at a lower price. With a Claude model the system asks for this on every request; other providers do it by themselves. The cycle log ends with a `CACHE:` line that says how much was read from the cache. With Claude, the system keeps the cache alive while a chat waits for your next message, so a quiet stretch costs very little. A tool run or a call longer than 5 minutes makes the next request pay the full price once. A photo the agent looks at stays in the conversation until the cycle ends, so a run of photos is read from the cache too.
 - **Before a run of steps.** An agent writes a sentence or two on what it is going to do and why before work that takes several steps, and again when its plan changes. The plan is in the cycle log. It is not sent to you as a message.
 
 **💤 End chat**, on **General** beside **Halt Agent**, closes the agent's live chat. It finishes its current reply, hands off, and rests until the next message. Nothing is halted. From the command line:
@@ -585,6 +592,8 @@ Agents come and go with your approval:
 - **See what happened.** **Cycle Logs** shows each work cycle, with a check-in line for every 30 minutes it ran. **System Prompt** shows exactly what the agent was given.
 
 Two tabs can delete one agent's history. A thread is the conversation an agent carries from cycle to cycle for one piece of work. A summary frame is the short summary it keeps of an older part of that conversation; the **Summary Frames** tab lists them.
+
+How much of the conversation an agent starts a cycle with is yours to set. **Resume Max Messages**, under the agent's **Technical Setup**, is the number of recent messages it starts with; the default is 50, and 0 lets the model's size decide. Anything older is written up as a summary frame when the cycle starts, and the agent carries its newest summaries in front of the recent messages. A smaller number costs less on every wake, because the whole conversation is billed at the full price once each time an agent wakes. The summaries are written by the **Compaction Model** (System Settings → General). Leave it blank and each agent's own model writes them; choose a small model there to keep that cheap.
 
 <table>
 <thead><tr><th>Tab</th><th>Button</th><th>Deletes</th><th>Keeps</th></tr></thead>
@@ -869,5 +878,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.9.3, November 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.10.1, November 2026.</p>
 </div>

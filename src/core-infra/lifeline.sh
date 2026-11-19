@@ -21,7 +21,17 @@ IDE_GENERATE=false
 IDE_TARGET=""
 IDE_TARGET_SEEN=false
 FORCE_RUN=false
-if [ "${1:-}" = "--ide-prompt" ]; then
+# --agent <name>: a pass for one agent, started by the link service when that
+# agent has new mail (state_realtime_link.md RL-04). It skips the work that
+# belongs to the minute pass: skill sync, the weekly registration, the tick.
+ONLY_AGENT=""
+if [ "${1:-}" = "--agent" ]; then
+  ONLY_AGENT="${2:-}"
+  if [ -z "${ONLY_AGENT}" ]; then
+    echo "usage: lifeline.sh --agent <agent>" >&2
+    exit 1
+  fi
+elif [ "${1:-}" = "--ide-prompt" ]; then
   IDE_TARGET="${2:-}"
   if [ -z "${IDE_TARGET}" ]; then
     echo "usage: lifeline.sh --ide-prompt <agent>" >&2
@@ -31,7 +41,7 @@ if [ "${1:-}" = "--ide-prompt" ]; then
 elif [ "${1:-}" = "--force" ]; then
   FORCE_RUN=true
 elif [ -n "${1:-}" ]; then
-  echo "usage: lifeline.sh [--force|--ide-prompt <agent>]" >&2
+  echo "usage: lifeline.sh [--force|--agent <agent>|--ide-prompt <agent>]" >&2
   exit 1
 fi
 
@@ -75,6 +85,30 @@ if [ -f "${LIFELINE_DISABLED_FLAG}" ] && [ "${IDE_GENERATE}" != "true" ]; then
   exit 0
 fi
 
+# ─── Shutdown hold (state_host_services.md §1.4.1) ───
+# The shutdown guard writes this flag when the computer is shutting down or
+# rebooting. While it is newer than the boot, no agent is started; a cycle that
+# ends then is reported with the outcome `shutdown`. A flag from before the
+# boot is left over (the guard's unit removes it at boot) and is dropped here.
+SHUTDOWN_FLAG="${VERSA_SHUTDOWN_FLAG:-/var/lib/versa-agi/shutdown_pending}"
+_shutdown_pending() {
+  local stamp now up
+  stamp=$(stat -c %Y "${SHUTDOWN_FLAG}" 2>/dev/null) || return 1
+  now=$(date +%s)
+  up=$(cut -d. -f1 "${VERSA_UPTIME_FILE:-/proc/uptime}" 2>/dev/null || echo 0)
+  [[ "${up}" =~ ^[0-9]+$ ]] || up=0
+  [ "${stamp}" -ge $(( now - up )) ]
+}
+if [ "${IDE_GENERATE}" != "true" ]; then
+  if _shutdown_pending; then
+    log "SHUTDOWN: this computer is shutting down — no agents are started"
+    exit 0
+  elif [ -e "${SHUTDOWN_FLAG}" ]; then
+    rm -f "${SHUTDOWN_FLAG}" 2>/dev/null || true
+  fi
+fi
+# ─── End shutdown hold ───
+
 # ─── Cycle Monitor (state_long_cycles.md §1.2, §1.4) ─────────────────────────
 # Background watcher, one per spawned agent. Polls every 10 s.
 #   Runaway: growth of the result file over the last 15 minutes (lines, size).
@@ -83,7 +117,13 @@ fi
 #            model call starts, when a reply arrives, and every 30 s while a
 #            tool runs, mail is awaited, or a live call is in progress.
 # On a breach it stops the agent and leaves a sentinel for the exit handler.
-# VERSA_MONITOR_POLL_SECONDS / VERSA_MONITOR_SAMPLE_POLLS exist for the tests.
+#   Alive:   $8, when given, is touched on every poll (never created): the
+#            cycle's activity_open marker, so its time is when the cycle was
+#            last alive (state_host_services.md §1.6.3).
+#   Sleep:   more than a minute between two polls means the machine slept.
+#            The stall timer then counts from that poll (§1.6.5).
+# VERSA_MONITOR_POLL_SECONDS / VERSA_MONITOR_SAMPLE_POLLS / VERSA_MONITOR_SLEEP_GAP
+# exist for the tests.
 monitor_runaway() {
   local result_file="$1"
   local agent_user="$2"
@@ -92,6 +132,7 @@ monitor_runaway() {
   local size_threshold_kb="${5:-2048}"
   local heartbeat_file="${6:-}"
   local stall_limit="${7:-0}"
+  local alive_file="${8:-}"
   local sentinel="/tmp/versa-agi-runaway-${agent_name}"
   local stall_sentinel="/tmp/versa-agi-stall-${agent_name}"
   local size_threshold_bytes=$((size_threshold_kb * 1024))
@@ -103,11 +144,25 @@ monitor_runaway() {
   local polls=0
   local started
   started=$(date +%s)
+  local last_poll="${started}"
+  local resumed=0
+  local poll_now
+  # Seconds between two polls (normally 10) that mean the machine slept.
+  local sleep_gap="${VERSA_MONITOR_SLEEP_GAP:-70}"
 
   rm -f "${sentinel}" "${stall_sentinel}" 2>/dev/null
   while true; do
     sleep "${poll_seconds}"
     polls=$((polls + 1))
+    poll_now=$(date +%s)
+    if [ $(( poll_now - last_poll )) -gt "${sleep_gap}" ]; then
+      resumed="${poll_now}"
+      log "MONITOR: ${agent_name} — $(( poll_now - last_poll ))s passed between two checks (the machine slept) — the stall timer starts again"
+    fi
+    last_poll="${poll_now}"
+    if [ -n "${alive_file}" ]; then
+      touch -c "${alive_file}" 2>/dev/null || true
+    fi
     local trigger=""
     local diagnostics=""
     local line_now=0 size_now=0
@@ -157,6 +212,7 @@ monitor_runaway() {
       now=$(date +%s)
       beat=$(stat -c %Y "${heartbeat_file}" 2>/dev/null || echo 0)
       [ "${beat}" -lt "${started}" ] 2>/dev/null && beat="${started}"
+      [ "${beat}" -lt "${resumed}" ] 2>/dev/null && beat="${resumed}"
       age=$(( now - beat ))
       if [ "${age}" -gt "${stall_limit}" ]; then
         echo "no heartbeat for ${age}s (limit ${stall_limit}s)" > "${stall_sentinel}"
@@ -168,7 +224,7 @@ monitor_runaway() {
   done
 }
 
-log "Lifeline fired"
+log "Lifeline fired${ONLY_AGENT:+ (one agent: ${ONLY_AGENT}, mail signal)}"
 
 # ─── Resolve Agent List ──────────────────────────────
 # Source: agents.db (SQLite)
@@ -183,8 +239,11 @@ log "Registry: ${AGENT_COUNT} active agent(s) [source: agictl]"
 # ─── Skill Sync (DB-driven) ──────────────────────────
 # Check for skills with status 'ready' or 'updated' and deploy to all sub-agents.
 # Then regenerate the skills catalog for triage prompt injection.
-SKILLS_TO_SYNC=$(sqlite3 "${AGENTS_DB}" \
-  "SELECT name FROM skills WHERE status IN ('ready', 'updated');" 2>/dev/null || true)
+SKILLS_TO_SYNC=""
+if [ -z "${ONLY_AGENT}" ]; then
+  SKILLS_TO_SYNC=$(sqlite3 "${AGENTS_DB}" \
+    "SELECT name FROM skills WHERE status IN ('ready', 'updated');" 2>/dev/null || true)
+fi
 
 if [ -n "${SKILLS_TO_SYNC}" ]; then
   # Count pending skills for logging
@@ -299,7 +358,7 @@ COA_CONFIG="/etc/versa-agi/coa_config.json"
 # ─── Install Registration Heartbeat (weekly) ────────
 # Signals active use to Firebase — separate from install/update submissionCount.
 INSTALL_ACCEPTANCE_PY="${VERSA_CORE_INFRA:-${SCRIPT_DIR}}/install_acceptance.py"
-if [ -f "${INSTALL_ACCEPTANCE_PY}" ] && [ -f "${SETUP_INI}" ]; then
+if [ -f "${INSTALL_ACCEPTANCE_PY}" ] && [ -f "${SETUP_INI}" ] && [ -z "${ONLY_AGENT}" ]; then
   REG_SUBMITTED=$(sed -n '/^\[registration\]/,/^\[/{s/^registration_submitted=//p}' "${SETUP_INI}" 2>/dev/null | head -1)
   LAST_HEARTBEAT=$(sed -n '/^\[registration\]/,/^\[/{s/^registration_last_heartbeat_at=//p}' "${SETUP_INI}" 2>/dev/null | head -1)
   HEARTBEAT_NEEDED=false
@@ -413,8 +472,11 @@ if [ -f "${SETUP_INI}" ]; then
   _ot=$(grep -Po '^\s*outage_threshold_minutes\s*=\s*\K[0-9]+' "${SETUP_INI}" 2>/dev/null || true)
   [ -n "${_ot}" ] && OUTAGE_THRESHOLD_MINUTES="${_ot}"
 fi
-_tick_json=$(/usr/local/bin/agictl cycle tick --threshold-minutes "${OUTAGE_THRESHOLD_MINUTES}" 2>/dev/null || true)
-_tick_gap=$(printf '%s' "${_tick_json}" | jq -r 'if .gap then "\(.gap.start) to \(.gap.end) UTC" else empty end' 2>/dev/null || true)
+_tick_gap=""
+if [ -z "${ONLY_AGENT}" ]; then
+  _tick_json=$(/usr/local/bin/agictl cycle tick --threshold-minutes "${OUTAGE_THRESHOLD_MINUTES}" 2>/dev/null || true)
+  _tick_gap=$(printf '%s' "${_tick_json}" | jq -r 'if .gap then "\(.gap.start) to \(.gap.end) UTC" else empty end' 2>/dev/null || true)
+fi
 if [ -n "${_tick_gap}" ]; then
   log "OUTAGE: Lifeline did not run from ${_tick_gap} (threshold ${OUTAGE_THRESHOLD_MINUTES}m) — agents are told on their next wake"
 fi
@@ -511,6 +573,10 @@ print(int(last.get("inserted") or 0))
 # Cloud inbox for one agent. Persist unread rows only — do not spawn and do
 # not rebuild the prompt. $6 = true is the during-spawn poll: log only when
 # rows insert (a zero result every 10 seconds would fill the log).
+# $7 = the running cycle's id: this fetch is then also the proof of life
+# (state_host_services.md §1.4.2). Sets _VV_INBOX_FETCHED=true when the
+# VersaVoice API answered.
+_VV_INBOX_FETCHED=false
 _vv_sync_agent_inbox() {
   local agent_user="$1"
   local agent_name="$2"
@@ -518,14 +584,27 @@ _vv_sync_agent_inbox() {
   local sub_id="$4"
   local token="$5"
   local while_spawned="${6:-false}"
+  local proof_cycle="${7:-}"
   local vv_enabled inbox_out inserted
+  local proof_args=()
+  _VV_INBOX_FETCHED=false
   vv_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
   if [ "${vv_enabled:-true}" != "true" ] || [ -z "${sub_id}" ] || [ -z "${token}" ]; then
     return 0
   fi
-  inbox_out=$(AGICTL_MESSAGES_DB="/var/lib/versa-agi/messages.db" \
-    /usr/local/bin/agictl message sync-inbox "${agent_user}" --agent-path "${agent_path}" --sub-account "${sub_id}" --token "${token}" 2>&1) \
-    || log "WARN: agictl message sync-inbox failed for ${agent_name}: $(printf '%s' "${inbox_out}" | tail -n 1 | cut -c1-200)"
+  if _vv_net_down; then
+    return 0
+  fi
+  [ -n "${proof_cycle}" ] && proof_args=(--cycle-id "${proof_cycle}")
+  # The token goes in the environment, never on the command line: any account
+  # on the machine can read another process's arguments, not its environment.
+  if inbox_out=$(AGICTL_MESSAGES_DB="/var/lib/versa-agi/messages.db" AGICTL_VV_TOKEN="${token}" \
+    /usr/local/bin/agictl message sync-inbox "${agent_user}" --agent-path "${agent_path}" --sub-account "${sub_id}" \
+      ${proof_args[@]+"${proof_args[@]}"} 2>&1); then
+    _VV_INBOX_FETCHED=true
+  else
+    log "WARN: agictl message sync-inbox failed for ${agent_name}: $(printf '%s' "${inbox_out}" | tail -n 1 | cut -c1-200)"
+  fi
   inserted=$(_vv_inbox_inserted "${inbox_out}")
   if [ "${inserted:-0}" -gt 0 ]; then
     _vv_run_instance_sync inbox
@@ -549,8 +628,12 @@ _vv_activity() {
     echo 0
     return 0
   fi
-  if ! out=$(timeout 20 /usr/local/bin/agictl system activity "${event}" \
-      --sub-account "${SUB_ACCOUNT_ID}" --token "${API_TOKEN}" --cycle-id "${CURRENT_CYCLE_ID}" "$@" 2>&1); then
+  if _vv_net_down; then
+    echo 0
+    return 0
+  fi
+  if ! out=$(AGICTL_VV_TOKEN="${API_TOKEN}" timeout 20 /usr/local/bin/agictl system activity "${event}" \
+      --sub-account "${SUB_ACCOUNT_ID}" --cycle-id "${CURRENT_CYCLE_ID}" "$@" 2>&1); then
     log "WARN: activity ${event} not sent for ${AGENT_NAME}: $(printf '%s' "${out}" | tail -n 1 | cut -c1-200)"
     echo 0
     return 0
@@ -576,8 +659,8 @@ _vv_activity_backfill_once() {
   if [ -f "${fail_marker}" ] && [ -n "$(find "${fail_marker}" -mmin -60 2>/dev/null)" ]; then
     return 0
   fi
-  if out=$(timeout 45 /usr/local/bin/agictl system activity-backfill \
-      --sub-account "${SUB_ACCOUNT_ID}" --token "${API_TOKEN}" --agent "${AGENT_NAME}" 2>&1); then
+  if out=$(AGICTL_VV_TOKEN="${API_TOKEN}" timeout 45 /usr/local/bin/agictl system activity-backfill \
+      --sub-account "${SUB_ACCOUNT_ID}" --agent "${AGENT_NAME}" 2>&1); then
     touch "${done_marker}" 2>/dev/null || true
     rm -f "${fail_marker}" 2>/dev/null || true
     log "ACTIVITY: ${AGENT_NAME} — history sent to VersaVoice ($(printf '%s' "${out}" | tail -n 1 | cut -c1-120))"
@@ -587,20 +670,202 @@ _vv_activity_backfill_once() {
   fi
 }
 
+# The link service rewrites this file on every answer from the VersaVoice API: "up",
+# "down" or "off", then the time. The link is carrying mail when the file
+# says "up" and is under two minutes old (state_realtime_link.md RL-06).
+LINK_STATE_FILE="${VERSA_LINK_STATE_FILE:-/var/lib/versa-agi/link_state}"
+_vv_link_up() {
+  local stamp now
+  stamp=$(stat -c %Y "${LINK_STATE_FILE}" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  [ $(( now - stamp )) -le 120 ] && [ "$(head -c 3 "${LINK_STATE_FILE}" 2>/dev/null)" = "up " ]
+}
+
+# Reply drafts are parked: off unless `[features] reply_drafts=true` (see the
+# note where VERSA_REPLY_DRAFT_FILE is exported).
+_vv_reply_drafts_on() {
+  [ "$(sed -n '/^\[features\]/,/^\[/{s/^reply_drafts=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')" = "true" ]
+}
+
+# Offline hold (state_realtime_link.md RL-11). The minute pass checks once
+# whether the VersaVoice API's server can be reached and keeps this file while it
+# cannot: its content is the time the outage was first seen, its age the last
+# pass that still saw it. While it is fresh, inbox fetches and activity reports
+# are skipped without a log line, and cloud-model agents are not spawned, so an
+# outage costs no failed cycle, no retry budget and no circuit breaker count.
+NET_DOWN_FILE="${VERSA_NET_DOWN_FILE:-/var/lib/versa-agi/net_down}"
+NET_PROBE_HOST="${VERSA_NET_PROBE_HOST:-us-central1-versavoice-s777.cloudfunctions.net}"
+NET_PROBE_PORT="${VERSA_NET_PROBE_PORT:-443}"
+_vv_net_down() {
+  local stamp now
+  stamp=$(stat -c %Y "${NET_DOWN_FILE}" 2>/dev/null) || return 1
+  now=$(date +%s)
+  [ $(( now - stamp )) -le 150 ]
+}
+# A TCP connection to the API's address: name lookup, route and reachability
+# in one step, without a request. Two tries, so one lost packet is not an outage.
+# Every address of the name is tried, IPv4 first, each with its own limit: a
+# machine with a dead IPv6 route (seen 2026-11-18, a phone tethered by USB)
+# spends three seconds on IPv6 before IPv4 answers at once.
+_vv_net_reachable() {
+  timeout 30 python3 -c '
+import socket, sys
+for attempt in (1, 2):
+    try:
+        found = socket.getaddrinfo(sys.argv[1], int(sys.argv[2]), type=socket.SOCK_STREAM)
+    except (OSError, ValueError):
+        continue
+    for family, kind, proto, _, address in sorted(found, key=lambda row: row[0] != socket.AF_INET):
+        try:
+            with socket.socket(family, kind, proto) as link:
+                link.settimeout(4)
+                link.connect(address)
+            sys.exit(0)
+        except OSError:
+            pass
+sys.exit(1)
+' "${NET_PROBE_HOST}" "${NET_PROBE_PORT}" 2>/dev/null
+}
+# Run once per minute pass. Sets NET_DOWN and NET_WENT_DOWN_NOW; logs one line
+# when an outage starts and one when it ends.
+_vv_net_check() {
+  local since now
+  NET_DOWN=false
+  NET_WENT_DOWN_NOW=false
+  if _vv_net_reachable; then
+    if [ -f "${NET_DOWN_FILE}" ]; then
+      since=$(head -c 12 "${NET_DOWN_FILE}" 2>/dev/null | tr -cd '0-9')
+      now=$(date +%s)
+      rm -f "${NET_DOWN_FILE}" 2>/dev/null || true
+      log "ONLINE: the VersaVoice API is reachable again after $(( (now - ${since:-${now}} + 59) / 60 )) min — fetches and cycles resume"
+    fi
+    return 0
+  fi
+  NET_DOWN=true
+  if [ -f "${NET_DOWN_FILE}" ]; then
+    touch "${NET_DOWN_FILE}" 2>/dev/null || true
+  else
+    date +%s > "${NET_DOWN_FILE}" 2>/dev/null || true
+    NET_WENT_DOWN_NOW=true
+    log "OFFLINE: the VersaVoice API cannot be reached (${NET_PROBE_HOST}) — inbox fetches wait and cloud-model agents are not started until it is back; local-model agents still run"
+  fi
+}
+
+# ─── Network check — once per minute pass (RL-11) ─────
+# The one-agent pass is started by a mail signal, which only arrives while
+# the VersaVoice API is reachable, so it does not check.
+NET_DOWN=false
+NET_WENT_DOWN_NOW=false
+if [ -z "${ONLY_AGENT}" ]; then
+  _net_vv=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
+  if [ "${_net_vv:-true}" = "true" ]; then
+    _vv_net_check
+  else
+    rm -f "${NET_DOWN_FILE}" 2>/dev/null || true
+  fi
+fi
+
 # Inbox poll for the life of one spawn. Sleeps first because the free-lock
 # sync already ran. The caller kills this when the harness returns.
 # Each pass clears the once-per-tick instance-sync flag so an insert can
 # still sync once in that 10-second window.
+# ─── Cut-cycle checkpoint (state_host_services.md §1.6.3) ───
+# A cycle's activity_open marker exists from its activity start until its end
+# is reported, and the cycle monitor touches it every 10 seconds. Found with
+# no cycle of that agent running, the cycle was cut: the computer went off
+# (last alive before the boot) or Lifeline was stopped while it stayed on.
+# Close its row with the time it was last alive, set the agent back to idle,
+# and send the late end to VersaVoice. Called per agent with the lock held.
+# Uses AGENT_NAME, AGENTS_DB, SUB_ACCOUNT_ID, API_TOKEN.
+_cut_cycle_checkpoint() {
+  local marker="${VERSA_STATE_DIR:-/var/lib/versa-agi}/${AGENT_NAME}/activity_open"
+  [ -f "${marker}" ] || return 0
+  local cut_id="" spawn_epoch="" alive now up code why outcome state duration
+  read -r cut_id spawn_epoch _ < "${marker}" 2>/dev/null || true
+  alive=$(stat -c %Y "${marker}" 2>/dev/null || echo 0)
+  if [ -z "${cut_id}" ]; then
+    rm -f "${marker}" 2>/dev/null || true
+    return 0
+  fi
+  [[ "${spawn_epoch}" =~ ^[0-9]+$ ]] || spawn_epoch="${alive}"
+  now=$(date +%s)
+  up=$(cut -d. -f1 "${VERSA_UPTIME_FILE:-/proc/uptime}" 2>/dev/null || echo 0)
+  [[ "${up}" =~ ^[0-9]+$ ]] || up=0
+  if [ "${alive}" -lt $(( now - up )) ]; then
+    code=98; why="the computer went off"; outcome="shutdown"
+  else
+    code=96; why="Lifeline was stopped"; outcome="crash"
+  fi
+  state=$(/usr/local/bin/agictl cycle close-cut "${AGENT_NAME}" --cycle-id "${cut_id}" \
+    --ended-epoch "${alive}" --exit-code "${code}" 2>/dev/null | tail -n 1 | jq -r '.state // empty' 2>/dev/null || true)
+  # The agent had closed its cycle before the cut: a normal end, reported late.
+  [ "${state}" = "already_ended" ] && outcome="ok"
+  sqlite3 "${AGENTS_DB}" "UPDATE agents SET status='idle', updated_at=datetime('now') WHERE name='${AGENT_NAME}' AND status='active';" 2>/dev/null || true
+  duration=$(( alive - spawn_epoch ))
+  [ "${duration}" -ge 1 ] || duration=1
+  CURRENT_CYCLE_ID="${cut_id}" _vv_activity end --outcome "${outcome}" \
+    --duration-seconds "${duration}" --ended-epoch "${alive}" >/dev/null
+  rm -f "${marker}" 2>/dev/null || true
+  log "CUT: ${AGENT_NAME} — cycle ${cut_id} was cut off at $(date -d "@${alive}" '+%Y-%m-%d %H:%M:%S') (${why}); record ${state:-not updated}, end reported to VersaVoice as ${outcome}; the agent is told on its next wake"
+}
+
+# ─── Sleep hold (state_host_services.md §1.6.1) ───────
+# While a cycle runs, the computer is asked not to sleep: a block hold with
+# Ubuntu's login service, tied to the spawn's process so it ends with it, a
+# crash included. Run beside the cycle, not around it, so the cycle's exit
+# code is never touched. Setup adds the permission for the watchdog account.
+# No systemd, no login service or no permission: the cycle runs without it.
+# Prints the hold's process id, or nothing. $1 = the process to follow.
+SLEEP_HOLD_BIN="${VERSA_SLEEP_HOLD_BIN:-systemd-inhibit}"
+_sleep_hold_start() {
+  local follow="$1" enabled
+  enabled=$(grep -Po '^\s*sleep_hold\s*=\s*\K[A-Za-z]+' "${SETUP_INI}" 2>/dev/null | head -1 || true)
+  [ "${enabled:-true}" = "false" ] && return 0
+  command -v "${SLEEP_HOLD_BIN}" >/dev/null 2>&1 || return 0
+  if ! "${SLEEP_HOLD_BIN}" --what=sleep --mode=block --who="Versa AGi" --why="An agent is working" true >/dev/null 2>&1; then
+    log "SLEEP HOLD: ${AGENT_NAME} — not taken (the login service refused it, or is not running); the cycle runs without it"
+    return 0
+  fi
+  "${SLEEP_HOLD_BIN}" --what=sleep --mode=block --who="Versa AGi" --why="An agent is working" \
+    tail --pid="${follow}" -f /dev/null >/dev/null 2>&1 &
+  echo $!
+}
+
+# Proof of life (state_host_services.md §1.4.2): $6 is the running cycle's
+# id. The fetch names it at most once in PROOF_OF_LIFE_SECONDS, and the
+# VersaVoice API counts the cycle as ended when it has not been named for 3
+# minutes (the machine is off or cut off). A fetch that got no answer does not
+# count, so the next pass tries again.
+PROOF_OF_LIFE_SECONDS="${VERSA_PROOF_OF_LIFE_SECONDS:-55}"
 _vv_inbox_while_spawned() {
   local agent_user="$1"
   local agent_name="$2"
   local agent_path="$3"
   local sub_id="$4"
   local token="$5"
+  local cycle_id="${6:-}"
+  local quiet=0
+  local last_proof=0
+  local proof now
   while true; do
     sleep 10
+    # While the link is carrying mail this fetch is only a safety net: one
+    # pass in six (state_realtime_link.md RL-06). Link down: every pass.
+    if _vv_link_up && [ "${quiet}" -lt 5 ]; then
+      quiet=$(( quiet + 1 ))
+      continue
+    fi
+    quiet=0
     _VV_INSTANCE_SYNCED_THIS_TICK=false
-    _vv_sync_agent_inbox "${agent_user}" "${agent_name}" "${agent_path}" "${sub_id}" "${token}" true
+    proof=""
+    now=$(date +%s)
+    if [ -n "${cycle_id}" ] && [ $(( now - last_proof )) -ge "${PROOF_OF_LIFE_SECONDS}" ]; then
+      proof="${cycle_id}"
+    fi
+    _vv_sync_agent_inbox "${agent_user}" "${agent_name}" "${agent_path}" "${sub_id}" "${token}" true "${proof}"
+    if [ -n "${proof}" ] && [ "${_VV_INBOX_FETCHED}" = "true" ]; then
+      last_proof="${now}"
+    fi
   done
 }
 
@@ -669,6 +934,9 @@ fi
 while IFS='|' read -r AGENT_NAME AGENT_USER AGENT_PATH AGENT_MODEL AGENT_TIMEOUT AGENT_RUNAWAY_THRESHOLD AGENT_RUNAWAY_SIZE_THRESHOLD AGENT_INJECTION_MODE AGENT_TOKEN_BUDGET AGENT_MAX_TURNS AGENT_TOOL_BUDGET AGENT_TRIAGE_MODEL AGENT_ANCHOR_STYLE AGENT_NUM_CTX AGENT_CONVO_DEPTH AGENT_RESUME_ENABLED AGENT_RESUME_MAX_MSGS AGENT_SKILL_MODE AGENT_TEMPERATURE AGENT_REASONING_EFFORT AGENT_REASONING_MAX_TOKENS AGENT_MODEL_PARAMS_EXTRA AGENT_MODEL_ROUTING_ENABLED; do
   [ -z "${AGENT_NAME}" ] && continue
   [ "${AGENT_NAME}" = "${WATCHDOG_USER}" ] && continue
+  if [ -n "${ONLY_AGENT}" ] && [ "${AGENT_NAME}" != "${ONLY_AGENT}" ]; then
+    continue
+  fi
   if [ "${IDE_GENERATE}" = "true" ] && [ "${AGENT_NAME}" != "${IDE_TARGET}" ]; then
     continue
   fi
@@ -1023,7 +1291,15 @@ ${AGENT_REGISTRY_CONTENT}
     rm -f "${LOCKFILE}" 2>/dev/null || true
   fi
   exec 200>"${LOCKFILE}"
-  if ! flock -n 200; then
+  if [ -n "${ONLY_AGENT}" ]; then
+    # One-agent pass (mail signal). The minute pass may hold this agent for a
+    # moment while it looks for work, so wait for it instead of giving up. Due
+    # scripts are left to the minute pass.
+    if ! flock -w 20 200; then
+      log "SKIP spawn: ${AGENT_NAME} (one-agent pass — lock still held after 20 s)"
+      continue
+    fi
+  elif ! flock -n 200; then
     log "SKIP spawn: ${AGENT_NAME} (already running — lock held)"
     _run_due_utility_and_scripts "${SYSTEM_CONFIG}" "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}"
     continue
@@ -1032,7 +1308,9 @@ ${AGENT_REGISTRY_CONTENT}
   # Secondary guard: check if a harness process is already running for this user
   if pgrep -u "${AGENT_USER}" -f "harness.agent_harness" > /dev/null 2>&1; then
     log "SKIP spawn: ${AGENT_NAME} (harness process already running for user ${AGENT_USER})"
-    _run_due_utility_and_scripts "${SYSTEM_CONFIG}" "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}"
+    if [ -z "${ONLY_AGENT}" ]; then
+      _run_due_utility_and_scripts "${SYSTEM_CONFIG}" "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}"
+    fi
     flock -u 200
     continue
   fi
@@ -1042,6 +1320,11 @@ ${AGENT_REGISTRY_CONTENT}
   TASKS_DB="/var/lib/versa-agi/coa/tasks.db"
   CYCLES_DB="/var/lib/versa-agi/coa/cycles.db"
   STEP_RESUME_SENTINEL="/tmp/versa-agi-step-resume/${AGENT_NAME}"
+
+  # ─── Cut-cycle checkpoint — before mail and before any spawn ───
+  if [ "${IDE_GENERATE}" != "true" ]; then
+    _cut_cycle_checkpoint
+  fi
 
   # ─── Deterministic Mailbox Operations ──────────────
   # ALWAYS run inbox fetch first, even during cooldown, so new messages are detected immediately.
@@ -1451,6 +1734,18 @@ ${AGENT_LABEL} may pick one back up when the work is still needed. To restart on
   # Hoisted from the spawn subshell so Lifeline can enforce local AI slot limits.
   IS_LOCAL_MODEL=false
   echo ",${VERSA_LOCAL_MODELS:-}," | grep -q ",${AGENT_MODEL}," && IS_LOCAL_MODEL=true
+
+  # ─── Offline hold (RL-11) ─────────────────────────
+  # A cloud model cannot answer without the network: the cycle would fail,
+  # spend a retry of each overdue task and count toward the circuit breaker.
+  # One line per agent on the pass that first sees the outage, none after.
+  if [ "${NET_DOWN}" = true ] && [ "${IS_LOCAL_MODEL}" != true ] && [ "${FORCE_RUN}" != "true" ]; then
+    if [ "${NET_WENT_DOWN_NOW}" = true ]; then
+      log "OFFLINE: ${AGENT_NAME} — has work; its cycle waits for the network"
+    fi
+    flock -u 200
+    continue
+  fi
 
   # ─── Concurrency Cap Check ────────────────────────
   if [ "${SPAWNED_COUNT}" -ge "${MAX_SPAWN_PER_TICK}" ]; then
@@ -2502,6 +2797,18 @@ ${IDE_RESUME_CONTEXT}"
     echo ",${VERSA_LOCAL_MODELS:-}," | grep -q ",${AGENT_MODEL}," && echo "export VERSA_LOCAL_MODEL='1'"
     # `agictl agent chat-close` writes "<cycleId> <reason>" here (state_live_chat.md LCH-23).
     echo "export VERSA_CHAT_CLOSE_FILE='/var/lib/versa-agi/${AGENT_NAME}/chat_close'"
+    echo "export VERSA_MAIL_SIGNAL_FILE='/var/lib/versa-agi/${AGENT_NAME}/mail_signal'"
+    # The reply as it is written, for the "being written" bubble in the app
+    # (state_realtime_link.md §2.2). The link service passes it on, so the
+    # harness is given the file only while the link is up.
+    # PARKED, 2026-11-18 (Primary User): the reply shown while it is written is switched off
+    # (`[features] reply_drafts=false`). A reply arrives whole, for every model, and the
+    # VersaVoice app may animate it. This code is kept on purpose for a later use where a
+    # long answer should be readable while it is written. Do not remove it.
+    # Design and state: state_realtime_link.md §2.2 and D14.
+    if _vv_reply_drafts_on && _vv_link_up; then
+      echo "export VERSA_REPLY_DRAFT_FILE='${CYCLES_DIR}/reply_draft'"
+    fi
     [ -n "${VERSA_FIRST_CONTACT:-}" ] && echo "export VERSA_FIRST_CONTACT='${VERSA_FIRST_CONTACT}'"
     [ -n "${VERSA_COA_AUTONOMOUS:-}" ] && echo "export VERSA_COA_AUTONOMOUS='${VERSA_COA_AUTONOMOUS}'"
     echo "export NODE_OPTIONS='--no-deprecation'"
@@ -2591,7 +2898,10 @@ ${IDE_RESUME_CONTEXT}"
   CHECKPOINT_DB="/var/lib/versa-agi/${AGENT_NAME}/cycles/checkpoints.db"
   RESUME_FLAG=""
   if [ "${AGENT_RESUME_ENABLED}" != "0" ] && [ -f "${CHECKPOINT_DB}" ]; then
-    HAS_STATE=$(sqlite3 "${CHECKPOINT_DB}" \
+    # Read as the agent user: watchdog cannot read a WAL database nobody has
+    # open, so this count came back 0 and the log line below was missing on
+    # most resumes. The harness decides NEW or RESUME from its own read.
+    HAS_STATE=$(sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" \
       "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${THREAD_ID}';" 2>/dev/null || echo "0")
     if [ "${HAS_STATE:-0}" -gt 0 ]; then
       RESUME_FLAG="--resume"
@@ -2611,7 +2921,8 @@ ${IDE_RESUME_CONTEXT}"
       sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" \
         "DELETE FROM checkpoints WHERE thread_id='${THREAD_ID}'; \
          DELETE FROM writes WHERE thread_id='${THREAD_ID}';" 2>/dev/null || true
-      REMAINING=$(sqlite3 "${CHECKPOINT_DB}" \
+      # Read as the agent user too: watchdog cannot read a WAL database nobody has open.
+      REMAINING=$(sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" \
         "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${THREAD_ID}';" 2>/dev/null || echo "?")
       log "CHECKPOINT: Resume disabled for ${AGENT_NAME} — thread ${THREAD_ID} cleared (${REMAINING} rows remain), starting fresh"
     else
@@ -2626,7 +2937,12 @@ ${IDE_RESUME_CONTEXT}"
   RESULT_LOG="${CYCLES_DIR}/result_$(date +%s).log"
 
   # Start the cycle monitor BEFORE the agent runs: rolling runaway window and stall timer.
-  monitor_runaway "${RESULT_FILE}" "${AGENT_USER}" "${AGENT_NAME}" "${RUNAWAY_LIMIT}" "${RUNAWAY_SIZE_LIMIT}" "${HEARTBEAT_FILE}" "${STALL_LIMIT_SECONDS}" &
+  # An `end` is owed from the activity start until it is sent. The monitor
+  # keeps this marker's time current; the shutdown guard waits for it to go;
+  # the cut-cycle checkpoint finds it when the cycle never got that far
+  # (state_host_services.md §1.4.1 rule 6, §1.6.3).
+  ACTIVITY_OPEN_MARKER="/var/lib/versa-agi/${AGENT_NAME}/activity_open"
+  monitor_runaway "${RESULT_FILE}" "${AGENT_USER}" "${AGENT_NAME}" "${RUNAWAY_LIMIT}" "${RUNAWAY_SIZE_LIMIT}" "${HEARTBEAT_FILE}" "${STALL_LIMIT_SECONDS}" "${ACTIVITY_OPEN_MARKER}" &
   MONITOR_PID=$!
 
   # Set agent status to 'active' in DB so dashboard reflects running state
@@ -2745,7 +3061,7 @@ ${IDE_RESUME_CONTEXT}"
   INBOX_POLL_PID=""
   _vv_poll_enabled=$(sed -n '/^\[versavoice\]/,/^\[/{s/^enabled=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
   if [ "${_vv_poll_enabled:-true}" = "true" ] && [ -n "${SUB_ACCOUNT_ID}" ] && [ -n "${API_TOKEN}" ]; then
-    _vv_inbox_while_spawned "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}" "${SUB_ACCOUNT_ID}" "${API_TOKEN}" &
+    _vv_inbox_while_spawned "${AGENT_USER}" "${AGENT_NAME}" "${AGENT_PATH}" "${SUB_ACCOUNT_ID}" "${API_TOKEN}" "${CURRENT_CYCLE_ID:-}" &
     INBOX_POLL_PID=$!
     trap 'kill "${INBOX_POLL_PID}" 2>/dev/null || true' EXIT
   fi
@@ -2765,7 +3081,7 @@ ${IDE_RESUME_CONTEXT}"
   fi
   ACTIVITY_CYCLES_TOTAL=$(sqlite3 "${CYCLES_DB}" "SELECT COUNT(*) FROM cycles WHERE id GLOB '${AGENT_NAME}-[0-9]*';" 2>/dev/null || echo 0)
   # Listening window (state_live_chat.md P3): ask for the [live_chat]
-  # setting; VersaVoice grants it, or 0 when 5 of the PU's agents listen.
+  # setting; VersaVoice grants it, or 0 when 5 of the PU's agents listen (20 with the link up).
   LISTEN_SETTING=$(sed -n '/^\[live_chat\]/,/^\[/{s/^idle_minutes=//p}' "${SETUP_INI}" 2>/dev/null | head -1 | tr -d '[:space:]')
   case "${LISTEN_SETTING}" in
     0|5|10|15|30) ;;
@@ -2778,9 +3094,26 @@ ${IDE_RESUME_CONTEXT}"
       [ -n "${_ch}" ] && ACTIVITY_CHANNEL_ARGS+=(--channel-id "${_ch}")
     done < <(sqlite3 "${MESSAGES_DB}" "SELECT DISTINCT CASE WHEN from_user_id < '${SUB_ACCOUNT_ID}' THEN from_user_id || '_' || '${SUB_ACCOUNT_ID}' ELSE '${SUB_ACCOUNT_ID}' || '_' || from_user_id END FROM messages WHERE status='unprocessed' AND direction='received' AND channel='vv' AND to_user_id='${SUB_ACCOUNT_ID}' AND from_user_id != '' LIMIT 20;" 2>/dev/null)
   fi
+  # The link is carrying mail: say so, and VersaVoice allows 20 listening
+  # agents instead of 5 (state_realtime_link.md RL-02, RL-06).
+  ACTIVITY_LINK_ARGS=()
+  if _vv_link_up; then
+    ACTIVITY_LINK_ARGS=(--link)
+  fi
+  # Proof of life (state_host_services.md §1.4.2): promised only when the
+  # spawn's inbox fetch is running, because that fetch is what renews it.
+  ACTIVITY_PROOF_ARGS=()
+  if [ -n "${INBOX_POLL_PID}" ] && [ -n "${CURRENT_CYCLE_ID:-}" ]; then
+    ACTIVITY_PROOF_ARGS=(--proof-of-life)
+  fi
   LISTEN_MINUTES=$(_vv_activity start --wake "${ACTIVITY_WAKE}" --listen-minutes "${LISTEN_SETTING}" \
     --hard-cap-epoch "$(( DEADLINE_EPOCH + TIMEOUT_GRACE_MIN * 60 ))" --cycles-total "${ACTIVITY_CYCLES_TOTAL:-0}" \
-    ${ACTIVITY_CHANNEL_ARGS[@]+"${ACTIVITY_CHANNEL_ARGS[@]}"})
+    ${ACTIVITY_CHANNEL_ARGS[@]+"${ACTIVITY_CHANNEL_ARGS[@]}"} \
+    ${ACTIVITY_LINK_ARGS[@]+"${ACTIVITY_LINK_ARGS[@]}"} \
+    ${ACTIVITY_PROOF_ARGS[@]+"${ACTIVITY_PROOF_ARGS[@]}"})
+  echo "${CURRENT_CYCLE_ID:-} ${SPAWN_EPOCH}" > "${ACTIVITY_OPEN_MARKER}" 2>/dev/null || true
+  # Sleep hold for the life of this cycle (§1.6.1).
+  SLEEP_HOLD_PID=$(_sleep_hold_start "${BASHPID}")
   case "${LISTEN_MINUTES}" in
     ''|*[!0-9]*) LISTEN_MINUTES=0 ;;
   esac
@@ -2804,6 +3137,10 @@ ${IDE_RESUME_CONTEXT}"
   if [ -n "${INBOX_POLL_PID}" ]; then
     kill "${INBOX_POLL_PID}" 2>/dev/null || true
     wait "${INBOX_POLL_PID}" 2>/dev/null || true
+  fi
+  # The cycle's work is over: the computer may sleep again.
+  if [ -n "${SLEEP_HOLD_PID:-}" ]; then
+    kill "${SLEEP_HOLD_PID}" 2>/dev/null || true
   fi
 
   rm -f "${ENV_SCRIPT}" "${TASKS_FILE}" "${CONVO_FILE}" "${GAMES_FILE}" "${ROUTING_FILE}" "${ROUTING_ATTACHMENTS_FILE}"
@@ -2872,11 +3209,22 @@ ${IDE_RESUME_CONTEXT}"
     55)  ACTIVITY_OUTCOME="loop" ;;
     *)   ACTIVITY_OUTCOME="crash" ;;
   esac
+  # The computer is shutting down: the cycle was closed or stopped for that
+  # reason, whatever its exit code (state_host_services.md §1.4.1 rule 6).
+  SHUTDOWN_CUT=false
+  if _shutdown_pending; then
+    SHUTDOWN_CUT=true
+    ACTIVITY_OUTCOME="shutdown"
+  fi
   _vv_activity end --outcome "${ACTIVITY_OUTCOME}" \
     --duration-seconds "$(( $(date +%s) - ${SPAWN_EPOCH:-$(date +%s)} ))" \
     --cycles-total "${ACTIVITY_CYCLES_TOTAL:-0}" >/dev/null
+  rm -f "${ACTIVITY_OPEN_MARKER:-}" 2>/dev/null || true
 
   # ─── Log Exit Code ───────────────────────────────
+  if [ "${SHUTDOWN_CUT}" = true ]; then
+    log "SHUTDOWN: ${AGENT_NAME} — cycle ended because the computer is shutting down (exit code ${EXIT_CODE}); reported to VersaVoice as shutdown"
+  fi
   case ${EXIT_CODE} in
     0)   log "DONE: ${AGENT_NAME} completed successfully" ;;
     99)  log "HALTED: ${AGENT_NAME} frozen after runaway detection" ;;
@@ -3028,26 +3376,43 @@ ${IDE_RESUME_CONTEXT}"
   # Prevent unbounded growth of the checkpoints database.
   # Keep only the last CHECKPOINT_KEEP_STEPS rows per thread.
   # Old rows are deleted from both checkpoints and writes tables.
-  # Runs as agent user since they own checkpoints.db.
+  #
+  # Every statement, the reads too, runs as the agent user. The database is in
+  # WAL mode: once the harness has closed it there is no -wal / -shm file, and
+  # an account that cannot write in that folder cannot even read it ("attempt
+  # to write a readonly database"). The count used to be read as watchdog, came
+  # back empty, and nothing was ever pruned (found 2026-11-19: COA's database
+  # had 2,800 rows on one thread and was 8.5 GB).
   CHECKPOINT_KEEP_STEPS=50
   CHECKPOINT_DB="/var/lib/versa-agi/${AGENT_NAME}/cycles/checkpoints.db"
+  _ckpt_sql() {
+    sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" "$1" 2>/dev/null
+  }
   if [ -f "${CHECKPOINT_DB}" ]; then
     # Count total rows across all threads
-    TOTAL_ROWS=$(sqlite3 "${CHECKPOINT_DB}" "SELECT COUNT(*) FROM checkpoints;" 2>/dev/null || echo "0")
-    if [ "${TOTAL_ROWS:-0}" -gt "${CHECKPOINT_KEEP_STEPS}" ]; then
+    TOTAL_ROWS=$(_ckpt_sql "SELECT COUNT(*) FROM checkpoints;" || echo "")
+    case "${TOTAL_ROWS}" in
+      ''|*[!0-9]*)
+        log "WARN: checkpoint prune skipped for ${AGENT_NAME} — ${CHECKPOINT_DB} could not be read"
+        TOTAL_ROWS=0
+        ;;
+    esac
+    if [ "${TOTAL_ROWS}" -gt "${CHECKPOINT_KEEP_STEPS}" ]; then
       # Get the list of thread IDs
-      THREAD_IDS=$(sqlite3 "${CHECKPOINT_DB}" "SELECT DISTINCT thread_id FROM checkpoints;" 2>/dev/null || true)
+      THREAD_IDS=$(_ckpt_sql "SELECT DISTINCT thread_id FROM checkpoints;" || true)
       PRUNED=0
       if [ -n "${THREAD_IDS}" ]; then
         while IFS= read -r TID; do
           [ -z "${TID}" ] && continue
-          THREAD_COUNT=$(sqlite3 "${CHECKPOINT_DB}" \
-            "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${TID}';" 2>/dev/null || echo "0")
-          if [ "${THREAD_COUNT:-0}" -gt "${CHECKPOINT_KEEP_STEPS}" ]; then
+          THREAD_COUNT=$(_ckpt_sql "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${TID}';" || echo "0")
+          case "${THREAD_COUNT}" in ''|*[!0-9]*) THREAD_COUNT=0 ;; esac
+          if [ "${THREAD_COUNT}" -gt "${CHECKPOINT_KEEP_STEPS}" ]; then
             # Delete older checkpoint rows and their associated writes.
-            # MUST run as the agent user (DB owner) — watchdog has read-only
-            # access, so a direct DELETE fails silently and pruning never runs.
-            sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" "
+            # secure_delete is off for this connection: Ubuntu's sqlite3 has
+            # it on, which overwrites every freed page, and the VACUUM below
+            # drops those pages anyway.
+            _ckpt_sql "
+              PRAGMA secure_delete=OFF;
               DELETE FROM writes WHERE thread_id='${TID}' AND checkpoint_id NOT IN (
                 SELECT checkpoint_id FROM checkpoints WHERE thread_id='${TID}'
                 ORDER BY rowid DESC LIMIT ${CHECKPOINT_KEEP_STEPS}
@@ -3056,18 +3421,31 @@ ${IDE_RESUME_CONTEXT}"
                 SELECT rowid FROM checkpoints WHERE thread_id='${TID}'
                 ORDER BY rowid DESC LIMIT ${CHECKPOINT_KEEP_STEPS}
               );
-            " 2>/dev/null || true
-            NEW_COUNT=$(sqlite3 "${CHECKPOINT_DB}" \
-              "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${TID}';" 2>/dev/null || echo "?")
+            " >/dev/null || true
+            NEW_COUNT=$(_ckpt_sql "SELECT COUNT(*) FROM checkpoints WHERE thread_id='${TID}';" || echo "")
+            case "${NEW_COUNT}" in ''|*[!0-9]*) NEW_COUNT="${THREAD_COUNT}" ;; esac
             PRUNED=$((PRUNED + THREAD_COUNT - NEW_COUNT))
           fi
         done <<< "${THREAD_IDS}"
       fi
-      if [ "${PRUNED}" -gt 0 ]; then
+      # Writes whose checkpoint is gone, on any thread. `agictl system vacuum`
+      # kept one checkpoint per thread and left that thread's other writes
+      # behind; they are never read again.
+      ORPHANS=$(_ckpt_sql "
+        PRAGMA secure_delete=OFF;
+        DELETE FROM writes WHERE NOT EXISTS (
+          SELECT 1 FROM checkpoints c
+          WHERE c.thread_id=writes.thread_id AND c.checkpoint_ns=writes.checkpoint_ns
+            AND c.checkpoint_id=writes.checkpoint_id
+        );
+        SELECT changes();
+      " | tail -n 1 || echo "0")
+      case "${ORPHANS}" in ''|*[!0-9]*) ORPHANS=0 ;; esac
+      if [ "${PRUNED}" -gt 0 ] || [ "${ORPHANS}" -gt 0 ]; then
         # Reclaim disk space (as DB owner — see note above)
-        sudo -u "${AGENT_USER}" sqlite3 "${CHECKPOINT_DB}" "VACUUM;" 2>/dev/null || true
+        _ckpt_sql "VACUUM;" >/dev/null || true
         DB_SIZE_MB=$(du -m "${CHECKPOINT_DB}" 2>/dev/null | cut -f1)
-        log "CHECKPOINT PRUNE: ${AGENT_NAME} — removed ${PRUNED} old rows, kept last ${CHECKPOINT_KEEP_STEPS} per thread (DB: ${DB_SIZE_MB}MB)"
+        log "CHECKPOINT PRUNE: ${AGENT_NAME} — removed ${PRUNED} old rows and ${ORPHANS} leftover writes, kept last ${CHECKPOINT_KEEP_STEPS} per thread (DB: ${DB_SIZE_MB}MB)"
       fi
     fi
   fi

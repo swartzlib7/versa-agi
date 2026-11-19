@@ -792,6 +792,7 @@ install_acceptance_feature_prompts() {
       "Versa - Business Admin defaults to OFF." \
       "Utility Models, Script Tasks, and Output Routing default to ON." \
       "Live Call (COA voice calls to you) defaults to OFF." \
+      "Live Link (messages reach agents at once) defaults to OFF." \
       "You can change these any time by re-running setup."
   else
     echo ""
@@ -912,6 +913,62 @@ install_acceptance_feature_prompts() {
     fi
   else
     export VERSA_LIVE_CALL_MODEL=""
+  fi
+
+  # Live Link (state_realtime_link.md). An update carries the site's answer; a
+  # site that ran the first link build has it under [versavoice] link.
+  local link_current="false"
+  if [ "${UPDATE_MODE:-false}" = true ]; then
+    link_current="$(_install_acceptance_features_get live_link "")"
+    [ -n "${link_current}" ] || link_current="$(_install_acceptance_section_get versavoice link false)"
+  fi
+  echo ""
+  if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_LIVE_LINK)"; then
+    export VERSA_FEATURE_LIVE_LINK="${supplied}"
+    info "Live Link supplied by the installer: ${supplied}"
+  else
+    _install_acceptance_feature_note \
+      "Live Link — a message reaches an agent at once instead of at the next fetch"
+    _install_acceptance_feature_cont \
+      "(up to a minute resting, 10 seconds in a chat). This machine keeps one"
+    _install_acceptance_feature_cont \
+      "outbound request open to VersaVoice AI; no port is opened."
+    export VERSA_FEATURE_LIVE_LINK="$(_install_acceptance_feature_ask \
+      "Enable Live Link?" "${link_current}")"
+  fi
+
+  # The lid (state_host_services.md §1.6.2). Versa AGi holds sleep while an
+  # agent's cycle runs, but a shut lid ignores that hold unless the login
+  # service is told otherwise. Asked on a laptop only; an update carries the
+  # earlier answer.
+  if ! declare -F machine_is_laptop >/dev/null 2>&1; then
+    # shellcheck source=core-infra/scripts/sleep_hold.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/scripts/sleep_hold.sh" 2>/dev/null || true
+  fi
+  if declare -F machine_is_laptop >/dev/null 2>&1 && machine_is_laptop; then
+    local lid_current="false"
+    if [ "${UPDATE_MODE:-false}" = true ]; then
+      lid_current="$(_install_acceptance_norm_bool "$(_install_acceptance_section_get agent lid_waits_for_agent false)")"
+    fi
+    echo ""
+    if supplied="$(_install_acceptance_feature_supplied VERSA_FEATURE_LID_WAITS)"; then
+      export VERSA_FEATURE_LID_WAITS="${supplied}"
+      info "Laptop detected. Lid setting supplied by the installer: ${supplied}"
+    else
+      info "Laptop detected."
+      _install_acceptance_feature_note \
+        "Lid — this computer stays awake while an agent is working, but a shut lid"
+      _install_acceptance_feature_cont \
+        "still puts it to sleep and the agent's work stops until you open it."
+      _install_acceptance_feature_cont \
+        "Answer yes to keep it awake with the lid shut until the agent has finished"
+      _install_acceptance_feature_cont \
+        "(at most the agent's time limit). Mind the heat if it goes into a bag."
+      export VERSA_FEATURE_LID_WAITS="$(_install_acceptance_feature_ask \
+        "Keep the laptop awake with the lid shut while an agent works?" "${lid_current}")"
+    fi
+  else
+    export VERSA_FEATURE_LID_WAITS="false"
   fi
 }
 
@@ -1102,6 +1159,10 @@ install_acceptance_persist_features() {
     || warn "Failed to set output_routing_ui (non-fatal)"
   _install_acceptance_features_set live_call "$(_install_acceptance_norm_bool "${VERSA_FEATURE_LIVE_CALL:-false}")" \
     || warn "Failed to set live_call (non-fatal)"
+  _install_acceptance_features_set live_link "$(_install_acceptance_norm_bool "${VERSA_FEATURE_LIVE_LINK:-false}")" \
+    || warn "Failed to set live_link (non-fatal)"
+  _install_acceptance_section_set agent lid_waits_for_agent "$(_install_acceptance_norm_bool "${VERSA_FEATURE_LID_WAITS:-false}")" \
+    || warn "Failed to set lid_waits_for_agent (non-fatal)"
   _install_acceptance_section_set live_call call_model "${VERSA_LIVE_CALL_MODEL:-}" \
     || warn "Failed to set live_call call_model (non-fatal)"
   if [ "${VERSA_BROWSER_ENABLED:-}" = "true" ] || [ "${VERSA_BROWSER_ENABLED:-}" = "false" ]; then
