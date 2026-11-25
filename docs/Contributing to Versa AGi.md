@@ -85,6 +85,7 @@ Agents run as their own Linux accounts and reach data only through `agictl`, whi
 - **Databases.** Only the system account writes a database. Agent-side code calls `agictl`; it does not open a database file to write, and a file mode is never loosened to let it.
 - **Secrets.** `setup.ini` and the agents' config files are for the system account only. Code that runs in an agent's process reads the cycle's copy of the settings (`AGICTL_SETUP_INI`), which has the secret values blanked. A new secret setting has a key ending in `_key`, `_token`, `_secret` or `_password`, so the copy blanks it.
 - **Files for a cycle.** Anything Lifeline writes for a cycle goes in that agent's own data folder (`/var/lib/versa-agi/<agent>/run/`) and is removed when the cycle ends. Nothing an agent is told, and no key, is written under `/tmp`.
+- **Groups are given by name.** The system account has a group of its own that no agent is in, and a file it writes takes that group. A file an agent must read is put in a folder that passes on the agents' group (setgid, `agi_agents`), or is given its group in `setup.sh`. Never rely on the group the writing account happens to have, and try the change on a machine installed the normal way: a development machine's accounts can differ.
 - **Folders.** An agent's home is closed to the other agents. What agents share goes in the shared workspace. Owners, groups and modes are set in `setup.sh` (`apply_system_permissions`) and checked by `src/audit_permissions.sh`; change both together.
 
 ### Agent Roles

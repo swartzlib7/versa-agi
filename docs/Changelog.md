@@ -20,6 +20,14 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 - **Settings is easier to read** — Each group is in a box of its own with a symbol and a larger name. "Lock now" is a filled button with a lock symbol on the first line of "Screen, lock and sleep".
 - **An app with several windows shows the one you had before** — When the window an app's box shows is closed, the box goes back to the window shown before it, not to the last one in the row.
 
+## [3.10.6] — 2026-11-25
+
+### Updates
+
+#### Fixed
+- **Agents stopped after updating to 3.10.5** — On a normal install every agent cycle failed in its first second after the update, and after five failures the agent was paused with a circuit breaker notice. 3.10.5 moved each cycle's prompt and environment files into the agent's data folder, where they were given a group no agent account is in, so the agent could not read them. The files now carry the group every agent account is in, and `setup.sh --update` puts existing folders right. After updating, start a paused agent again from the dashboard or with `agictl agent activate <name>`.
+- **A failed triage says what came back** — When the triage model's answer cannot be read, the cycle log now shows how long the answer was and how it began.
+
 ## [3.10.5] — 2026-11-24
 
 ### Security

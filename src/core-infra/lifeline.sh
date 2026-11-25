@@ -2726,14 +2726,26 @@ ${IDE_RESUME_CONTEXT}"
   # agent can enter (watchdog:<agent's group> 750). They were in /tmp, 644:
   # every account on the machine could read each agent's prompt, and its
   # keys for the length of a cycle (state_agent_account_permissions.md §2.4).
+  #
+  # The agent reads them through agi_agents, the group every agent account
+  # and watchdog are in. The folder is setgid so that each file written here
+  # takes that group. Without it a file takes watchdog's own group, which no
+  # agent is in: the agent cannot read its environment file and every cycle
+  # ends with exit code 1 before it writes a line (3.10.5 as first shipped).
   # ── cycle files: begin ──
   CYCLE_RUN_DIR="/var/lib/versa-agi/${AGENT_NAME}/run"
   if ! mkdir -p "${CYCLE_RUN_DIR}" 2>/dev/null || [ ! -w "${CYCLE_RUN_DIR}" ]; then
     log "WARN: ${AGENT_NAME} has no cycle folder at ${CYCLE_RUN_DIR}; using a private one under /tmp"
     CYCLE_RUN_DIR="$(mktemp -d "/tmp/versa_agi_${AGENT_NAME}.XXXXXX")"
-    chgrp "${AGENT_USER}" "${CYCLE_RUN_DIR}" 2>/dev/null || true
+    chgrp "${AGENT_USER}" "${CYCLE_RUN_DIR}" 2>/dev/null \
+      || chgrp agi_agents "${CYCLE_RUN_DIR}" 2>/dev/null || true
+  else
+    chgrp agi_agents "${CYCLE_RUN_DIR}" 2>/dev/null || true
   fi
-  chmod 750 "${CYCLE_RUN_DIR}" 2>/dev/null || true
+  chmod 2750 "${CYCLE_RUN_DIR}" 2>/dev/null || true
+  if [ "$(stat -c '%G' "${CYCLE_RUN_DIR}" 2>/dev/null)" = "$(id -gn)" ] && ! id -nG "${AGENT_USER}" 2>/dev/null | tr ' ' '\n' | grep -qx "$(id -gn)"; then
+    log "WARN: ${AGENT_NAME} cannot read ${CYCLE_RUN_DIR} (group $(id -gn), which ${AGENT_USER} is not in); the cycle will fail. Run setup.sh --update"
+  fi
   # What earlier versions left behind in /tmp.
   rm -f "/tmp/versa_agi_${AGENT_NAME}_system.txt" "/tmp/versa_agi_${AGENT_NAME}_wake.txt" \
         "/tmp/versa_agi_${AGENT_NAME}_tasks.txt" "/tmp/versa_agi_${AGENT_NAME}_convo.txt" \

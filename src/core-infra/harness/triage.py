@@ -595,7 +595,10 @@ def run_triage(llm, wake_prompt: str, tasks_context: str = "",
         )
 
     if not data:
-        print("TRIAGE: Could not parse JSON response. Defaulting to pass-through.", flush=True)
+        # Say what came back, so an empty reply, a cut-off reply and plain prose can be told apart.
+        _shown = " ".join(str(raw or "").split())[:300]
+        print(f"TRIAGE: Could not parse JSON response ({len(str(raw or ''))} chars: {_shown!r}). "
+              "Defaulting to pass-through.", flush=True)
         return TriageResult(
             classification="follow_up",
             confidence=0.5,

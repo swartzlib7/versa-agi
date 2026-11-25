@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.10.5"
+PRODUCT_VERSION="3.10.6"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -4612,8 +4612,11 @@ apply_system_permissions() {
   [ -d "/var/lib/versa-agi/coa/cycles" ]        && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/cycles && chmod 755 /var/lib/versa-agi/coa/cycles
   # Per-cycle prompt and environment files (Lifeline writes, the agent reads).
   # The data folder above is what keeps other accounts out.
+  # setgid: a file Lifeline writes there takes agi_agents, whatever watchdog's
+  # own group is (on a normal install that is a group no agent is in).
+  mkdir -p /var/lib/versa-agi/coa/run
   for _run in /var/lib/versa-agi/*/run; do
-    [ -d "${_run}" ] && chown -R "${WATCHDOG_USER}:agi_agents" "${_run}" && chmod 750 "${_run}"
+    [ -d "${_run}" ] && chown -R "${WATCHDOG_USER}:agi_agents" "${_run}" && chmod 2750 "${_run}"
   done
   mkdir -p "/var/lib/versa-agi/coa/view-cache"
   chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/view-cache && chmod 770 /var/lib/versa-agi/coa/view-cache
@@ -4783,6 +4786,9 @@ apply_system_permissions() {
         chown "${WATCHDOG_USER}:${os_user}" "${vdata}" && chmod 750 "${vdata}"
         chown -R "${os_user}:${os_user}" "${vdata}/cycles" && chmod 755 "${vdata}/cycles"
         chown -R "${os_user}:${os_user}" "${vdata}/view-cache" && chmod 770 "${vdata}/view-cache"
+        # Per-cycle files: Lifeline writes, the agent reads through agi_agents (setgid).
+        mkdir -p "${vdata}/run"
+        chown -R "${WATCHDOG_USER}:agi_agents" "${vdata}/run" && chmod 2750 "${vdata}/run"
         # 660: harness (agent user) must overwrite after skill injection (SPWN-14)
         [ -f "${vdata}/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/last_prompt.txt" && chmod 660 "${vdata}/last_prompt.txt"
       fi

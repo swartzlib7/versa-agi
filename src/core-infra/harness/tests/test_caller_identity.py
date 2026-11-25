@@ -404,11 +404,42 @@ class CycleFiles(unittest.TestCase):
                                      timeout=30, check=True).stdout
                 run_dir = os.path.join(data, agent, "run")
                 self.assertIn("DIR=" + run_dir, out)
-                self.assertEqual(stat.S_IMODE(os.stat(run_dir).st_mode), 0o750)
+                # setgid, so a file written there takes the folder's group.
+                self.assertEqual(stat.S_IMODE(os.stat(run_dir).st_mode), 0o2750)
                 self.assertFalse(os.path.exists(legacy))
             finally:
                 if os.path.exists(legacy):
                     os.remove(legacy)
+
+    def test_the_agent_reads_its_files_through_the_group_every_agent_is_in(self):
+        """watchdog's own group is one no agent is in on a normal install. A run
+        folder left with it gave every cycle exit code 1 (3.10.5 as first shipped)."""
+        start = self.text.index("# ── cycle files: begin ──")
+        block = self.text[start:self.text.index("# ── cycle files: end ──")]
+        self.assertIn('chgrp agi_agents "${CYCLE_RUN_DIR}"', block)
+        self.assertIn('chmod 2750 "${CYCLE_RUN_DIR}"', block)
+        self.assertNotIn('chmod 750 "${CYCLE_RUN_DIR}"', block)
+        setup = _read(SRC, "setup.sh")
+        self.assertIn('chown -R "${WATCHDOG_USER}:agi_agents" "${_run}" && chmod 2750 "${_run}"', setup)
+        self.assertIn('mkdir -p "${vdata}/run"', setup)
+        self.assertIn('chown -R "${WATCHDOG_USER}:agi_agents" "${vdata}/run" && chmod 2750 "${vdata}/run"', setup)
+        self.assertIn("mkdir -p /var/lib/versa-agi/coa/run", setup)
+
+    def test_a_file_written_in_the_folder_takes_the_folders_group(self):
+        """The mechanism the fix relies on, tried with a group this account is in."""
+        groups = [g for g in os.getgroups() if g != os.getegid()]
+        if not groups:
+            self.skipTest("this account is in one group only")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "run")
+            os.mkdir(run_dir)
+            os.chown(run_dir, -1, groups[0])
+            os.chmod(run_dir, 0o2750)
+            path = os.path.join(run_dir, "env.sh")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("x")
+            os.chmod(path, 0o640)
+            self.assertEqual(os.stat(path).st_gid, groups[0])
 
 
 class AgentHomes(unittest.TestCase):

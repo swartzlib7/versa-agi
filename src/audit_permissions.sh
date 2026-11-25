@@ -136,6 +136,7 @@ check "/var/lib/versa-agi/coa/cycles.db"  "watchdog:coa"       "640"  "Cycles DB
 check "/var/lib/versa-agi/organization.db" "watchdog:coa"      "640"  "Organization DB"
 check "/var/lib/versa-agi/coa"            "watchdog:coa"       "750"  "COA data dir"
 check "/var/lib/versa-agi/coa/cycles"     "coa:coa"            "755"  "COA cycles dir"
+check "/var/lib/versa-agi/coa/run"        "watchdog:agi_agents" "2750" "COA per-cycle files (setgid: files take agi_agents)"
 check "/var/lib/versa-agi/coa/status.json" "watchdog:coa"      "640"  "COA status (§IX.2)"
 check "/var/lib/versa-agi/coa/last_prompt.txt" "watchdog:coa"  "660"  "Last prompt (§IX.2 — group-write for harness)"
 check "/var/lib/versa-agi/archive"           "watchdog:watchdog"  "700"  "Archive dir (removed agents' homes)"
@@ -214,6 +215,7 @@ if [ -f "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" ]; then
     # §IX.2 /var/lib/versa-agi/{name}/ — agent data directory
     check "/var/lib/versa-agi/${agent}"              "watchdog:${os_user}"   "750" "Data dir"
     check "/var/lib/versa-agi/${agent}/cycles"        "${os_user}:${os_user}"   "755" "Cycles dir"
+    check "/var/lib/versa-agi/${agent}/run"           "watchdog:agi_agents"     "2750" "Per-cycle files (setgid: files take agi_agents)"
     check "/var/lib/versa-agi/${agent}/last_prompt.txt" "watchdog:${os_user}" "660" "Last prompt (group-write for harness)"
     check "/var/lib/versa-agi/${agent}/poise.md"      "watchdog:${os_user}"   "640" "Poise template"
     check "/var/lib/versa-agi/${agent}/duties.md"     "watchdog:${os_user}"   "640" "Duties file"
