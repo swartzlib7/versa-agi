@@ -511,7 +511,7 @@ On a laptop that only connects to a GPU server, do not download weights. Add the
 ### Sentinel: promote and hand over
 
 <div class="callout">
-<p><strong>Rolling out.</strong> These steps are in the software. Treat them as rolling out until you have run them on a Sentinel you can afford to redo. Back up first with <code>versa-agi-backup</code>.</p>
+<p><strong>Back up first</strong> with <code>versa-agi-backup</code>. Promote cannot be undone, and a handover sets every agent up again under the new account.</p>
 </div>
 
 **Make this Sentinel a full home system.** It cannot be undone.
