@@ -1,0 +1,667 @@
+
+import db_connect
+import contextlib
+import fcntl
+import os
+import json
+import re
+import base64
+import mimetypes
+import time
+import urllib.request
+import urllib.error
+import urllib.parse
+from collections import deque
+from urllib.parse import urlparse
+import sqlite3
+from rich.console import Console
+
+import message_attachments
+
+console = Console()
+
+VV_API_BASE = "https://us-central1-versavoice-s777.cloudfunctions.net/api/v1"
+MAX_FILE_SIZE = 52428800 # 50MB, one inbound file. Outbound limits: message_attachments.py
+
+# ── Rate Limiter (VV API: 60 req/min) ──
+# Use 55 as effective limit with 5-request safety margin
+_RATE_LIMIT = 55
+_RATE_WINDOW = 60  # seconds
+_request_timestamps: deque = deque()
+
+def _rate_limit_wait():
+    """Sliding-window rate limiter. Blocks if approaching 60 req/min VV API limit."""
+    now = time.monotonic()
+    # Purge timestamps older than the window
+    while _request_timestamps and _request_timestamps[0] < now - _RATE_WINDOW:
+        _request_timestamps.popleft()
+    # If at limit, sleep until the oldest call expires
+    if len(_request_timestamps) >= _RATE_LIMIT:
+        sleep_for = _request_timestamps[0] - (now - _RATE_WINDOW) + 0.1
+        if sleep_for > 0:
+            console.print(f"[yellow]Rate limit: sleeping {sleep_for:.1f}s[/yellow]")
+            time.sleep(sleep_for)
+            # Notify PU via task (debounced — max once per 5 min)
+            _rate_limit_notify(sleep_for)
+    _request_timestamps.append(time.monotonic())
+
+# Debounce: track last notification time
+_last_rate_notify: float = 0.0
+
+def _rate_limit_notify(sleep_duration: float):
+    """Create a high-priority task to notify PU about rate limiting. Max once per 5 min."""
+    import subprocess
+    global _last_rate_notify
+    now = time.monotonic()
+    if now - _last_rate_notify < 300:  # 5 min debounce
+        return
+    _last_rate_notify = now
+    try:
+        subprocess.run(
+            ["/usr/local/bin/agictl", "task", "add",
+             f"RATE_LIMIT: VV API rate limit hit — throttled for {sleep_duration:.1f}s. High message volume detected.",
+             "--priority", "high", "--callback", "notify_sponsor"],
+            capture_output=True, timeout=5
+        )
+    except Exception:
+        pass  # Best-effort — don't break the API call chain
+
+def api_request(endpoint, token, method="GET", body=None, timeout=None):
+    _rate_limit_wait()
+    url = VV_API_BASE + endpoint
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    data = json.dumps(body).encode("utf-8") if body else None
+    # TTS generation (speak mode) can take 15-30s for longer messages
+    if timeout is None:
+        timeout = 60 if method in ("POST", "PUT") else 10
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            error_body = e.read().decode("utf-8")
+            parsed_error = json.loads(error_body)
+            # Log the parsed error message if available
+            err_msg = parsed_error.get("message", "Unknown HTTP Error")
+            console.print(f"[bold red]API Error ({endpoint}) [{e.code}]:[/bold red] {err_msg}")
+            return parsed_error
+        except Exception:
+            console.print(f"[bold red]API Error ({endpoint}) [{e.code}]:[/bold red] {str(e)}")
+            return None
+    except Exception as e:
+        console.print(f"[bold red]Network Error ({endpoint}):[/bold red] {str(e)}")
+        return None
+
+def _ensure_deleted_table(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deleted_message_ids ("
+        "message_id TEXT PRIMARY KEY, "
+        "deleted_at DATETIME NOT NULL DEFAULT (datetime('now'))"
+        ")"
+    )
+
+
+def tombstone_message(message_id, messages_db):
+    """Record a message ID so inbox sync never re-inserts it after local/cloud delete."""
+    if not message_id:
+        return False
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        _ensure_deleted_table(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO deleted_message_ids (message_id) VALUES (?)",
+            (message_id,),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        console.print(f"[red]DB Error tombstoning message:[/red] {str(e)}")
+        return False
+
+
+def is_message_tombstoned(message_id, messages_db):
+    if not message_id:
+        return False
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        _ensure_deleted_table(conn)
+        row = conn.execute(
+            "SELECT 1 FROM deleted_message_ids WHERE message_id = ? LIMIT 1",
+            (message_id,),
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def delete_local_message(message_id, messages_db):
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        conn.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        console.print(f"[red]DB Error deleting local message:[/red] {str(e)}")
+        return False
+
+
+def _parse_message_time(value):
+    """UTC time from a cloud ``timestamp`` or a SQLite ``created_at``."""
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def inbox_since(messages_db, sub_account_id, full_sync=False):
+    """``since`` for GET /messages/inbox. The API keeps particles strictly after it.
+
+    Normal pull: one second before the newest stored message for this sub-account
+    (cloud ``timestamp`` when the row has one, otherwise ``created_at`` as UTC).
+    The overlap is how a second message in that same second is not skipped; rows
+    already stored are dropped by ``message_id``. No stored row, a read failure,
+    or ``full_sync``: the beginning of the inbox, so older mail is not cut off.
+    """
+    from datetime import timedelta
+    epoch = "1970-01-01T00:00:00Z"
+    if full_sync or not messages_db or not os.path.isfile(messages_db):
+        return epoch
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        rows = conn.execute(
+            "SELECT created_at, raw_payload FROM messages "
+            "WHERE to_user_id = ? OR from_user_id = ?",
+            (sub_account_id, sub_account_id),
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        console.print(f"[yellow]Inbox cursor unreadable, pulling from the beginning:[/yellow] {exc}")
+        return epoch
+    latest = None
+    for created_at, raw_payload in rows:
+        stamp = None
+        if raw_payload:
+            try:
+                payload = json.loads(raw_payload)
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                stamp = payload.get("timestamp")
+        parsed = _parse_message_time(stamp) or _parse_message_time(created_at)
+        if parsed is not None and (latest is None or parsed > latest):
+            latest = parsed
+    if latest is None:
+        return epoch
+    return (latest - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@contextlib.contextmanager
+def inbox_fetch_lock(messages_db, sub_account_id):
+    """One inbox fetch at a time per sub-account (state_realtime_link.md RL-03).
+
+    Lifeline, the poll of a spawned agent and the link service can all fetch
+    the same agent's inbox. The fetch reads its cursor, asks the cloud, then
+    checks and inserts; two at once could store one message twice. The lock
+    file sits beside messages.db. If it cannot be opened the fetch still runs.
+    """
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", str(sub_account_id or "none"))
+    path = os.path.join(os.path.dirname(os.path.abspath(messages_db)), f".inbox_fetch_{name}.lock")
+    try:
+        handle = os.open(path, os.O_CREAT | os.O_RDWR, 0o660)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            os.close(handle)
+
+
+def fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False, cycle_id=""):
+    """Fetch one sub-account's inbox, one fetch at a time (``inbox_fetch_lock``)."""
+    with inbox_fetch_lock(messages_db, sub_account_id):
+        return _fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db,
+                            full_sync=full_sync, cycle_id=cycle_id)
+
+
+def _fetch_inbox(agent_user, agent_path, sub_account_id, token, messages_db, full_sync=False, cycle_id=""):
+    """Fetches messages from VersaVoice Cloud and persists them cleanly to messages.db.
+
+    Returns ``(success, inserted)`` — ``inserted`` is new SQLite rows this fetch.
+
+    ``since`` is the newest message already stored for this sub-account
+    (``inbox_since``). ``unreadOnly=false`` so a particle the server already
+    marked read, whose body never landed here, is still returned. ``markAsRead``
+    stays on. Inserts are deduplicated by message_id. Deletes should go
+    through agictl message delete (cloud + local) so the sub-account particle is
+    removed and will not be returned by the inbox API.
+
+    full_sync=True ignores the cursor and pulls from the beginning (manual catch-up).
+
+    ``cycle_id``: the agent's running cycle, sent by the fetch that runs for
+    the life of a spawn. VersaVoice takes it as proof that the machine is
+    alive (state_host_services.md §1.4.2).
+    """
+    since = inbox_since(messages_db, sub_account_id, full_sync=full_sync)
+    endpoint = (
+        f"/messages/inbox?subAccountId={sub_account_id}"
+        f"&unreadOnly=false&markAsRead=true&since={since}"
+    )
+    cycle_id = re.sub(r"[^A-Za-z0-9._-]", "", str(cycle_id or ""))[:120]
+    if cycle_id:
+        endpoint += f"&cycleId={cycle_id}"
+    response = api_request(endpoint, token)
+    
+    if isinstance(response, list):
+        messages = response
+    elif isinstance(response, dict) and "messages" in response:
+        messages = response.get("messages", [])
+    else:
+        return False, 0
+        
+    if not messages:
+        return True, 0
+        
+    inserted = 0
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        _ensure_deleted_table(conn)
+        c = conn.cursor()
+        
+        for msg in messages:
+            msg_id = msg.get("messageId") or msg.get("id")
+            if not msg_id:
+                continue
+
+            c.execute("SELECT 1 FROM deleted_message_ids WHERE message_id = ? LIMIT 1", (msg_id,))
+            if c.fetchone():
+                continue
+                
+            # Sender is in the "from" object: {uid, displayName, senderId}
+            sender_obj = msg.get("from", {})
+            sender_id = sender_obj.get("uid") or sender_obj.get("senderId") or msg.get("senderUid") or "unknown"
+            sender_name = sender_obj.get("displayName") or msg.get("senderName") or "Unknown"
+            # The inbox API's 'text' field is already Neural Text (no tags):
+            # cascade: translatedTextNt → translatedText → enhancedSourceTextNt → originalText
+            # Use it for display; 'originalText' retains emotion tags for the original_text column
+            text = msg.get("text") or msg.get("originalTextNt") or msg.get("originalText", "")
+            if not text:
+               text = msg.get("translatedText") or ""
+            
+            # Store the raw VV mode as-is (typed, transcribe, translate, speak, etc.)
+            raw_mode = msg.get("generationMode") or msg.get("mode", "typed")
+            
+            c.execute("SELECT id FROM messages WHERE message_id = ?", (msg_id,))
+            if c.fetchone():
+                continue
+                
+            c.execute('''INSERT INTO messages 
+                (message_id, direction, status, from_user_id, to_user_id, original_text, text, attachment_path, created_at, mode, raw_payload, display_name, channel_id)
+                VALUES (?, 'received', 'unprocessed', ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)''',
+                (msg_id, sender_id, sub_account_id, msg.get("originalText", ""), text, msg.get("audioUrl") or msg.get("translatedAudioUrl", ""), raw_mode, json.dumps(msg), sender_name, msg.get("channelId", ""))
+            )
+            inserted += 1
+            
+            # --- Attachment Pipeline: download all attachment types to workspace ---
+            attachments = msg.get("attachments", [])
+            audio_url = msg.get("audioUrl") or msg.get("translatedAudioUrl")
+            
+            # Determine workspace base for attachments
+            attach_base = os.path.join(agent_path, ".agent", "attachments", msg_id)
+            has_any_attachment = False
+            if message_attachments.inbound_file_name(msg_id, "") != msg_id:
+                # The folder is named for the message; an id that is not a plain name is not used as one.
+                console.print(f"[red]Attachments not saved: message id {msg_id!r} is not a plain name[/red]")
+                attachments = []
+            
+            # 1. Handle structured attachments array (media, markdown, url)
+            if attachments and isinstance(attachments, list):
+                for att_idx, att in enumerate(attachments):
+                    att_type = att.get("type", "")
+                    att_value = att.get("value", "")
+                    att_meta = att.get("meta") or {}
+                    
+                    if not att_value:
+                        continue
+                    
+                    try:
+                        if att_type == "media":
+                            if not message_attachments.inbound_address_ok(att_value):
+                                console.print(f"[red]Attachment refused for {msg_id}: its address is not an https address[/red]")
+                                continue
+                            media_dir = os.path.join(attach_base, "media")
+                            os.makedirs(media_dir, exist_ok=True)
+                            file_name = message_attachments.inbound_file_name(
+                                att_meta.get("fileName"), f"media_{att_idx}")
+                            local_path = os.path.join(media_dir, file_name)
+                            req = urllib.request.Request(att_value)
+                            with urllib.request.urlopen(req, timeout=30) as resp:
+                                if not message_attachments.inbound_address_ok(resp.geturl()):
+                                    console.print(f"[red]Attachment refused for {msg_id}: it was redirected off https[/red]")
+                                    continue
+                                size = int(resp.headers.get('Content-Length', 0))
+                                data = resp.read(MAX_FILE_SIZE + 1) if size <= MAX_FILE_SIZE else b""
+                                if size <= MAX_FILE_SIZE and len(data) <= MAX_FILE_SIZE:
+                                    with open(local_path, 'wb') as f:
+                                        f.write(data)
+                                    try:
+                                        os.chmod(local_path, 0o644)
+                                    except: pass
+                                    has_any_attachment = True
+                        
+                        elif att_type == "markdown":
+                            md_dir = os.path.join(attach_base, "markdown")
+                            os.makedirs(md_dir, exist_ok=True)
+                            title = att_meta.get("title", f"markdown_{att_idx}")
+                            # Sanitize filename
+                            safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in title).strip()
+                            if not safe_title:
+                                safe_title = f"markdown_{att_idx}"
+                            local_path = os.path.join(md_dir, f"{safe_title}.md")
+                            with open(local_path, 'w', encoding='utf-8') as f:
+                                f.write(att_value)
+                            try:
+                                os.chmod(local_path, 0o644)
+                            except: pass
+                            has_any_attachment = True
+                        
+                        elif att_type == "url":
+                            url_dir = os.path.join(attach_base, "urls")
+                            os.makedirs(url_dir, exist_ok=True)
+                            # Name from meta.description > meta.title > domain
+                            url_name = att_meta.get("description") or att_meta.get("title")
+                            if not url_name:
+                                try:
+                                    url_name = urlparse(att_value).netloc.replace("www.", "")
+                                except:
+                                    url_name = f"url_{att_idx}"
+                            safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in url_name).strip()
+                            if not safe_name:
+                                safe_name = f"url_{att_idx}"
+                            local_path = os.path.join(url_dir, f"{safe_name}.url")
+                            with open(local_path, 'w', encoding='utf-8') as f:
+                                f.write(att_value + "\n")
+                                if att_meta.get("description"):
+                                    f.write(f"description: {att_meta['description']}\n")
+                                if att_meta.get("title"):
+                                    f.write(f"title: {att_meta['title']}\n")
+                                if att_meta.get("image"):
+                                    f.write(f"image: {att_meta['image']}\n")
+                            try:
+                                os.chmod(local_path, 0o644)
+                            except: pass
+                            has_any_attachment = True
+                    
+                    except Exception as e:
+                        console.print(f"[red]Attachment download failed ({att_type}) for {msg_id}: {e}[/red]")
+            
+            # Note: audioUrl/translatedAudioUrl are voice-mode transcription audio, NOT user attachments.
+            # The agent already has the text — no need to download audio files.
+            
+            # Update DB with attachment metadata
+            if has_any_attachment:
+                c.execute("UPDATE messages SET has_attachments = 1, attachment_path = ? WHERE message_id = ?",
+                          (attach_base, msg_id))
+            
+        conn.commit()
+        conn.close()
+        
+        if inserted > 0:
+            console.print(f"Persisted {inserted} new message(s) to SQLite.")
+            
+        return True, inserted
+    except Exception as e:
+        console.print(f"[bold red]Database Error:[/bold red] {str(e)}")
+        return False, 0
+
+def upload_media(token, sub_account_id, recipient_id, file_path, problems=None):
+    """Upload a media file to VersaVoice via /attachments/upload. Returns {downloadUrl, meta} or None.
+
+    A failure is added to `problems` (when given) in words the sending agent can act on.
+    """
+    if not os.path.isfile(file_path):
+        console.print(f"[red]File not found: {file_path}[/red]")
+        if problems is not None:
+            problems.append(f"{file_path}: there is no file at this path.")
+        return None
+    
+    file_name = os.path.basename(file_path)
+    mime_type = (message_attachments.media_mime(file_path)
+                 or mimetypes.guess_type(file_path)[0] or "application/octet-stream")
+    
+    with open(file_path, 'rb') as f:
+        data_b64 = base64.b64encode(f.read()).decode('ascii')
+    
+    payload = {
+        "subAccountId": sub_account_id,
+        "recipientId": recipient_id,
+        "fileName": file_name,
+        "mimeType": mime_type,
+        "data": data_b64
+    }
+    
+    response = api_request("/attachments/upload", token, method="POST", body=payload)
+    if not response or not response.get("downloadUrl"):
+        err = response.get("message", str(response)) if response else "Upload failed"
+        console.print(f"[red]Media upload failed ({file_name}): {err}[/red]")
+        if problems is not None:
+            problems.append(f"{file_name}: the upload was refused ({err}).")
+        return None
+    
+    return {
+        "downloadUrl": response["downloadUrl"],
+        "meta": response.get("meta", {"fileName": file_name, "mimeType": mime_type})
+    }
+
+def build_attachments(token, sub_account_id, recipient_id, media_paths=None, markdown_paths=None, urls=None,
+                      problems=None):
+    """Build a VV attachments array from local files and URLs.
+    
+    - media_paths: list of file paths → uploaded via /attachments/upload
+    - markdown_paths: list of .md file paths → read content inline
+    - urls: list of URL strings → passed directly
+    
+    Returns list of attachment dicts or empty list. Each attachment that could not be built is
+    added to `problems` (when given); the caller then does not send (state_message_body.md rule 11).
+    """
+    attachments = []
+    
+    # Media: upload each file, get download URL
+    for path in (media_paths or []):
+        result = upload_media(token, sub_account_id, recipient_id, path, problems=problems)
+        if result:
+            meta = result["meta"]
+            attachments.append({
+                "type": "media",
+                "value": result["downloadUrl"],
+                "meta": {
+                    "fileName": meta.get("fileName", os.path.basename(path)),
+                    "mimeType": meta.get("mimeType", "application/octet-stream"),
+                    "sizeBytes": meta.get("sizeBytes", os.path.getsize(path))
+                }
+            })
+    
+    # Markdown: read file content inline
+    for path in (markdown_paths or []):
+        if not os.path.isfile(path):
+            console.print(f"[red]Markdown file not found: {path}[/red]")
+            if problems is not None:
+                problems.append(f"--markdown {path}: there is no file at this path.")
+            continue
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        title = os.path.splitext(os.path.basename(path))[0]
+        size_bytes = len(content.encode('utf-8'))
+        attachments.append({
+            "type": "markdown",
+            "value": content,
+            "meta": {"title": title, "sizeBytes": size_bytes}
+        })
+    
+    # URLs: pass directly
+    for url in (urls or []):
+        attachments.append({
+            "type": "url",
+            "value": url,
+            "meta": None
+        })
+    
+    if len(attachments) > message_attachments.MAX_ATTACHMENTS:
+        console.print(f"[yellow]Warning: {len(attachments)} attachments exceeds max 10. Truncating.[/yellow]")
+        attachments = attachments[:message_attachments.MAX_ATTACHMENTS]
+    
+    return attachments
+
+def send_message(token, sub_account_id, recipient_id, text, mode, messages_db, attachments=None):
+    """Sends a message via VersaVoice API to the designated recipient and persists to local outbox log."""
+    endpoint = "/messages/send"
+    payload = {
+        "subAccountId": sub_account_id,
+        "recipientId": recipient_id,
+        "text": text,
+        "mode": mode
+    }
+    if attachments:
+        payload["attachments"] = attachments
+    
+    response = api_request(endpoint, token, method="POST", body=payload)
+    if not response or not response.get("success"):
+        err = response.get("message", str(response)) if response else "Network Error"
+        console.print(f"[red]Failed to send message: {err}[/red]")
+        return False
+        
+    data = response.get("data", {})
+    # API may nest messageId at different levels — check all possibilities
+    msg_id = (
+        data.get("messageId")
+        or response.get("messageId")
+        or data.get("id")
+        or response.get("id")
+        or "local_out_" + os.urandom(4).hex()
+    )
+    
+    # Save the outbound message text in SQLite so the Agent can see its own sent logs
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        c = conn.cursor()
+        cycle_id = os.environ.get("VERSA_CYCLE_ID") or None
+        has_attach = 1 if attachments else 0
+
+        # Build attachment_path as JSON array of human-readable summaries
+        attach_path = None
+        if attachments:
+            summaries = []
+            for att in attachments:
+                att_type = att.get("type", "unknown")
+                meta = att.get("meta") or {}
+                if att_type == "media":
+                    summaries.append(f"📷 {meta.get('fileName', 'media')}")
+                elif att_type == "markdown":
+                    summaries.append(f"📄 {meta.get('title', 'markdown')}.md")
+                elif att_type == "url":
+                    summaries.append(f"🔗 {att.get('value', 'url')}")
+                else:
+                    summaries.append(f"📎 {att_type}")
+            attach_path = json.dumps(summaries)
+
+        c.execute('''INSERT INTO messages 
+            (message_id, direction, status, from_user_id, to_user_id, text, original_text, mode, has_attachments, attachment_path, raw_payload, cycle_id, created_at)
+            VALUES (?, 'sent', 'processed', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))''',
+            (msg_id, sub_account_id, recipient_id, text, text, mode, has_attach, attach_path, json.dumps(attachments) if attachments else None, cycle_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        console.print(f"[red]DB Error persisting sent message:[/red] {str(e)}")
+        return False
+
+# ── Live voice call signaling (state_live_voice_call.md §1.6) ──
+# The phone's WebRTC offer and the OpenAI answer pass through VersaVoice; audio
+# never does. GET /calls/{id} long-polls so ringing stays inside the 60/min limit.
+
+CALL_LONG_POLL_SECONDS = 25
+
+
+def call_open(token, sub_account_id, reason, ttl_seconds, recipient_id=""):
+    """POST /calls — ring the sponsor, or a connection when recipient_id is set."""
+    body = {
+        "subAccountId": sub_account_id,
+        "reason": reason,
+        "ttlSeconds": int(ttl_seconds),
+    }
+    if recipient_id:
+        body["recipientId"] = recipient_id
+    return api_request("/calls", token, method="POST", body=body)
+
+
+def call_wait_offer(token, sub_account_id, call_id, wait_seconds=CALL_LONG_POLL_SECONDS,
+                    callee_uid=""):
+    """GET /calls/{id}?wait=offer — returns when the callee joins, declines, or the wait ends."""
+    query = {
+        "subAccountId": sub_account_id,
+        "wait": "offer",
+        "timeout": int(wait_seconds),
+    }
+    if callee_uid:
+        query["calleeUid"] = callee_uid
+    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}?{urllib.parse.urlencode(query)}"
+    return api_request(endpoint, token, method="GET", timeout=int(wait_seconds) + 10)
+
+
+def call_status(token, sub_account_id, call_id, callee_uid=""):
+    """GET /calls/{id} — the call document's status, without waiting."""
+    query = {"subAccountId": sub_account_id}
+    if callee_uid:
+        query["calleeUid"] = callee_uid
+    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}?{urllib.parse.urlencode(query)}"
+    return api_request(endpoint, token, method="GET")
+
+
+def call_update(token, sub_account_id, call_id, callee_uid="", **fields):
+    """PUT /calls/{id} — sdpAnswer, status, closeReason, durationSeconds."""
+    body = {"subAccountId": sub_account_id}
+    if callee_uid:
+        body["calleeUid"] = callee_uid
+    body.update({k: v for k, v in fields.items() if v is not None})
+    endpoint = f"/calls/{urllib.parse.quote(call_id, safe='')}"
+    return api_request(endpoint, token, method="PUT", body=body)
+
+
+def mark_message_processed(msg_id, messages_db):
+    """Updates the local SQLite message instance to processed status so the Agent ignores it on subsequent wakes."""
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        c = conn.cursor()
+        c.execute("UPDATE messages SET status='processed' WHERE message_id=?", (msg_id,))
+        rows = c.rowcount
+        conn.commit()
+        conn.close()
+        return rows > 0
+    except Exception as e:
+        console.print(f"[red]DB Error marking message as processed:[/red] {str(e)}")
+        return False
+

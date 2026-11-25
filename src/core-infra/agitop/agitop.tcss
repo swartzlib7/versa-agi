@@ -1,0 +1,4344 @@
+/* agitop — Versa AGi Mission Control Dashboard
+ * Textual CSS Stylesheet
+ */
+
+Screen {
+    background: $surface;
+}
+
+/* ─── Global Widget Border Styling ────────── */
+
+Input {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Input:focus {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Select:focus {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Select {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+SelectCurrent {
+    background: $surface-lighten-2;
+    color: $text;
+}
+
+Checkbox, ClearCheckbox {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+    background: $surface-lighten-2;
+    height: auto;
+    padding: 0 1;
+}
+
+Checkbox:focus, ClearCheckbox:focus {
+    border: solid $surface-lighten-2;
+    color: $text-muted;
+}
+
+Checkbox > .toggle--label, ClearCheckbox > .toggle--label {
+    color: $text;
+}
+
+Checkbox > .toggle--button, ClearCheckbox > .toggle--button {
+    background: $surface-lighten-2;
+    color: $panel-darken-2;
+}
+
+Checkbox.-on > .toggle--button, ClearCheckbox.-on > .toggle--button {
+    color: $text-success;
+    background: $surface-lighten-2;
+}
+
+/* Dismiss actions: Close, Cancel */
+.dismiss-btn {
+    background: $surface-lighten-2;
+    color: $text;
+    border: solid $surface-lighten-1;
+}
+
+.dismiss-btn:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+.btn-quit {
+    background: #111111;
+    color: #ffffff;
+    border: solid #333333;
+}
+
+.btn-quit:hover {
+    background: #222222;
+    color: #ffffff;
+}
+
+#dashboard-scroll {
+    height: 1fr;
+    min-height: 0;
+    scrollbar-size: 1 1;
+}
+
+#dashboard {
+    layout: vertical;
+    height: auto;
+    min-height: 100%;
+    padding: 0 1;
+}
+
+#system-controls-collapse {
+    height: auto;
+    margin-bottom: 1;
+    border: solid $primary;
+    background: $surface-darken-1;
+}
+
+#system-controls-collapse > CollapsibleTitle {
+    background: $surface-darken-1;
+    color: $primary-lighten-2;
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* Fixed content height when expanded (tabs + pane). Collapsed = title only. */
+#system-controls-collapse > Contents {
+    height: 19;
+    layout: vertical;
+    padding: 0;
+}
+
+#system-controls-collapse #system-panel {
+    height: 1fr;
+    min-height: 0;
+    border: none;
+    margin: 0;
+    padding: 1;
+}
+
+/* System / Agents content tabs + launcher tabs inside the collapsible */
+#system-tabs {
+    width: 100%;
+    height: 1fr;
+    min-height: 0;
+}
+
+#system-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#system-tabs TabPane {
+    height: 1fr;
+    min-height: 0;
+    padding: 0;
+}
+
+#sys-agents-tab {
+    height: 1fr;
+    min-height: 0;
+    padding: 0;
+}
+
+/* Match #work-tabs chrome; content tabs keep top accent; launchers use bottom */
+#system-tabs Tabs {
+    height: 4;
+    padding: 0 1;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+#system-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#system-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+/* Content tabs — top accent (pane content lives here) */
+#system-tabs #--content-tab-sys-system-tab {
+    border-top: heavy #8B0000;
+}
+
+#system-tabs #--content-tab-sys-system-tab.-active {
+    background: #8B0000 25%;
+    border: heavy #8B0000;
+    color: #FF6B6B;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-agents-tab {
+    border-top: heavy $warning;
+}
+
+#system-tabs #--content-tab-sys-agents-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+/* Launcher tabs — bottom accent = opens modal / one-shot op (not a content pane) */
+#system-tabs #--content-tab-sys-launch-settings {
+    border-bottom: heavy cyan;
+    color: cyan;
+}
+
+#system-tabs #--content-tab-sys-launch-settings:hover {
+    background: cyan 25%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy cyan;
+    color: #67e8f9;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-game {
+    border-bottom: heavy lime;
+    color: lime;
+}
+
+#system-tabs #--content-tab-sys-launch-game:hover {
+    background: lime 20%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy lime;
+    color: #b8ff4a;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-api-keys {
+    border-bottom: heavy #7c3aed;
+    color: #a78bfa;
+}
+
+#system-tabs #--content-tab-sys-launch-api-keys:hover {
+    background: #7c3aed 30%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #7c3aed;
+    color: #c4b5fd;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-models {
+    border-bottom: heavy #1a73e8;
+    color: #5ba3f5;
+}
+
+#system-tabs #--content-tab-sys-launch-models:hover {
+    background: #1a73e8 30%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #1a73e8;
+    color: #8bbbff;
+    text-style: bold;
+}
+
+#system-tabs #--content-tab-sys-launch-routing {
+    border-bottom: heavy #E5E5E5;
+    color: #E5E5E5;
+}
+
+#system-tabs #--content-tab-sys-launch-routing:hover {
+    background: #E5E5E5 20%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #E5E5E5;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+.panel-header {
+    height: auto;
+    max-height: 5;
+    margin-bottom: 1;
+}
+
+#channel-filters {
+    width: 1fr;
+    height: auto;
+    align-vertical: middle;
+}
+
+.action-link {
+    width: auto;
+    color: $primary-lighten-2;
+    padding-top: 1;
+    padding-right: 1;
+}
+
+.action-link:hover {
+    color: $accent;
+}
+
+.panel-title {
+    content-align: left middle;
+    text-style: bold;
+    color: $accent;
+    margin-right: 2;
+    padding-top: 1;
+}
+
+.panel-btn {
+    min-width: 20;
+    margin-right: 1;
+}
+
+.panel-btn-sm {
+    width: auto;
+    min-width: 8;
+    margin-left: 0;
+    margin-right: 0;
+}
+
+.filter-label {
+    padding-top: 1;
+    color: $text-muted;
+}
+
+/* ─── System Panel ─────────────────────────────── */
+
+#system-panel {
+    height: auto;
+    min-height: 0;
+    border: solid $primary;
+    border-title-color: $text;
+    padding: 1;
+    background: $surface-darken-1;
+}
+
+#system-columns {
+    height: auto;
+    width: 100%;
+    align: left top;
+}
+
+#sys-atrium,
+.sys-atrium-panel {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    align: center top;
+}
+
+.atrium-col {
+    width: 50%;
+    min-width: 36;
+    height: auto;
+    padding-left: 1;
+}
+
+.sys-atrium-box {
+    height: 10;
+    min-height: 10;
+    width: 100%;
+    border: solid $surface-lighten-2;
+    background: $surface;
+    padding: 0 1;
+    overflow: hidden;
+    layout: vertical;
+    align: left top;
+}
+
+.sys-atrium-box.sys-atrium-idle {
+    align: center middle;
+}
+
+#sys-atrium-rain {
+    width: 100%;
+    height: 7;
+    min-height: 7;
+    overflow: hidden;
+}
+
+#sys-atrium-ticker {
+    width: 100%;
+    height: 1;
+    min-height: 1;
+    overflow: hidden;
+    content-align: left middle;
+    /* pinned as line 8 inside the 10-line .sys-atrium-box */
+}
+
+#atrium-start-link {
+    width: auto;
+    height: auto;
+    color: $primary-lighten-2;
+    text-align: center;
+    content-align: center middle;
+}
+
+.atrium-center-link {
+    width: auto;
+    height: auto;
+    color: $primary-lighten-2;
+    text-align: center;
+    content-align: center middle;
+}
+
+.atrium-center-link:hover {
+    color: $accent;
+    text-style: underline;
+}
+
+.atrium-stop-link {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    text-align: center;
+    content-align: center middle;
+}
+
+.sys-col {
+    width: 1fr;
+    height: auto;
+}
+
+.controls-inline-col {
+    width: 1fr;
+    height: auto;
+    align: left top;
+}
+
+.controls-btn-row {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.controls-btn-row > .ctrl-inline-btn {
+    width: 1fr;
+    min-width: 8;
+    height: 3;
+    margin: 0 1 0 0;
+    text-wrap: nowrap;
+}
+
+.controls-btn-row > .ctrl-inline-btn:last-child {
+    margin-right: 0;
+}
+
+/* Full width of both inner columns (= 2× one button). */
+.controls-refresh-row > .ctrl-refresh-span {
+    width: 1fr;
+    min-width: 8;
+    height: 3;
+    margin: 0;
+    text-wrap: nowrap;
+}
+
+.col-header {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+.clock-header {
+    width: 100%;
+    text-align: center;
+    content-align: center middle;
+}
+
+.clock-col {
+    width: auto;
+    min-width: 22;
+    max-width: 28;
+    content-align: center middle;
+    text-align: center;
+    height: auto;
+    align: center top;
+}
+
+#m-clock {
+    text-align: center;
+    content-align: center middle;
+    text-style: bold;
+    min-height: 5;
+    padding: 1 2;
+}
+
+.clock-force-row {
+    width: 100%;
+    height: auto;
+    align: center middle;
+}
+
+.clock-force-btn {
+    width: auto;
+    min-width: 12;
+    height: 3;
+    margin: 0;
+    background: $primary;
+    color: $text;
+    text-style: bold;
+    content-align: center middle;
+    text-align: center;
+}
+
+.clock-force-btn:hover {
+    background: $primary-lighten-1;
+}
+
+
+.controls-col {
+    width: 2fr;
+    min-width: 40;
+    height: auto;
+}
+
+#controls-panel {
+    height: auto;
+    width: 100%;
+    background: $surface-darken-1;
+}
+
+#controls-grid {
+    width: 100%;
+    height: auto;
+    align: left top;
+    padding: 1 0;
+}
+
+.ctrl-col {
+    width: 1fr;
+    height: auto;
+    padding: 0 1;
+}
+
+.ctrl-col > .panel-btn {
+    width: 100%;
+    margin: 0 0 1 0;
+    height: 3;
+}
+
+.btn-grid-row {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.btn-grid-row > .panel-btn {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* Dashboard controls — custom palette (Kill / Refresh / Routing use default variants) */
+.ctrl-lifeline {
+    background: cyan;
+    color: black;
+    text-style: bold;
+}
+
+.ctrl-lifeline:hover {
+    background: #00e5e5;
+    color: black;
+}
+
+.ctrl-system-settings {
+    background: #8B0000;
+    color: white;
+    text-style: bold;
+}
+
+.ctrl-system-settings:hover {
+    background: #A40000;
+    color: white;
+}
+
+.ctrl-log-toggle {
+    background: #F5F5DC;
+    color: #333333;
+}
+
+.ctrl-log-toggle:hover {
+    background: #EFEFD0;
+    color: #222222;
+}
+
+/* Org "Lines" action button — paper tone, matching the LOG toggle. */
+.org-lines-btn {
+    background: #F5F5DC;
+    color: #333333;
+}
+
+.org-lines-btn:hover {
+    background: #EFEFD0;
+    color: #222222;
+}
+
+.ctrl-vacuum {
+    background: #C0C0C0;
+    color: #333333;
+}
+
+.ctrl-vacuum:hover {
+    background: #B0B0B0;
+    color: #222222;
+}
+
+.panel-btn-sm {
+    width: auto;
+    min-width: 8;
+    height: auto;
+}
+
+/* ─── Agents Panel (System & Controls → Agents tab) ─ */
+
+#system-controls-collapse #agents-panel {
+    width: 1fr;
+    height: 1fr;
+    min-height: 0;
+    border: none;
+    margin: 0;
+    padding: 1;
+    background: $surface-darken-1;
+}
+
+/* ─── Tasks / Messages / Projects tabs ─────────── */
+/* Tab bar ~4 rows + 24-row content. Parent height must match (not 33) or a blank
+   strip appears below the tables. Panels fill TabPane via height: 100%. */
+
+#work-tabs {
+    width: 100%;
+    height: 1fr;
+    min-height: 0;
+    margin-top: 1;
+}
+
+.work-tab-body {
+    height: 100%;
+    min-height: 0;
+    layout: vertical;
+}
+
+.work-tab-actions {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    width: 100%;
+}
+
+.work-tab-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* Organization entity action bar (New / Edit / Delete / Refresh) */
+.org-action-bar {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    width: 100%;
+    align: center middle;
+}
+
+.org-action-bar Button {
+    width: 1fr;
+    min-width: 12;
+    margin: 0 1;
+    height: 3;
+}
+
+/* Organization per-tab picklist filter bar */
+.org-filter-bar {
+    height: auto;
+    margin-bottom: 1;
+    width: 100%;
+}
+
+.org-filter-bar Select {
+    width: 1fr;
+    margin: 0 1;
+}
+
+/* Organization entity tables — styled like the Tasks/Projects/Messages tables,
+   each bordered in its tab's accent colour. */
+#org-organizations-table,
+#org-products-table,
+#org-estimates-table,
+#org-invoices-table,
+#org-transactions-table,
+#org-exchange-table,
+#org-emails-table,
+#org-addresses-table,
+#org-credentials-table {
+    height: 1fr;
+    min-height: 10;
+}
+#org-organizations-table { border: solid $accent; }
+#org-products-table      { border: solid $success; }
+#org-estimates-table     { border: solid $warning; }
+#org-invoices-table      { border: solid magenta; }
+#org-transactions-table  { border: solid $primary; }
+#org-exchange-table      { border: solid darkorange; }
+#org-emails-table        { border: solid magenta; }
+#org-addresses-table     { border: solid darkorange; }
+#org-credentials-table   { border: solid $primary; }
+
+#tasks-table,
+#projects-table,
+#messages-table {
+    height: 1fr;
+    min-height: 10;
+}
+
+#tasks-table {
+    border: solid $warning;
+}
+
+#projects-table {
+    border: solid $success;
+}
+
+#messages-table {
+    border: solid $primary;
+}
+
+#tasks-panel-body,
+#projects-panel-body,
+#messages-panel-body,
+#org-organizations-panel-body,
+#org-products-panel-body,
+#org-estimates-panel-body,
+#org-invoices-panel-body,
+#org-transactions-panel-body,
+#org-exchange-panel-body,
+#org-emails-panel-body,
+#org-addresses-panel-body,
+#org-credentials-panel-body,
+#org-explorer-panel-body {
+    height: 100%;
+    min-height: 0;
+}
+
+#work-tabs Tabs {
+    height: 4;
+    padding: 0 1;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+#work-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#work-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+#work-tabs #--content-tab-projects-tab {
+    border-top: heavy $success;
+}
+
+#work-tabs #--content-tab-projects-tab.-active {
+    background: $success 25%;
+    border: heavy $success;
+    color: $text-success;
+    text-style: bold;
+}
+
+#work-tabs #--content-tab-tasks-tab {
+    border-top: heavy $warning;
+}
+
+#work-tabs #--content-tab-tasks-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#work-tabs #--content-tab-messages-tab {
+    border-top: heavy $primary;
+}
+
+#work-tabs #--content-tab-messages-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+/* Light themes: lighten-2 primary washes out on cream; use solid primary. */
+.-light-mode #work-tabs #--content-tab-messages-tab.-active {
+    color: $primary;
+}
+
+/* Light themes: inactive work-tabs use lighten surfaces that erase muted text. */
+.-light-mode #work-tabs Tab {
+    background: $surface-darken-1;
+    border: solid $surface-darken-2;
+    color: $text;
+}
+
+.-light-mode #work-tabs Tabs {
+    background: $surface-darken-1;
+    border-bottom: solid $surface-darken-2;
+}
+
+/* ─── Organizations launcher (work-tabs) — bottom accent = opens modal ─── */
+#work-tabs #--content-tab-org-tab {
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #E5E5E5;
+    background: $surface-lighten-2;
+    color: #E5E5E5;
+}
+
+#work-tabs #--content-tab-org-tab:hover {
+    background: #E5E5E5 20%;
+    border: solid $surface-lighten-2;
+    border-bottom: heavy #E5E5E5;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+/* Light themes: keep bottom accent readable on cream surfaces. */
+.-light-mode #work-tabs #--content-tab-org-tab {
+    border: solid $surface-darken-2;
+    border-bottom: heavy $accent;
+    background: $surface-darken-1;
+    color: $accent;
+}
+
+.-light-mode #work-tabs #--content-tab-org-tab:hover {
+    background: $accent 20%;
+    border: solid $surface-darken-2;
+    border-bottom: heavy $accent;
+    color: $accent;
+    text-style: bold;
+}
+
+.-light-mode #org-modal-tabs Tab {
+    background: $surface-darken-1;
+    border: solid $surface-darken-2;
+    color: $text;
+}
+
+.-light-mode #org-modal-tabs Tabs {
+    background: $surface-darken-1;
+}
+
+/* ─── Organization Modal ─── */
+OrganizationModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#org-modal-shell {
+    width: 85%;
+    height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#org-modal-header {
+    margin-bottom: 1;
+}
+
+#org-modal-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#org-modal-tabs Tabs {
+    height: 4;
+    overflow: auto hidden;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+#org-modal-tabs Tabs > #tabs-scroll {
+    overflow: auto hidden;
+}
+
+#org-modal-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#org-modal-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+#org-modal-tabs #--content-tab-org-modal-organizations-tab { border-top: heavy $accent; }
+#org-modal-tabs #--content-tab-org-modal-organizations-tab.-active {
+    background: $accent 25%;
+    color: $accent;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-products-tab { border-top: heavy $success; }
+#org-modal-tabs #--content-tab-org-modal-products-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-estimates-tab { border-top: heavy $warning; }
+#org-modal-tabs #--content-tab-org-modal-estimates-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-invoices-tab { border-top: heavy magenta; }
+#org-modal-tabs #--content-tab-org-modal-invoices-tab.-active {
+    background: magenta 25%;
+    color: magenta;
+    border: heavy magenta;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-transactions-tab { border-top: heavy $primary; }
+#org-modal-tabs #--content-tab-org-modal-transactions-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-exchange-tab { border-top: heavy darkorange; }
+#org-modal-tabs #--content-tab-org-modal-exchange-tab.-active {
+    background: darkorange 25%;
+    color: darkorange;
+    border: heavy darkorange;
+    text-style: bold;
+}
+
+/* staff-tab removed — staff management is now inside the per-org record modal */
+
+#org-modal-tabs #--content-tab-org-modal-emails-tab { border-top: heavy magenta; }
+#org-modal-tabs #--content-tab-org-modal-emails-tab.-active {
+    background: magenta 25%;
+    color: magenta;
+    border: heavy magenta;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-addresses-tab { border-top: heavy darkorange; }
+#org-modal-tabs #--content-tab-org-modal-addresses-tab.-active {
+    background: darkorange 25%;
+    color: darkorange;
+    border: heavy darkorange;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-credentials-tab { border-top: heavy $primary; }
+#org-modal-tabs #--content-tab-org-modal-credentials-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#org-modal-tabs #--content-tab-org-modal-explorer-tab { border-top: heavy $accent; }
+#org-modal-tabs #--content-tab-org-modal-explorer-tab.-active {
+    background: $accent 25%;
+    color: $accent;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#org-modal-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#org-modal-tabs TabPane {
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+}
+
+#org-modal-footer {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#org-modal-footer Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+#org-tree {
+    height: 1fr;
+    min-height: 10;
+    border: solid $accent;
+    padding: 0 1;
+}
+
+#work-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#work-tabs TabPane {
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+}
+
+#tasks-panel,
+#messages-panel,
+#projects-panel,
+#org-organizations-panel,
+#org-products-panel,
+#org-estimates-panel,
+#org-invoices-panel,
+#org-transactions-panel,
+#org-exchange-panel,
+#org-explorer-panel {
+    width: 1fr;
+    height: 100%;
+    min-height: 0;
+    padding: 0 1;
+    background: $surface-darken-1;
+}
+
+/* ─── Footer Stats ─────────────────────────────── */
+
+#footer-stats-panel {
+    height: 3;
+    margin-top: 1;
+    border: heavy $primary;
+    background: $surface-darken-2;
+    content-align: center middle;
+}
+
+#footer-row {
+    height: 100%;
+    align: center middle;
+}
+
+#footer-label {
+    width: 1fr;
+    text-align: center;
+    text-style: bold;
+    color: $text;
+}
+
+#footer-reset-link {
+    width: auto;
+    color: $warning;
+}
+
+#footer-reset-link:hover {
+    color: $error;
+}
+
+#footer-session-link {
+    width: auto;
+    padding-right: 2;
+    color: $accent;
+}
+
+#footer-session-link:hover {
+    color: $primary-lighten-2;
+}
+
+SessionViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ResetConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+TechnicalSetupModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#settings-json-view {
+    height: 14;
+    min-height: 8;
+}
+
+PromptViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+AgentPromptMenu {
+    align: center middle;
+    background: $surface 80%;
+}
+
+AgentEditModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+MemoryViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DeleteTaskModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+/* ─── Modals ───────────────────────────────────── */
+
+TaskEditModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#task-dialog {
+    width: 60%;
+    height: 66%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+    layout: vertical;
+}
+
+#task-dialog-title {
+    margin-bottom: 0;
+    border-bottom: solid $accent;
+    content-align: center middle;
+}
+
+#task-dialog-title-spacer {
+    height: 1;
+    width: 100%;
+}
+
+#task-edit-desc {
+    height: 10;
+    margin-bottom: 1;
+    border: solid $accent;
+}
+
+.modal-form-label {
+    height: auto;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.modal-form-label-spaced {
+    margin-top: 1;
+}
+
+.task-field-col .modal-form-label,
+.project-field-col .modal-form-label {
+    margin-top: 0;
+}
+
+.task-field-hint {
+    margin-top: 0;
+    margin-bottom: 1;
+}
+
+.task-due-time-row {
+    height: auto;
+    width: 100%;
+    margin-top: 0;
+    align: center middle;
+    content-align: center middle;
+}
+
+.task-time-field {
+    width: auto;
+    min-width: 10;
+    height: auto;
+}
+
+.task-time-label {
+    width: 100%;
+    height: auto;
+    margin: 0 0 0 0;
+    content-align: center middle;
+    text-align: center;
+}
+
+.task-time-input {
+    width: 10;
+    min-width: 10;
+    max-width: 10;
+    height: 3;
+    min-height: 3;
+    color: $text;
+    content-align: center middle;
+    text-align: center;
+}
+
+#task-edit-due-hour,
+#task-edit-due-minute,
+#task-edit-wake-hour,
+#task-edit-wake-minute {
+    width: 10;
+    min-width: 10;
+    max-width: 10;
+    color: $text;
+    content-align: center middle;
+    text-align: center;
+}
+
+#task-edit-due-hour:focus,
+#task-edit-due-minute:focus,
+#task-edit-wake-hour:focus,
+#task-edit-wake-minute:focus {
+    color: $text;
+}
+
+.task-due-sep {
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 0 1;
+    content-align: center middle;
+}
+
+.task-due-today-btn {
+    width: 100%;
+    height: 3;
+    margin-top: 0;
+}
+
+.task-field-row {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.task-field-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.task-field-col:last-child {
+    margin-right: 0;
+}
+
+.task-schedule-grid {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    align: left top;
+}
+
+.task-schedule-meta-col {
+    content-align: left top;
+    height: auto;
+    width: 2fr;
+}
+
+.task-schedule-datetime-col {
+    content-align: left top;
+    height: auto;
+    width: 1.5fr;
+    min-width: 28;
+}
+
+.task-schedule-datetime-col > .modal-form-label {
+    width: 100%;
+    height: auto;
+    margin-bottom: 0;
+    content-align: center middle;
+    text-align: center;
+}
+
+.task-schedule-datetime-box {
+    border: solid $surface-lighten-1;
+    background: $surface-darken-1;
+    padding: 0 1;
+    height: auto;
+    content-align: center middle;
+    width: 100%;
+}
+
+.task-schedule-datetime-inner {
+    width: 100%;
+    height: auto;
+    content-align: center middle;
+}
+
+#task-edit-due-date,
+#task-edit-wake-date {
+    width: 100%;
+    height: 3;
+    content-align: left middle;
+}
+
+.task-schedule-datetime-inner .task-due-time-row {
+    height: auto;
+    min-height: 5;
+    align: center middle;
+    content-align: center middle;
+}
+
+.task-schedule-datetime-inner .task-due-today-btn {
+    width: 100%;
+    height: 3;
+    min-height: 3;
+    margin-top: 0;
+    content-align: center middle;
+}
+
+#task-edit-error {
+    height: auto;
+}
+
+/* Fill journal pane down to hint/actions; page size uses table.height.
+   height == min-height (both 100% of the 1fr scroll) keeps the viewport fixed
+   so DataTable does not collapse to content (~4 rows). */
+#task-progress-scroll {
+    height: 1fr;
+    min-height: 0;
+    width: 100%;
+}
+
+#task-progress-table {
+    height: 100%;
+    min-height: 100%;
+    width: 100%;
+    border: solid $accent;
+}
+
+#task-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#task-general-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#task-general-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#task-journal-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#task-utility-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#task-utility-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#task-utility-status-msg {
+    width: 100%;
+    height: auto;
+    color: $text;
+    text-align: center;
+    content-align: center middle;
+    margin-bottom: 1;
+    padding: 0 2;
+}
+
+#task-utility-header {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: solid $accent;
+}
+
+#task-utility-header Static {
+    height: auto;
+}
+
+#task-utility-enabled-row,
+#utility-models-enabled-row,
+#um-enabled-row {
+    height: 3;
+    width: 100%;
+    align: left middle;
+}
+
+#task-edit-mode {
+    width: 100%;
+    height: auto;
+    layout: horizontal;
+    border: none;
+    background: transparent;
+    margin-bottom: 1;
+}
+
+#task-edit-mode > RadioButton {
+    width: auto;
+    min-width: 16;
+    height: 3;
+    margin-right: 1;
+    content-align: left middle;
+}
+
+#chk-utility-models-enabled,
+#chk-utility-models-write-manifest,
+#um-enabled {
+    width: auto;
+    min-width: 15;
+    height: 3;
+    margin-right: 1;
+}
+
+.utility-models-row-col {
+    width: 1fr;
+    height: 3;
+    align: center middle;
+    content-align: center middle;
+}
+
+.utility-models-row-col Checkbox, .utility-models-row-col ClearCheckbox {
+    width: auto;
+    margin: 0;
+}
+
+.utility-models-row-col-action {
+    align: center middle;
+}
+
+#btn-utility-runs-log {
+    width: auto;
+    height: 3;
+}
+
+#task-utility-enabled-note,
+#utility-models-enabled-note,
+#um-enabled-note {
+    width: 1fr;
+    height: 3;
+    margin: 0;
+    content-align: left middle;
+}
+
+#task-utility-scroll Select,
+#utility-model-editor-scroll Select {
+    height: auto;
+    min-height: 3;
+    width: 100%;
+}
+
+#task-utility-scroll Select > SelectCurrent,
+#utility-model-editor-scroll Select > SelectCurrent {
+    height: 3;
+    min-height: 3;
+    color: $text;
+    background: $surface-lighten-2;
+    content-align: left middle;
+}
+
+#task-utility-scroll Select > SelectOverlay,
+#utility-model-editor-scroll Select > SelectOverlay {
+    max-height: 18;
+}
+
+#task-utility-scroll Select > SelectOverlay > .option-list--option,
+#utility-model-editor-scroll Select > SelectOverlay > .option-list--option {
+    height: 3;
+    min-height: 3;
+    padding: 0 1;
+    color: $text;
+    content-align: left middle;
+}
+
+#task-utility-alert-row {
+    height: 3;
+    width: 100%;
+}
+
+.task-vv-alert-col {
+    align-horizontal: center;
+    height: 3;
+}
+
+.task-vv-alert-label {
+    content-align: center middle;
+    width: 100%;
+}
+
+#task-edit-utility-start-alert,
+#task-edit-utility-stop-alert {
+    width: auto;
+    min-width: 14;
+    height: 3;
+    margin-right: 1;
+}
+
+#task-progress-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.task-progress-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+.task-progress-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+.task-dialog-buttons {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+.task-dialog-buttons Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ─── Message Viewer Modal ────────────────────── */
+
+MessageViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ThreadManagerModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DrainConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+RemovalConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+RegistrationModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#registration-dialog {
+    width: 48;
+    height: auto;
+    min-height: 12;
+    max-height: 18;
+    padding: 1 1;
+    border: thick $accent;
+    background: $surface;
+    layout: vertical;
+}
+
+#registration-body {
+    width: 100%;
+    height: 1fr;
+    text-align: center;
+    content-align: center middle;
+    padding: 0 1 1 1;
+}
+
+#registration-dismiss {
+    dock: bottom;
+    width: 100%;
+    min-height: 3;
+    margin-top: 1;
+}
+
+/* COA picker lives inside #api-keys-dialog (bootstrap mode) */
+#coa-bootstrap-section {
+    height: auto;
+    margin-top: 1;
+    padding-top: 1;
+}
+
+#coa-bootstrap-heading {
+    margin-bottom: 1;
+}
+
+SystemSettingsModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#settings-dialog {
+    width: 68%;
+    height: 72%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#settings-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#settings-tabs Tabs,
+#strategy-tabs Tabs,
+#model-manager-tabs Tabs,
+#model-routing-tabs Tabs,
+#project-tabs Tabs,
+#task-tabs Tabs,
+#agent-tabs Tabs {
+    height: 4;
+    padding: 0 1;
+    background: $surface-darken-1;
+    border-bottom: solid $surface-lighten-1;
+}
+
+/* Let the tab strip scroll horizontally when the tabs overflow the modal width.
+   Textual already auto-scrolls the active tab into view on keyboard nav; this
+   adds mouse-wheel + a thin scrollbar so every tab stays reachable. */
+#settings-tabs Tabs > #tabs-scroll,
+#strategy-tabs Tabs > #tabs-scroll,
+#model-manager-tabs Tabs > #tabs-scroll,
+#model-routing-tabs Tabs > #tabs-scroll,
+#project-tabs Tabs > #tabs-scroll,
+#task-tabs Tabs > #tabs-scroll,
+#agent-tabs Tabs > #tabs-scroll {
+    overflow-x: auto;
+    scrollbar-size-horizontal: 1;
+}
+
+#settings-tabs Tab,
+#strategy-tabs Tab,
+#model-manager-tabs Tab,
+#model-routing-tabs Tab,
+#project-tabs Tab,
+#task-tabs Tab,
+#agent-tabs Tab {
+    height: 3;
+    padding: 0 4;
+    margin: 0 1;
+    border: solid $surface-lighten-2;
+    background: $surface-lighten-2;
+    color: $text-muted;
+}
+
+#settings-tabs Tab:hover,
+#strategy-tabs Tab:hover,
+#model-manager-tabs Tab:hover,
+#model-routing-tabs Tab:hover,
+#project-tabs Tab:hover,
+#task-tabs Tab:hover,
+#agent-tabs Tab:hover {
+    background: $surface-lighten-1;
+    color: $text;
+}
+
+#settings-tabs ContentSwitcher,
+#strategy-tabs ContentSwitcher,
+#model-manager-tabs ContentSwitcher,
+#model-routing-tabs ContentSwitcher,
+#project-tabs ContentSwitcher,
+#task-tabs ContentSwitcher,
+#agent-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#settings-tabs TabPane,
+#strategy-tabs TabPane,
+#model-manager-tabs TabPane,
+#model-routing-tabs TabPane,
+#project-tabs TabPane,
+#task-tabs TabPane,
+#agent-tabs TabPane {
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+}
+
+#settings-tabs #--content-tab-settings-general-tab {
+    border-top: heavy $accent;
+}
+
+#settings-tabs #--content-tab-settings-general-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-skills-tab {
+    border-top: heavy #7c3aed;
+}
+
+#settings-tabs #--content-tab-settings-skills-tab.-active {
+    background: #7c3aed 25%;
+    color: #e9d5ff;
+    border: heavy #7c3aed;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-packages-tab {
+    border-top: heavy $error;
+}
+
+#settings-tabs #--content-tab-settings-packages-tab.-active {
+    background: $error 25%;
+    color: $error;
+    border: heavy $error;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-system-memory-tab {
+    border-top: heavy $success;
+}
+
+#settings-tabs #--content-tab-settings-system-memory-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-image-processing-tab {
+    border-top: heavy #d97706;
+}
+
+#settings-tabs #--content-tab-settings-image-processing-tab.-active {
+    background: #d97706 25%;
+    color: #fbbf24;
+    border: heavy #d97706;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-audio-processing-tab {
+    border-top: heavy #8b5cf6;
+}
+
+#settings-tabs #--content-tab-settings-audio-processing-tab.-active {
+    background: #8b5cf6 25%;
+    color: #c4b5fd;
+    border: heavy #8b5cf6;
+    text-style: bold;
+}
+
+#settings-tabs #--content-tab-settings-utility-models-tab {
+    border-top: heavy #06b6d4;
+}
+
+#settings-tabs #--content-tab-settings-utility-models-tab.-active {
+    background: #06b6d4 25%;
+    color: #a5f3fc;
+    border: heavy #06b6d4;
+    text-style: bold;
+}
+
+#live-call-transcript {
+    height: 14;
+    border: round #dc2626 60%;
+}
+
+#settings-tabs #--content-tab-settings-live-call-tab {
+    border-top: heavy #dc2626;
+}
+
+#settings-tabs #--content-tab-settings-live-call-tab.-active {
+    background: #dc2626 25%;
+    color: #fca5a5;
+    border: heavy #dc2626;
+    text-style: bold;
+}
+
+#settings-image-processing-scroll {
+    height: 100%;
+}
+
+#settings-audio-processing-scroll {
+    height: 100%;
+}
+
+#strategy-tabs #--content-tab-strategy-games-tab {
+    border-top: heavy $warning;
+}
+
+#strategy-tabs #--content-tab-strategy-games-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#strategy-tabs #--content-tab-strategy-awareness-tab {
+    border-top: heavy $accent;
+}
+
+#strategy-tabs #--content-tab-strategy-awareness-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#project-tabs #--content-tab-project-general-tab {
+    border-top: heavy $accent;
+}
+
+#project-tabs #--content-tab-project-general-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#project-tabs #--content-tab-project-members-tab {
+    border-top: heavy $success;
+}
+
+#project-tabs #--content-tab-project-members-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#project-tabs #--content-tab-project-memory-tab {
+    border-top: heavy $primary;
+}
+
+#project-tabs #--content-tab-project-memory-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#model-manager-tabs #--content-tab-mm-models-tab {
+    border-top: heavy #1a73e8;
+}
+
+#model-manager-tabs #--content-tab-mm-models-tab.-active {
+    background: #1a73e8 25%;
+    color: #8ab4f8;
+    border: heavy #1a73e8;
+    text-style: bold;
+}
+
+#model-manager-tabs #--content-tab-mm-providers-tab {
+    border-top: heavy $accent;
+}
+
+#model-manager-tabs #--content-tab-mm-providers-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#model-routing-tabs #--content-tab-routing-general-tab {
+    border-top: heavy $success;
+}
+
+#model-routing-tabs #--content-tab-routing-general-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#model-routing-tabs #--content-tab-routing-work-tab {
+    border-top: heavy $warning;
+}
+
+#model-routing-tabs #--content-tab-routing-work-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#model-routing-tabs #--content-tab-routing-output-tab {
+    border-top: heavy $primary;
+}
+
+#model-routing-tabs #--content-tab-routing-output-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#settings-flood-task-row {
+    height: auto;
+    width: 100%;
+    align: left top;
+    margin-bottom: 1;
+}
+
+.settings-aligned-field-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+    layout: vertical;
+}
+
+.settings-field-spacer {
+    height: 1fr;
+    min-height: 0;
+}
+
+.settings-aligned-field-col:last-child {
+    margin-right: 0;
+}
+
+#settings-general-pane,
+#settings-image-processing-pane,
+#settings-audio-processing-pane,
+#settings-skills-pane,
+#settings-packages-pane,
+#settings-system-memory-pane,
+#settings-utility-models-pane,
+#settings-live-call-pane,
+#settings-live-chat-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#settings-general-scroll,
+#settings-audio-processing-scroll,
+#settings-image-processing-scroll,
+#settings-live-call-scroll,
+#settings-live-chat-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+.settings-general-cols {
+    height: auto;
+    width: 100%;
+    align: left top;
+}
+
+.settings-general-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.settings-general-col:last-child {
+    margin-right: 0;
+}
+
+/* Quota pause list. A 1fr row clips Lift past the column edge. */
+#settings-spawn-hold-list {
+    height: auto;
+    width: 100%;
+}
+
+.spawn-hold-row {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.spawn-hold-row Static {
+    width: 100%;
+    height: 1;
+}
+
+.spawn-hold-row Button {
+    width: 12;
+    height: 3;
+    margin-top: 0;
+}
+
+.settings-web-search-row {
+    height: auto;
+    width: 100%;
+    align: left top;
+}
+
+.settings-web-search-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.settings-web-search-col:last-child {
+    margin-right: 0;
+}
+
+#mm-models-pane,
+#mm-providers-pane {
+    height: 100%;
+    min-height: 0;
+    layout: vertical;
+}
+
+#settings-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#settings-dialog-header {
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+}
+
+#settings-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+}
+
+.settings-col {
+    height: auto;
+}
+
+.settings-section-box {
+    height: auto;
+    padding: 0 1;
+    margin-top: 1;
+    border: solid $primary;
+}
+
+.settings-inline-row {
+    height: auto;
+    width: 100%;
+    align: left middle;
+}
+
+.settings-inline-row Checkbox, .settings-inline-row ClearCheckbox {
+    width: auto;
+    margin-right: 1;
+}
+
+.settings-inline-row Static {
+    width: 1fr;
+    height: auto;
+}
+
+.settings-split-row {
+    height: auto;
+    width: 100%;
+}
+
+.settings-split-col {
+    width: 1fr;
+    height: auto;
+}
+
+.settings-split-actions {
+    align: center middle;
+}
+
+.settings-operations-cols {
+    height: auto;
+    width: 100%;
+    align: left top;
+}
+
+.settings-operations-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.settings-operations-col:last-child {
+    margin-right: 0;
+}
+
+.settings-browser-grid {
+    layout: grid;
+    grid-size: 2 2;
+    grid-gutter: 1 2;
+    height: auto;
+    width: 100%;
+}
+
+.settings-browser-info {
+    height: auto;
+}
+
+.settings-browser-toggle-cell {
+    height: auto;
+    align: center middle;
+}
+
+.settings-browser-toggle-cell Button {
+    width: 100%;
+    height: 3;
+}
+
+.settings-browser-timeout-cell {
+    height: auto;
+}
+
+#settings-browser-timeout-cell {
+    column-span: 2;
+}
+
+.settings-tab-actions {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    align: center middle;
+}
+
+.settings-tab-actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0 1;
+    height: 3;
+}
+
+#settings-skills-hint {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+#settings-utility-models-header {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: solid #06b6d4;
+}
+
+#settings-utility-models-header Static {
+    height: auto;
+}
+
+#utility-models-table {
+    height: 1fr;
+    min-height: 0;
+    width: 100%;
+    border: solid #06b6d4;
+}
+
+#utility-models-hint {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+#utility-models-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#utility-models-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
+}
+
+/* ── Utility Model editor / remove confirm ── */
+
+UtilityModelEditorModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#utility-model-editor-dialog {
+    width: 52%;
+    height: 74%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #06b6d4;
+    layout: vertical;
+}
+
+#utility-model-editor-header {
+    margin-bottom: 1;
+    border-bottom: solid #06b6d4;
+    padding-bottom: 1;
+}
+
+#utility-model-editor-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#utility-model-editor-scroll Input {
+    margin-bottom: 0;
+}
+
+#utility-model-editor-scroll .task-field-col {
+    height: auto;
+}
+
+#utility-model-editor-scroll .task-field-col Select {
+    width: 100%;
+}
+
+#um-enabled-row {
+    margin-top: 1;
+}
+
+#utility-model-editor-scroll TextArea {
+    height: 12;
+    min-height: 8;
+    margin-top: 0;
+    border: solid $surface-lighten-1;
+}
+
+#utility-model-editor-actions {
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+    border-top: solid #06b6d4;
+    padding-top: 1;
+    align: center middle;
+}
+
+#utility-model-editor-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+UtilityModelRemoveConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#um-remove-dialog {
+    width: 64;
+    height: auto;
+    padding: 1 2;
+    border: heavy $error;
+    background: $surface;
+}
+
+#um-remove-actions {
+    margin-top: 1;
+    height: auto;
+    align: center middle;
+}
+
+#um-remove-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 16;
+    height: 3;
+}
+
+/* ── Router Mode Confirm Modal ─────────────── */
+
+RouterModeConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#router-dialog {
+    width: 60%;
+    height: auto;
+    max-height: 70%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #d97706;
+}
+
+#router-title {
+    margin-bottom: 1;
+    border-bottom: solid #d97706;
+    padding-bottom: 1;
+}
+
+#router-status {
+    margin-top: 1;
+    padding: 1;
+    min-height: 3;
+}
+
+#router-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#router-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+#msg-dialog {
+    width: 60%;
+    height: 72%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#msg-dialog-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#msg-dialog-top {
+    height: auto;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#msg-dialog-direction {
+    margin-bottom: 1;
+}
+
+.msg-dialog-meta {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.msg-meta-col {
+    width: 1fr;
+    height: auto;
+    padding-right: 1;
+}
+
+#msg-status-row {
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+#msg-status-row Static {
+    width: auto;
+    margin-right: 1;
+}
+
+#msg-status-row Select {
+    width: 1fr;
+}
+
+#msg-reply-section {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $surface-lighten-1;
+    padding-top: 1;
+}
+
+#msg-reply-body {
+    height: 12;
+    min-height: 8;
+    margin-top: 1;
+}
+
+#msg-dialog > Button {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+}
+
+#msg-body-pane {
+    height: auto;
+    min-height: 12;
+    margin-bottom: 1;
+}
+
+#msg-dialog-body {
+    height: auto;
+    min-height: 12;
+    margin-bottom: 0;
+}
+
+#msg-attachments {
+    height: auto;
+    max-height: 10;
+    margin-top: 1;
+    padding: 1;
+    border: dashed $accent;
+}
+
+#msg-dialog-actions,
+#msg-dialog-footer {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    align: center middle;
+}
+
+#msg-dialog-actions Button,
+#msg-dialog-footer Button {
+    width: 1fr;
+    margin: 0 2;
+    height: 3;
+}
+
+#md-attach-buttons {
+    height: auto;
+    margin-top: 1;
+}
+
+#md-attach-buttons Button {
+    margin-right: 1;
+}
+
+/* ─── Markdown Viewer Modal ──────────────────── */
+
+MarkdownViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#md-viewer-dialog {
+    width: 75%;
+    height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $warning;
+}
+
+#md-viewer-title {
+    margin-bottom: 1;
+    border-bottom: solid $warning;
+    padding-bottom: 1;
+}
+
+#md-viewer-scroll {
+    height: 1fr;
+    min-height: 5;
+    margin-bottom: 1;
+}
+
+#md-viewer-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#md-viewer-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 16;
+    height: 3;
+}
+
+/* ─── Compose Modal ──────────────────────────── */
+
+ComposeModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#compose-dialog {
+    width: 60%;
+    height: auto;
+    max-height: 70%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $success;
+}
+
+#compose-title {
+    margin-bottom: 1;
+    border-bottom: solid $success;
+    padding-bottom: 1;
+}
+
+#compose-agent-locked {
+    background: $surface-lighten-2;
+    color: $text;
+    border: solid $surface-lighten-1;
+    padding: 0 1;
+    height: 3;
+    margin-bottom: 1;
+}
+
+#compose-body {
+    height: 12;
+    min-height: 8;
+    max-height: 16;
+    margin-bottom: 1;
+}
+
+/* Paper-toned background for message compose / reply inputs */
+TextArea.msg-input-paper {
+    background: #cdc0aa;
+    color: #1f1a12;
+    border: solid #a89880;
+}
+
+TextArea.msg-input-paper:focus {
+    border: solid #968a72;
+}
+
+#compose-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#compose-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ─── Green Action Links ─────────────────────── */
+
+.action-link-green {
+    width: auto;
+    color: $success;
+    padding-top: 1;
+    padding-right: 1;
+}
+
+.action-link-green:hover {
+    color: $success-lighten-2;
+    text-style: underline;
+}
+
+.action-link-filter {
+    width: auto;
+    color: $text-muted;
+    padding-top: 0;
+}
+
+.action-link-filter:hover {
+    color: $text;
+    text-style: underline;
+}
+
+.action-link-filter-active {
+    color: $success;
+    text-style: bold;
+}
+
+.action-link-filter-active:hover {
+    color: $success-lighten-2;
+}
+
+.dimmed {
+    opacity: 40%;
+}
+
+.header-sep {
+    width: auto;
+    color: $text-muted;
+    padding-top: 0;
+}
+
+#chk-vv-enabled {
+    width: auto;
+    height: 3;
+    margin: 0;
+}
+
+/* ─── Project Members Modal ──────────────────── */
+
+ProjectMembersModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DeleteProjectModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#project-dialog {
+    width: 60%;
+    height: 66%;
+    max-height: 80%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $success;
+    layout: vertical;
+}
+
+ProjectMembersModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#project-dialog-title {
+    margin-bottom: 1;
+    border-bottom: solid $success;
+    padding-bottom: 1;
+}
+
+#project-edit-desc {
+    height: 5;
+    min-height: 5;
+    margin-bottom: 1;
+    border: solid $accent;
+    overflow-y: auto;
+}
+
+#project-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-general-pane,
+#project-members-pane,
+#project-memory-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#project-general-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-members-scroll,
+#project-memory-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $accent;
+    scrollbar-gutter: stable;
+}
+
+.modal-tab-spacer {
+    height: 1;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.agent-tab-actions-bar {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+.agent-tab-actions-bar Button {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0 1;
+}
+
+/* project-dialog-close styling handled by .task-dialog-buttons Button */
+
+.project-field-row {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.project-field-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+#project-coa-workspace {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#project-directory-name {
+    height: auto;
+    margin-bottom: 0;
+}
+
+#project-directory-hint,
+#project-name-lock-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#members-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+    border: none;
+    margin-bottom: 0;
+}
+
+.project-members-actions {
+    height: auto;
+    margin-bottom: 1;
+    align: center middle;
+}
+
+.project-members-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ─── API Keys Modal ─────────────────────────── */
+
+.api-keys-btn {
+    background: #7c3aed;
+    color: #ffffff;
+}
+
+.api-keys-btn:hover {
+    background: #6d28d9;
+}
+
+ApiKeysModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+/* Fixed shell + 1fr scroll so Save/Close stay on-screen (catalog-form pattern). */
+#api-keys-dialog {
+    width: 52%;
+    height: 80%;
+    max-height: 88%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #7c3aed;
+    layout: vertical;
+    overflow: hidden;
+}
+
+#api-keys-scroll {
+    height: 1fr;
+    min-height: 0;
+    margin-top: 0;
+}
+
+#api-keys-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+}
+
+.api-keys-col {
+    height: auto;
+}
+
+#api-keys-dialog Input {
+    margin-bottom: 0;
+}
+
+#api-keys-dialog .api-keys-col > Static {
+    margin-top: 1;
+}
+
+#api-keys-feedback {
+    margin-top: 1;
+    padding: 1;
+    height: auto;
+}
+
+#api-keys-footer {
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    align: center middle;
+}
+
+#api-keys-footer Button {
+    width: 1fr;
+    margin: 0 2;
+    height: 3;
+}
+
+/* ─── Model Manager Modal ────────────────────── */
+
+.model-manager-btn {
+    background: #1a73e8;
+    color: #ffffff;
+}
+
+.model-manager-btn:hover {
+    background: #1765cc;
+}
+
+ModelManagerModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+/* ── Model Routing Modal ───────────────────── */
+
+ModelRoutingModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#model-routing-dialog {
+    width: 59%;
+    height: 74%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#model-routing-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#routing-help {
+    margin-bottom: 1;
+}
+
+#routing-general-scroll,
+#routing-work-scroll,
+#routing-output-scroll {
+    height: 100%;
+    border: solid $primary;
+    padding: 1;
+}
+
+#routing-general-columns,
+#routing-work-columns,
+#routing-output-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+}
+
+.routing-col {
+    height: auto;
+}
+
+#routing-general-columns .routing-col Select {
+    width: 100%;
+}
+
+.routing-checkbox-box {
+    width: 100%;
+    height: 3;
+    border: solid $surface-lighten-2;
+    padding: 0 1;
+    content-align: left middle;
+}
+
+.routing-checkbox-box Checkbox, .routing-checkbox-box ClearCheckbox {
+    width: 100%;
+    height: auto;
+    border: none;
+    background: transparent;
+    padding: 0;
+}
+
+#model-routing-header {
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+}
+
+#model-routing-actions {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#model-routing-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
+}
+
+#model-manager-dialog {
+    width: 59%;
+    height: 74%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #1a73e8;
+}
+
+ModelManagerModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#model-manager-shell {
+    width: 59%;
+    height: 74%;
+    min-width: 60;
+    padding: 1 2;
+    background: $surface;
+    border: thick #1a73e8;
+    layout: vertical;
+    overflow: hidden;
+}
+
+#model-manager-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#model-manager-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+/* Keep Edit/Reset/Remove/Add/Close on-screen (ProviderForm .pf-actions pattern). */
+#model-manager-footer {
+    dock: bottom;
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+    overflow-x: auto;
+}
+
+#model-manager-footer Button {
+    width: 1fr;
+    min-width: 10;
+    margin: 0 0 0 1;
+    height: 3;
+}
+
+#mm-help {
+    height: auto;
+    max-height: 5;
+    margin-bottom: 1;
+    overflow-y: auto;
+}
+
+#mm-feedback {
+    height: auto;
+    max-height: 3;
+    overflow-y: auto;
+}
+
+.mm-subheader {
+    margin-top: 1;
+}
+
+/* Fill pane down to footer; min-height 0 so small terminals can shrink the table. */
+#mm-models-table {
+    height: 1fr;
+    min-height: 0;
+    border: solid $primary;
+}
+
+#mm-providers-table {
+    height: 1fr;
+    min-height: 0;
+    border: solid $primary;
+}
+
+#mm-models-actions,
+#mm-providers-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#mm-models-actions Button,
+#mm-providers-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
+}
+
+#mm-feedback {
+    margin-top: 1;
+    padding: 0 1;
+}
+
+.setup-form-row {
+    height: auto;
+    margin-top: 1;
+}
+
+.setup-form-col {
+    width: 1fr;
+    height: auto;
+    margin: 0 1;
+}
+
+#msg-dialog-header {
+    margin-bottom: 1;
+}
+
+.mm-form-row {
+    height: auto;
+    margin-top: 1;
+}
+
+.mm-form-col {
+    width: 1fr;
+    height: auto;
+    margin: 0 1;
+}
+
+.mm-form-col-price {
+    width: 12;
+    min-width: 10;
+    max-width: 14;
+    height: auto;
+    margin: 0 1;
+}
+
+.mm-form-textarea {
+    height: 5;
+    min-height: 5;
+    max-height: 8;
+}
+
+.mm-form-hint {
+    height: auto;
+    margin-top: 0;
+    color: $text-muted;
+    text-style: italic;
+}
+
+.mm-section-heading {
+    margin-top: 2;
+    margin-bottom: 1;
+    padding-top: 1;
+    padding-bottom: 1;
+    border-top: solid $accent;
+}
+
+.mm-check-row {
+    align: center middle;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+.mm-check-row Checkbox, .mm-check-row ClearCheckbox {
+    width: 1fr;
+    margin: 0 2;
+    content-align: center middle;
+}
+
+/* Model Feedback modal */
+ModelFeedbackModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#model-feedback-dialog {
+    width: 43%;
+    height: auto;
+    max-height: 88%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#model-feedback-header {
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+}
+
+#mf-columns {
+    layout: grid;
+    grid-size: 2;
+    grid-gutter: 1 2;
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+.mf-col {
+    height: auto;
+}
+
+#mf-records-panel {
+    height: auto;
+    min-height: 10;
+    max-height: 22;
+    margin-top: 1;
+    margin-bottom: 1;
+    padding: 1;
+    border: solid $accent;
+    background: $panel;
+}
+
+#mf-records-panel DataTable {
+    height: auto;
+    max-height: 14;
+    margin-top: 1;
+}
+
+#model-feedback-actions {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#model-feedback-actions Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
+#openrouter-pick-dialog,
+#provider-pick-dialog {
+    width: 64%;
+    height: 60%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#provider-pick-dialog.provider-brand-google {
+    border: thick #4285F4;
+    background: #4285F4 12%;
+}
+
+#provider-pick-dialog.provider-brand-openai {
+    border: thick #10A37F;
+    background: #10A37F 10%;
+}
+
+#provider-pick-dialog.provider-brand-anthropic {
+    border: thick #C15F3C;
+    background: #C15F3C 12%;
+}
+
+#provider-pick-dialog.provider-brand-xai {
+    border: thick #FFFFFF;
+    background: #1A1A1A 70%;
+}
+
+#provider-pick-dialog.provider-brand-openrouter {
+    border: thick #94A3B8;
+    background: #94A3B8 10%;
+}
+
+#provider-pick-dialog.provider-brand-huggingface {
+    border: thick #FFD21E;
+    background: #FFD21E 10%;
+}
+
+#or-pick-header,
+#provider-pick-header,
+.provider-pick-titlebar {
+    height: auto;
+    min-height: 3;
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding: 1 0;
+    align: center middle;
+    content-align: center middle;
+}
+
+.provider-brand-google.provider-pick-titlebar {
+    border: solid #4285F4;
+    background: #4285F4 28%;
+}
+
+.provider-brand-google .provider-pick-title {
+    color: #E8F0FE;
+}
+
+.provider-brand-openai.provider-pick-titlebar {
+    border: solid #10A37F;
+    background: #10A37F 25%;
+}
+
+.provider-brand-openai .provider-pick-title {
+    color: #E6FFF6;
+}
+
+.provider-brand-anthropic.provider-pick-titlebar {
+    border: solid #C15F3C;
+    background: #C15F3C 30%;
+}
+
+.provider-brand-anthropic .provider-pick-title {
+    color: #FFF4EF;
+}
+
+.provider-brand-xai.provider-pick-titlebar {
+    border: solid #FFFFFF;
+    background: #1A1A1A 88%;
+}
+
+.provider-brand-xai .provider-pick-title {
+    color: #F5F5F5;
+}
+
+.provider-brand-openrouter.provider-pick-titlebar {
+    border: solid #94A3B8;
+    background: #94A3B8 22%;
+}
+
+.provider-brand-openrouter .provider-pick-title {
+    color: #F1F5F9;
+}
+
+.provider-brand-huggingface.provider-pick-titlebar {
+    border: solid #FFD21E;
+    background: #FFD21E 22%;
+}
+
+.provider-brand-huggingface .provider-pick-title {
+    color: #1A1A1A;
+}
+
+.provider-pick-title,
+#provider-pick-title {
+    width: 1fr;
+    height: auto;
+    min-height: 3;
+    padding: 1 0;
+    text-style: bold underline;
+    text-align: center;
+    content-align: center middle;
+}
+
+/* ─── Provider import buttons (Add Model form) ─── */
+
+#catalog-form-header {
+    width: 100%;
+    height: auto;
+    min-height: 1;
+    margin-bottom: 1;
+    border-bottom: solid $accent;
+    padding-bottom: 1;
+    align: center middle;
+    content-align: center middle;
+}
+
+#catalog-form-header Button {
+    width: 1fr;
+    min-width: 14;
+    height: 3;
+    margin: 0 1;
+    padding: 0 1;
+    text-style: bold;
+    text-align: center;
+    content-align: center middle;
+}
+
+#catalog-form-header Button.provider-brand-google {
+    border: block #4285F4;
+    background: #4285F4 28%;
+    color: #E8F0FE;
+}
+
+#catalog-form-header Button.provider-brand-openai {
+    border: block #10A37F;
+    background: #10A37F 25%;
+    color: #E6FFF6;
+}
+
+#catalog-form-header Button.provider-brand-anthropic {
+    border: block #C15F3C;
+    background: #C15F3C 30%;
+    color: #FFF4EF;
+}
+
+#catalog-form-header Button.provider-brand-xai {
+    border: block #FFFFFF;
+    background: #1A1A1A 88%;
+    color: #F5F5F5;
+}
+
+#catalog-form-header Button.provider-brand-openrouter {
+    border: block #94A3B8;
+    background: #94A3B8 22%;
+    color: #F1F5F9;
+}
+
+#catalog-form-header Button.provider-brand-huggingface {
+    border: block #FFD21E;
+    background: #FFD21E 22%;
+    color: #1A1A1A;
+}
+
+#catalog-form-header Button.provider-brand-google:hover {
+    background: #4285F4 50%;
+    border: block #4285F4;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-openai:hover {
+    background: #10A37F 50%;
+    border: block #10A37F;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-anthropic:hover {
+    background: #C15F3C 55%;
+    border: block #C15F3C;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-xai:hover {
+    background: #333333 90%;
+    border: block #FFFFFF;
+    color: #FFFFFF;
+}
+
+#catalog-form-header Button.provider-brand-openrouter:hover {
+    background: #94A3B8 45%;
+    border: block #94A3B8;
+    color: #0F172A;
+}
+
+#catalog-form-header Button.provider-brand-huggingface:hover {
+    background: #FFD21E 50%;
+    border: block #FFD21E;
+    color: #1A1A1A;
+}
+
+#catalog-form-import-label {
+    width: 100%;
+    text-align: center;
+}
+
+#provider-pick-loading {
+    width: 100%;
+    height: 1fr;
+    min-height: 12;
+    margin: 1 0;
+    text-align: center;
+    content-align: center middle;
+}
+
+.provider-pick-hidden {
+    display: none;
+}
+
+#or-pick-scroll,
+#provider-pick-scroll {
+    height: 1fr;
+    margin: 1 0;
+}
+
+/* Fill the modal down to the action buttons; page info rides the border title.
+   height == min-height (both 100% of the 1fr scroll) keeps the viewport fixed
+   and avoids DataTable re-measurement thrash on hover/refresh. */
+#or-pick-scroll DataTable,
+#provider-pick-scroll DataTable {
+    height: 100%;
+    min-height: 100%;
+    border: solid $accent;
+    border-title-color: $text;
+}
+
+#or-pick-actions,
+#provider-pick-actions {
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#or-pick-actions Button,
+#provider-pick-actions Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
+/* Model Manager sub-modals (Add/Edit forms) — fixed shell + 1fr scroll so
+   Save/Cancel stay visible on short terminals (same idea as provider-pick). */
+#catalog-form-shell {
+    width: 72%;
+    height: 88%;
+    max-height: 88%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+    overflow: hidden;
+}
+
+#catalog-form-scroll {
+    height: 1fr;
+    min-height: 0;
+    margin-top: 1;
+}
+
+#catalog-form-title {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    padding: 1 0;
+    text-style: bold underline;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#f-error {
+    height: auto;
+    min-height: 2;
+    max-height: 8;
+}
+
+#catalog-form-footer {
+    dock: bottom;
+    height: auto;
+    margin-top: 1;
+    border-top: solid $accent;
+    padding-top: 1;
+    align: center middle;
+}
+
+#catalog-form-footer Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
+CatalogFormModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ProviderFormModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+ProviderPickModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+/* ─── Cycle Log Modal ────────────────────────── */
+
+CycleLogModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#cycle-log-body {
+    height: 1fr;
+    min-height: 10;
+    margin-bottom: 1;
+    scrollbar-gutter: stable;
+}
+
+#cycle-log-select {
+    margin-bottom: 1;
+}
+
+#step-nav-bar {
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+    display: none;
+}
+
+#step-indicator {
+    width: 1fr;
+    text-align: center;
+    text-style: bold;
+    color: $accent;
+}
+
+#step-nav-bar Button {
+    width: auto;
+    min-width: 12;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ─── Skill Viewer Modal ─────────────────────── */
+
+SkillViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#skill-dialog {
+    width: 70%;
+    height: 85%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+}
+
+#skill-dialog-header {
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#skill-content-scroll {
+    height: 1fr;
+    min-height: 5;
+    margin-bottom: 1;
+}
+
+#skill-dialog-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#skill-dialog-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 16;
+    height: 3;
+}
+
+/* ═══════════════════════════════════════════════════════
+   Strategy Button + Modal
+   ═══════════════════════════════════════════════════════ */
+
+.strategy-btn {
+    background: #d97706;
+    color: #ffffff;
+}
+
+.strategy-btn:hover {
+    background: #b45309;
+}
+
+/* Strategy Modal */
+StrategyModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#strategy-dialog {
+    width: 68%;
+    height: 72%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #d97706;
+    layout: vertical;
+}
+
+#strategy-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#strategy-games-pane,
+#strategy-awareness-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#strategy-dialog-footer {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#strategy-dialog-footer Button {
+    width: 1fr;
+    min-width: 0;
+    height: 3;
+    margin: 0 1;
+}
+
+#strategy-dialog-title {
+    height: auto;
+    margin-bottom: 1;
+    border-bottom: solid #d97706;
+    padding-bottom: 1;
+}
+
+#awareness-section-header,
+#games-section-header {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#games-strat-hint,
+#awareness-strat-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#strategy-games-scroll,
+#strategy-awareness-scroll {
+    height: 1fr;
+    min-height: 0;
+    scrollbar-gutter: stable;
+}
+
+#strategy-games-scroll {
+    border: solid $warning;
+}
+
+#strategy-awareness-scroll {
+    border: solid $accent;
+}
+
+#games-table,
+#awareness-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+.strategy-tab-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+.strategy-tab-actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0 1;
+    height: 3;
+}
+
+.awareness-filter-row {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.awareness-filter-row Select {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#settings-sys-memory-table {
+    height: 1fr;
+    min-height: 0;
+    border: solid $success;
+}
+
+/* Agent Memory Modal (per-agent connection memory) */
+AgentMemoryViewModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#agent-memory-dialog {
+    width: 68%;
+    height: 72%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+    layout: vertical;
+}
+
+#agent-memory-title {
+    height: auto;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#agent-memory-connection-pane {
+    height: 1fr;
+    min-height: 0;
+    layout: vertical;
+}
+
+#agent-memory-connection-header,
+#agent-memory-connection-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#agent-memory-connection-scroll {
+    height: 1fr;
+    min-height: 0;
+    max-height: 28;
+    border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#agent-memory-connection-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+#agent-memory-dialog-footer {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+/* Project viewer modal */
+ProjectMembersModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#project-dialog {
+    width: 60%;
+    height: 66%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+    layout: vertical;
+}
+
+#project-dialog-title {
+    height: auto;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#project-edit-desc {
+    height: 5;
+    min-height: 5;
+    margin-bottom: 1;
+    border: solid $accent;
+    overflow-y: auto;
+}
+
+#project-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-general-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#project-members-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#project-members-header,
+#project-members-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#project-members-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $accent;
+    scrollbar-gutter: stable;
+}
+
+#members-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+.project-members-actions {
+    height: auto;
+    margin-top: 1;
+}
+
+#project-memory-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#project-memory-header,
+#project-memory-hint {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#project-memory-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#project-memory-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+#agent-prompt-dialog-footer {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#agent-memory-dialog-footer Button {
+    min-width: 16;
+    height: 3;
+}
+
+/* Agent detail modal (tabbed) */
+AgentPromptMenu {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#agent-dialog {
+    width: 59%;
+    height: 79%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+    layout: vertical;
+}
+
+#agent-dialog-title {
+    height: auto;
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#agent-dialog-info {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#agent-status-actions {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+#agent-status-actions Button {
+    margin: 0 1;
+    height: 3;
+}
+
+#agent-tabs {
+    height: 1fr;
+    min-height: 0;
+}
+
+#agent-tabs ContentSwitcher {
+    height: 1fr;
+    min-height: 0;
+}
+
+#agent-tabs TabPane {
+    height: 100%;
+    padding: 0;
+}
+
+#agent-general-pane,
+#agent-tech-pane,
+#agent-overrides-pane,
+#agent-memory-pane,
+#agent-poise-pane,
+#agent-prompt-pane,
+#agent-cycle-pane,
+#agent-threads-pane,
+#agent-frames-pane,
+#agent-ide-pane {
+    height: 100%;
+    layout: vertical;
+}
+
+#agent-ide-scroll {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#agent-ide-scroll .settings-section-box {
+    border: solid $primary;
+}
+
+#agent-ide-detail {
+    height: auto;
+    margin-top: 1;
+}
+
+#agent-general-scroll .setup-form-row {
+    margin-top: 1;
+}
+
+.agent-browser-toggle-col {
+    align: left top;
+}
+
+.agent-browser-toggle-col Button {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+}
+
+#model-routing-hint {
+    height: auto;
+    margin-top: 0;
+}
+
+#agent-general-scroll,
+#agent-tech-scroll,
+#agent-overrides-scroll {
+    height: 1fr;
+    min-height: 0;
+}
+
+#input-model-params-extra {
+    height: 3;
+    min-height: 3;
+    max-height: 3;
+}
+
+.agent-dialog-header-row {
+    height: auto;
+    width: 100%;
+    align: left top;
+    margin-bottom: 1;
+}
+
+#agent-dialog-info {
+    width: 2fr;
+    height: auto;
+}
+
+.agent-header-action-col {
+    width: 1fr;
+    height: auto;
+    align: center top;
+    padding-top: 0;
+}
+
+.agent-header-action-col Button {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+}
+
+#agent-status-actions {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#agent-status-actions Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
+#agent-memory-scroll,
+#agent-threads-scroll,
+#agent-frames-scroll,
+#agent-poise-scroll,
+#agent-prompt-scroll {
+    height: 1fr;
+    min-height: 0;
+    border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#agent-tab-mem-table,
+#agent-thread-table,
+#agent-frames-table {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+}
+
+#agent-cycle-log-body {
+    height: 1fr;
+    min-height: 10;
+    width: 100%;
+    border: solid $primary;
+    scrollbar-gutter: stable;
+}
+
+#agent-poise-body,
+#agent-last-prompt-body {
+    height: 100%;
+    min-height: 10;
+    width: 100%;
+}
+
+#agent-cycle-log-header {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#agent-cycle-log-select {
+    margin-bottom: 1;
+}
+
+#agent-step-nav-bar {
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+    display: none;
+}
+
+#agent-step-indicator {
+    width: 1fr;
+    text-align: center;
+    text-style: bold;
+    color: $accent;
+}
+
+#agent-step-nav-bar Button {
+    width: auto;
+    min-width: 12;
+    margin: 0 1;
+    height: 3;
+}
+
+#agent-tab-mem-hint,
+#agent-thread-summary {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.agent-tab-actions,
+.agent-settings-actions,
+.agent-cycle-actions,
+.agent-thread-actions {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+    align: center middle;
+}
+
+.agent-tab-actions Button,
+.agent-thread-actions Button,
+.agent-cycle-actions Button {
+    width: 1fr;
+    min-width: 0;
+    margin: 0 1;
+    height: 3;
+}
+
+#task-tabs #--content-tab-task-general-tab {
+    border-top: heavy $accent;
+}
+
+#task-tabs #--content-tab-task-general-tab.-active {
+    background: $accent 25%;
+    color: $text;
+    border: heavy $accent;
+    text-style: bold;
+}
+
+#task-tabs #--content-tab-task-journal-tab {
+    border-top: heavy $primary;
+}
+
+#task-tabs #--content-tab-task-journal-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#task-tabs #--content-tab-task-utility-tab {
+    border-top: heavy #06b6d4;
+}
+
+#task-tabs.utility-feature-disabled #--content-tab-task-utility-tab {
+    border-top: heavy $surface-lighten-2;
+    color: $text-muted;
+}
+
+#task-tabs #--content-tab-task-utility-tab.-active {
+    background: #06b6d4 25%;
+    color: #a5f3fc;
+    border: heavy #06b6d4;
+    text-style: bold;
+}
+
+#task-tabs.utility-feature-disabled #--content-tab-task-utility-tab.-active {
+    background: $surface-lighten-1;
+    color: $text-muted;
+    border: heavy $surface-lighten-2;
+    text-style: bold;
+}
+
+#project-tabs.project-new-mode #--content-tab-project-members-tab,
+#project-tabs.project-new-mode #--content-tab-project-memory-tab {
+    border-top: heavy $surface-lighten-2;
+    color: $text-muted;
+}
+
+#project-tabs.project-new-mode #--content-tab-project-members-tab.-active,
+#project-tabs.project-new-mode #--content-tab-project-memory-tab.-active {
+    background: $surface-lighten-1;
+    color: $text-muted;
+    border: heavy $surface-lighten-2;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-general-tab {
+    border-top: heavy $warning;
+}
+
+#agent-tabs #--content-tab-agent-general-tab.-active {
+    background: $warning 25%;
+    color: $warning;
+    border: heavy $warning;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-tech-tab {
+    border-top: heavy #1a73e8;
+}
+
+#agent-tabs #--content-tab-agent-tech-tab.-active {
+    background: #1a73e8 25%;
+    color: #ffffff;
+    border: heavy #1a73e8;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-overrides-tab {
+    border-top: heavy $error;
+}
+
+#agent-tabs #--content-tab-agent-overrides-tab.-active {
+    background: $error 25%;
+    color: $text;
+    border: heavy $error;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-memory-tab {
+    border-top: heavy $primary;
+}
+
+#agent-tabs #--content-tab-agent-memory-tab.-active {
+    background: $primary 25%;
+    color: $primary-lighten-2;
+    border: heavy $primary;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-poise-tab,
+#agent-tabs #--content-tab-agent-last-prompt-tab {
+    border-top: heavy $success;
+}
+
+#agent-tabs #--content-tab-agent-poise-tab.-active,
+#agent-tabs #--content-tab-agent-last-prompt-tab.-active {
+    background: $success 25%;
+    color: $text-success;
+    border: heavy $success;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-cycle-tab {
+    border-top: heavy #d97706;
+}
+
+#agent-tabs #--content-tab-agent-cycle-tab.-active {
+    background: #d97706 25%;
+    color: #fbbf24;
+    border: heavy #d97706;
+    text-style: bold;
+}
+
+#agent-tabs #--content-tab-agent-threads-tab {
+    border-top: heavy $error;
+}
+
+#agent-tabs #--content-tab-agent-threads-tab.-active {
+    background: $error 25%;
+    color: $text;
+    border: heavy $error;
+    text-style: bold;
+}
+
+/* Summary Frames tab — teal */
+#agent-tabs #--content-tab-agent-frames-tab {
+    border-top: heavy #0d9488;
+}
+
+#agent-tabs #--content-tab-agent-frames-tab.-active {
+    background: #0d9488 25%;
+    color: $text;
+    border: heavy #0d9488;
+    text-style: bold;
+}
+
+/* IDE Integration tab — magenta, matching the 'ide' agent status colour */
+#agent-tabs #--content-tab-agent-ide-tab {
+    border-top: heavy #c026d3;
+}
+
+#agent-tabs #--content-tab-agent-ide-tab.-active {
+    background: #c026d3 25%;
+    color: #f0abfc;
+    border: heavy #c026d3;
+    text-style: bold;
+}
+
+/* Game Detail Sub-Modal */
+GameDetailModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#game-detail-dialog {
+    width: 75%;
+    height: 80%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $warning;
+}
+
+/* Awareness Detail Sub-Modal */
+AwarenessDetailModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#awareness-detail-dialog {
+    width: 65%;
+    height: auto;
+    max-height: 75%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $accent;
+}
+
+/* ── Full-width sole Close button ─────────────── */
+
+.modal-close-btn {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+}
+
+/* ── SYCL Activation Modal ──────────────────── */
+
+SyclActivationModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#sycl-dialog {
+    width: 60%;
+    height: auto;
+    max-height: 70%;
+    padding: 1 2;
+    background: $surface;
+    border: thick #d97706;
+}
+
+#sycl-title {
+    margin-bottom: 1;
+    border-bottom: solid #d97706;
+    padding-bottom: 1;
+}
+
+#sycl-status {
+    margin-top: 1;
+    padding: 1;
+    min-height: 3;
+}
+
+#sycl-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#sycl-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+/* ── Edit / Delete Memory Sub-Modals ─────────── */
+
+EditMemoryRowModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+DeleteMemoryConfirmModal {
+    align: center middle;
+    background: $surface 80%;
+}
+
+#edit-memory-dialog {
+    width: 50%;
+    height: auto;
+    max-height: 30%;
+    padding: 1 2;
+    background: $surface;
+    border: thick $primary;
+}
+
+#edit-mem-title {
+    margin-bottom: 1;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+#edit-mem-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#edit-mem-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    height: 3;
+}
+
+#skills-registry-table {
+    height: 1fr;
+    min-height: 0;
+    border: solid $primary;
+}
+
+#packages-table {
+    height: 1fr;
+    min-height: 0;
+    border: solid $error;
+}
+
+#packages-actions {
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+
+#packages-actions Button {
+    width: 1fr;
+    margin: 0 1;
+    min-width: 12;
+    height: 3;
+}

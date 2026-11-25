@@ -1,0 +1,53 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────
+# agictl — Versa AGi CLI Wrapper (V3)
+# ─────────────────────────────────────────────────────
+
+set -euo pipefail
+
+# ─── Check Python ──────────────────────
+PYTHON=""
+if [ -x "/opt/versa-agi/venv/bin/python3" ]; then
+    PYTHON="/opt/versa-agi/venv/bin/python3"
+elif command -v python3 &>/dev/null; then
+    PYTHON="python3"
+fi
+
+if [ -z "${PYTHON}" ]; then
+    echo "ERROR: Python 3 not found" >&2
+    exit 1
+fi
+
+# Locate core infra path via environment configuration
+PATHS_ENV="/etc/versa-agi/paths.env"
+if [ -f "${PATHS_ENV}" ]; then
+  source "${PATHS_ENV}"
+fi
+CORE_INFRA="${VERSA_CORE_INFRA:-/home/watchdog/core-infra}"
+
+for _arg in "$@"; do
+  case "${_arg}" in
+    --version|-V)
+      _ver="${VERSA_PRODUCT_VERSION:-}"
+      if ! [[ "${_ver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        _ver=""
+        for _vf in \
+            "${CORE_INFRA}/VERSION" \
+            "/home/watchdog/core-infra/VERSION" \
+            "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/VERSION"; do
+          if [ -f "${_vf}" ]; then
+            _ver="$(tr -d '[:space:]' < "${_vf}")"
+            break
+          fi
+        done
+      fi
+      echo "agictl ${_ver:-unknown}"
+      exit 0
+      ;;
+    --) break ;;
+  esac
+done
+
+# Execute the python CLI module
+export PYTHONPATH="${CORE_INFRA}:${PYTHONPATH:-}"
+exec ${PYTHON} "${CORE_INFRA}/agictl/cli.py" "$@"

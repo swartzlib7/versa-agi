@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="700"
+   height="200"
+   viewBox="0 0 700 200"
+   version="1.1"
+   id="svg6"
+   sodipodi:docname="ugpn-symbol-v1.svg"
+   inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs6" />
+  <sodipodi:namedview
+     id="namedview6"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="1.0370899"
+     inkscape:cx="354.35692"
+     inkscape:cy="117.15474"
+     inkscape:window-width="1920"
+     inkscape:window-height="1043"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg6" />
+  <!-- Base shadow / ambient glow -->
+  <path
+     d="m 41.252911,100 c 0,-57.955321 88.213449,-57.955321 176.426909,0 88.21345,57.95532 176.42691,57.95532 264.64036,0 88.21345,-57.955321 176.42691,-57.955321 176.42691,0 0,57.95532 -88.21346,57.95532 -176.42691,0 -88.21345,-57.955321 -176.42691,-57.955321 -264.64036,0 -88.21346,57.95532 -176.426909,57.95532 -176.426909,0 z"
+     fill="none"
+     stroke="#004635"
+     stroke-width="19.067"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     id="path1"
+     style="display:inline" />
+  <!-- Mid glow -->
+  <path
+     d="m 41.252911,100 c 0,-57.955321 88.213449,-57.955321 176.426909,0 88.21345,57.95532 176.42691,57.95532 264.64036,0 88.21345,-57.955321 176.42691,-57.955321 176.42691,0 0,57.95532 -88.21346,57.95532 -176.42691,0 -88.21345,-57.955321 -176.42691,-57.955321 -264.64036,0 -88.21346,57.95532 -176.426909,57.95532 -176.426909,0 z"
+     fill="none"
+     stroke="#008e72"
+     stroke-width="9.53351"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     id="path2"
+     style="display:none" />
+  <!-- Main line (Tech Cyan) -->
+  <path
+     d="m 41.252911,100 c 0,-57.955321 88.213449,-57.955321 176.426909,0 88.21345,57.95532 176.42691,57.95532 264.64036,0 88.21345,-57.955321 176.42691,-57.955321 176.42691,0 0,57.95532 -88.21346,57.95532 -176.42691,0 -88.21345,-57.955321 -176.42691,-57.955321 -264.64036,0 -88.21346,57.95532 -176.426909,57.95532 -176.426909,0 z"
+     fill="none"
+     stroke="#00ffcc"
+     stroke-width="2.97922"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     id="path3"
+     style="display:inline" />
+  <!-- Decorative nodes at crossovers (representing nodes in the uGPN network) -->
+</svg>

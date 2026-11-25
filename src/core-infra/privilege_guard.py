@@ -1,0 +1,217 @@
+"""Privilege-escalation patterns shared by the harness and execute CLI.
+
+COA Autonomous Mode lifts the text scanner when the caller is COA and the
+sudoers grant file exists (that is what the OS will run). Lifeline may also
+export VERSA_COA_AUTONOMOUS; a passed env dict is honored as-is (tests).
+"""
+from __future__ import annotations
+
+import os
+import re
+
+BLOCKED_PATTERNS = (
+    "sudo ",
+    "sudo\t",
+    " sudo ",
+    "su ",
+    "su\t",
+    " su ",
+    "newgrp ",
+    "pkexec ",
+    "gpasswd ",
+    "usermod ",
+)
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# In an agent's own process this is the cycle's copy with the secret values
+# blanked (Lifeline names it); in agictl, as watchdog, the system file.
+SETUP_INI = os.environ.get("AGICTL_SETUP_INI") or "/etc/versa-agi/setup.ini"
+SUDOERS_COA_AUTONOMOUS = "/etc/sudoers.d/versa_agi_coa_autonomous"
+
+
+def privilege_escalation_hit(text: str) -> str | None:
+    """Return the matched pattern if *text* looks like privilege escalation."""
+    if not text:
+        return None
+    lowered = text.lower()
+    for pattern in BLOCKED_PATTERNS:
+        if pattern in lowered or lowered.startswith(pattern.strip()):
+            return pattern.strip()
+    return None
+
+
+def _ini_value(section: str, key: str, ini_path: str = SETUP_INI) -> str:
+    try:
+        current = ""
+        with open(ini_path, encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    current = stripped[1:-1].strip().lower()
+                    continue
+                if current != section:
+                    continue
+                eq = stripped.find("=")
+                if eq <= 0:
+                    continue
+                if stripped[:eq].strip() == key:
+                    return stripped[eq + 1 :].strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def _coa_os_user() -> str:
+    env_u = (os.environ.get("VERSA_COA_USER") or "").strip().lower()
+    if env_u:
+        return env_u
+    ini_u = _ini_value("users", "coa").lower()
+    return ini_u or "coa"
+
+
+def _is_coa_caller(src: dict) -> bool:
+    coa = _coa_os_user()
+    aliases = {"coa", coa}
+    name = (src.get("VERSA_AGENT_NAME") or "").strip().lower()
+    stamp = (src.get("AGICTL_AGENT_USER") or "").strip().lower()
+    return name in aliases or stamp in aliases
+
+
+def grant_landed_on_disk(
+    ini_path: str = SETUP_INI,
+    sudoers_path: str = SUDOERS_COA_AUTONOMOUS,
+) -> bool:
+    """True when INI is on and the sudoers grant is there (`sudoers_grant_present`)."""
+    if not sudoers_grant_present(sudoers_path):
+        return False
+    return _ini_value("coa", "autonomous", ini_path).lower() == "true"
+
+
+_SUDO_ANSWER: dict[str, bool] = {}
+
+
+def _sudo_answers(coa_user: str) -> bool:
+    """Ask sudo itself whether the COA OS user may run it without a password.
+
+    Used only when the grant folder cannot be read. One question per process.
+    """
+    if coa_user in _SUDO_ANSWER:
+        return _SUDO_ANSWER[coa_user]
+    import pwd
+    import subprocess
+
+    sudo = os.environ.get("VERSA_SUDO_BIN") or "sudo"
+    try:
+        me = pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        me = ""
+    # As the COA user: ask directly. As watchdog (agictl) or root: ask as that user.
+    command = [sudo, "-n", "true"] if me == coa_user else [sudo, "-n", "-u", coa_user, sudo, "-n", "true"]
+    try:
+        answer = subprocess.run(command, capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        answer = False
+    _SUDO_ANSWER[coa_user] = answer
+    return answer
+
+
+def sudoers_grant_present(sudoers_path: str = SUDOERS_COA_AUTONOMOUS) -> bool:
+    """The OS grant — scanner lift follows this file, not INI readability.
+
+    Some systems keep ``/etc/sudoers.d`` readable by root only (mode 0750; the
+    sudo package of Ubuntu 24.04 ships it 0755, newer Debian packaging 0750),
+    so from the agent's or watchdog's account the file cannot be seen even when
+    it is there (a sentinel on a cloud server, 2026-11-21: the grant was written
+    and COA was told it had not landed). When the folder cannot be entered, sudo
+    itself is asked. When it can be entered, the file is the answer.
+    """
+    if os.path.isfile(sudoers_path):
+        return True
+    if os.access(os.path.dirname(sudoers_path) or ".", os.X_OK):
+        return False
+    return _sudo_answers(_coa_os_user())
+
+
+def coa_autonomous_allowed(env: dict | None = None) -> bool:
+    """True only for COA when the Autonomous grant is in effect.
+
+    Lifeline exports ``VERSA_COA_AUTONOMOUS``. When *env* is omitted (live
+    process), the sudoers file is enough — that is what ``sudo`` will honor.
+    Requiring INI∧file left the scanner on after a landed grant when INI
+    could not be read or lagged the file. A passed dict is honored as-is
+    (tests) and never reads disk.
+    """
+    src = env if env is not None else os.environ
+    if not _is_coa_caller(src):
+        return False
+    flag = (src.get("VERSA_COA_AUTONOMOUS") or "").strip().lower()
+    if flag in _TRUTHY:
+        return True
+    if env is not None:
+        return False
+    return sudoers_grant_present()
+
+
+_COA_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
+
+
+def sudoers_line(coa_user: str) -> str:
+    """One visudo-safe sudoers line for the COA OS user."""
+    user = (coa_user or "").strip()
+    if not _COA_USER_RE.fullmatch(user):
+        raise ValueError(f"invalid COA OS user {user!r}")
+    return f"{user} ALL=(ALL) NOPASSWD: ALL\n"
+
+
+def refuse_agent_coa_autonomous(
+    want_enabled: bool,
+    agent_user: str | None,
+    coa_user: str,
+) -> str | None:
+    """Error if an agent-stamped caller may not write ``coa.autonomous``.
+
+    PU (no stamp) may enable or disable. COA may only disable. Sub-agents
+    cannot write this key.
+    """
+    stamp = (agent_user or "").strip()
+    if not stamp:
+        return None
+    if want_enabled:
+        return (
+            "COA cannot enable its own autonomous sudo. "
+            "The Primary User enables it in System Settings or VersaVoice."
+        )
+    if stamp != (coa_user or "").strip():
+        return (
+            "Only the COA may disarm autonomous sudo. "
+            "Sub-agents cannot change this grant."
+        )
+    return None
+
+
+def coa_autonomous_changed_since_sync(local: bool, last_synced) -> bool:
+    """True when this host must push ``coaAutonomous`` up on the next sync.
+
+    ``last_synced`` is the value recorded after the previous successful sync.
+    No record yet counts as changed so the first sync seeds VersaVoice.
+    Unchanged means VersaVoice owns the value and the GET is applied.
+    """
+    if not isinstance(last_synced, bool):
+        return True
+    return bool(local) != last_synced
+
+
+def install_role_change_allowed(current: str, desired: str) -> tuple[bool, str]:
+    """Sentinel → normal is a promote. Normal → sentinel is refused."""
+    cur = (current or "normal").strip().lower() or "normal"
+    dest = (desired or "").strip().lower()
+    if dest not in ("normal", "sentinel"):
+        return False, "install_role must be 'normal' or 'sentinel'"
+    if cur == dest:
+        return True, ""
+    if cur == "sentinel" and dest == "normal":
+        return True, ""
+    if cur == "normal" and dest == "sentinel":
+        return False, "Cannot convert a normal install to Sentinel. No downgrade path."
+    return False, f"Cannot change install_role from {cur} to {dest}"

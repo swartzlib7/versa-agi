@@ -1,0 +1,192 @@
+"""Validate local image paths for agictl view / harness modality tools."""
+from __future__ import annotations
+
+import db_connect
+
+
+import os
+import sqlite3
+
+from model_drivers.libraries.chat_image_in_content_parts import (
+    _guess_image_mime,
+    read_image_base64,
+)
+from model_drivers.libraries.chat_video_in_content_parts import (
+    MAX_VIDEO_BYTES,
+    VIDEO_EXTENSIONS,
+    _guess_video_mime,
+)
+from model_drivers.message_adapters import IMAGE_EXTENSIONS
+
+AGENTS_DB = os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+
+
+class ViewPathError(Exception):
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+def _agent_workspace(agent_name: str) -> str:
+    agent_dir = os.environ.get("AGICTL_AGENT_DIR", "").strip()
+    if agent_dir:
+        return os.path.dirname(agent_dir)
+
+    conn = db_connect.connect_compat(AGENTS_DB, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
+    conn.close()
+    if not row or not row["workspace"]:
+        raise ViewPathError("agent_not_found", f"Agent '{agent_name}' has no workspace")
+    return row["workspace"]
+
+
+def resolve_view_image_path(path: str, agent_name: str = "") -> str:
+    """Resolve a local image path. Relative paths are resolved from the agent workspace."""
+    if not path or not str(path).strip():
+        raise ViewPathError("path_required", "Image path is required")
+
+    raw = os.path.expanduser(str(path).strip())
+    # Local files only — remote fetch would introduce SSRF risk on the agent host.
+    # Use browser screenshot or download to a local path first, then view.
+    if "://" in raw and not raw.lower().startswith("file://"):
+        raise ViewPathError("not_local", "Remote URLs are not supported — provide a local file path")
+    if raw.lower().startswith("file://"):
+        raw = raw[7:]
+
+    if not os.path.isabs(raw):
+        if agent_name:
+            try:
+                raw = os.path.join(_agent_workspace(agent_name), raw)
+            except ViewPathError:
+                raw = os.path.abspath(raw)
+        else:
+            raw = os.path.abspath(raw)
+
+    real = os.path.realpath(raw)
+    if not os.path.isfile(real):
+        raise ViewPathError("not_found", f"File not found: {real}")
+    if not os.access(real, os.R_OK):
+        raise ViewPathError("not_readable", f"Cannot read file: {real}")
+
+    ext = os.path.splitext(real)[1].lower()
+    mime = _guess_image_mime(real)
+    if ext not in IMAGE_EXTENSIONS and not mime.startswith("image/"):
+        raise ViewPathError("not_image", f"Not a supported image file: {real}")
+
+    return real
+
+
+def inspect_image_for_view(path: str, agent_name: str) -> dict:
+    """Validate path and return JSON-serializable metadata for view tools."""
+    from model_drivers.image_processing import prepare_image_for_view
+
+    real = resolve_view_image_path(path, agent_name)
+    inject_path, proc_meta = prepare_image_for_view(real, agent_name)
+    mime, _b64 = read_image_base64(inject_path)
+    size = os.path.getsize(inject_path)
+    result = {
+        "success": True,
+        "path": inject_path,
+        "source_path": real,
+        "mime": mime,
+        "bytes": size,
+        "modality": "image",
+        "agent": agent_name,
+    }
+    if proc_meta.get("processed"):
+        result["processed"] = True
+        if proc_meta.get("resized_from"):
+            result["resized_from"] = proc_meta["resized_from"]
+            result["resized_to"] = proc_meta["resized_to"]
+    elif proc_meta.get("processing_skipped"):
+        result["processing_note"] = proc_meta["processing_skipped"]
+    elif proc_meta.get("processing_error"):
+        result["processing_note"] = proc_meta["processing_error"]
+    return result
+
+
+def video_byte_limit_for_model(execution_model: str | None) -> int:
+    """OpenRouter ``video_url`` is 200 MB; native Google inline is 20 MB."""
+    from model_drivers.libraries.chat_video_in_google_media import (
+        ADAPTER_ID as GOOGLE_VIDEO_ADAPTER,
+        MAX_VIDEO_BYTES as GOOGLE_VIDEO_BYTES,
+    )
+    from model_drivers.registry import resolve_model_driver
+
+    key = (execution_model or "").strip()
+    if not key:
+        return MAX_VIDEO_BYTES
+    resolved = resolve_model_driver(key, "input", "video")
+    if resolved and resolved.adapter.adapter_id == GOOGLE_VIDEO_ADAPTER:
+        return GOOGLE_VIDEO_BYTES
+    return MAX_VIDEO_BYTES
+
+
+def resolve_view_video_path(
+    path: str,
+    agent_name: str = "",
+    *,
+    max_bytes: int | None = None,
+) -> str:
+    """Resolve a local video path. Relative paths resolve from the agent workspace."""
+    if not path or not str(path).strip():
+        raise ViewPathError("path_required", "Video path is required")
+
+    raw = os.path.expanduser(str(path).strip())
+    if "://" in raw and not raw.lower().startswith("file://"):
+        raise ViewPathError("not_local", "Remote URLs are not supported — provide a local file path")
+    if raw.lower().startswith("file://"):
+        raw = raw[7:]
+
+    if not os.path.isabs(raw):
+        if agent_name:
+            try:
+                raw = os.path.join(_agent_workspace(agent_name), raw)
+            except ViewPathError:
+                raw = os.path.abspath(raw)
+        else:
+            raw = os.path.abspath(raw)
+
+    real = os.path.realpath(raw)
+    if not os.path.isfile(real):
+        raise ViewPathError("not_found", f"File not found: {real}")
+    if not os.access(real, os.R_OK):
+        raise ViewPathError("not_readable", f"Cannot read file: {real}")
+
+    ext = os.path.splitext(real)[1].lower()
+    if ext not in VIDEO_EXTENSIONS:
+        raise ViewPathError(
+            "not_video",
+            f"Not a supported video file (mp4, mkv, mov): {real}",
+        )
+    limit = MAX_VIDEO_BYTES if max_bytes is None else int(max_bytes)
+    size = os.path.getsize(real)
+    if size > limit:
+        limit_mb = max(1, limit // (1024 * 1024))
+        raise ViewPathError(
+            "too_large",
+            f"Video exceeds the {limit_mb} MB ingest limit: {real}",
+        )
+    return real
+
+
+def inspect_video_for_view(
+    path: str,
+    agent_name: str,
+    execution_model: str | None = None,
+) -> dict:
+    """Validate path and return JSON-serializable metadata for video view tools."""
+    limit = video_byte_limit_for_model(execution_model)
+    real = resolve_view_video_path(path, agent_name, max_bytes=limit)
+    mime = _guess_video_mime(real)
+    return {
+        "success": True,
+        "path": real,
+        "source_path": real,
+        "mime": mime,
+        "bytes": os.path.getsize(real),
+        "modality": "video",
+        "agent": agent_name,
+    }

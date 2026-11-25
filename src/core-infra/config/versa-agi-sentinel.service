@@ -1,0 +1,22 @@
+[Unit]
+Description=Versa AGi Sentinel — Reactive File Watcher
+After=network.target
+
+[Service]
+Type=simple
+User=watchdog
+Group=watchdog
+ExecStart=/home/watchdog/core-infra/sentinel.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=versa-agi-sentinel
+
+# Security: sentinel runs as watchdog, which already has restricted permissions.
+# ProtectSystem=strict is NOT used because sentinel invokes lifeline.sh
+# which requires broad filesystem access (sudo -u coa, agent workspaces, etc).
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

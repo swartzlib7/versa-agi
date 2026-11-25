@@ -1,0 +1,12 @@
+# Gitignored — Sub-agent working directories (each is an independent repo clone)
+agents/
+
+# Gemini CLI session data
+.gemini/history/
+.gemini/tmp/
+
+# Lock files
+*.lock
+
+# OS
+.DS_Store

@@ -1,0 +1,96 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────
+# Versa AGi — Agent Telemetry Database Initialization
+#
+# Creates the cycles.db schema.
+# Location: /var/lib/versa-agi/coa/cycles.db
+# Access: Watchdog (via agictl)
+# ─────────────────────────────────────────────────────
+
+set -euo pipefail
+
+DB_PATH="${1:-/var/lib/versa-agi/coa/cycles.db}"
+
+echo "Initializing cycles database: ${DB_PATH}"
+
+sqlite3 "${DB_PATH}" <<'SQL'
+CREATE TABLE IF NOT EXISTS cycles (
+  id            TEXT PRIMARY KEY,
+  started_at    DATETIME NOT NULL DEFAULT (datetime('now')),
+  ended_at      DATETIME,
+  exit_code     INTEGER,
+  summary       TEXT,
+  system_prompt TEXT,
+  spawn_prompt  TEXT,
+  messages_sent INTEGER DEFAULT 0,
+  messages_recv INTEGER DEFAULT 0,
+  tasks_done    INTEGER DEFAULT 0,
+  tokens_input  INTEGER DEFAULT 0,
+  tokens_output INTEGER DEFAULT 0,
+  tokens_thinking INTEGER DEFAULT 0,
+  tokens_cached INTEGER DEFAULT 0,
+  tokens_total  INTEGER DEFAULT 0,
+  json_output_path TEXT,
+  session_start_ts DATETIME,
+  last_awareness_ts DATETIME,
+  errors        TEXT,
+  wake_reason   TEXT,
+  handoff       TEXT,
+  checkins      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS config (
+  key           TEXT PRIMARY KEY,
+  value         TEXT NOT NULL,
+  updated_at    DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+SQL
+
+# Add token tracking columns to cycles if upgrading from earlier schema
+if ! sqlite3 "${DB_PATH}" "SELECT tokens_input FROM cycles LIMIT 0;" 2>/dev/null; then
+  sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN tokens_input INTEGER DEFAULT 0;" 2>/dev/null
+  sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN tokens_output INTEGER DEFAULT 0;" 2>/dev/null
+  sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN tokens_thinking INTEGER DEFAULT 0;" 2>/dev/null
+  sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN tokens_total INTEGER DEFAULT 0;" 2>/dev/null
+  echo "Migration: added token tracking columns to cycles"
+fi
+
+# Add awareness enforcement gate columns if upgrading from earlier schema
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN session_start_ts DATETIME;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN last_awareness_ts DATETIME;" 2>/dev/null || true
+
+# Model routing audit columns (modality routing plan)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN assigned_model TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN execution_model TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN routing_mode TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN routing_work_modality TEXT;" 2>/dev/null || true
+
+# Cost estimates (TD-COST-001)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN cost_usd_estimated REAL;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN pricing_source TEXT;" 2>/dev/null || true
+
+# Spawn handoff (state_spawn_context.md §1.12)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN wake_reason TEXT;" 2>/dev/null || true
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN handoff TEXT;" 2>/dev/null || true
+
+# Harness check-in log, one line every 30 minutes (state_long_cycles.md §1.6)
+sqlite3 "${DB_PATH}" "ALTER TABLE cycles ADD COLUMN checkins TEXT;" 2>/dev/null || true
+
+sqlite3 "${DB_PATH}" <<'SQL'
+CREATE TABLE IF NOT EXISTS frames (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name   TEXT NOT NULL,
+  cycle_id     TEXT,
+  thread_id    TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'rolled')),
+  frame_start  TEXT NOT NULL,
+  frame_end    TEXT NOT NULL,
+  summary      TEXT NOT NULL,
+  message_ids  TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_frames_agent_thread ON frames(agent_name, thread_id, status);
+SQL
+
+echo "Cycles database initialized: ${DB_PATH}"
+echo "Tables: cycles, config, frames"

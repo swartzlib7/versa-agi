@@ -1,0 +1,744 @@
+"""
+System reader — CRON state, disk, memory, processes.
+"""
+
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+
+import glob
+import os
+import re
+import shutil
+import subprocess
+import time
+from typing import Optional
+
+# Lifeline writes /tmp/versa_agi_<agent>.cooldown. Names are registry keys.
+_SPAWN_HOLD_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+SPAWN_HOLD_DIR = "/tmp"
+
+
+def list_spawn_holds(directory: str = SPAWN_HOLD_DIR, now: Optional[int] = None) -> list:
+    """Active spawn holds. Each item is agent, remaining_seconds, and type.
+
+    type is ``quota`` when at least 30 minutes remain (the 1-hour quota pause),
+    otherwise ``rate_limit`` (429 / 503). Expired files are omitted.
+    """
+    if now is None:
+        now = int(time.time())
+    holds = []
+    for path in sorted(glob.glob(os.path.join(directory, "versa_agi_*.cooldown"))):
+        filename = os.path.basename(path)
+        agent = filename[len("versa_agi_"):-len(".cooldown")]
+        if not _SPAWN_HOLD_AGENT.match(agent):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                resume_at = int(handle.read().strip())
+        except (ValueError, OSError):
+            continue
+        if resume_at <= now:
+            continue
+        remaining = resume_at - now
+        holds.append({
+            "agent": agent,
+            "remaining_seconds": remaining,
+            "type": "quota" if remaining >= 1800 else "rate_limit",
+        })
+    holds.sort(key=lambda row: row["remaining_seconds"], reverse=True)
+    return holds
+
+
+# The link service's own report (TD-LINK-001): "<up|down|off> <epoch> <detail>".
+LINK_STATE_FILE = "/var/lib/versa-agi/link_state"
+LINK_FRESH_SECONDS = 120   # the limit lifeline.sh uses (_vv_link_up)
+
+
+def read_link_state(path: str = LINK_STATE_FILE, now: Optional[int] = None) -> dict:
+    """The link to VersaVoice as the link service last reported it.
+
+    Returns {state, detail}. state is ``up``, ``down``, ``off``, or ``none``
+    when there is no report (the service is not installed or has not run).
+    ``up`` holds only while the report is fresh, as it does for Lifeline: a
+    service that stopped reporting is ``down``.
+    """
+    if now is None:
+        now = int(time.time())
+    try:
+        stamp = int(os.stat(path).st_mtime)
+        with open(path, encoding="utf-8") as handle:
+            words = handle.readline().strip().split(" ", 2)
+    except (OSError, ValueError):
+        return {"state": "none", "detail": ""}
+    state = words[0] if words and words[0] in ("up", "down", "off") else "none"
+    detail = words[2] if len(words) > 2 else ""
+    if state == "up" and now - stamp > LINK_FRESH_SECONDS:
+        return {"state": "down", "detail": f"no report for {(now - stamp) // 60} min"}
+    return {"state": state, "detail": detail}
+
+
+def lift_spawn_hold(agent: str, directory: str = SPAWN_HOLD_DIR) -> bool:
+    """Delete one agent's cooldown file. Does not change model or agent status.
+
+    ``sudo rm`` is used only for the live ``/tmp`` directory when the file
+    is not writable by this user. A test directory never calls sudo.
+    """
+    if not agent or not _SPAWN_HOLD_AGENT.match(agent):
+        return False
+    directory_real = os.path.realpath(directory)
+    path = os.path.join(directory_real, f"versa_agi_{agent}.cooldown")
+    if os.path.dirname(os.path.realpath(path)) != directory_real:
+        return False
+    if not os.path.lexists(path):
+        return True
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        if os.path.realpath(directory) != os.path.realpath(SPAWN_HOLD_DIR):
+            return False
+        try:
+            subprocess.run(
+                ["sudo", "rm", "-f", path],
+                capture_output=True, timeout=5, check=False,
+            )
+        except Exception:
+            return False
+    return not os.path.lexists(path)
+
+
+class SystemReader:
+    """Reads system-level infrastructure state."""
+
+    # Canonical Lifeline OFF flag — lifeline.sh / File Monitor honor this.
+    LIFELINE_DISABLED_FLAG = "/var/lib/versa-agi/lifeline.disabled"
+
+    def __init__(self, coa_user: str = "coa", watchdog_user: str = "watchdog"):
+        self.coa_user = coa_user
+        self.watchdog_user = watchdog_user
+
+    def _lifeline_flag_path(self) -> str:
+        return self.LIFELINE_DISABLED_FLAG
+
+    def _set_lifeline_disabled_flag(self, disabled: bool) -> None:
+        """Create or remove the hard OFF flag (sudo fallback)."""
+        path = self._lifeline_flag_path()
+        if disabled:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "a", encoding="utf-8"):
+                    pass
+                return
+            except OSError:
+                pass
+            try:
+                subprocess.run(
+                    ["sudo", "mkdir", "-p", os.path.dirname(path)],
+                    capture_output=True, timeout=5, check=False,
+                )
+                subprocess.run(
+                    ["sudo", "touch", path],
+                    capture_output=True, timeout=5, check=False,
+                )
+                subprocess.run(
+                    ["sudo", "chown", f"{self.watchdog_user}:{self.watchdog_user}", path],
+                    capture_output=True, timeout=5, check=False,
+                )
+            except Exception:
+                pass
+            return
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            pass
+        try:
+            subprocess.run(
+                ["sudo", "rm", "-f", path],
+                capture_output=True, timeout=5, check=False,
+            )
+        except Exception:
+            pass
+
+    def get_cpu_usage(self) -> str:
+        """Get current CPU utilization using psutil if available."""
+        try:
+            import psutil
+            pct = psutil.cpu_percent(interval=0.1)
+            cores = psutil.cpu_count(logical=True) or 0
+            freq = psutil.cpu_freq()
+            speed_ghz = (freq.current / 1000.0) if freq else 0.0
+            if speed_ghz:
+                return f"{pct:.0f}% · {cores} cores @ {speed_ghz:.1f}GHz"
+            return f"{pct:.0f}% · {cores} cores"
+        except ImportError:
+            return "--"
+
+    @staticmethod
+    def _format_bytes_gb(num_bytes: float) -> str:
+        gb = num_bytes / (1024 ** 3)
+        if gb >= 100:
+            return f"{gb:.0f}G"
+        if gb >= 10:
+            return f"{gb:.1f}G"
+        return f"{gb:.2f}G"
+
+    def get_disk_free(self) -> str:
+        """Get free and total disk space on root partition."""
+        try:
+            usage = shutil.disk_usage("/")
+            free = self._format_bytes_gb(usage.free)
+            total = self._format_bytes_gb(usage.total)
+            return f"{free} free / {total}"
+        except Exception:
+            return "--"
+
+    def get_memory_free(self) -> str:
+        """Get available and total memory."""
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            avail = self._format_bytes_gb(mem.available)
+            total = self._format_bytes_gb(mem.total)
+            return f"{avail} free / {total}"
+        except ImportError:
+            pass
+        try:
+            result = subprocess.run(
+                ["free", "-m"],
+                capture_output=True, text=True, timeout=3,
+            )
+            for line in result.stdout.splitlines():
+                if line.startswith("Mem:"):
+                    parts = line.split()
+                    total_mb = int(parts[1]) if len(parts) >= 2 else 0
+                    avail_mb = int(parts[6]) if len(parts) >= 7 else int(parts[3])
+                    total = self._format_bytes_gb(total_mb * 1024 * 1024)
+                    avail = self._format_bytes_gb(avail_mb * 1024 * 1024)
+                    return f"{avail} free / {total}"
+        except Exception:
+            pass
+        return "--"
+
+    def is_cron_enabled(self) -> bool:
+        """Check if Lifeline is ON (flag absent and crontab lifeline line active)."""
+        if os.path.exists(self._lifeline_flag_path()):
+            return False
+
+        def check_output(out: str) -> bool:
+            for line in out.splitlines():
+                line = line.strip()
+                if line and "lifeline" in line.lower() and not line.startswith("#"):
+                    return True
+            return False
+
+        try:
+            result = subprocess.run(
+                ["crontab", "-u", self.watchdog_user, "-l"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if check_output(result.stdout):
+                return True
+        except Exception:
+            pass
+
+        # May need sudo — try without -u
+        try:
+            result = subprocess.run(
+                ["sudo", "crontab", "-u", self.watchdog_user, "-l"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if check_output(result.stdout):
+                return True
+        except Exception:
+            pass
+            
+        return False
+
+    def get_cron_interval(self) -> Optional[str]:
+        """Get the CRON schedule expression."""
+        try:
+            result = subprocess.run(
+                ["sudo", "crontab", "-u", self.watchdog_user, "-l"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "lifeline" in line.lower():
+                    # Return the cron schedule part (first 5 fields)
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        return " ".join(parts[:5])
+        except Exception:
+            pass
+        return None
+
+    def toggle_cron(self) -> bool:
+        """Toggle Lifeline ON/OFF. Returns new state (True=enabled).
+
+        Writes the hard OFF flag (lifeline.sh honors it) and syncs the
+        watchdog crontab lifeline line.
+        """
+        try:
+            result = subprocess.run(
+                ["crontab", "-u", self.watchdog_user, "-l"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return self.is_cron_enabled()
+
+            is_on = self.is_cron_enabled()
+            # Flag first so a mid-toggle lifeline run cannot spawn
+            self._set_lifeline_disabled_flag(disabled=is_on)
+
+            new_lines = []
+            for line in result.stdout.splitlines():
+                if "lifeline" in line.lower():
+                    if is_on and not line.startswith("#"):
+                        # Disable: comment out with plain #
+                        line = "#" + line
+                    elif not is_on and line.startswith("#"):
+                        # Enable: strip leading # (one character)
+                        line = line[1:]
+                new_lines.append(line)
+
+            new_content = "\n".join(new_lines) + "\n"
+            write_result = subprocess.run(
+                ["crontab", "-u", self.watchdog_user, "-"],
+                input=new_content, capture_output=True, text=True, timeout=5,
+            )
+            if write_result.returncode != 0:
+                # Restore flag to pre-toggle state (is_on)
+                self._set_lifeline_disabled_flag(disabled=not is_on)
+                return self.is_cron_enabled()
+            return not is_on
+        except Exception:
+            return self.is_cron_enabled()
+
+    def kill_agents(self, os_users: Optional[list[str]] = None) -> None:
+        """Kill all LangGraph harness processes across agent OS users.
+
+        Args:
+            os_users: OS usernames to target. Defaults to [self.coa_user].
+        """
+        targets = os_users or [self.coa_user]
+        for user in targets:
+            try:
+                subprocess.run(
+                    ["pkill", "-f", "harness.agent_harness", "-u", user],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
+                
+        try:
+            # Reset zombie 'active' statuses using native Python sqlite3
+            # (the sqlite3 CLI fails with 'readonly database' due to WAL journal permissions)
+            import os, sqlite3
+            db_path = os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+            conn = db_connect.connect_compat(db_path)
+            conn.execute("UPDATE agents SET status='idle' WHERE status='active';")
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    def is_agent_process_running(self) -> bool:
+        """Check if a LangGraph harness process is running for the agent user."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-u", self.coa_user, "-f", "harness.agent_harness"],
+                capture_output=True, text=True, timeout=3,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def is_lifeline_process_running(self) -> bool:
+        """True if a lifeline.sh process is currently running."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", r"lifeline\.sh"],
+                capture_output=True, text=True, timeout=3,
+            )
+            return result.returncode == 0 and bool(result.stdout.strip())
+        except Exception:
+            return False
+
+    def get_cron_interval_minutes(self) -> int:
+        """Lifeline CRON interval in minutes (from crontab */N or setup.ini)."""
+        expr = self.get_cron_interval()
+        if expr:
+            first = expr.split()[0]
+            if first.startswith("*/"):
+                try:
+                    n = int(first[2:])
+                    if n >= 1:
+                        return n
+                except ValueError:
+                    pass
+        try:
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read("/etc/versa-agi/setup.ini")
+            n = int(cfg.get("agent", "cron_interval", fallback="1"))
+            return max(1, n)
+        except Exception:
+            return 1
+
+    def seconds_until_lifeline_tick(self) -> int:
+        """Seconds until the next CRON lifeline boundary (local clock)."""
+        from datetime import datetime
+        interval = self.get_cron_interval_minutes()
+        now = datetime.now()
+        mins_into = now.minute % interval
+        secs_into = mins_into * 60 + now.second
+        cycle_secs = interval * 60
+        remaining = cycle_secs - secs_into
+        return remaining if remaining > 0 else 0
+
+    def try_force_lifeline(
+        self,
+        *,
+        near_tick_seconds: int = 5,
+        lifeline_path: str = "/home/watchdog/core-infra/lifeline.sh",
+    ) -> tuple[bool, str]:
+        """Start lifeline.sh --force if safe.
+
+        Returns (ok, message). Refuses when Lifeline is OFF, already running,
+        or within ``near_tick_seconds`` of the next CRON boundary.
+        """
+        if not self.is_cron_enabled():
+            return False, "Lifeline is OFF — turn it ON in Controls first."
+        if self.is_lifeline_process_running():
+            return False, "Lifeline is already running."
+        remaining = self.seconds_until_lifeline_tick()
+        if remaining <= near_tick_seconds:
+            return False, (
+                f"CRON tick in {remaining}s — wait for the scheduled run."
+            )
+        if not os.path.isfile(lifeline_path):
+            return False, f"Lifeline script not found: {lifeline_path}"
+        try:
+            subprocess.Popen(
+                ["sudo", "-u", self.watchdog_user, lifeline_path, "--force"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "Lifeline started (manual)."
+        except Exception as e:
+            return False, f"Failed to start Lifeline: {e}"
+
+    def get_link_status(self) -> dict:
+        """The link to VersaVoice: {state, detail} (see read_link_state)."""
+        return read_link_state()
+
+    def is_sentinel_running(self) -> bool:
+        """Check if the Sentinel file watcher (inotifywait) is running."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-u", self.watchdog_user, "-f", "inotifywait"],
+                capture_output=True, text=True, timeout=3,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def get_uptime(self) -> str:
+        """Get system uptime."""
+        try:
+            result = subprocess.run(
+                ["uptime", "-p"],
+                capture_output=True, text=True, timeout=3,
+            )
+            text = result.stdout.strip()
+            # "up 3 days, 14 hours, 22 minutes" → "3d 14h"
+            text = text.replace("up ", "")
+            parts = []
+            for segment in text.split(","):
+                segment = segment.strip()
+                if "day" in segment:
+                    parts.append(segment.split()[0] + "d")
+                elif "hour" in segment:
+                    parts.append(segment.split()[0] + "h")
+                elif "minute" in segment:
+                    parts.append(segment.split()[0] + "m")
+            return " ".join(parts) if parts else text
+        except Exception:
+            return "--"
+
+    def is_logging_enabled(self) -> bool:
+        """Check if lifeline logging is enabled via paths.env."""
+        paths_env = "/etc/versa-agi/paths.env"
+        try:
+            with open(paths_env, "r") as f:
+                for line in f:
+                    if line.startswith("VERSA_LOGGING_ENABLED="):
+                        return line.strip().split("=", 1)[1].strip('"').lower() == "true"
+        except Exception:
+            pass
+        return True  # default enabled
+
+    def toggle_logging(self) -> bool:
+        """Toggle VERSA_LOGGING_ENABLED in paths.env. Returns new state."""
+        paths_env = "/etc/versa-agi/paths.env"
+        current = self.is_logging_enabled()
+        new_val = "false" if current else "true"
+        try:
+            # Check if variable exists in file
+            result = subprocess.run(
+                ["sudo", "grep", "-q", "^VERSA_LOGGING_ENABLED=", paths_env],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode == 0:
+                # Variable exists — replace in-place
+                subprocess.run(
+                    ["sudo", "sed", "-i",
+                     f"s/^VERSA_LOGGING_ENABLED=.*/VERSA_LOGGING_ENABLED=\"{new_val}\"/",
+                     paths_env],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                # Variable missing — append it
+                subprocess.run(
+                    ["sudo", "bash", "-c",
+                     f"echo 'VERSA_LOGGING_ENABLED=\"{new_val}\"' >> {paths_env}"],
+                    capture_output=True, timeout=5,
+                )
+            return not current
+        except Exception:
+            return current
+
+    def get_cooldown_status(self) -> Optional[dict]:
+        """Check if any agent is in API cooldown.
+
+        Reads /tmp/versa_agi_{agent}.cooldown marker files written by
+        lifeline.sh's rate-limit handler. Each file contains a Unix epoch
+        timestamp indicating when the agent may resume.
+
+        Returns:
+            dict with 'type' ('quota' or 'rate_limit'), 'agent', and
+            'remaining_seconds', or None if no cooldown is active.
+        """
+        holds = list_spawn_holds()
+        if not holds:
+            return None
+        worst = holds[0]
+        return {
+            "type": worst["type"],
+            "agent": worst["agent"],
+            "remaining_seconds": worst["remaining_seconds"],
+        }
+
+    def is_inference_endpoint_running(self) -> bool:
+        """Check if Inference Endpoint is available.
+
+        Handles multiple backends:
+          - Ollama (standard/remote): 'ollama serve' process
+          - Intel SYCL: llama-server process
+          - Remote: HTTP reachability check on VERSA_INFERENCE_URL
+        """
+        # Check for local Ollama process
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "ollama serve"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+        # Check for Intel SYCL / llama-server process (legacy pgrep name retained)
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "llama-server"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+        # Fallback: HTTP health check on configured inference URL (handles remote backends)
+        inference_url = self._read_paths_env("VERSA_INFERENCE_URL", "")
+        if inference_url:
+            try:
+                import urllib.request
+                req = urllib.request.Request(inference_url, method="GET")
+                urllib.request.urlopen(req, timeout=3)
+                return True
+            except Exception:
+                pass
+
+        return False
+
+    def is_local_ai_enabled(self) -> bool:
+        """Check VERSA_LOCAL_AI_ENABLED in paths.env."""
+        return self._read_paths_env("VERSA_LOCAL_AI_ENABLED", "false").lower() == "true"
+
+    def get_execution_mode(self) -> str:
+        """Get execution mode from paths.env: cloud, local, or hybrid."""
+        return self._read_paths_env("VERSA_EXECUTION_MODE", "cloud")
+
+    def get_gpu_backend(self) -> str:
+        """Get GPU backend from paths.env: standard, intel, or remote."""
+        return self._read_paths_env("VERSA_GPU_BACKEND", "standard")
+
+    def get_topology(self) -> str:
+        """Get deployment topology: local, server, or client.
+
+        Reads from setup.ini [local_ai] topology key.
+        Falls back to 'local' if not configured.
+        """
+        ini_path = "/etc/versa-agi/setup.ini"
+        if not os.path.isfile(ini_path):
+            return "local"
+        try:
+            import configparser
+            cfg = configparser.ConfigParser()
+            cfg.read(ini_path)
+            return cfg.get("local_ai", "topology", fallback="local")
+        except Exception:
+            return "local"
+
+    def get_local_models(self) -> list[str]:
+        """Get comma-separated local model list from paths.env."""
+        raw = self._read_paths_env("VERSA_LOCAL_MODELS", "")
+        return [m.strip() for m in raw.split(",") if m.strip()] if raw else []
+
+    def get_cloud_models(self) -> list[str]:
+        """Configured remote (class=cloud) models from paths.env.
+
+        Membership is generated by catalog sync for enabled+keyed providers.
+        """
+        raw = self._read_paths_env("VERSA_CLOUD_MODELS", "")
+        return [m.strip() for m in raw.split(",") if m.strip()] if raw else []
+
+    def get_third_party_models(self) -> list[str]:
+        """Get comma-separated cloud third-party model list from paths.env."""
+        raw = self._read_paths_env("VERSA_THIRD_PARTY_MODELS", "")
+        return [m.strip() for m in raw.split(",") if m.strip()] if raw else []
+
+    def is_third_party_enabled(self) -> bool:
+        """Check VERSA_THIRD_PARTY_ENABLED in paths.env."""
+        return self._read_paths_env("VERSA_THIRD_PARTY_ENABLED", "false").lower() == "true"
+
+    def get_loading_strategy(self) -> str:
+        """Get model loading strategy from paths.env: 'single' or 'router'.
+
+        'router' — all downloaded models are available; the server loads on demand.
+        'single' — one model loaded at a time (legacy SYCL behaviour).
+        """
+        return self._read_paths_env("VERSA_MODEL_LOADING_STRATEGY", "single")
+
+    @staticmethod
+    def _count_lock_files(lock_dir: str) -> int:
+        """Count active ``.lock`` files in a deterministic-run lock directory.
+
+        Utility and Script runners drop a ``<key>.lock`` file while a job is in
+        flight (``/var/lib/versa-agi/utility-runs`` and ``.../script-runs``) and
+        remove it on completion. The dirs are world-readable, so the dashboard
+        (running as the PU) can count them without elevation. Missing dir → 0.
+        """
+        try:
+            return sum(1 for n in os.listdir(lock_dir) if n.endswith(".lock"))
+        except OSError:
+            return 0
+
+    def get_deterministic_run_counts(self) -> tuple[int, int]:
+        """Return (utility_running, script_running) — in-flight headless task runs."""
+        return (
+            self._count_lock_files("/var/lib/versa-agi/utility-runs"),
+            self._count_lock_files("/var/lib/versa-agi/script-runs"),
+        )
+
+    @staticmethod
+    def _read_last_run(lock_dir: str) -> Optional[str]:
+        """Return the UTC-ISO completion time of the last run, or None.
+
+        The runners write a world-readable ``.last`` marker on completion. Returns
+        the raw stored ISO string (UTC); callers handle local-time formatting.
+        """
+        try:
+            with open(os.path.join(lock_dir, ".last"), encoding="utf-8") as f:
+                val = f.read().strip()
+            return val or None
+        except OSError:
+            return None
+
+    def get_deterministic_last_runs(self) -> tuple[Optional[str], Optional[str]]:
+        """Return (utility_last_run_utc, script_last_run_utc) ISO strings or None."""
+        return (
+            self._read_last_run("/var/lib/versa-agi/utility-runs"),
+            self._read_last_run("/var/lib/versa-agi/script-runs"),
+        )
+
+    def get_active_local_model(self) -> str:
+        """Get the single active (VRAM-resident) local model from paths.env.
+
+        Only meaningful when model_loading_strategy=single. In router mode
+        all models are available and this returns empty string.
+
+        Written by ``agictl model activate`` and synced by
+        ``agictl model refresh`` on client topologies.
+
+        Returns empty string if not set or in router mode.
+        """
+        if self.get_loading_strategy() == "router":
+            return ""  # No single active model in router mode
+        return self._read_paths_env("VERSA_ACTIVE_LOCAL_MODEL", "")
+
+    def get_coa_approved_models(self) -> list[str]:
+        """COA-approved keys from catalog sync (paths.env VERSA_COA_APPROVED_MODELS).
+
+        Empty means no live catalog rows are flagged COA — not every cloud model.
+        """
+        raw = self._read_paths_env("VERSA_COA_APPROVED_MODELS", "")
+        return [m.strip() for m in raw.split(",") if m.strip()]
+
+    def get_default_model(self) -> str:
+        """System default model from paths.env (lifeline fallback when agents.model empty)."""
+        return self._read_paths_env("VERSA_DEFAULT_MODEL", "")
+
+    def get_tunnel_host(self) -> str:
+        """Get the remote inference server hostname from client_config.json.
+
+        Only meaningful when topology=client. Returns empty string if
+        not configured or file missing.
+        """
+        import json
+        cfg_path = "/etc/versa-agi/client_config.json"
+        try:
+            with open(cfg_path, "r") as f:
+                cfg = json.load(f)
+            return cfg.get("tunnel_host", "")
+        except Exception:
+            return ""
+
+    def get_watchdog_ssh_key(self) -> str:
+        """Get the SSH key path for the watchdog user.
+
+        This key is used by the SSH tunnel and for remote command
+        execution on inference servers (client topology).
+        """
+        return f"/home/{self.watchdog_user}/.ssh/versa_agi_ed25519"
+
+    def _read_paths_env(self, key: str, default: str = "") -> str:
+        """Read a single key from /etc/versa-agi/paths.env."""
+        paths_env = "/etc/versa-agi/paths.env"
+        try:
+            with open(paths_env, "r") as f:
+                for line in f:
+                    if line.startswith(f"{key}="):
+                        return line.strip().split("=", 1)[1].strip('"')
+        except Exception:
+            pass
+        return default

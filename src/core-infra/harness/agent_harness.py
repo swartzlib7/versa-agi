@@ -1,0 +1,3559 @@
+
+import db_connect
+import hashlib
+import os
+import sys
+import json
+import time
+import uuid
+import sqlite3
+import shlex
+import argparse
+import subprocess
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional, Literal
+
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage, RemoveMessage, trim_messages
+from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from harness.live_call import CALL_TURN_STEP_CAP, step_cap_message as live_step_cap_message
+from harness.deadline import CLOSE_NOW, DeadlineWarnings
+from harness.checkin import CheckIns, checkin_line, checkin_message
+from harness.cycle_close import (
+    EXIT_LOOP, EXIT_STEP_BUDGET, EXIT_TIME_LIMIT, harness_handoff, last_plain_reply,
+    time_limit_summary,
+)
+from harness.heartbeat import Heartbeat
+from harness.repeat_guard import RepeatGuard, call_label
+from harness.step_clock import StepClock
+import local_time
+from harness.cache_keepalive import KeepAlive, LastRequest
+from harness import reply_draft as reply_draft_mod
+from harness.prompt_cache import cache_log_line, cache_totals, session_id as cache_session_id
+from harness.prompt_cache import system_prompt as cached_system_prompt
+from harness.listening import (
+    ListeningWindow,
+    MailSignal,
+    agent_ids_from_env,
+    conversations_block,
+    read_close_deadline,
+    read_close_request,
+    shutdown_message,
+    wait_for_mail,
+)
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+def tlog(msg: str):
+    """Timestamped print for result file traceability."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
+def _reply_text(msg) -> str:
+    """A model reply as text for logs: its text parts, not its reasoning record."""
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content
+    from harness.compaction import message_text
+
+    return message_text(msg) or ("" if isinstance(msg, AIMessage) else str(content))
+
+
+def _format_params_audit(model_name: str, agent_overrides: dict | None) -> str:
+    """Compact catalog-layer generation params (before provider-native shaping)."""
+    from harness.model_params import resolve_model_params
+
+    resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
+    bits = [f"reasoning={resolved.get('reasoning_effort') or 'none'}"]
+    if resolved.get("temperature") is not None:
+        bits.append(f"temp={resolved['temperature']}")
+    if resolved.get("reasoning_max_tokens") is not None:
+        bits.append(f"reasoning_tokens={resolved['reasoning_max_tokens']}")
+    extra = resolved.get("extra") or {}
+    if extra:
+        bits.append(f"extra={json.dumps(extra, separators=(',', ':'))}")
+    if agent_overrides:
+        bits.append("agent_override=yes")
+    return " ".join(bits)
+
+
+def _native_params_for_audit(native: dict[str, Any], num_ctx: int = 0) -> dict[str, Any]:
+    """Provider-native kwargs safe for cycle log (no secrets / bulky blobs)."""
+    out: dict[str, Any] = {}
+    for key, val in native.items():
+        if key in ("extra_body", "model_kwargs"):
+            if key == "model_kwargs" and isinstance(val, dict) and val:
+                out["model_kwargs"] = val
+            continue
+        out[key] = val
+    if num_ctx and num_ctx > 0:
+        out["num_ctx"] = num_ctx
+    return out
+
+
+def _resolve_llm_provider_and_native(
+    model_name: str,
+    num_ctx: int = 0,
+    agent_overrides: dict | None = None,
+    prompt_cache: bool = False,
+    cache_session: str = "",
+) -> tuple[Any, dict[str, Any]]:
+    """Resolve exact Provider route and translated Model parameters."""
+    from harness.model_params import (
+        resolve_model_params,
+        to_native_kwargs,
+        apply_native_for_local_runtime,
+    )
+    from provider_runtime import resolve_provider_route
+
+    provider_route = resolve_provider_route(model_name)
+    provider_slug = provider_route.provider_slug
+    resolved = resolve_model_params(model_name, agent_overrides=agent_overrides)
+    family = provider_route.family
+    native = to_native_kwargs(family, model_name, resolved, provider_slug=provider_slug,
+                              prompt_cache=prompt_cache, cache_session=cache_session)
+    if provider_slug in ("ollama", "llamacpp"):
+        native = apply_native_for_local_runtime(native, provider_slug)
+    return provider_route, native
+
+
+def resolve_llm_route(
+    model_name: str,
+    num_ctx: int = 0,
+    agent_overrides: dict | None = None,
+) -> dict[str, Any]:
+    """Resolve catalog-driven provider metadata without instantiating the LLM."""
+    provider_route, native = _resolve_llm_provider_and_native(
+        model_name,
+        num_ctx=num_ctx,
+        agent_overrides=agent_overrides,
+    )
+    route: dict[str, Any] = {
+        "catalog_key": model_name,
+        "catalog_provider": provider_route.provider_slug,
+        "provider_family": provider_route.family,
+        "client": provider_route.client_type,
+        "gpu_backend": provider_route.gpu_backend,
+        "local_provider": (
+            provider_route.provider_slug if provider_route.local else ""
+        ),
+        "inference_url": provider_route.inference_url,
+        "endpoint": provider_route.endpoint,
+        "api_model": provider_route.api_model,
+        "native_params": _native_params_for_audit(native, num_ctx),
+    }
+    return route
+
+
+def _format_llm_route_log(role: str, model_name: str, route: dict[str, Any]) -> str:
+    """Single-line provider resolution audit for cycle logs."""
+    parts = [
+        f"LLM ROUTE ({role}/{model_name}):",
+        f"catalog_provider={route.get('catalog_provider') or '—'}",
+        f"client={route.get('client') or '—'}",
+    ]
+    if route.get("local_provider"):
+        parts.extend([
+            f"local_provider={route['local_provider']}",
+            f"gpu_backend={route.get('gpu_backend') or '—'}",
+            f"inference={route.get('inference_url') or '—'}",
+            f"endpoint={route.get('endpoint') or '—'}",
+            f"api_model={route.get('api_model') or model_name}",
+        ])
+    elif route.get("endpoint"):
+        parts.append(f"endpoint={route['endpoint']}")
+    return " ".join(parts)
+
+
+def _format_native_params_audit(route: dict[str, Any]) -> str:
+    """Compact provider-native params actually passed to LangChain."""
+    native = route.get("native_params") or {}
+    if not native:
+        return "native=(none)"
+    return f"native={json.dumps(native, separators=(',', ':'), default=str)}"
+
+
+def _log_llm_resolution(role: str, model_name: str, num_ctx: int, agent_overrides: dict | None) -> None:
+    """Emit catalog + native param audit lines for one model role."""
+    route = resolve_llm_route(model_name, num_ctx=num_ctx, agent_overrides=agent_overrides)
+    tlog(_format_llm_route_log(role, model_name, route))
+    tlog(f"MODEL PARAMS ({role}/{model_name}): catalog-layer {_format_params_audit(model_name, agent_overrides)} | {_format_native_params_audit(route)}")
+
+
+_PLACEHOLDER_TOOL_CONTENT = "[Result unavailable — the cycle ended before this tool call completed.]"
+
+
+def _canonicalize_messages(msgs, max_msgs=0, anchor_ai=False):
+    """Produce a provider-valid message list from a checkpoint history.
+
+    Every major LLM provider rejects a malformed tool-call transcript
+    (``INVALID_CHAT_HISTORY`` / ``400``). This function returns a sequence that
+    is valid by construction, guaranteeing:
+
+      * Every ``AIMessage`` tool_call is immediately followed by a ``ToolMessage``
+        answering it. If the real result was lost (crash mid-execution, an
+        earlier prune, a partial trim) a synthetic placeholder is inserted
+        ADJACENT to its parent — so even a dangling call buried in the middle
+        of the history is repaired, not just one at the tail.
+      * Every ``ToolMessage`` immediately follows the ``AIMessage`` that produced
+        its ``tool_call_id``. Orphans (no preceding producer), duplicate answers,
+        and foreign results are dropped.
+      * An optional depth trim keeps only the last ``max_msgs`` messages, anchored
+        so the window begins at a ``HumanMessage`` (the pre_model_hook trims with
+        ``start_on="human"``, so a non-human start would be discarded anyway).
+        When no ``HumanMessage`` exists the history is dropped entirely.
+        ``anchor_ai``: the thread has compaction frames, so the payload starts
+        at the frames block and the window may also begin at an ``AIMessage``.
+
+    Pure function (no I/O). Returns ``(clean, changed, stats)`` where ``changed``
+    is ``True`` iff the id-sequence differs from the input — placeholders carry
+    fresh ids and drops/trims/reorders change the sequence, so any modification
+    flips it and only then must the caller persist.
+    """
+    original_ids = [getattr(m, "id", None) for m in msgs]
+    stats = {"trimmed": 0, "orphans": 0, "placeholders": 0}
+
+    # ── 1. Depth trim, anchored at a HumanMessage ──
+    work = list(msgs)
+    if max_msgs > 0 and len(work) > max_msgs:
+        first_sys = work[0] if work and isinstance(work[0], SystemMessage) else None
+        body = work[1:] if first_sys else work
+        keep_n = (max_msgs - 1) if first_sys else max_msgs
+        start = max(len(body) - keep_n, 0)
+        anchor = None
+        anchor_types = (HumanMessage, AIMessage) if anchor_ai else (HumanMessage,)
+        # Expand backwards toward an earlier HumanMessage (bounded), else
+        # shrink forward to the next one.
+        for i in range(start, max(start - max_msgs, -1), -1):
+            if isinstance(body[i], anchor_types):
+                anchor = i
+                break
+        if anchor is None:
+            for i in range(start + 1, len(body)):
+                if isinstance(body[i], anchor_types):
+                    anchor = i
+                    break
+        kept_body = body[anchor:] if anchor is not None else []
+        work = ([first_sys] if first_sys else []) + kept_body
+        stats["trimmed"] = len(msgs) - len(work)
+
+    # ── 2. Repair tool_call / ToolMessage pairing and ordering ──
+    clean = []
+    i, n = 0, len(work)
+    while i < n:
+        m = work[i]
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            clean.append(m)
+            expected = [tc["id"] for tc in m.tool_calls]
+            names = {tc["id"]: tc.get("name", "unknown") for tc in m.tool_calls}
+            expected_set = set(expected)
+            # Consume the run of ToolMessages immediately following this AIMessage.
+            answered = {}
+            j = i + 1
+            while j < n and isinstance(work[j], ToolMessage):
+                tm = work[j]
+                tcid = getattr(tm, "tool_call_id", None)
+                if tcid in expected_set and tcid not in answered:
+                    answered[tcid] = tm
+                else:
+                    stats["orphans"] += 1  # duplicate / foreign result
+                j += 1
+            # Emit answers in the tool_call order, synthesizing where missing.
+            for cid in expected:
+                if cid in answered:
+                    clean.append(answered[cid])
+                else:
+                    clean.append(ToolMessage(
+                        content=_PLACEHOLDER_TOOL_CONTENT,
+                        tool_call_id=cid,
+                        name=names[cid],
+                        id=str(uuid.uuid4()),
+                    ))
+                    stats["placeholders"] += 1
+            i = j
+        elif isinstance(m, ToolMessage):
+            # ToolMessage with no preceding producing AIMessage — orphan.
+            stats["orphans"] += 1
+            i += 1
+        else:
+            clean.append(m)
+            i += 1
+
+    changed = [getattr(m, "id", None) for m in clean] != original_ids
+    return clean, changed, stats
+
+
+def _unresolved_tool_call_ids(messages) -> set:
+    """Return tool_call IDs from the latest AIMessage not yet answered.
+
+    Parallel tool calls stream as one AIMessage chunk followed by one ToolMessage
+    chunk per call. Budget warnings must wait until every ID in that batch is
+    answered — checking only the current chunk misses the gap after the first
+    result and corrupts the checkpoint (INVALID_CHAT_HISTORY).
+    """
+    if not messages:
+        return set()
+    answered = set()
+    i = len(messages) - 1
+    while i >= 0 and isinstance(messages[i], ToolMessage):
+        tcid = getattr(messages[i], "tool_call_id", None)
+        if tcid:
+            answered.add(tcid)
+        i -= 1
+    if i < 0:
+        return set()
+    m = messages[i]
+    if not isinstance(m, AIMessage) or not getattr(m, "tool_calls", None):
+        return set()
+    pending = set()
+    for tc in m.tool_calls:
+        cid = tc.get("id")
+        if cid and cid not in answered:
+            pending.add(cid)
+    return pending
+
+
+def _stream_suffix_not_in_checkpoint(committed, streamed) -> list:
+    """Return the trailing streamed messages not yet present in committed state.
+
+    Walks ``streamed`` from the end until a message id already in ``committed``
+    is found. Used to merge ToolMessages (and any uncommitted AIMessage) from
+    the local stream mirror into the checkpoint without wiping prior history.
+    """
+    if not streamed:
+        return []
+    committed_ids = {
+        getattr(m, "id", None) for m in committed if getattr(m, "id", None)
+    }
+    if not committed_ids:
+        return list(streamed)
+    suffix: list = []
+    for m in reversed(streamed):
+        mid = getattr(m, "id", None)
+        if mid and mid in committed_ids:
+            break
+        suffix.append(m)
+    suffix.reverse()
+    return suffix
+
+
+def _flush_stream_messages_to_checkpoint(agent, config, messages) -> str:
+    """Commit streamed tool results before break-and-reinvoke.
+
+    Breaking ``agent.stream()`` after a tools batch (especially parallel
+    ``agictl_view_image`` + other tools) can interrupt the tools superstep
+    before ToolMessages are committed. They may exist only as pending writes
+    — invisible in ``get_state().values`` — while ``snapshot.next`` still
+    points at a half-finished step. The next ``stream({"messages": [...]})``
+    then validates a dangling ``AIMessage.tool_calls`` and raises
+    ``INVALID_CHAT_HISTORY``.
+
+    Fix (same idea as RESUME pending-writes repair): merge any streamed
+    suffix missing from the committed transcript, canonicalize, and reseed
+    ``as_node="__start__"`` so pending writes are discarded. Never reseed
+    from the local mirror alone — on RESUME it is only this cycle's stream
+    chunks, not the full thread.
+    """
+    if agent is None or not messages:
+        return "skip"
+    if _unresolved_tool_call_ids(messages):
+        # Caller should have gated on this; refuse to flush a dangling local tail.
+        return "skip-local-unresolved"
+    try:
+        snapshot = agent.get_state(config)
+    except Exception as e:
+        return f"get_state-failed:{e}"
+
+    pending_next = tuple(getattr(snapshot, "next", ()) or ()) if snapshot else ()
+    committed = list((snapshot.values or {}).get("messages", []) or []) if snapshot else []
+    unresolved_ckpt = _unresolved_tool_call_ids(committed)
+    suffix = _stream_suffix_not_in_checkpoint(committed, messages)
+
+    if not pending_next and not unresolved_ckpt and not suffix:
+        return "ok-committed"
+
+    try:
+        merged = list(committed) + suffix
+        clean, _changed, stats = _canonicalize_messages(merged)
+        agent.update_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + clean},
+            as_node="__start__",
+        )
+        return (
+            f"flushed pending_next={pending_next or '—'} "
+            f"unresolved_ckpt={len(unresolved_ckpt)} "
+            f"suffix={len(suffix)} msgs={len(clean)} "
+            f"placeholders={stats.get('placeholders', 0)}"
+        )
+    except Exception as e:
+        return f"flush-failed:{e}"
+
+
+# Transient HTTP statuses worth retrying — timeouts, conflicts, rate limits,
+# the "headers too large" edge case (431), and all 5xx. Excludes 400/401/403/404
+# and other deterministic client errors (retrying those is pointless).
+_TRANSIENT_HTTP_STATUS = {408, 409, 425, 429, 431, 500, 502, 503, 504}
+
+# Transient exception class names across providers (openai, anthropic, google,
+# httpx). Matched by name so we don't have to import every SDK.
+_TRANSIENT_EXC_NAMES = {
+    "APIConnectionError", "APITimeoutError", "InternalServerError",
+    "RateLimitError", "ServiceUnavailable", "ResourceExhausted",
+    "DeadlineExceeded", "ServiceUnavailableError", "InternalServerError",
+    "Timeout", "ConnectError", "ConnectTimeout", "ReadTimeout",
+    "RemoteProtocolError", "PoolTimeout",
+}
+
+
+def _is_transient_transport_error(e) -> bool:
+    """True if `e` is a transient transport/edge failure worth retrying.
+
+    Provider-agnostic: checks an HTTP status code (directly or on a nested
+    response) against the transient set, then falls back to matching transient
+    exception class names anywhere in the MRO. Deterministic client errors
+    (400/401/403/404, validation, INVALID_CHAT_HISTORY) are NOT transient.
+    """
+    err_str = str(e).lower()
+    if "image input is not supported" in err_str or "mmproj" in err_str:
+        return False
+    if "invalid_chat_history" in err_str:
+        return False
+
+    status = getattr(e, "status_code", None)
+    if status is None:
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+    if isinstance(status, int) and status in _TRANSIENT_HTTP_STATUS:
+        return True
+    for cls in type(e).__mro__:
+        if cls.__name__ in _TRANSIENT_EXC_NAMES:
+            return True
+    return False
+
+from harness.model_context import (
+    effective_resume_cap, get_model_context, get_trimmer_char_limit, resume_message_cap,
+)
+
+from pydantic import BaseModel, Field
+
+# ═══════════════════════════════════════════════════════
+# Tool Output Limit — enforced globally on all tool returns
+# ═══════════════════════════════════════════════════════
+TOOL_OUTPUT_LIMIT = 6000
+
+AGICTL_TOOL_TIMEOUT_SECONDS = 120
+UTILITY_TOOL_TIMEOUT_SECONDS = 900
+
+
+def _run_agictl(args_str: str, timeout: int = AGICTL_TOOL_TIMEOUT_SECONDS, limit: int | None = None) -> str:
+    """Internal helper: execute an agictl command and return output. `limit` replaces the
+    agent's tool output limit for this call when it is larger."""
+    try:
+        cmd = ["agictl"] + shlex.split(args_str)
+    except ValueError as ve:
+        return f"ERROR parsing command syntax: {ve}. Check quotation marks and escaping."
+    if "call-bridge" in cmd:
+        return ("ERROR: there is no terminal command for placing a call. COA calls the Primary "
+                "User with the agictl_call_pu tool.")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        output = result.stdout
+        if result.stderr:
+            output += "\nSTDERR:\n" + result.stderr
+        cap = max(TOOL_OUTPUT_LIMIT, limit or 0) if TOOL_OUTPUT_LIMIT > 0 else 0
+        if cap > 0 and len(output) > cap:
+            output = output[:cap] + f"\n\n[OUTPUT TRUNCATED: Exceeded {cap} chars. Refine your query or paginate.]"
+        return output if output else "Command executed successfully with no output."
+    except subprocess.TimeoutExpired:
+        return f"ERROR: Command timed out after {timeout} seconds."
+    except Exception as e:
+        return f"Error executing command: {e}"
+
+
+# ═══════════════════════════════════════════════════════
+# 1. SYSTEM — System-level queries and config
+# ═══════════════════════════════════════════════════════
+
+class SystemInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl system subcommand to run. "
+        "Examples: 'system whoami', 'system config get', 'system config get primary_user', "
+        "'system config set key value', 'system workspace-link /path', "
+        "'system sync-instance --status', 'system sync-profiles'."
+    ))
+
+@tool("agictl_system", args_schema=SystemInput)
+def agictl_system(command: str) -> str:
+    """Query or configure system-level settings.
+    Use for: identity (whoami), config management, workspace linking, profile sync.
+    Examples:
+      - 'system whoami'
+      - 'system config get'
+      - 'system config set key value'
+      - 'system workspace-link /path/to/project'
+      - 'system sync-instance --status'
+      - 'system live-chat' (is Live Chat on, the listening time, Live Link)
+      - 'system live-chat set 15' or 'set off'; 'system live-chat link on' (only when the Primary User asks)
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 2. MODEL — LLM model management
+# ═══════════════════════════════════════════════════════
+
+class ModelInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl model subcommand. "
+        "Examples: 'model list', 'model list --table', 'model catalog list --table', "
+        "'model run modelname', 'model refresh'."
+    ))
+
+@tool("agictl_model", args_schema=ModelInput)
+def agictl_model(command: str) -> str:
+    """Look at the models on this install — local models, the catalog, a test prompt.
+    Examples:
+      - 'model list' — the local models and whether each is downloaded (COA only)
+      - 'model catalog list --table' — every model in the catalog, with its key
+      - 'model run modelname' — send one test prompt to a local model
+      - 'model refresh' — read the inference server's model list again
+    Your own model is set by COA with 'agent set-model <name> <catalog-key>' (agictl_agent).
+    'model activate' switches the local model the whole host has loaded; it is not for
+    changing one agent's model.
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 3. AGENT — Agent registry queries
+# ═══════════════════════════════════════════════════════
+
+class AgentInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl agent subcommand. Agent-facing commands only. "
+        "Examples: 'agent list', 'agent show web-dev', 'agent summary', "
+        "'agent count', 'agent get-active'."
+    ))
+
+@tool("agictl_agent", args_schema=AgentInput)
+def agictl_agent(command: str) -> str:
+    """Query agent registry information (read-only).
+    Use for: listing agents, showing agent details, summaries, counts.
+    Examples:
+      - 'agent list' — all registered agents
+      - 'agent show web-dev' — full details for an agent
+      - 'agent summary' — one table of every agent with role, model and status
+      - 'agent get-active' — currently active agents
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 3b. UTILITY — One-shot Utility Model runs
+# ═══════════════════════════════════════════════════════
+
+class UtilityInput(BaseModel):
+    command: str = Field(description=(
+        "The agictl utility subcommand only. "
+        "Examples: 'utility model list', 'utility run brand-hero-square "
+        "--input-files brand/ref.jpg', "
+        "'utility run weekly-summary --task-id 42'."
+    ))
+
+@tool("agictl_utility", args_schema=UtilityInput)
+def agictl_utility(command: str) -> str:
+    """Run Utility Model profiles — one-shot generation without a full agent cycle.
+    Use for: listing UM profiles, manual runs with --input-files, dry-run validation.
+    Examples:
+      - 'utility model list' — enabled Utility Model profiles
+      - 'utility run <um-id>' — run using UM defaults (run-as-agent context)
+      - 'utility run <um-id> --input-files path/a.jpg,path/b.pdf'
+      - 'utility run <um-id> --dry-run' — validate maps and paths only
+    Image/audio generation may take most of the 900-second tool budget.
+    """
+    return _run_agictl(command, timeout=UTILITY_TOOL_TIMEOUT_SECONDS)
+
+
+# ═══════════════════════════════════════════════════════
+# 4. TASK — Task lifecycle management
+# ═══════════════════════════════════════════════════════
+
+class TaskInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl task subcommand. "
+        "Examples: 'task list', 'task list --all', 'task get 73', "
+        "'task add \"Title\" --project 3 --due-date \"2026-05-20 12:00\" --desc \"Description\" --priority high' "
+        "(--project and --due-date are required; local time), "
+        "'task update 73 --status in_progress', 'task update 73 --status done', "
+        "'task progress 73 \"DONE: X. NEXT: Y.\"' (append progress journal entry), "
+        "'task progress 73' (list journal), "
+        "'task done 73', 'task cancel 73', 'task snooze 73 10', "
+        "'task unfreeze 73' (resume a frozen task assigned to you), "
+        "'task unfreeze-all <your_agent_name>' (resume all your frozen tasks), "
+        "'task reminder \"Check deployment\" --category instruction'."
+    ))
+
+@tool("agictl_task", args_schema=TaskInput)
+def agictl_task(command: str) -> str:
+    """Manage your task queue — list, create, update, complete, or cancel tasks.
+    IMPORTANT: Always use exact option syntax with -- prefixes.
+    Examples:
+      - 'task list' — active tasks
+      - 'task list --all' — all tasks including done/cancelled
+      - 'task get 73' — full task details
+      - 'task add "Setup server" --project 3 --due-date "2026-05-20 12:00" --desc "Docker setup" --priority high' (--project and --due-date are required; due dates are local time; 'now' also works)
+      - 'task update 73 --status in_progress'
+      - 'task progress 73 "DONE: research. NEXT: draft doc."' — append progress entry (your breadcrumbs for next cycle)
+      - 'task progress 73' — read the progress journal
+      - 'task done 73' — mark complete
+      - 'task cancel 73'
+      - 'task snooze 73 10' — snooze for 10 minutes
+      - 'task unfreeze 73' — resume a frozen task assigned to you (resets retry counter)
+      - 'task unfreeze-all <your_agent_name>' — resume all your frozen tasks
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 5. MESSAGE — Communication (VersaVoice + internal)
+# ═══════════════════════════════════════════════════════
+
+class MessageInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl message subcommand. "
+        "The text of a message to a person is plain conversation: never put code, commands, logs or "
+        "file paths in it, in any mode. Write them to a Markdown file in your workspace and attach it "
+        "with --markdown <path>; attach links with --url. A picture goes in --media; a PDF, spreadsheet or ZIP in --file. "
+        "Examples: 'message send UID \"Hello!\" --mode typed', "
+        "'message send UID \"The script is ready. I attached it.\" --mode typed --markdown workspace/script.md', "
+        "'message get SUB_ACCOUNT_UID --unread', 'message get SUB_ACCOUNT_UID --last-n-count 10', "
+        "'message internal agent-name \"message text\"', "
+        "'message mark-processed MSG_ID'."
+    ))
+
+@tool("agictl_message", args_schema=MessageInput)
+def agictl_message(command: str) -> str:
+    """Send and receive messages via VersaVoice or internal agent channels.
+    The text of a message to a person is plain conversation. Code, commands, logs and file paths
+    never go in the text, typed or spoken: write them to a Markdown file in your workspace and
+    attach it with --markdown <path>. Links go in --url. A picture goes in --media;
+    a file to keep (PDF, Word, Excel, CSV, ZIP) goes in --file.
+    A send with an attachment that cannot be attached is refused and nothing goes out.
+    Examples:
+      - 'message send UID "Hello!" --mode typed' — send to VersaVoice contact
+      - 'message send UID "The script is ready. I attached it." --mode typed --markdown workspace/script.md'
+        — code or long detail goes in the attached file, not in the text
+      - 'message get SUB_ACCOUNT_UID --unread' — unprocessed inbound messages
+      - 'message get SUB_ACCOUNT_UID --contact UID --last-n-count 10' — conversation history
+      - 'message internal agent-name "message"' — send to another agent
+      - 'message mark-processed MSG_ID' — mark a message as processed
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 6. CYCLE — Agent lifecycle telemetry
+# ═══════════════════════════════════════════════════════
+
+class CycleInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl cycle subcommand. "
+        "Examples: 'cycle end \"Summary of work done\" --handoff \"Open: … | Next: …\"', "
+        "'cycle recent agent-name', 'cycle count agent-name'."
+    ))
+
+@tool("agictl_cycle", args_schema=CycleInput)
+def agictl_cycle(command: str) -> str:
+    """Manage your work cycle — end cycle, view history.
+    CRITICAL: You MUST call 'cycle end <summary>' before your budget runs out.
+    To respawn on a new model: snooze or create a due task, then 'cycle end'.
+    Examples:
+      - 'cycle end "Completed Docker setup for mysmartyard" --handoff "Open: TLS cert | Next: verify renewal"'
+        — end cycle; the handoff is shown at your next spawn
+      - 'cycle recent coa' — view recent cycle summaries
+      - 'cycle count coa' — total cycles executed
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 7. PROJECT — Workspace and project management
+# ═══════════════════════════════════════════════════════
+
+class ProjectInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl project subcommand. "
+        "Examples: 'project list', 'project add name --desc \"Description\" --remote URL', "
+        "'project update 3 --desc \"New description\"', "
+        "'project assign 3 --agent charlie', "
+        "'project pause 3', 'project resume 3', "
+        "'project archive 3', 'project git-setup'."
+    ))
+
+@tool("agictl_project", args_schema=ProjectInput)
+def agictl_project(command: str) -> str:
+    """Manage workspace projects — list, register, update, pause, resume, archive.
+    Examples:
+      - 'project list' — all registered projects (includes id)
+      - 'project add myapp --desc "Web app" --remote git@github.com:org/repo.git'
+      - 'project update 3 --desc "Updated summary"' — update metadata by project id
+      - 'project assign 3 --agent charlie' — assign agent to project by id
+      - 'project pause 3' — pause project (skipped by Lifeline)
+      - 'project resume 3' — resume a paused project
+      - 'project members 3' — list members for project id
+      - 'project git-setup' — configure git identity and SSH keys
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 8. CONNECTION — Social graph (VersaVoice contacts)
+# ═══════════════════════════════════════════════════════
+
+class ConnectionInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl connection subcommand. "
+        "Examples: 'connection list primary-user', 'connection list agent', "
+        "'connection request UID'."
+    ))
+
+@tool("agictl_connection", args_schema=ConnectionInput)
+def agictl_connection(command: str) -> str:
+    """Manage VersaVoice connections — list contacts, send connection requests.
+    Examples:
+      - 'connection list primary-user' — list Primary User's contacts
+      - 'connection list agent' — list your established connections
+      - 'connection request UID' — send connection invitation
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 9. MEMORY — Agent persistent memory
+# ═══════════════════════════════════════════════════════
+
+class MemoryInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl memory subcommand. "
+        "Examples: 'memory connection get UID', "
+        "'memory connection set UID --preferences \"prefers text\" --rapport building', "
+        "'memory connection list', 'memory project get 7', "
+        "'memory project set 7 --phase \"development\" --blockers \"none\"', "
+        "'memory system get key', 'memory system set key value', 'memory system list'. "
+        "COA/PU only: append '--agent NAME' to maintain another agent's memory."
+    ))
+
+@tool("agictl_memory", args_schema=MemoryInput)
+def agictl_memory(command: str) -> str:
+    """Manage your persistent memory — per-contact, per-project, and system knowledge.
+    Memory persists across cycles and is YOUR responsibility to maintain.
+    Examples:
+      - 'memory connection set UID --preferences "prefers voice" --rapport building'
+      - 'memory project set 7 --phase "testing" --next-steps "deploy to staging"'
+      - 'memory system set docker_available "true"'
+      - 'memory system list' — view all system knowledge
+      - COA/PU only: 'memory connection list --agent iris'
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 9b. GAME — Strategic pursuit management
+# ═══════════════════════════════════════════════════════
+
+class GameInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl game subcommand. "
+        "Examples: 'game add \"VersaVoice Launch\" --postulate \"Build the voice platform\"', "
+        "'game update 1 --posture aggressive --barriers \"Competitor launched\"', "
+        "'game show 1', 'game list', 'game list --status active', "
+        "'game assign-project 1 3', "
+        "'game opponent add 3 \"CompetitorCo\" --type business --desc \"Main rival\"', "
+        "'game opponent list --project 3', 'game opponent update 1 --assessment \"Losing ground\"', "
+        "'game opponent delete 1'."
+    ))
+
+@tool("agictl_game", args_schema=GameInput)
+def agictl_game(command: str) -> str:
+    """Manage strategic pursuits — games, posture, and competitive intelligence.
+    Examples:
+      - 'game add "Career" --postulate "Launch acting career" --posture exploratory'
+      - 'game update 1 --posture aggressive --barriers "Audition rejection rate high"'
+      - 'game show 1' — full game state with projects + awareness
+      - 'game list' — all games
+      - 'game assign-project 1 3' — assign project #3 to game #1
+      - 'game opponent add 3 "RivalCo" --type business'
+      - 'game opponent list --project 3'
+      - 'game opponent update 1 --assessment "They raised Series B"'
+      - 'game opponent delete 1'
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 9c. AWARENESS — Agent cognitive state (Conclusions + Actions)
+# ═══════════════════════════════════════════════════════
+
+class AwarenessInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl awareness subcommand. "
+        "Examples: 'awareness add conclusion --subject project --subject-id 3 --content \"Blocked by design input\"', "
+        "'awareness add action --subject connection --subject-id abc123 --content \"Switch to voice\" --action-conclusion-id 7', "
+        "'awareness revise 7 --content \"Updated understanding\"', "
+        "'awareness complete 12', "
+        "'awareness list --type conclusion --status active', "
+        "'awareness get 7'."
+    ))
+
+@tool("agictl_awareness", args_schema=AwarenessInput)
+def agictl_awareness(command: str) -> str:
+    """Manage your cognitive awareness — conclusions about the world and actions derived from them.
+    This is the core of the Awareness-First discipline. You MUST write conclusions and actions every cycle.
+    Examples:
+      - 'awareness add conclusion --subject self --content "I over-explain in messages"'
+      - 'awareness add action --subject connection --subject-id abc --content "Use bullet points" --action-conclusion-id 7'
+      - 'awareness revise 7 --content "Updated: they now prefer detailed reports"'
+      - 'awareness complete 12' — mark an action as done
+      - 'awareness list --status active' — all active awareness
+      - 'awareness get 7' — single entry details
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 10. IDENTITY — VersaVoice sub-account provisioning
+# ═══════════════════════════════════════════════════════
+
+class IdentityInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl identity subcommand. COA-only. "
+        "Example: 'identity provision agent-user --token TOKEN --first-name Name --last-name Last'."
+    ))
+
+@tool("agictl_identity", args_schema=IdentityInput)
+def agictl_identity(command: str) -> str:
+    """Provision or manage VersaVoice identity for agents (COA-only).
+    Example:
+      - 'identity provision web-dev --token TOKEN --first-name Web --last-name Dev'
+    """
+    return _run_agictl(command)
+
+
+# ═══════════════════════════════════════════════════════
+# 11. EXECUTE — Code execution (bash/python)
+# ═══════════════════════════════════════════════════════
+
+class ExecuteInput(BaseModel):
+    command: str = Field(description=(
+        "The agictl execute subcommand (or shorthand 'bash \"...\"' / 'python \"...\"'). "
+        "Examples: 'bash \"ls -la\"', 'execute bash \"ls -la /home\"', "
+        "'execute python \"print(1+1)\"'. "
+        "Privilege escalation (sudo/su) is blocked unless the Primary User enabled "
+        "COA Autonomous Mode and the sudoers grant landed."
+    ))
+
+@tool("agictl_execute", args_schema=ExecuteInput)
+def agictl_execute(command: str) -> str:
+    """Execute bash or python scripts in your workspace.
+    Privilege escalation is blocked unless COA Autonomous Mode is granted.
+    Examples:
+      - 'bash "ls -la"'
+      - 'execute bash "docker compose up -d"'
+      - 'execute python "import os; print(os.getcwd())"'
+    """
+    from privilege_guard import coa_autonomous_allowed, privilege_escalation_hit
+
+    if not command:
+        return "ERROR: You must provide a command string!"
+
+    stripped = command.strip()
+    if stripped.startswith("bash ") and not stripped.startswith("execute "):
+        command = f"execute {stripped}"
+    elif stripped.startswith("python ") and not stripped.startswith("execute "):
+        command = f"execute {stripped}"
+
+    if not coa_autonomous_allowed():
+        hit = privilege_escalation_hit(command)
+        if hit:
+            return (
+                f"BLOCKED: Privilege escalation command detected ('{hit}'). "
+                "You do NOT have sudo/su access. This command will NEVER succeed. "
+                "Set the task to blocked: agictl task update <id> --status blocked. "
+                "Report this blocker to the COA or Primary User and move to your next task."
+            )
+
+    timeout = 600 if coa_autonomous_allowed() else AGICTL_TOOL_TIMEOUT_SECONDS
+    return _run_agictl(command, timeout=timeout)
+
+
+class SearchInput(BaseModel):
+    command: str = Field(default="", description=(
+        "The full agictl search subcommand to run. "
+        "Examples: 'search web \"how to install Node.js 22 on Ubuntu 24.04\" --count 5', "
+        "'search read \"https://docs.example.com/guide\"', "
+        "'search read \"https://docs.example.com/guide\" --offset 8000', "
+        "'search read \"https://example.com\" --links', 'search status'."
+    ))
+    query: str = Field(default="", description=(
+        "Short form of 'search web': the query to look up. Use this or `command`, not both."
+    ))
+    count: int = Field(default=5, description="With `query`: number of results (default 5, max 10)")
+
+
+def search_tool_command(command: str = "", query: str = "", count: int = 5) -> str:
+    """The agictl arguments for one `agictl_search` call ("" when nothing usable was given)."""
+    command = (command or "").strip()
+    if command.startswith("agictl "):
+        command = command[len("agictl "):].strip()
+    if command:
+        return command if command.startswith("search ") else ""
+    query = (query or "").strip()
+    if not query:
+        return ""
+    return f"search web {shlex.quote(query)} --count {max(1, min(int(count or 5), 10))}"
+
+
+@tool("agictl_search", args_schema=SearchInput)
+def agictl_search(command: str = "", query: str = "", count: int = 5) -> str:
+    """Find and read things on the web. No browser is started.
+    Order of use: search to find pages, read to read one, the browser tool only when a page needs it.
+    Examples:
+      - 'search web "<query>" --count 5' — find pages: title, URL, snippet
+      - 'search read "<url>"' — the readable text of one page (documentation, articles, references)
+      - 'search read "<url>" --offset 8000' — read on when the reply says truncated (use its next_offset)
+      - 'search read "<url>" --links' — also list the page's links
+      - 'search status' — which engines answer; use when a search returns nothing
+    If 'search read' returns a `hint`, the page needs scripts: read it with the browser tool.
+    """
+    args = search_tool_command(command, query, count)
+    if not args:
+        return ("ERROR: pass `command` starting with 'search ' (for example: search web \"<query>\"), "
+                "or a `query`.")
+    return _run_agictl(args)
+
+
+# ═══════════════════════════════════════════════════════
+# All tools registry — passed to create_react_agent
+# ═══════════════════════════════════════════════════════
+
+ALL_TOOLS = [
+    agictl_system,
+    agictl_model,
+    agictl_agent,
+    agictl_utility,
+    agictl_task,
+    agictl_message,
+    agictl_cycle,
+    agictl_project,
+    agictl_connection,
+    agictl_memory,
+    agictl_game,
+    agictl_awareness,
+    agictl_identity,
+    agictl_execute,
+]
+
+def _setup_ini_path() -> str:
+    """The cycle's own copy of the settings (no secrets in it), or the system file."""
+    return os.environ.get("AGICTL_SETUP_INI") or "/etc/versa-agi/setup.ini"
+
+
+# Conditionally register search tool based on setup.ini config
+def _is_search_enabled():
+    import configparser
+    config = configparser.ConfigParser()
+    config.read(_setup_ini_path())
+    return config.get("search", "enabled", fallback="false").lower() == "true"
+
+if _is_search_enabled():
+    ALL_TOOLS.append(agictl_search)
+
+# ═══════════════════════════════════════════════════════
+# BROWSER — Headless browser automation (Playwright)
+# ═══════════════════════════════════════════════════════
+
+class BrowserInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl browser subcommand to run. "
+        "Examples: 'browser goto \"https://example.com\"', "
+        "'browser goto \"https://example.com\" --screenshot', "
+        "'browser click \"https://example.com\" \"button.submit\"', "
+        "'browser fill \"https://example.com\" \"#email\" \"user@test.com\"', "
+        "'browser screenshot \"https://example.com\" --full-page', "
+        "'browser extract \"https://example.com\" --selector \"h1\"', "
+        "'browser extract \"https://example.com\" --selector \"a\" --attribute \"href\"'."
+    ))
+
+@tool("agictl_browser", args_schema=BrowserInput)
+def agictl_browser(command: str) -> str:
+    """Browse web pages using a headless Chromium browser.
+    Use for: navigating pages, clicking elements, filling forms, taking screenshots, extracting content.
+    IMPORTANT: Only http:// and https:// URLs are allowed. file:// is blocked.
+    Examples:
+      - 'browser goto "https://example.com"' — load page and get text content
+      - 'browser goto "https://example.com" --offset 8000' — read on when the reply says truncated (use its next_offset)
+      - 'browser goto "https://example.com" --screenshot' — load + screenshot
+      - 'browser click "https://example.com" "button.submit"' — click an element
+      - 'browser fill "https://example.com" "#email" "user@test.com"' — fill a form field
+      - 'browser screenshot "https://example.com" --full-page' — full-page screenshot
+      - 'browser extract "https://example.com" --selector "h1"' — extract text from selector
+      - 'browser extract "https://example.com" --selector "a" --attribute "href"' — extract attribute
+    Any command takes --user-agent "<text>" to set the user agent for that call.
+    """
+    return _run_agictl(command)
+
+# Conditionally register browser tool based on setup.ini config
+def _is_browser_enabled():
+    import configparser
+    config = configparser.ConfigParser()
+    config.read(_setup_ini_path())
+    return config.get("browser", "enabled", fallback="false").lower() == "true"
+
+if _is_browser_enabled():
+    ALL_TOOLS.append(agictl_browser)
+
+
+# ═══════════════════════════════════════════════════════
+# ORGANIZATION — Business records (feature-gated, TEAM-2 / D27)
+# ═══════════════════════════════════════════════════════
+
+class OrganizationInput(BaseModel):
+    command: str = Field(description=(
+        "The full agictl organization subcommand. "
+        "Examples: 'organization org list', "
+        "'organization invoice list', "
+        "'organization invoice add --customer-org-id 1 --status draft', "
+        "'organization transaction list', "
+        "'organization exchange list', "
+        "'organization exchange get 3'."
+    ))
+
+@tool("agictl_organization", args_schema=OrganizationInput)
+def agictl_organization(command: str) -> str:
+    """Organization domain — orgs, products, invoices, estimates, transactions, exchange.
+    Money fields are integer cents. COA owns integration/exchange sync; Accountant owns ops.
+    Examples:
+      - 'organization org list'
+      - 'organization product list'
+      - 'organization invoice list'
+      - 'organization invoice add --customer-org-id 1 --status draft'
+      - 'organization transaction list'
+      - 'organization exchange list'
+    """
+    return _run_agictl(command)
+
+def _is_organization_enabled():
+    import configparser
+    config = configparser.ConfigParser()
+    config.read(_setup_ini_path())
+    return config.get("features", "organization_ui", fallback="false").lower() in (
+        "1", "true", "yes", "on",
+    )
+
+if _is_organization_enabled():
+    ALL_TOOLS.append(agictl_organization)
+
+
+# ═══════════════════════════════════════════════════════
+# LIVE CALL — COA voice call to the Primary User (state_live_voice_call.md)
+# ═══════════════════════════════════════════════════════
+
+class CallPuInput(BaseModel):
+    reason: str = Field(description=(
+        "Why you are calling the Primary User, in one plain sentence. "
+        "The voice opens the call with it."
+    ))
+    brief: str = Field(default="", description=(
+        "What the voice should know before it speaks, in about 120 words of plain language: what "
+        "you need decided or want to tell them, the facts that matter, the options, and what you "
+        "recommend. No IDs or system terms."
+    ))
+    last_call_summary: str = Field(default="", description=(
+        "Only when you already called this cycle: the 2–4 sentence summary of that call "
+        "(what was discussed, decided, and what happens next). It is saved as that call's note."
+    ))
+    recipient_id: str = Field(default="", description=(
+        "VersaVoice user id of a connection to call. Leave empty to call the Primary User. "
+        "The person must already be a contact, the same rule as messaging them."
+    ))
+
+
+_LIVE_CALL_RUNTIME = None  # harness.live_call.LiveCallRuntime, set in main()
+_HARNESS_DEADLINE_EPOCH = None  # Lifeline --deadline-epoch, set in main()
+# Stall timer (state_long_cycles.md §1.2). A no-op until main() gives it the file.
+_HEARTBEAT = Heartbeat(None)
+# Set once the cycle model is built; its pings are counted with the cycle's tokens.
+_CACHE_KEEPALIVE = None
+
+
+def _keepalive_usage() -> tuple[int, int, int, int]:
+    """(input, output, read, written) tokens of this cycle's cache keep-alive pings."""
+    return _CACHE_KEEPALIVE.usage() if _CACHE_KEEPALIVE is not None else (0, 0, 0, 0)
+# A call must leave this much time before the hard stop (state_live_chat.md §1.7).
+CALL_DEADLINE_MARGIN_SECONDS = 180
+CALL_MIN_MINUTES = 5
+
+
+@tool("agictl_call_pu", args_schema=CallPuInput)
+def agictl_call_pu(reason: str, brief: str = "", last_call_summary: str = "",
+                   recipient_id: str = "") -> str:
+    """Place a live voice call in the VersaVoice app (COA only).
+    Empty recipient_id rings the Primary User. A recipient_id rings that connection, if they
+    are already a contact. Use when talking settles something faster than chat, or when they
+    asked you to call. Rings their phone and returns when they join, decline, miss it, or have
+    no device (up to about a minute).
+    Connected: end your turn. Each request they make arrives as a new message; your final reply to it is spoken.
+    Not connected: send a chat message to that person instead. Calls per cycle are limited by the Live Call setting.
+    Approvals are never given by voice.
+    """
+    runtime = _LIVE_CALL_RUNTIME
+    gate = _LIVE_CALL_GATE
+    if runtime is None or gate is None or not gate.ok:
+        return json.dumps({"success": False, "status": "unavailable",
+                           "error": "Live Call is not available in this cycle. Send a chat message instead."})
+    settings = gate.settings
+    if _HARNESS_DEADLINE_EPOCH:
+        # A call placed late in a cycle gets only the time left (§1.7 rule 3).
+        left_min = int((_HARNESS_DEADLINE_EPOCH - time.time() - CALL_DEADLINE_MARGIN_SECONDS) // 60)
+        if left_min < CALL_MIN_MINUTES:
+            return json.dumps({"success": False, "status": "no_time",
+                               "error": "Not enough time left in this cycle for a call. Send a chat "
+                                        "message now and offer the call after your next wake."})
+        if left_min < settings.max_minutes:
+            import dataclasses
+            settings = dataclasses.replace(settings, max_minutes=left_min)
+            tlog(f"LIVE CALL: cap cut to {left_min} min (time left in this cycle)")
+    try:
+        return json.dumps(runtime.place(reason, settings, last_call_summary=last_call_summary,
+                                        brief=brief, recipient_id=recipient_id))
+    except Exception as e:
+        runtime.shutdown("failed")
+        return json.dumps({"success": False, "status": "failed", "error": f"call failed: {e}"})
+
+
+def _evaluate_live_call_gate():
+    if os.environ.get("VERSA_AGENT_NAME", "").strip().lower() != "coa":
+        return None
+    try:
+        from live_call_config import evaluate_gate
+        return evaluate_gate("coa")
+    except Exception as e:
+        tlog(f"LIVE CALL: gate check failed — {e}")
+        return None
+
+
+_LIVE_CALL_GATE = _evaluate_live_call_gate()
+if _LIVE_CALL_GATE is not None and _LIVE_CALL_GATE.ok:
+    ALL_TOOLS.append(agictl_call_pu)
+
+
+# ═══════════════════════════════════════════════════════
+# DESKTOP — Observe and operate the PU's HeteroSphere desktop (COA only)
+# ═══════════════════════════════════════════════════════
+
+HETEROSPHERE_SOCKET_DIR = "/tmp/heterosphere"
+# A look with an app's controls is larger than an agent's general tool limit
+# (state_versa_desktop.md §4.35 L4).
+DESKTOP_OUTPUT_LIMIT = 20000
+
+
+class DesktopInput(BaseModel):
+    command: str = Field(description=(
+        "'desktop look pu', 'desktop look pu --window <id> [--screen N]', 'desktop see pu [--screen N]', "
+        "'desktop click pu <atspi-id>', 'desktop right-click pu <atspi-id>', 'desktop double-click pu <atspi-id>', "
+        "'desktop type pu <atspi-id> \"<text>\"', 'desktop key pu <keys>' (enter, ctrl+a), or one Perceptron step: "
+        "'desktop open pu', 'desktop load pu <element>', 'desktop unload pu <element>', "
+        "'desktop activate pu', 'desktop close pu', 'desktop clip-use pu <n>'."))
+
+
+@tool("agictl_desktop", args_schema=DesktopInput)
+def agictl_desktop(command: str) -> str:
+    """Read the Primary User's desktop as a tree of named elements (every screen), operate
+    the primary screen one Perceptron step at a time, the way they do, or take a picture
+    of a screen (COA only). A look sums up each app window; the one with the keys comes in
+    full, and `--window <id>` reads one window's controls. `click`, `right-click` and
+    `double-click` press an app's control by its id from your last look; `type` types into a
+    field (never a password), `key` presses keys in the app that has them. Looking, operating, and pictures are allowed
+    separately on their screen unless they granted a period already, so a call can wait up to
+    about 40 seconds. A refusal is final for this request. A picture's path is read with
+    agictl_view_image. Load computer_use.md before the first look, step, or picture.
+    Examples: 'desktop look pu', 'desktop look pu --window window', 'desktop right-click pu atspi-4242-17',
+    'desktop load pu reboot', 'desktop see pu --screen 1'
+    """
+    return _run_agictl(command, timeout=60, limit=DESKTOP_OUTPUT_LIMIT)
+
+
+# Offered only once the PU's HeteroSphere has created its socket directory.
+if (os.environ.get("VERSA_AGENT_NAME", "").strip().lower() == "coa"
+        and os.path.isdir(HETEROSPHERE_SOCKET_DIR)):
+    ALL_TOOLS.append(agictl_desktop)
+
+
+def _call_model_overrides(call_model: str, wanted: str | None = None) -> dict | None:
+    """The reasoning level for call turns (live_call_config.call_effort_for).
+
+    [live_call] reasoning_effort: `auto` (stock) asks for the level shipped for this model,
+    measured to keep spoken answers quick; low / medium / high ask for that level. The call
+    model does the work the person asked for, so it reasons; state_live_voice_call.md §3.13.
+    """
+    from harness.model_params import agent_overrides_from_values, allowed_reasoning_efforts
+    from live_call_config import DEFAULT_CALL_REASONING, call_effort_for
+
+    effort = call_effort_for(call_model, allowed_reasoning_efforts(call_model),
+                             wanted or DEFAULT_CALL_REASONING)
+    if not effort:
+        return None
+    return agent_overrides_from_values(
+        temperature=None, reasoning_effort=effort, reasoning_max_tokens=None, model_params_extra=None,
+    )
+
+
+def _agictl_config_value(key: str) -> dict:
+    try:
+        payload = json.loads(_run_agictl(f"system config get {key}"))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    value = payload.get("value") if isinstance(payload, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _agictl_json(args: list[str], timeout: int = 30):
+    """agictl JSON for harness-internal reads (no tool-output cap)."""
+    try:
+        proc = subprocess.run(["agictl", *args], capture_output=True, text=True, timeout=timeout)
+        return json.loads(proc.stdout)
+    except Exception:
+        return None
+
+
+_LIVE_CALL_STYLE_KEY = "pu.communication_style"
+_LIVE_CALL_STYLE_KEY_HINTS = ("communication", "style", "preference", "tone")
+
+
+def _live_call_context() -> dict:
+    """PU language, style, profile, active games, and the latest call — for the voice card,
+    the call's start context, and the prompt.
+
+    Style: system memory `pu.communication_style` (saved in the get-to-know call); without it,
+    any system-memory keys that look like communication preferences. Profile: My Information
+    already synced from VersaVoice (`primary_user`), then the other `pu.*` system-memory keys.
+    """
+    from harness.live_call import account_profile_line, last_call_line, resolve_call_language
+
+    pu = _agictl_config_value("primary_user")
+    rows = [r for r in (_agictl_json(["memory", "system", "list"]) or []) if isinstance(r, dict)]
+    explicit = next((r for r in rows if r.get("key") == _LIVE_CALL_STYLE_KEY), None)
+    notes = []
+    if explicit and str(explicit.get("value") or "").strip():
+        notes.append(" ".join(str(explicit["value"]).split()))
+    else:
+        for row in rows:
+            key = str(row.get("key") or "")
+            if key and not key.startswith("live_call.") and any(h in key.lower() for h in _LIVE_CALL_STYLE_KEY_HINTS):
+                notes.append(f"{key}: {' '.join(str(row.get('value') or '').split())}")
+    profile = [
+        f"{str(r['key'])[3:].replace('_', ' ')}: {' '.join(str(r.get('value') or '').split())}"
+        for r in rows
+        if str(r.get("key") or "").startswith("pu.") and r.get("key") != _LIVE_CALL_STYLE_KEY
+        and str(r.get("value") or "").strip()
+    ]
+    games = [g for g in (_agictl_json(["game", "list", "--status", "active"]) or []) if isinstance(g, dict)]
+    calls = _agictl_json(["message", "calls", "list", "--limit", "1"])
+    latest = calls[0] if isinstance(calls, list) and calls and isinstance(calls[0], dict) else None
+    account = account_profile_line(pu)
+    return {
+        "language": resolve_call_language(str(pu.get("spokenLanguage") or "")),
+        "style_notes": "; ".join(notes)[:400],
+        "pu_profile": "; ".join(part for part in (account, "; ".join(profile)) if part),
+        "games": games,
+        "last_call": last_call_line(latest),
+    }
+
+
+# ═══════════════════════════════════════════════════════
+# VIEW — Agent-initiated image / video perception
+# ═══════════════════════════════════════════════════════
+
+MODALITY_VIEW_MIN_STEPS = 8
+
+_HARNESS_VIEW_CTX: dict[str, Any] = {}
+
+
+class ViewImageInput(BaseModel):
+    path: str = Field(description=(
+        "Absolute or workspace-relative path to a local image file on disk."
+    ))
+
+
+class ViewVideoInput(BaseModel):
+    path: str = Field(description=(
+        "Absolute or workspace-relative path to a local video file on disk "
+        "(mp4, mkv, or mov, 200 MB max)."
+    ))
+
+
+def _view_late_cycle_refusal(remaining: int) -> str:
+    return json.dumps({
+        "success": False,
+        "code": "late_cycle_cutoff",
+        "error": (
+            f"Modality tools refused — fewer than {MODALITY_VIEW_MIN_STEPS} steps remain. "
+            "Wrap up: journal progress (agictl task progress), leave a handoff, and agictl cycle end."
+        ),
+        "steps_remaining": remaining,
+    })
+
+
+def _view_no_driver_refusal(execution_model: str, modality: str) -> str:
+    return json.dumps({
+        "success": False,
+        "code": "no_driver",
+        "error": (
+            f"Execution model '{execution_model}' has no exact executable "
+            f"{modality}-input ModelDriver. "
+            f"Use agictl agent set-model to assign a ◆ {modality}-capable catalog key, "
+            "journal next actions, and agictl cycle end to respawn on the new model."
+        ),
+        "execution_model": execution_model,
+    })
+
+
+@tool("agictl_view_image", args_schema=ViewImageInput)
+def agictl_view_image(path: str) -> str:
+    """View a local image file — injects it into your context when the execution model supports vision.
+
+    Use when you need to perceive a screenshot, attachment, diagram, or any image on disk.
+    The execution model must declare image in catalog input_modalities.
+    Examples:
+      - agictl_view_image(path="/tmp/screenshot.png")
+      - agictl_view_image(path="workspace/project/diagram.png")
+    """
+    from model_drivers.registry import resolve_model_driver
+    from model_drivers.view_paths import ViewPathError, inspect_image_for_view
+
+    ctx = _HARNESS_VIEW_CTX
+    agent_name = ctx.get("agent_name") or os.environ.get("VERSA_AGENT_NAME", "")
+    execution_model = ctx.get("execution_model") or ""
+    remaining = int(ctx.get("steps_remaining") or 0)
+
+    if remaining < MODALITY_VIEW_MIN_STEPS:
+        return _view_late_cycle_refusal(remaining)
+
+    if resolve_model_driver(execution_model, "input", "image") is None:
+        return _view_no_driver_refusal(execution_model, "image")
+
+    try:
+        result = inspect_image_for_view(path, agent_name)
+    except ViewPathError as e:
+        return json.dumps({"success": False, "code": e.code, "error": e.message})
+    except OSError as e:
+        return json.dumps({"success": False, "code": "io_error", "error": str(e)})
+
+    result["execution_model"] = execution_model
+    result["inject"] = True
+    return json.dumps(result)
+
+
+@tool("agictl_view_video", args_schema=ViewVideoInput)
+def agictl_view_video(path: str) -> str:
+    """View a local video file — injects it into your context when the execution model supports video.
+
+    Use for mp4/mkv/mov attachments or recordings (200 MB max; native Google
+    inline is ~20 MB). Only when the PU or a Connection explicitly asked.
+    The execution model must have an exact video-input ModelDriver (◆).
+    Examples:
+      - agictl_view_video(path="/tmp/clip.mp4")
+      - agictl_view_video(path="workspace/project/demo.mov")
+    """
+    from model_drivers.registry import resolve_model_driver
+    from model_drivers.view_paths import ViewPathError, inspect_video_for_view
+
+    ctx = _HARNESS_VIEW_CTX
+    agent_name = ctx.get("agent_name") or os.environ.get("VERSA_AGENT_NAME", "")
+    execution_model = ctx.get("execution_model") or ""
+    remaining = int(ctx.get("steps_remaining") or 0)
+
+    if remaining < MODALITY_VIEW_MIN_STEPS:
+        return _view_late_cycle_refusal(remaining)
+
+    if resolve_model_driver(execution_model, "input", "video") is None:
+        return _view_no_driver_refusal(execution_model, "video")
+
+    try:
+        result = inspect_video_for_view(path, agent_name, execution_model=execution_model)
+    except ViewPathError as e:
+        return json.dumps({"success": False, "code": e.code, "error": e.message})
+    except OSError as e:
+        return json.dumps({"success": False, "code": "io_error", "error": str(e)})
+
+    result["execution_model"] = execution_model
+    result["inject"] = True
+    return json.dumps(result)
+
+
+ALL_TOOLS.append(agictl_view_image)
+ALL_TOOLS.append(agictl_view_video)
+
+
+# ═══════════════════════════════════════════════════════
+# LOAD SKILL — one skill file, whole (SKR-03)
+# ═══════════════════════════════════════════════════════
+
+# Set in main() from --skills-dir; the tool falls back to AGICTL_AGENT_DIR.
+_SKILLS_DIR: str | None = None
+
+
+class LoadSkillInput(BaseModel):
+    name: str = Field(description=(
+        "The skill's file name from your skills list, with or without '.md'. "
+        "Examples: 'task_scheduling', 'cli_reference.md'. "
+        "A file inside a skill's own folder: 'solution_architect/install_template.sh'. "
+        "A shipped reference document: 'docs/versa_agi_readme.md'."
+    ))
+
+
+@tool("agictl_load_skill", args_schema=LoadSkillInput)
+def agictl_load_skill(name: str) -> str:
+    """Load one skill and receive ALL of it. Use this whenever you are told to load or
+    read a skill, or a skill is named for this cycle. Do not read a skill with `cat`:
+    that is cut at your tool output limit and you would act on half a skill.
+    Examples:
+      - agictl_load_skill(name="task_scheduling")
+      - agictl_load_skill(name="cli_reference")
+    """
+    from harness.skill_loader import read_skill, skills_folder
+    return read_skill(name, skills_folder(_SKILLS_DIR))
+
+
+ALL_TOOLS.append(agictl_load_skill)
+
+
+def _build_view_image_message(
+    payload: dict,
+    provider_family: str,
+) -> HumanMessage | None:
+    """Build a multimodal HumanMessage for a successful view.
+
+    The caller feeds this message to the model by *breaking and re-invoking*
+    the stream (see the VIEW RE-INVOKE block in the main loop) — NOT via
+    `agent.update_state`. A live `agent.stream(...)` Pregel loop holds its
+    channels in memory and never re-reads an externally written checkpoint
+    mid-run, so an `update_state` injection is invisible to the agent node's
+    next turn — the model would answer without ever seeing the image. See
+    "VIEW INJECT / multimodal re-invoke" in System Design § Development
+    Standards.
+    """
+    from model_drivers.registry import resolve_model_driver
+
+    path = payload.get("path") or ""
+    if not path:
+        return None
+    try:
+        modality = str(payload.get("modality") or "image").strip().lower() or "image"
+        caption = f"Agent requested view of {modality} at {path}"
+        execution_model = str(payload.get("execution_model") or "")
+        resolved = resolve_model_driver(execution_model, "input", modality)
+        if resolved is None:
+            tlog(
+                f"VIEW INJECT: no_driver model={execution_model} "
+                f"direction=input modality={modality}"
+            )
+            return None
+        parts = resolved.adapter.entrypoint(
+            path=path,
+            caption=caption,
+            config=resolved.binding.config,
+        )
+        adapter_id = resolved.adapter.adapter_id
+        inject_id = f"view-inject-{uuid.uuid4()}"
+        inject_msg = HumanMessage(content=parts, id=inject_id)
+        fp = ""
+        try:
+            import hashlib
+            digest = hashlib.sha256()
+            with open(path, "rb") as img_f:
+                digest.update(img_f.read(65536))
+            fp = digest.hexdigest()[:12]
+        except OSError:
+            pass
+        size_note = f" bytes={payload.get('bytes')}" if payload.get("bytes") else ""
+        fp_note = f" sha256_12={fp}" if fp else ""
+        src = payload.get("source_path") or path
+        src_note = f" source={src}" if src and src != path else ""
+        resize_note = ""
+        if payload.get("resized_from") and payload.get("resized_to"):
+            resize_note = f" resized={payload['resized_from']}→{payload['resized_to']}"
+        tlog(
+            f"VIEW INJECT: path={path}{size_note}{fp_note}{src_note}{resize_note} "
+            f"model={payload.get('execution_model')} "
+            f"provider_family={provider_family} adapter={adapter_id} id={inject_id}"
+        )
+        return inject_msg
+    except Exception as e:
+        tlog(f"VIEW INJECT: Failed — {e}")
+        return None
+
+
+def _trim_view_inject_payloads(agent, config, pending: list[dict] | None = None) -> int:
+    """Strip image/video payloads from view-inject HumanMessages in the checkpoint.
+
+    When *pending* is set, trims those message ids after the model turn that
+    consumed the inject. Always scans for any remaining ``view-inject-*`` ids
+    with image/video blocks (stale payloads from cycles where trim never ran).
+    """
+    from model_drivers.message_adapters import content_has_image_parts, trim_image_parts_from_message
+
+    pending_ids: set[str] = set()
+    paths_by_id: dict[str, str] = {}
+    if pending:
+        pending_ids = {p["message_id"] for p in pending if p.get("message_id")}
+        paths_by_id = {p["message_id"]: p.get("path", "") for p in pending if p.get("message_id")}
+
+    try:
+        snapshot = agent.get_state(config)
+        current = snapshot.values.get("messages", []) if snapshot else []
+    except Exception as e:
+        tlog(f"VIEW TRIM: Could not read checkpoint — {e}")
+        return 0
+
+    def _path_for_message(mid: str, content: object) -> str:
+        if mid in paths_by_id and paths_by_id[mid]:
+            return paths_by_id[mid]
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text") or ""
+                    if " at " in text:
+                        return text.rsplit(" at ", 1)[-1].strip()
+        return ""
+
+    changed = False
+    updated: list = []
+    trimmed = 0
+    for m in current:
+        if not isinstance(m, HumanMessage):
+            updated.append(m)
+            continue
+        mid = getattr(m, "id", None) or ""
+        should_trim = (
+            mid in pending_ids
+            or (isinstance(mid, str) and mid.startswith("view-inject-"))
+        )
+        if should_trim and content_has_image_parts(m.content):
+            path = _path_for_message(mid, m.content)
+            new_content = trim_image_parts_from_message(m.content, path)
+            updated.append(HumanMessage(content=new_content, id=mid))
+            trimmed += 1
+            changed = True
+        else:
+            updated.append(m)
+
+    if changed:
+        try:
+            agent.update_state(
+                config,
+                {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + updated},
+                as_node="__start__",
+            )
+            tlog(f"VIEW TRIM: removed image blocks from {trimmed} injected message(s)")
+        except Exception as e:
+            tlog(f"VIEW TRIM: Failed — {e}")
+            return 0
+    return trimmed
+
+
+def _apply_view_surgical_trim(agent, config, pending: list[dict]) -> int:
+    """Strip image payloads from injected view messages after the next agent turn."""
+    return _trim_view_inject_payloads(agent, config, pending)
+
+
+
+def usage_totals(messages: list) -> tuple[int, int, int]:
+    """(total, prompt, completion) tokens the providers reported on these messages."""
+    total_tokens, prompt_tokens, completion_tokens = 0, 0, 0
+    for m in messages:
+        if not isinstance(m, AIMessage):
+            continue
+        # Standard LangChain usage_metadata (Gemini, OpenAI)
+        if hasattr(m, "usage_metadata") and m.usage_metadata:
+            prompt_tokens += m.usage_metadata.get("input_tokens", 0)
+            completion_tokens += m.usage_metadata.get("output_tokens", 0)
+            total_tokens += m.usage_metadata.get("total_tokens", 0)
+            continue
+        # Ollama: token data in response_metadata
+        rm = getattr(m, "response_metadata", None) or {}
+        if rm.get("eval_count") or rm.get("prompt_eval_count"):
+            p = rm.get("prompt_eval_count", 0) or 0
+            c = rm.get("eval_count", 0) or 0
+            prompt_tokens += p
+            completion_tokens += c
+            total_tokens += p + c
+    return total_tokens, prompt_tokens, completion_tokens
+
+
+def telemetry_path(agent_name: str) -> str:
+    if agent_name == "coa":
+        return "/var/lib/versa-agi/coa/cycles/cycle_telemetry.json"
+    return f"/var/lib/versa-agi/{agent_name}/cycles/cycle_telemetry.json"
+
+
+def write_running_telemetry(agent_name: str, messages: list, telemetry_file: str | None = None) -> None:
+    """Token counts so far, tagged with this cycle's id.
+
+    Written after every model reply so a cycle that is killed still leaves its
+    own numbers, and Lifeline can tell them from an earlier cycle's
+    (state_spawn_context.md §1.5 rule 3). Never raises.
+    """
+    try:
+        total_tokens, prompt_tokens, completion_tokens = usage_totals(messages)
+        cache_read, cache_write = cache_totals(messages)
+        ping_in, ping_out, ping_read, ping_write = _keepalive_usage()
+        total_tokens += ping_in + ping_out
+        prompt_tokens += ping_in
+        completion_tokens += ping_out
+        cache_read += ping_read
+        cache_write += ping_write
+        path = telemetry_file or telemetry_path(agent_name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as f:
+            json.dump({
+                "cycle_id": os.environ.get("VERSA_CYCLE_ID", ""),
+                "total_tokens": total_tokens,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+                "partial": True,
+            }, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def write_telemetry(agent_name: str, total_tokens: int, prompt_tokens: int, completion_tokens: int, messages: list,
+                    cached_tokens: int = 0, cache_write_tokens: int = 0):
+    telemetry_file = telemetry_path(agent_name)
+
+    os.makedirs(os.path.dirname(telemetry_file), exist_ok=True)
+
+    serializable_messages = []
+    for m in messages:
+        msg_dict = {"type": m.type, "content": _reply_text(m)}
+        if hasattr(m, "tool_calls") and m.tool_calls:
+            msg_dict["toolCalls"] = [{"name": tc.get("name", "unknown"), "status": "called"} for tc in m.tool_calls]
+        serializable_messages.append(msg_dict)
+
+    with open(telemetry_file, "w") as f:
+        json.dump({
+            "cycle_id": os.environ.get("VERSA_CYCLE_ID", ""),
+            "total_tokens": total_tokens,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "messages": serializable_messages
+        }, f)
+
+
+# Late nudge: prefer ~15 steps from the end on large budgets; clamp for small max_steps.
+END_OFF_REMAINING_CAP = 15
+
+
+def end_off_remaining_threshold(max_steps: int) -> int:
+    """Steps remaining when the end-off nudge fires.
+
+    Large budgets (~300): 15 left. Small budgets: ~10% of max (floor 2) so a
+    20-step agent is not nudged almost immediately.
+    """
+    if max_steps <= 0:
+        return 1
+    return min(END_OFF_REMAINING_CAP, max(2, max_steps // 10))
+
+
+def budget_wrap_message(step_count: int, max_steps: int) -> str:
+    """Soft wrap-up at ~80% of the step budget."""
+    remaining = max(0, max_steps - step_count)
+    return (
+        f"⏱️ Step budget: {step_count} of {max_steps} used ({remaining} remaining). "
+        "Begin wrapping up current work. "
+        "Journal progress: agictl task progress <id> 'DONE: ... NEXT: ...'. "
+        "If you cannot finish in the remaining steps, save progress and end the cycle — "
+        "you will be respawned to continue."
+    )
+
+
+def budget_end_off_message(step_count: int, max_steps: int) -> str:
+    """Calm end-off nudge near the hard step limit (not a panic CRITICAL)."""
+    remaining = max(0, max_steps - step_count)
+    return (
+        f"⏱️ Step budget: {step_count} of {max_steps} used ({remaining} remaining). "
+        "Please end off now: journal progress with "
+        "agictl task progress <id> 'DONE: ... NEXT: ... BLOCKERS: ...', then "
+        "agictl cycle end 'Summary of what was done' --handoff 'Open: … | Next: …'. "
+        "Your progress entry and handoff are injected into the next wake — "
+        "you will be respawned on the next tick to continue."
+    )
+
+
+def _saved_handoff(cycle_id: str) -> str:
+    """Handoff already on this cycle's row ("" when none, or when it cannot be read)."""
+    if not cycle_id:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["agictl", "cycle", "get", cycle_id], capture_output=True, text=True, timeout=15,
+        )
+        # `cycle get` answers {"success": true, "cycle": {...row...}}.
+        reply = json.loads(proc.stdout or "{}") or {}
+        row = reply.get("cycle") if isinstance(reply.get("cycle"), dict) else reply
+        return str((row or {}).get("handoff") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _close_cycle_from_harness(agent_name: str, summary: str, tag: str, handoff: str = "") -> bool:
+    """Close the open cycle row the way `agictl cycle end` does.
+
+    Used when the harness ends the cycle itself: step budget (53), time limit
+    (54), repeated call (55). ``handoff`` is written only when given; a handoff
+    the agent saved earlier this cycle stays. Runs without the listening-window
+    flag so the row is closed, not held open for a chat.
+    """
+    cmd = ["agictl", "cycle", "end", summary]
+    cmd += ["--handoff", handoff] if handoff else ["--no-handoff"]
+    cmd += ["--agent", agent_name]
+    env = {k: v for k, v in os.environ.items() if k not in ("VERSA_LISTENING", "VERSA_LISTEN_MINUTES")}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            tlog(f"{tag}: cycle finalize returned {proc.returncode}: {err}")
+            return False
+        tlog(f"{tag}: Cycle closed by the harness — {summary}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        tlog(f"{tag}: Failed to finalize cycle — {e}")
+        return False
+
+
+def _finalize_cycle_step_budget(agent_name: str, step_count: int, max_steps: int) -> None:
+    """Close the open cycle row when the harness hits the hard step limit.
+
+    Mirrors what `agictl cycle end` does so RECENT ACTIVITY summaries and wake
+    context stay coherent when the agent ignores budget warnings.
+    """
+    summary = (
+        f"[Harness] Step budget reached ({step_count}/{max_steps}). "
+        "Work continues on next spawn — review task progress and recent cycle summaries."
+    )
+    _close_cycle_from_harness(agent_name, summary, "STEP BUDGET")
+
+
+def _finalize_cycle_with_handoff(agent_name: str, summary: str, tag: str, messages, last_tool: str) -> None:
+    """Close at the time limit or on a repeated call (state_long_cycles.md §1.3 rule 2).
+
+    Keeps a handoff the agent already saved this cycle; otherwise writes one
+    from its last plain-text reply and its last tool call.
+    """
+    handoff = ""
+    if not _saved_handoff(os.environ.get("VERSA_CYCLE_ID", "")):
+        handoff = harness_handoff(last_plain_reply(messages), last_tool)
+    _close_cycle_from_harness(agent_name, summary, tag, handoff=handoff)
+
+
+def _write_checkin_line(line: str) -> None:
+    """One line on the cycle row's check-in log (state_long_cycles.md §1.6). Best effort."""
+    cmd = ["agictl", "cycle", "checkin", line]
+    cycle_id = os.environ.get("VERSA_CYCLE_ID", "")
+    if cycle_id:
+        cmd += ["--cycle-id", cycle_id]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        tlog(f"CHECK-IN: line not written — {e}")
+
+
+# ═══════════════════════════════════════════════════════
+# LLM Provider Resolution
+# ═══════════════════════════════════════════════════════
+
+def get_llm(model_name: str, num_ctx: int = 0, agent_overrides: dict | None = None,
+            prompt_cache: bool = False, cache_session: str = "", extra_callbacks: list | None = None):
+    """Instantiate the exact catalog Model's Provider client.
+
+    Provider slug, endpoint, credentials, and client class come from the merged
+    catalog/provider registries via ``provider_runtime``. Model-name shape never
+    selects transport.
+
+    Args:
+        model_name: The model identifier (e.g. 'gemini-2.5-flash', 'gpt-5.5-2026-04-23')
+        num_ctx: Context window size in tokens for Ollama models. 0 = Ollama default.
+        agent_overrides: Optional per-agent param overrides (temperature, reasoning, extra).
+        prompt_cache: True for the model that runs the cycle (harness/prompt_cache.py).
+        cache_session: Opaque id of the agent's thread, for a route that pins by id.
+        extra_callbacks: Callback handlers for this client (the cache keep-alive's recorder).
+    """
+    from provider_runtime import create_langchain_client
+
+    provider_route, native = _resolve_llm_provider_and_native(
+        model_name,
+        num_ctx=num_ctx,
+        agent_overrides=agent_overrides,
+        prompt_cache=prompt_cache,
+        cache_session=cache_session,
+    )
+    callbacks = None
+    if native.get("streaming"):
+        # A streamed reply touches the heartbeat as it arrives (state_long_cycles.md §1.2).
+        from harness.stream_heartbeat import StreamHeartbeat
+        callbacks = [StreamHeartbeat(lambda: _HEARTBEAT.beat())]
+    if extra_callbacks:
+        callbacks = (callbacks or []) + list(extra_callbacks)
+    return create_langchain_client(
+        provider_route,
+        native_params=native,
+        num_ctx=num_ctx,
+        callbacks=callbacks,
+    )
+
+
+# ═══════════════════════════════════════════════════════
+# Main Entry Point
+# ═══════════════════════════════════════════════════════
+
+def main():
+    global TOOL_OUTPUT_LIMIT, _SKILLS_DIR
+    parser = argparse.ArgumentParser(description="Versa AGi LangGraph Harness")
+    parser.add_argument("--agent", required=True, help="Name of the agent")
+    parser.add_argument("--system-file", required=True, help="Path to the system prompt file")
+    parser.add_argument("--wake-file", required=True, help="Path to the wake reason prompt file")
+    parser.add_argument("--model", required=True, help="Model to execute")
+    parser.add_argument("--max-steps", type=int, default=50, help="Maximum number of agent graph steps")
+    parser.add_argument("--tool-budget", type=int, default=6000, help="Maximum character output limit for tools")
+    parser.add_argument("--thread-id", default=None, help="Thread ID for checkpoint persistence (agent_id-project_id)")
+    parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint for this thread")
+    parser.add_argument("--skills-dir", default=None, help="Path to agent skills directory for dynamic injection")
+    parser.add_argument("--triage-model", default=None, help="Model for triage node (falls back to --model if not set)")
+    parser.add_argument("--num-ctx", type=int, default=0, help="Context window size in tokens for Ollama (0 = model default)")
+    parser.add_argument("--temperature", type=float, default=None, help="Per-agent temperature override (omit = inherit)")
+    parser.add_argument("--reasoning-effort", default=None, help="Per-agent reasoning effort override (omit = inherit)")
+    parser.add_argument("--reasoning-max-tokens", type=int, default=None, help="Per-agent reasoning token budget (omit = inherit)")
+    parser.add_argument("--model-params-extra", default=None, help="Per-agent extra params JSON passthrough (omit = inherit)")
+    parser.add_argument("--tasks-file", default=None, help="Unused (kept for lifeline compat)")
+    parser.add_argument("--convo-file", default=None, help="Unused (kept for lifeline compat)")
+    parser.add_argument("--games-file", default=None, help="Unused — Games are not a triage input")
+    parser.add_argument("--inbox-file", default=None, help="Unread inbound digest for triage (optional; else built from DB)")
+    parser.add_argument("--registry-file", default=None, help="Project/task registry for triage (optional; else built from DB)")
+    parser.add_argument("--routing-file", default=None, help="Path to ephemeral model routing JSON from lifeline")
+    parser.add_argument("--resume-max-messages", type=int, default=0, help="Verbatim messages a resumed cycle starts with; never more than the model window allows (0 = the window rule alone)")
+    parser.add_argument("--skill-mode", default="hybrid", choices=["full", "lazy", "hybrid"], help="Skill injection mode: full (inject all), lazy (manifest only), hybrid (core injected + lazy manifest)")
+    parser.add_argument("--deadline-epoch", type=float, default=None, help="Epoch seconds when Lifeline's timeout stops this run (time warnings at 10 and 5 minutes left)")
+    parser.add_argument("--listen-minutes", type=int, default=0, help="Live Chat listening window granted by VersaVoice (0 = one-shot cycle)")
+    args = parser.parse_args()
+    harness_started_epoch = time.time()
+    global _HARNESS_DEADLINE_EPOCH, _HEARTBEAT
+    _HARNESS_DEADLINE_EPOCH = args.deadline_epoch
+    _HEARTBEAT = Heartbeat.from_env()
+    _HEARTBEAT.start()
+
+    TOOL_OUTPUT_LIMIT = args.tool_budget
+
+    with open(args.system_file, "r") as f:
+        system_prompt = f.read()
+
+    # Resolve skills directory early — used by both CLI reference injection and triage
+    skills_dir = getattr(args, 'skills_dir', None)
+    _SKILLS_DIR = skills_dir
+
+    # ── Always-Inject skill blocks (static content) ──
+    # Collected first, then inserted BEFORE the LIVE SITUATION sentinel so the
+    # static prompt prefix (cache-eligible) includes them — appending after the
+    # per-cycle data would make this content uncacheable (System Design §3.1,
+    # Poise Layout Design Pattern).
+    DYNAMIC_BOUNDARY_SENTINEL = "## ── LIVE SITUATION"
+    static_skill_blocks = []
+
+    # ── Always-Inject: CLI Reference (agent subset) ──
+    # cli_reference_agent.md — always injected for every agent (token-efficient spawn default).
+    # COA loads full cli_reference.md on demand via agictl_load_skill (see COA block below).
+    cli_ref_injected = False
+    if skills_dir:
+        cli_ref_path = os.path.join(skills_dir, "cli_reference_agent.md")
+        if os.path.isfile(cli_ref_path):
+            try:
+                with open(cli_ref_path, "r") as f:
+                    cli_ref_content = f.read()
+                static_skill_blocks.append(f"\n\n---\n## ── TOOL REFERENCE: cli_reference_agent.md ──\n\n{cli_ref_content}")
+                cli_ref_injected = True
+                tlog(f"CLI REFERENCE (agent): Injected ({len(cli_ref_content)} chars)")
+            except Exception as e:
+                tlog(f"CLI REFERENCE (agent): Failed to read — {e}")
+
+    # ── COA: full operator CLI reference (on demand, not auto-injected) ──
+    if skills_dir and args.agent == "coa":
+        full_ref_path = os.path.join(skills_dir, "cli_reference.md")
+        if os.path.isfile(full_ref_path):
+            static_skill_blocks.append(
+                "\n\n---\n## ── COA: FULL CLI REFERENCE (load on demand) ──\n"
+                "This spawn includes **cli_reference_agent.md** only. For model catalog, provider CRUD, "
+                "admin commands, and operator-only groups, load the full manual **before** that work:\n"
+                "- tool **`agictl_load_skill`**, argument **`cli_reference`** (it arrives whole)\n"
+                "Sub-agents do not have this file — never reference it to them.\n"
+            )
+            tlog("CLI REFERENCE (full): on-demand via .agent/skills/cli_reference.md")
+
+    # ── Always-Inject: Skill Authoring (COA-exclusive) ──
+    # skill_authoring.md is injected only for COA — sub-agents never see it.
+    if skills_dir and args.agent == "coa":
+        skill_auth_path = os.path.join(skills_dir, "skill_authoring.md")
+        if os.path.isfile(skill_auth_path):
+            try:
+                with open(skill_auth_path, "r") as f:
+                    skill_auth_content = f.read()
+                static_skill_blocks.append(f"\n\n---\n## ── SKILL AUTHORING REFERENCE ──\n\n{skill_auth_content}")
+                tlog(f"SKILL AUTHORING: Injected ({len(skill_auth_content)} chars)")
+            except Exception as e:
+                tlog(f"SKILL AUTHORING: Failed to read — {e}")
+
+    # ── Always-Inject: Memory Management (Awareness-First Procedure) ──
+    # memory_management.md is mandatory — agents MUST execute the 5-step
+    # awareness procedure every cycle. Never gated behind triage.
+    if skills_dir:
+        mem_skill_path = os.path.join(skills_dir, "memory_management.md")
+        if os.path.isfile(mem_skill_path):
+            try:
+                with open(mem_skill_path, "r") as f:
+                    mem_skill_content = f.read()
+                static_skill_blocks.append(f"\n\n---\n## ── MANDATORY: MEMORY & AWARENESS PROCEDURE ──\n**This procedure MUST be executed before ending every cycle.**\n\n{mem_skill_content}")
+                tlog(f"MEMORY SKILL: Injected ({len(mem_skill_content)} chars)")
+            except Exception as e:
+                tlog(f"MEMORY SKILL: Failed to read — {e}")
+
+    # ── Always-Inject: Communication Basic (essential messaging rules) ──
+    # communication_basic.md is a ~2 KB condensed version of the full communication skill.
+    # Always present — agents must know how to send/receive messages correctly.
+    if skills_dir:
+        comm_basic_path = os.path.join(skills_dir, "communication_basic.md")
+        if os.path.isfile(comm_basic_path):
+            try:
+                with open(comm_basic_path, "r") as f:
+                    comm_basic_content = f.read()
+                static_skill_blocks.append(f"\n\n---\n## ── COMMUNICATION RULES ──\n\n{comm_basic_content}")
+                tlog(f"COMMUNICATION BASIC: Injected ({len(comm_basic_content)} chars)")
+            except Exception as e:
+                tlog(f"COMMUNICATION BASIC: Failed to read — {e}")
+
+    from harness.triage import format_loadable_skills_block
+    catalog_block = format_loadable_skills_block(args.agent)
+    if catalog_block.strip():
+        static_skill_blocks.append(catalog_block)
+        tlog(f"LOADABLE CATALOG: Injected ({len(catalog_block)} chars)")
+
+    # ── Insert static skill blocks at the cache boundary ──
+    if static_skill_blocks:
+        skills_payload = "".join(static_skill_blocks)
+        boundary_idx = system_prompt.find(DYNAMIC_BOUNDARY_SENTINEL)
+        if boundary_idx != -1:
+            system_prompt = (
+                system_prompt[:boundary_idx].rstrip()
+                + skills_payload
+                + "\n\n---\n\n"
+                + system_prompt[boundary_idx:]
+            )
+            tlog(f"STATIC SKILLS: Inserted at LIVE SITUATION boundary ({len(skills_payload)} chars)")
+        else:
+            # Legacy poise without sentinel — fall back to appending
+            system_prompt += skills_payload
+            tlog(f"STATIC SKILLS: No boundary sentinel found — appended ({len(skills_payload)} chars)")
+
+    with open(args.wake_file, "r") as f:
+        wake_prompt = f.read()
+
+    # Read pre-computed triage context files (written by lifeline.sh)
+    tasks_context = ""
+    if args.tasks_file and os.path.isfile(args.tasks_file):
+        with open(args.tasks_file, "r") as f:
+            tasks_context = f.read().strip()
+
+    convo_context = ""
+    if args.convo_file and os.path.isfile(args.convo_file):
+        with open(args.convo_file, "r") as f:
+            convo_context = f.read().strip()
+
+    inbox_context = ""
+    if getattr(args, "inbox_file", None) and os.path.isfile(args.inbox_file):
+        with open(args.inbox_file, "r") as f:
+            inbox_context = f.read().strip()
+
+    registry_context = ""
+    if getattr(args, "registry_file", None) and os.path.isfile(args.registry_file):
+        with open(args.registry_file, "r") as f:
+            registry_context = f.read().strip()
+
+    # ── Session Type ──
+    # Determined later by actual checkpoint state inspection, not just --resume flag.
+    session_type = "NEW"
+    thread_label = args.thread_id or "none"
+
+    from harness.model_params import agent_overrides_from_values
+    agent_param_overrides = agent_overrides_from_values(
+        temperature=args.temperature,
+        reasoning_effort=args.reasoning_effort,
+        reasoning_max_tokens=args.reasoning_max_tokens,
+        model_params_extra=args.model_params_extra,
+    )
+
+    routing_context = None
+    if args.routing_file and os.path.isfile(args.routing_file):
+        try:
+            with open(args.routing_file, "r") as rf:
+                routing_context = json.load(rf)
+            cand_n = len((routing_context or {}).get("candidates") or [])
+            tlog(f"ROUTING: loaded context from {args.routing_file} (mode={(routing_context or {}).get('mode')}, candidates={cand_n})")
+        except Exception as e:
+            tlog(f"ROUTING: failed to load {args.routing_file} — {e}")
+    else:
+        if args.routing_file:
+            tlog(f"ROUTING: file missing — {args.routing_file}")
+        else:
+            tlog("ROUTING: no routing file passed (model_routing_enabled off or empty pool)")
+
+    # ── Checkpointer Setup ──
+    checkpointer = None
+    config = {"recursion_limit": args.max_steps * 3}
+
+    if args.thread_id:
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            checkpoint_path = f"/var/lib/versa-agi/{args.agent}/cycles/checkpoints.db"
+            os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+            db_conn = db_connect.connect_compat(checkpoint_path, check_same_thread=False)
+            checkpointer = SqliteSaver(db_conn)
+            config["configurable"] = {"thread_id": args.thread_id}
+            tlog(f"CHECKPOINT: {checkpoint_path} (thread: {args.thread_id})")
+        except ImportError:
+            tlog("CHECKPOINT: langgraph-checkpoint-sqlite not installed — running without persistence")
+        except Exception as e:
+            tlog(f"CHECKPOINT: Failed to initialize — {e}")
+
+    # ── Triage Node ──
+    # Runs a lightweight classification before the main agent loop.
+    # Uses a separate model if --triage-model is set, otherwise falls back to --model.
+    from harness.triage import run_triage, inject_skills, build_triage_context, enrich_triage_from_inbox, build_inbox_context, build_registry_context
+
+    triage_model_name = getattr(args, 'triage_model', None) or args.model
+    triage_llm = get_llm(triage_model_name, agent_overrides=agent_param_overrides)
+
+    tlog(f"TRIAGE MODEL: {triage_model_name}")
+    if skills_dir:
+        tlog(f"SKILLS DIR: {skills_dir}")
+
+    # Run triage classification (before main LLM — ephemeral routing decision)
+    if not inbox_context:
+        inbox_context = build_inbox_context(args.agent)
+    if not registry_context:
+        registry_context = build_registry_context(args.agent)
+
+    triage_result = run_triage(
+        llm=triage_llm,
+        wake_prompt=wake_prompt,
+        inbox_context=inbox_context,
+        registry_context=registry_context,
+        skills_dir=skills_dir,
+        agent_name=args.agent,
+        routing_context=routing_context,
+    )
+    triage_result = enrich_triage_from_inbox(triage_result, args.agent)
+
+    from harness.model_routing import resolve_execution_model
+    execution_model, routing_mode, routing_work_modality = resolve_execution_model(
+        routing_context, triage_result, args.model, agent_name=args.agent,
+        wake_prompt=wake_prompt,
+    )
+    tlog(f"EXECUTION MODEL: {execution_model} (assigned={args.model}, mode={routing_mode})")
+    if routing_work_modality:
+        tlog(f"ROUTING: work_modality={routing_work_modality}")
+    if routing_context and routing_mode == "none":
+        rec = getattr(triage_result, "recommended_model", None)
+        if not rec and not routing_work_modality:
+            tlog("ROUTING: triage omitted work_modality and recommended_model — kept assigned model")
+
+    cycle_id = os.environ.get("VERSA_CYCLE_ID", "")
+    if cycle_id:
+        try:
+            import subprocess as _sp
+            cmd = [
+                "agictl", "cycle", "set-routing", cycle_id,
+                "--assigned-model", args.model,
+                "--execution-model", execution_model,
+                "--routing-mode", routing_mode,
+            ]
+            if routing_work_modality:
+                cmd.extend(["--work-modality", routing_work_modality])
+            _sp.run(cmd, capture_output=True, text=True, timeout=15)
+            tlog(f"ROUTING: recorded on cycle {cycle_id}")
+        except Exception as e:
+            tlog(f"ROUTING: cycle set-routing failed — {e}")
+
+    # What the cycle model was last sent: the cache keep-alive sends it again while a chat waits.
+    last_request = LastRequest()
+    # The reply as it is written, for the "being written" bubble in the app
+    # (state_realtime_link.md §2.2). None when Lifeline gave no draft file.
+    reply_draft = None
+    cycle_callbacks = [last_request]
+    try:
+        reply_draft = reply_draft_mod.from_environment(cycle_id)
+        if reply_draft is not None:
+            cycle_callbacks.append(reply_draft_mod.callback_for(reply_draft))
+    except Exception as e:
+        reply_draft = None
+        tlog(f"DRAFT: off for this cycle — {e}")
+    llm = get_llm(execution_model, num_ctx=args.num_ctx, agent_overrides=agent_param_overrides,
+                  prompt_cache=True,
+                  cache_session=cache_session_id(args.agent, args.thread_id or ""),
+                  extra_callbacks=cycle_callbacks)
+
+    from harness.model_params import detect_provider_family
+    from model_catalog import catalog_entry_for_model
+
+    _cat_entry = catalog_entry_for_model(execution_model)
+    _provider_slug = (_cat_entry or {}).get("provider")
+    _HARNESS_VIEW_CTX.update({
+        "agent_name": args.agent,
+        "execution_model": execution_model,
+        "provider_family": detect_provider_family(execution_model, _provider_slug),
+    })
+
+    # Request traits of the execution model (state_model_drivers.md §2.7).
+    from harness.model_params import builtin_search_tools, traits_for, web_search_enabled
+    from harness.model_reply import (
+        PROVIDER_SEARCH_HINT, REFUSALS_BEFORE_CLOSE, refusal_closed_line, refusal_note,
+        refusal_reason, refusal_summary, search_log_line,
+    )
+    from harness.reasoning_replay import (
+        WIRE_ANTHROPIC, ReplayGuard, is_binding_error, is_server_tool_error, wire_for,
+    )
+
+    execution_traits = traits_for(
+        execution_model, _HARNESS_VIEW_CTX["provider_family"], _provider_slug,
+    )
+    replay_guard = ReplayGuard(
+        execution_traits.replay, execution_model, log=tlog,
+        wire=wire_for(_HARNESS_VIEW_CTX["provider_family"], execution_traits.api),
+    )
+    provider_search_tools = builtin_search_tools(execution_model, agent_param_overrides)
+    if web_search_enabled(execution_model, agent_param_overrides):
+        tlog(f"WEB SEARCH: provider search on for {execution_model} ({execution_traits.web_search})")
+
+    # Inject skills based on triage classification
+    # Filter out always-injected skills — they're not triage-driven.
+    skill_content = ""
+    always_injected = {
+        "cli_reference_agent.md",
+        "skill_authoring.md",
+        "memory_management.md",
+        "communication_basic.md",
+        "communication.md",
+    }
+    # Lifeline injects remote_sentinel.md into {FIRST_CONTACT} for this cycle.
+    if os.environ.get("VERSA_FIRST_CONTACT", "").strip().lower() == "sentinel":
+        always_injected.add("remote_sentinel.md")
+        if triage_result.skills_to_inject:
+            before = list(triage_result.skills_to_inject)
+            triage_result.skills_to_inject = [
+                s for s in triage_result.skills_to_inject if s != "self_introduction.md"
+            ]
+            if before != triage_result.skills_to_inject:
+                tlog("FIRST_CONTACT: dropped self_introduction.md (VERSA_FIRST_CONTACT=sentinel)")
+        tlog("FIRST_CONTACT: remote_sentinel.md treated as already in system prompt")
+    skill_mode = getattr(args, 'skill_mode', 'hybrid')
+    tlog(f"SKILL MODE: {skill_mode}")
+    if skills_dir and triage_result.skills_to_inject:
+        triage_result.skills_to_inject = [s for s in triage_result.skills_to_inject if s not in always_injected]
+        # ── Override Resolution ──
+        # Before injecting a skill, check if {name}_override.md exists.
+        # If an override exists, inject it instead of the shipped version.
+        resolved_skills = []
+        for skill_name in triage_result.skills_to_inject:
+            base = skill_name.replace(".md", "")
+            override_path = os.path.join(skills_dir, f"{base}_override.md")
+            if os.path.isfile(override_path):
+                resolved_skills.append(f"{base}_override.md")
+                tlog(f"SKILL OVERRIDE: {skill_name} → {base}_override.md")
+            else:
+                resolved_skills.append(skill_name)
+        triage_result.skills_to_inject = resolved_skills
+        if triage_result.skills_to_inject:
+            if skill_mode == "full":
+                # Full mode: paste recommended skill bodies (not the whole catalog).
+                skill_content = inject_skills(triage_result, skills_dir)
+            else:
+                # hybrid/lazy: full loadable catalog is already on the system prompt.
+                # Triage only names recommendations in the wake preamble.
+                tlog(
+                    "SKILLS: catalog already on system prompt; "
+                    f"triage recommended {', '.join(triage_result.skills_to_inject)}"
+                )
+
+    # Build enhanced system prompt with injected skills
+    enhanced_prompt = system_prompt
+    if skill_content:
+        enhanced_prompt = system_prompt + "\n" + skill_content
+    if provider_search_tools:
+        enhanced_prompt += PROVIDER_SEARCH_HINT
+
+    # ── Live Chat: CONVERSATIONS rules (state_live_chat.md §1.6) ──
+    listen_pu_ids: set[str] = set()
+    if args.listen_minutes > 0:
+        pu = _agictl_config_value("primary_user")
+        pu_uid = str(pu.get("uid") or "").strip()
+        if pu_uid:
+            listen_pu_ids.add(pu_uid)
+        from harness.live_call import pu_call_name
+        enhanced_prompt += conversations_block(pu_call_name(pu) if pu else "",
+                                               coa=args.agent == "coa", minutes=args.listen_minutes)
+        tlog(f"LISTEN: {args.listen_minutes} min window granted; conversations block added")
+
+    # ── Live Call status + last call (COA, feature on) — dynamic tail, cache-safe ──
+    if _LIVE_CALL_GATE is not None and _LIVE_CALL_GATE.settings and _LIVE_CALL_GATE.settings.enabled:
+        try:
+            from harness.live_call import prompt_block
+            from live_call_config import load_catalog, model_display, provider_labels
+
+            call_model = _LIVE_CALL_GATE.call_model
+            model_label = (model_display(call_model, load_catalog().get(call_model), provider_labels())
+                           if call_model else "none")
+            ctx = _live_call_context()
+            enhanced_prompt += prompt_block(
+                ready=_LIVE_CALL_GATE.ok, reasons=_LIVE_CALL_GATE.summary(), call_model=model_label,
+                language=ctx["language"], last_call=ctx["last_call"],
+                calls_per_cycle=getattr(_LIVE_CALL_GATE.settings, "calls_per_cycle", 1),
+            )
+            tlog(f"LIVE CALL: prompt block added (last call: {'yes' if ctx['last_call'] else 'none'})")
+        except Exception as e:
+            tlog(f"LIVE CALL: prompt block skipped — {e}")
+
+    # Build triage-enhanced wake prompt
+    triage_context = build_triage_context(triage_result)
+    enhanced_wake = f"{triage_context}\n\n---\n\n{wake_prompt}"
+
+    # ── Route Decision ──
+    # confidence >= 0.7: proceed to agent
+    # confidence < 0.7 + parallel viable: clarify AND continue
+    # confidence < 0.7 + no parallel work: clarify and exit
+    if triage_result.classification == "clarification_needed" and triage_result.confidence < 0.7 and not triage_result.parallel_work_viable:
+        tlog(f"TRIAGE: Low confidence ({triage_result.confidence:.2f}), no parallel work — clarify & exit path")
+        # Harness gate (not a user message): keep altitude — one line + triage brief above
+        enhanced_wake = (
+            f"{triage_context}\n\n"
+            "⚠ TRIAGE/HARNESS GATE (advisory): Low confidence and parallel work not viable — "
+            "clarify with the sender (see strategic brief / negative signals), then end this cycle. "
+            "Follow poise and communication skills for how to message.\n\n"
+            f"---\n\n{wake_prompt}"
+        )
+
+    # Persist the effective prompt (post always-inject + triage skill payload + wake)
+    # so agitop's System Prompt tab matches what the model receives. Lifeline wrote
+    # a pre-harness snapshot to the same path before spawn; overwrite here.
+    last_prompt_path = f"/var/lib/versa-agi/{args.agent}/last_prompt.txt"
+    try:
+        with open(last_prompt_path, "w", encoding="utf-8") as f:
+            f.write(enhanced_prompt)
+            if not enhanced_prompt.endswith("\n"):
+                f.write("\n")
+            f.write(enhanced_wake)
+            if not enhanced_wake.endswith("\n"):
+                f.write("\n")
+        tlog(f"LAST_PROMPT: Wrote effective prompt ({len(enhanced_prompt) + len(enhanced_wake)} chars) → {last_prompt_path}")
+    except Exception as e:
+        tlog(f"LAST_PROMPT: Failed to write {last_prompt_path} — {e}")
+
+    # ── Agent Construction ──
+    # The system prompt is always loaded fresh from the poise file — never part of checkpoint state.
+
+    # Context Trimming: pre_model_hook trims messages before sending to LLM.
+    # Full history is preserved in the checkpoint — only the LLM input is trimmed.
+    # Uses actual character count as a conservative proxy for tokens (~3 chars/token).
+    # Model-aware: cloud providers have known context limits; local models use num_ctx.
+
+    # ── Model-Aware Context Window ──
+    # get_trimmer_char_limit returns the raw model budget (token window × 80%
+    # headroom × 3 chars/token). The system prompt and tool schemas are sent
+    # with EVERY request but are not part of state["messages"] — the trimmer
+    # never sees them. Subtract them explicitly so the headroom is real, with
+    # a floor so a pathologically large prompt cannot zero out the budget.
+    MODEL_CHAR_BUDGET = get_trimmer_char_limit(args.model, args.num_ctx)
+    TOOL_SCHEMA_CHARS = sum(
+        len(t.name) + len(t.description or "") + len(str(t.args))
+        for t in ALL_TOOLS
+    )
+    TRIM_BUDGET_FLOOR = 32_000  # ~10K tokens — minimum working context
+    CONTEXT_WINDOW_CHARS = max(
+        MODEL_CHAR_BUDGET - len(enhanced_prompt) - TOOL_SCHEMA_CHARS,
+        TRIM_BUDGET_FLOOR,
+    )
+    tlog(f"CONTEXT BUDGET: model={MODEL_CHAR_BUDGET:,} chars − system prompt "
+         f"{len(enhanced_prompt):,} − tool schemas {TOOL_SCHEMA_CHARS:,} "
+         f"→ trim limit {CONTEXT_WINDOW_CHARS:,} chars")
+
+    # Compaction frames (TD-CTX-FRAME-001): active frames for this thread, cached per cycle.
+    _FRAME_CACHE: dict = {}
+    _CYCLE_STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # Message id → when the harness first saw it; frame end times come from here.
+    _MSG_SEEN_AT: dict = {}
+    # [compaction] model — blank means the spawned model writes the frames.
+    compaction_llm = None
+    compaction_model = ""
+    try:
+        import configparser as _cp
+        _ini = _cp.ConfigParser(delimiters=("=",), strict=False, interpolation=None)
+        _ini.read(_setup_ini_path())
+        compaction_model = (_ini.get("compaction", "model", fallback="") or "").strip()
+    except Exception:
+        compaction_model = ""
+    if compaction_model and compaction_model != execution_model:
+        try:
+            compaction_llm = get_llm(compaction_model)
+            tlog(f"COMPACTION: model {compaction_model}")
+        except Exception as e:
+            compaction_llm = None
+            tlog(f"COMPACTION: model {compaction_model} unavailable ({e}) — using {execution_model}")
+    COMPACTION_SPAN_CHARS = int(
+        get_trimmer_char_limit(
+            compaction_model if compaction_llm else execution_model,
+            0 if compaction_llm else args.num_ctx,
+        ) * 0.9
+    )
+
+    # Per-message serialization overhead (role, type, name, structural JSON).
+    # Conservative flat estimate — keeps the proxy honest for many-message histories.
+    MESSAGE_OVERHEAD_CHARS = 40
+
+    # Fixed char budget for vision blocks in trim accounting (not wire size).
+    # Full base64 would blow the trim window and drop the entire history (23→0).
+    VISION_PART_CHAR_BUDGET = 16_000
+
+    # Viewed media stay in what the model is sent until the cycle ends; the
+    # checkpoint keeps a text note (state_spawn_context.md §1.15).
+    from harness.view_hold import ViewHold, hold_limit
+    view_hold = ViewHold(hold_limit(CONTEXT_WINDOW_CHARS, VISION_PART_CHAR_BUDGET))
+
+    def _count_dict_part(part: dict) -> int:
+        """Count all string payloads in a content part — not just 'text'.
+
+        Providers return list-content parts keyed by type: 'text', 'thinking'/
+        'reasoning' (extended thinking blocks, re-sent on every turn), 'data'
+        (base64 media), 'executable_code', etc. Counting only 'text' undercounts
+        — sometimes massively (base64 images, long thinking traces).
+        """
+        ptype = part.get("type", "")
+        if ptype in ("image_url", "image", "media"):
+            return VISION_PART_CHAR_BUDGET
+
+        total = 0
+        for value in part.values():
+            if isinstance(value, str):
+                total += len(value)
+            elif isinstance(value, dict):
+                total += _count_dict_part(value)
+            elif isinstance(value, list):
+                for v in value:
+                    if isinstance(v, str):
+                        total += len(v)
+                    elif isinstance(v, dict):
+                        total += _count_dict_part(v)
+        return total
+
+    def _count_message_chars(messages):
+        """Count total characters across all messages for context window management.
+
+        Sums: message .content (str or multimodal list — ALL part payloads),
+        tool_call name/arguments, tool_call_id fields, and a flat per-message
+        serialization overhead — all of which contribute to the API token count.
+        Used with a conservative ~3 chars ≈ 1 token budget conversion.
+        """
+        total = 0
+        for m in messages:
+            total += MESSAGE_OVERHEAD_CHARS
+            # Content: string or multimodal list
+            if isinstance(m.content, str):
+                total += len(m.content)
+            elif isinstance(m.content, list):
+                for part in m.content:
+                    if isinstance(part, str):
+                        total += len(part)
+                    elif isinstance(part, dict):
+                        total += _count_dict_part(part)
+            # Tool calls: name + arguments are sent to the LLM as structured input
+            if hasattr(m, "tool_calls") and m.tool_calls:
+                for tc in m.tool_calls:
+                    total += len(tc.get("name", "") or "")
+                    args_val = tc.get("args", {})
+                    if isinstance(args_val, str):
+                        total += len(args_val)
+                    else:
+                        total += len(str(args_val))
+            # Tool call ID (present on ToolMessage responses)
+            if hasattr(m, "tool_call_id") and m.tool_call_id:
+                total += len(m.tool_call_id)
+        return total
+
+    def _utc_now():
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _span_text(span):
+        from harness.compaction import message_text
+        lines = []
+        for m in span:
+            text = message_text(m)[:4000]
+            calls = getattr(m, "tool_calls", None) or []
+            if calls:
+                named = "; ".join(
+                    f"{c.get('name', '')}({str(c.get('args', ''))[:600]})" for c in calls
+                )
+                text = (text + "\n" if text else "") + f"TOOL CALLS: {named}"
+            lines.append(f"{type(m).__name__}: {text}")
+        return "\n".join(lines)[:COMPACTION_SPAN_CHARS]
+
+    def _store_frame(span, frame_start, frame_end):
+        """Summarize a span and store it as one frame of this thread.
+
+        Returns what `agictl cycle frames add` answered, with the summary and
+        the covered ids added; None when the summary came back empty.
+        """
+        import json as _json
+        from harness.compaction import message_text
+        prompt = (
+            "Summarize these agent turns as one compaction frame. In order: motivations, "
+            "actions, tool calls with their results, outcomes, conclusions. Plain prose. "
+            "Keep names, ids, file paths, and numbers the agent may need later."
+        )
+        _HEARTBEAT.beat()  # the summary call starts
+        reply = (compaction_llm or llm).invoke(
+            [HumanMessage(content=prompt + "\n\n" + _span_text(span))]
+        )
+        _HEARTBEAT.beat()  # the summary came back; the cycle model's call is next
+        summary = message_text(reply).strip()
+        if not summary:
+            return None
+        ids = ",".join(str(getattr(m, "id", "") or "") for m in span if getattr(m, "id", None))
+        proc = subprocess.run(
+            ["agictl", "cycle", "frames", "add", "--thread", args.thread_id or "",
+             "--start", frame_start, "--end", frame_end, "--ids", ids or "-",
+             "--cycle-id", os.environ.get("VERSA_CYCLE_ID", "")],
+            input=summary, capture_output=True, text=True, timeout=20,
+        )
+        try:
+            written = _json.loads(proc.stdout or "{}")
+        except Exception:
+            return None
+        if isinstance(written, dict):
+            written.setdefault("summary", summary)
+            written.setdefault("message_ids", ids)
+        return written
+
+    def _roll_extra_frames(rows):
+        """Mark the oldest active frames `rolled` when the frames block is over
+        its size (§1.8 rule 9). `rows` is every frame of the thread. Returns how many."""
+        from harness.compaction import active_frames, frame_slots
+        live = active_frames(rows)
+        size = max(len(str(r.get("summary") or "")) for r in live) if live else 1
+        keep = frame_slots(CONTEXT_WINDOW_CHARS, size)
+        extra = live[:-keep] if len(live) > keep else []
+        for old in extra:
+            subprocess.run(
+                ["agictl", "cycle", "frames", "roll", "--id", str(old.get("id"))],
+                capture_output=True, text=True, timeout=20,
+            )
+        return len(extra)
+
+    def pre_model_hook(state):
+        """Trim messages to fit context window before LLM call.
+        Returns llm_input_messages (not messages) to preserve full checkpoint history.
+
+        Compaction frames (TD-CTX-FRAME-001): before a cycle-model call, when the
+        verbatim turns reach 90% of the character budget, the oldest 35% are
+        summarized into a frame. Call turns are not compacted.
+        """
+        _HEARTBEAT.beat()  # a model call starts (state_long_cycles.md §1.2)
+        from harness.compaction import (
+            HARNESS_NOTE, TRIGGER, active_frames, framed_ids, frame_slots, frame_times,
+            message_text, note_seen, select_oldest_span, split_verbatim,
+            verbatim_start_types,
+        )
+
+        all_msgs = view_hold.expand(list(state["messages"]))
+        in_call = False
+        try:
+            in_call = live_runtime is not None and (live_runtime.in_turn() or live_runtime.live)
+        except NameError:
+            in_call = False
+
+        def _frames():
+            """Every frame of this thread, active and rolled. Cached until a compaction changes them."""
+            import json as _json
+            thread = getattr(args, "thread_id", "") or ""
+            if not thread:
+                return []
+            if _FRAME_CACHE.get("thread") == thread and "rows" in _FRAME_CACHE:
+                return _FRAME_CACHE["rows"]
+            try:
+                proc = subprocess.run(
+                    ["agictl", "cycle", "frames", "list", "--thread", thread, "--harness"],
+                    capture_output=True, text=True, timeout=20,
+                )
+                data = _json.loads(proc.stdout or "[]")
+                rows = data if isinstance(data, list) else []
+            except Exception:
+                rows = []
+            _FRAME_CACHE.update(thread=thread, rows=rows)
+            return rows
+
+        def _write_frame(span, last_frame_end):
+            frame_start, frame_end = frame_times(
+                span, _MSG_SEEN_AT, last_frame_end, _CYCLE_STARTED_AT, _utc_now(),
+            )
+            return _store_frame(span, frame_start, frame_end)
+
+        def _frames_block(rows):
+            if not rows:
+                return None
+            parts = [HARNESS_NOTE]
+            for row in rows:
+                # Stored in UTC; the agent is shown local time (state_time_display.md §1 rule 4).
+                parts.append(
+                    f"Frame {local_time.show(row.get('frame_start'))} to "
+                    f"{local_time.show(row.get('frame_end'))}:\n{row.get('summary')}"
+                )
+            return HumanMessage(content="\n\n".join(parts))
+
+        note_seen(_MSG_SEEN_AT, all_msgs, _CYCLE_STARTED_AT, _utc_now())
+        # A message is framed once: rolled frames still cover their messages,
+        # only active frames are sent (state_spawn_context.md §1.8).
+        frames = [] if in_call else _frames()
+        covered = framed_ids(frames)
+        verbatim = split_verbatim(all_msgs, covered) if not in_call else all_msgs
+        block = None if in_call else _frames_block(active_frames(frames))
+        block_chars = _count_message_chars([block]) if block else 0
+        if (
+            not in_call and args.thread_id
+            and _count_message_chars(verbatim) >= int((CONTEXT_WINDOW_CHARS - block_chars) * TRIGGER)
+            and len(verbatim) > 4
+        ):
+            span, _rest = select_oldest_span(verbatim)
+            last_end = frames[-1].get("frame_end") if frames else _CYCLE_STARTED_AT
+            try:
+                written = _write_frame(span, last_end)
+            except Exception as exc:
+                written = None
+                tlog(f"COMPACTION: skipped — {exc}")
+            if written and written.get("success"):
+                tlog(f"COMPACTION: framed {len(span)} messages as frame {written.get('id')}")
+                _FRAME_CACHE.clear()
+                frames = _frames()
+                extra = _roll_extra_frames(frames)
+                if extra:
+                    tlog(f"COMPACTION: rolled {extra} oldest frame(s) out of the payload")
+                    _FRAME_CACHE.clear()
+                    frames = _frames()
+                covered = covered | framed_ids(frames)
+                verbatim = split_verbatim(all_msgs, covered)
+                block = _frames_block(active_frames(frames))
+                block_chars = _count_message_chars([block]) if block else 0
+
+        budget = max(CONTEXT_WINDOW_CHARS - block_chars, TRIM_BUDGET_FLOOR // 2)
+        trim_kwargs = dict(
+            max_tokens=budget,
+            strategy="last",
+            token_counter=_count_message_chars,
+            include_system=True,
+            allow_partial=False,
+        )
+        # After a frame covers the wake, a later human message (time warning,
+        # mid-cycle mail) must not cut the turns before it (§1.8 rule 4).
+        if block is not None:
+            trim_kwargs["start_on"] = verbatim_start_types(True)
+        elif any(isinstance(m, HumanMessage) for m in verbatim):
+            trim_kwargs["start_on"] = verbatim_start_types(False)
+        trimmed = trim_messages(verbatim, **trim_kwargs)
+        if len(trimmed) < len(verbatim):
+            tlog(f"CONTEXT TRIM: {len(verbatim)} → {len(trimmed)} messages "
+                 f"({_count_message_chars(trimmed):,} chars, limit: {budget:,})")
+        if not trimmed and verbatim:
+            trimmed = verbatim[-min(4, len(verbatim)):]
+            tlog(f"CONTEXT TRIM: trim_messages returned empty — kept last {len(trimmed)} message(s)")
+        if block is not None:
+            trimmed = [block] + list(trimmed)
+        if not in_call:
+            # Reasoning records the cycle model cannot accept are left out (§2.7 B3).
+            trimmed = replay_guard.apply(list(trimmed))
+        return {"llm_input_messages": trimmed}
+
+    agent_kwargs = {
+        "model": llm,
+        "tools": list(ALL_TOOLS) + provider_search_tools,
+        # Marked for the provider's cache where the model has to be asked (§2.7 B16).
+        "prompt": cached_system_prompt(execution_traits, enhanced_prompt),
+        "pre_model_hook": pre_model_hook,
+    }
+    if checkpointer:
+        agent_kwargs["checkpointer"] = checkpointer
+
+    agent = create_react_agent(**agent_kwargs)
+
+    # ── Cache keep-alive while a chat waits (state_model_drivers.md §2.7 B17) ──
+    global _CACHE_KEEPALIVE
+    _CACHE_KEEPALIVE = KeepAlive(
+        execution_traits, llm, agent_kwargs["tools"], last_request,
+        family=_HARNESS_VIEW_CTX["provider_family"], log=tlog,
+    )
+
+    # ── Live call mode (COA) ──
+    # Call turns run on [live_call] call_model through a second graph that shares
+    # this thread's checkpointer; the cycle's execution model resumes after the call.
+    global _LIVE_CALL_RUNTIME
+    live_runtime = None
+    call_agent = None
+    if _LIVE_CALL_GATE is not None:
+        if not _LIVE_CALL_GATE.ok:
+            tlog(f"LIVE CALL: off — {_LIVE_CALL_GATE.summary()}")
+        elif not checkpointer:
+            tlog("LIVE CALL: off — no checkpoint thread for call turns")
+        else:
+            try:
+                from harness.live_call import LiveCallRuntime, pu_call_name, sanitize_for_call_model
+                from provider_runtime import resolve_provider_api_key
+
+                call_model = _LIVE_CALL_GATE.call_model
+                call_overrides = _call_model_overrides(
+                    call_model, _LIVE_CALL_GATE.settings.reasoning_effort if _LIVE_CALL_GATE.settings else None,
+                )
+                call_llm = get_llm(call_model, agent_overrides=call_overrides)
+
+                def call_pre_model_hook(state):
+                    trimmed = pre_model_hook(state)["llm_input_messages"]
+                    return {"llm_input_messages": sanitize_for_call_model(trimmed)}
+
+                call_agent = create_react_agent(
+                    model=call_llm,
+                    tools=ALL_TOOLS,
+                    prompt=enhanced_prompt,
+                    pre_model_hook=call_pre_model_hook,
+                    checkpointer=checkpointer,
+                )
+                pu = _agictl_config_value("primary_user")
+                identity = _agictl_config_value("identity")
+                live_runtime = LiveCallRuntime(
+                    agent_label=identity.get("first_name") or "COA",
+                    pu_name=pu_call_name(pu),
+                    api_key_resolver=lambda: resolve_provider_api_key("openai"),
+                    log=tlog,
+                    context_provider=_live_call_context,
+                )
+                _LIVE_CALL_RUNTIME = live_runtime
+                tlog(f"LIVE CALL: ready — call model {call_model}, reasoning "
+                     f"{(call_overrides or {}).get('reasoning_effort') or 'model default'}, "
+                     f"voice {_LIVE_CALL_GATE.settings.voice_model}")
+            except Exception as e:
+                live_runtime = None
+                call_agent = None
+                _LIVE_CALL_RUNTIME = None
+                tlog(f"LIVE CALL: off — call model setup failed: {e}")
+
+    # ── Checkpoint State Inspection & Repair ──
+    # Two-pass approach:
+    # Pass 1 (always): Lightweight SQL query to determine if a checkpoint exists (NEW vs RESUME).
+    # Pass 2 (always on RESUME): Scan the tail of the checkpoint for dangling tool calls.
+    #   - Dangling calls occur when a previous cycle was hard-killed (timeout, runaway, crash)
+    #     mid-execution, leaving AIMessages with tool_calls but no corresponding ToolMessages.
+    #   - Only scans the last N messages — dangling tool_calls can only exist at the tail.
+    #   - Cost is negligible (~50ms for a get_state + 10-message scan).
+    if checkpointer and "configurable" in config:
+        # Pass 1: Lightweight session type check (no message deserialization)
+        try:
+            cursor = db_conn.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = ?",
+                (args.thread_id,),
+            )
+            has_checkpoint = cursor.fetchone()[0] > 0
+            session_type = "RESUME" if has_checkpoint else "NEW"
+        except Exception:
+            session_type = "NEW"  # Table may not exist yet
+
+        # ── Checkpoint integrity & depth trim (single atomic pass) ──
+        # On RESUME the persisted history can be malformed in ways every provider
+        # rejects (INVALID_CHAT_HISTORY): dangling tool_calls (an AIMessage whose
+        # ToolMessage never landed), orphan ToolMessages (no preceding producer),
+        # or a window not starting at a HumanMessage. Instead of mutating in place
+        # with RemoveMessage batches — which can PARTIAL-FAIL and leave a corrupted
+        # state (the thread 93-0 incident) — we compute a canonical, valid sequence
+        # and clear-and-reseed it ATOMICALLY via the REMOVE_ALL_MESSAGES sentinel.
+        # That single write cannot partial-fail and repairs even a dangling call
+        # buried mid-history (the placeholder is inserted adjacent to its parent).
+        if session_type == "RESUME":
+            try:
+                snapshot = agent.get_state(config)
+                current = snapshot.values.get("messages", []) if snapshot else []
+                if not current:
+                    tlog(f"CHECKPOINT: Resume with empty state (thread: {args.thread_id})")
+                else:
+                    window = args.num_ctx if args.num_ctx and args.num_ctx > 0 else 0
+                    if window <= 0:
+                        _, window = get_model_context(args.model or "")
+                    # The stored Resume max messages, never more than the window
+                    # allows (state_spawn_context.md §1.8 rule 7).
+                    resume_ceiling = resume_message_cap(window)
+                    resume_cap = effective_resume_cap(args.resume_max_messages, window)
+                    # A framed message is never sent again, so it leaves the
+                    # checkpoint here and the resume tail is counted over the
+                    # rest (state_spawn_context.md §1.8 rule 5). With frames the
+                    # payload starts at the frames block, so the tail may start
+                    # at an AI message.
+                    _framed = 0
+                    _has_frames = False
+                    _rows = []
+                    unframed = current
+                    try:
+                        import json as _json
+                        from harness.compaction import framed_ids, split_verbatim
+                        _proc = subprocess.run(
+                            ["agictl", "cycle", "frames", "list", "--thread", args.thread_id,
+                             "--harness"],
+                            capture_output=True, text=True, timeout=20,
+                        )
+                        _rows = _json.loads(_proc.stdout or "[]")
+                        _rows = _rows if isinstance(_rows, list) else []
+                        _has_frames = bool(_rows)
+                        unframed = split_verbatim(current, framed_ids(_rows))
+                        _framed = len(current) - len(unframed)
+                    except Exception:
+                        unframed = current
+                    tlog(
+                        f"RESUME CAP: {resume_cap} messages "
+                        f"(stored max {args.resume_max_messages}; window {window} tokens "
+                        f"allows {resume_ceiling}; {_framed} framed removed)"
+                    )
+                    # Messages past the tail are summarized into a frame before
+                    # the cut (§1.8 rule 8). The provider's cache is cold at
+                    # resume, so the cut costs no cached input.
+                    if len(unframed) > resume_cap:
+                        from harness.compaction import resume_frame_times, resume_span, utc_stamp
+                        _tail, _, _ = _canonicalize_messages(unframed, resume_cap, anchor_ai=True)
+                        _span = resume_span(unframed, _tail)
+                        _stored = None
+                        if _span:
+                            try:
+                                _start, _end = resume_frame_times(
+                                    _rows[-1].get("frame_end") if _rows else None,
+                                    utc_stamp(getattr(snapshot, "created_at", None)),
+                                    _utc_now(),
+                                )
+                                _stored = _store_frame(_span, _start, _end)
+                            except Exception as exc:
+                                _stored = None
+                                tlog(f"RESUME FRAME: the summary call failed — {exc}")
+                        if _stored and _stored.get("success"):
+                            tlog(
+                                f"RESUME FRAME: {len(_span)} messages summarized as frame "
+                                f"{_stored.get('id')}"
+                            )
+                            _rows.append({
+                                "id": _stored.get("id"), "status": "active",
+                                "summary": _stored.get("summary"),
+                                "message_ids": _stored.get("message_ids"),
+                                "frame_start": _start, "frame_end": _end,
+                            })
+                            _rolled = _roll_extra_frames(_rows)
+                            if _rolled:
+                                tlog(f"RESUME FRAME: rolled {_rolled} oldest frame(s) out of the payload")
+                            _has_frames = True
+                            _framed += len(_span)
+                            unframed = unframed[len(_span):]
+                        elif _span:
+                            # Nothing is dropped unread below the ceiling.
+                            if resume_cap < resume_ceiling:
+                                tlog(
+                                    f"RESUME FRAME: no summary was stored — the tail is cut at "
+                                    f"{resume_ceiling} messages for this cycle"
+                                )
+                            resume_cap = resume_ceiling
+                    clean, changed, stats = _canonicalize_messages(
+                        unframed, resume_cap, anchor_ai=_has_frames,
+                    )
+                    changed = changed or _framed > 0
+                    # A non-empty `next` means the prior cycle was interrupted
+                    # mid-superstep (e.g. `agictl cycle end` SIGTERM during a
+                    # parallel tool batch, timeout, or runaway kill). The
+                    # interrupted step's PENDING WRITES are not folded into the
+                    # committed `values` that canonicalize inspects — so a
+                    # dangling AIMessage(tool_calls) can be invisible here yet
+                    # replayed on the next invoke, crashing with
+                    # INVALID_CHAT_HISTORY (the thread 93-0 incident). Reseeding
+                    # at `__start__` supersedes that checkpoint and discards the
+                    # pending writes, so the resume starts from the committed,
+                    # canonical transcript instead of replaying a dead step.
+                    pending_next = tuple(getattr(snapshot, "next", ()) or ())
+                    if changed or pending_next:
+                        agent.update_state(
+                            config,
+                            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + clean},
+                            as_node="__start__",
+                        )
+                        post = agent.get_state(config)
+                        post_count = len(post.values.get("messages", [])) if post else -1
+                        depth = resume_cap
+                        pending_note = f", cleared pending step next={pending_next}" if pending_next else ""
+                        tlog(
+                            f"CHECKPOINT REPAIR: {len(current)} → {post_count} messages "
+                            f"(trimmed {stats['trimmed']}, orphans dropped {stats['orphans']}, "
+                            f"placeholders {stats['placeholders']}, max: {depth}{pending_note})"
+                        )
+                        if not clean:
+                            session_type = "NEW"
+                    else:
+                        tlog(
+                            f"CHECKPOINT: Clean resume — {len(current)} messages, "
+                            f"no repair needed (thread: {args.thread_id})"
+                        )
+                    stale_views = _trim_view_inject_payloads(agent, config)
+                    if stale_views:
+                        tlog(
+                            f"CHECKPOINT: Trimmed stale view-inject image payload(s) "
+                            f"from prior cycle(s) ({stale_views})"
+                        )
+            except Exception as e:
+                # Any failure means we cannot guarantee a valid history. Wipe the
+                # thread so the next invoke starts from a known-good empty state
+                # rather than risk an INVALID_CHAT_HISTORY crash.
+                tlog(f"CHECKPOINT REPAIR: Failed — {e}. Wiping thread for a clean start.")
+                session_type = "NEW"
+                try:
+                    checkpointer.conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (args.thread_id,))
+                    checkpointer.conn.execute("DELETE FROM writes WHERE thread_id = ?", (args.thread_id,))
+                    checkpointer.conn.commit()
+                    tlog(f"CHECKPOINT: Corrupted thread {args.thread_id} wiped — starting fresh")
+                except Exception as de:
+                    tlog(f"CHECKPOINT: Could not wipe thread — {de}")
+
+    # ── Startup Context Log ──
+    # Printed AFTER checkpoint inspection so session_type is accurate.
+    tlog("=" * 60)
+    tlog(f"[{session_type}] AGENT: {args.agent} | THREAD: {thread_label}")
+    tlog(f"ASSIGNED: {args.model} | TRIAGE: {triage_model_name} | EXECUTION: {execution_model}")
+    _log_llm_resolution("triage", triage_model_name, 0, agent_param_overrides)
+    _log_llm_resolution("execution", execution_model, args.num_ctx, agent_param_overrides)
+    if routing_mode != "none" or routing_work_modality:
+        rwm = f", work_modality={routing_work_modality}" if routing_work_modality else ""
+        tlog(f"ROUTING: mode={routing_mode}{rwm}")
+    if getattr(triage_result, "required_work_modality", None):
+        tlog(f"  TRIAGE WORK MODALITY: {triage_result.required_work_modality}")
+    if getattr(triage_result, "recommended_model", None):
+        tlog(f"  TRIAGE RECOMMENDED: {triage_result.recommended_model}")
+    num_ctx_display = f"{args.num_ctx:,}" if args.num_ctx > 0 else "default"
+    resume_display = f"{args.resume_max_messages}" if args.resume_max_messages > 0 else "from the model window"
+    tlog(f"BUDGET: {args.max_steps} steps | TOOL LIMIT: {args.tool_budget} chars | NUM_CTX: {num_ctx_display} | RESUME DEPTH: {resume_display}")
+    tlog(f"SYSTEM PROMPT: {len(enhanced_prompt)} chars ({len(enhanced_prompt.splitlines())} lines)")
+    sections = [s.strip().lstrip("#").strip() for s in enhanced_prompt.splitlines() if s.strip().startswith("## ")]
+    if sections:
+        tlog(f"  SECTIONS: {' | '.join(sections[:10])}")
+    if skill_content:
+        tlog(f"  INJECTED SKILLS: {', '.join(triage_result.skills_to_inject)} ({len(skill_content)} chars)")
+    wake_lines = [l for l in wake_prompt.splitlines() if l.strip()]
+    tlog(f"WAKE PROMPT: {len(wake_prompt)} chars ({len(wake_lines)} lines)")
+    for line in wake_lines[:3]:
+        tlog(f"  {line[:120]}")
+    if len(wake_lines) > 3:
+        tlog(f"  ... ({len(wake_lines) - 3} more lines)")
+    tlog(f"TRIAGE: {triage_result.classification} (confidence={triage_result.confidence:.2f})")
+    if triage_result.strategy_notes:
+        tlog(f"  STRATEGY: {triage_result.strategy_notes}")
+    if triage_result.project_id is not None:
+        tlog(f"  PROJECT: {triage_result.project_id} → thread: {triage_result.thread_id}")
+    if triage_result.task_actions:
+        tlog(f"  TASK ACTIONS: {triage_result.task_actions}")
+    if triage_result.signal_results:
+        from harness.triage import adverse_signals
+        # ✓ = healthy for this key (inverted for pending_question / contradiction / etc.)
+        _INV = {"contradiction_check", "memory_conflict", "risk_assessment", "pending_question"}
+        parts = []
+        for k, v in triage_result.signal_results.items():
+            healthy = (not v) if k in _INV else bool(v)
+            parts.append(f"{k}={'✓' if healthy else '✗'}")
+        tlog(f"  SIGNALS: {' | '.join(parts)}")
+        adv = adverse_signals(triage_result.signal_results)
+        tlog(f"  ADVERSE: {', '.join(adv) if adv else '(none)'}")
+    if triage_result.has_attachments:
+        tlog(f"  ATTACHMENTS: {triage_result.attachment_paths}")
+    tlog(f"TOOLS: {', '.join(t.name for t in ALL_TOOLS)} ({len(ALL_TOOLS)} total)")
+    tlog("=" * 60)
+
+    # ── Message Initialization ──
+    # On resume: triage-enhanced wake prompt adds new context to existing checkpoint state
+    # On fresh: triage-enhanced wake prompt is the initial human message
+    # Stable ids so a transient-retry can re-pass the same input idempotently
+    # (add_messages upserts by id — without a fixed id it would assign a new
+    # UUID on retry and duplicate the wake/warning message).
+    messages = [HumanMessage(content=enhanced_wake, id=str(uuid.uuid4()))]
+
+    step_count = 0
+    max_steps = args.max_steps
+    budget_80 = int(max_steps * 0.80)
+    end_off_remaining = end_off_remaining_threshold(max_steps)
+    warned_80 = False
+    warned_end_off = False
+    # Long-running cycles (state_long_cycles.md). The step clock times this
+    # agent's steps; the time warnings and the close at the limit scale with it.
+    step_clock = StepClock(local=os.environ.get("VERSA_LOCAL_MODEL") == "1")
+    deadline_warnings = DeadlineWarnings(
+        args.deadline_epoch, started_epoch=harness_started_epoch, typical_step=step_clock.typical,
+    )
+    repeat_guard = RepeatGuard()
+    checkins = CheckIns(harness_started_epoch)
+    open_tool_calls: dict = {}   # tool_call id → (tool name, arguments)
+    last_tool_label = ""
+    cycle_ended = False
+    budget_hard_stop = False
+    limit_stop = False           # time limit: the harness closes the cycle (exit 54)
+    loop_stop = ""               # repeated call: the cycle summary (exit 55)
+    refusal_stop = ""            # the provider declined twice: the cycle summary
+    refusals_in_row = 0          # declined replies with no ordinary reply between them
+    declined_reply = None        # (message, reason) of a declined reply not yet handled
+    binding_retry_used = False   # one retry without reasoning records (§2.7 B4)
+    input_messages = messages  # Initial input for first stream invocation
+    _harness_crashed = False
+    pending_view_injects: list[HumanMessage] = []
+
+    # Bounded retry for transient transport errors
+    # blip from the model edge). The graph is checkpointed, so on a transient
+    # failure we simply re-invoke and resume from the last checkpoint; only an
+    # exhausted retry budget (or a non-transient error) crashes the cycle.
+    MAX_TRANSIENT_RETRIES = 4
+
+    # Live call turns run on call_agent and do not spend the cycle step budget.
+    active_agent = agent
+    call_steps = 0
+
+    def _in_call_turn() -> bool:
+        return live_runtime is not None and live_runtime.in_turn()
+
+    from harness.midcycle_mail import MidcycleInbox
+    # System prompt holds this cycle's NEW MESSAGES block. The wake is only the reason line.
+    midcycle_inbox = MidcycleInbox.from_env(
+        args.agent, f"{enhanced_prompt}\n{enhanced_wake}", log=tlog,
+    )
+    midcycle_inbox.pu_ids = set(listen_pu_ids)
+
+    # ── Live Chat listening window (state_live_chat.md §1.4) ──
+    listening = ListeningWindow(
+        args.listen_minutes, args.deadline_epoch, pu_ids=listen_pu_ids,
+        agent_ids=agent_ids_from_env(),
+        close_file=os.environ.get("VERSA_CHAT_CLOSE_FILE"), cycle_id=os.environ.get("VERSA_CYCLE_ID"),
+        close_lead=deadline_warnings.close_now_lead,
+    )
+    # The link service rewrites this file when it has stored new mail for this
+    # agent, so the wait reads it at once (state_realtime_link.md RL-07).
+    mail_signal = MailSignal(os.environ.get("VERSA_MAIL_SIGNAL_FILE"))
+    turn_base = 0  # steps spent before the current chat turn (per-turn budget)
+    # Stall timer: startup is done; a live call in progress keeps the heartbeat going (§1.2).
+    _HEARTBEAT.set_busy(lambda: live_runtime is not None and bool(getattr(live_runtime, "live", False)))
+    _HEARTBEAT.beat()
+    if listening.enabled and listening.note_rows(midcycle_inbox.unread_rows()):
+        tlog(f"LISTEN: window open — a person woke this cycle ({listening.minutes} min idle)")
+
+    # ── Shutdown (state_host_services.md §1.4.1 rule 5) ──
+    # The shutdown guard writes a close request for this cycle. The agent is
+    # told once, at the next safe point, in any cycle, listening or not.
+    shutdown_told = False
+
+    def _shutdown_requested() -> bool:
+        return read_close_request(listening.close_file, listening.cycle_id) == "shutdown"
+
+    def _shutdown_seconds_left() -> float | None:
+        deadline = read_close_deadline(listening.close_file, listening.cycle_id)
+        return None if deadline is None else deadline - time.time()
+
+    def _mark_shutdown_told() -> None:
+        nonlocal shutdown_told
+        shutdown_told = True
+        # An open window is closed in the same step, so `cycle end` is accepted.
+        if listening.should_wait():
+            listening.begin_closing("shutdown")
+
+    def _inject_midcycle_mail() -> bool:
+        """Fold unread mail that arrived after the wake prompt into this cycle.
+
+        Same gate as a budget warning: no unanswered tool call, and not inside
+        a live-call turn. Does not mark the rows processed.
+        """
+        nonlocal input_messages
+        if _in_call_turn() or _unresolved_tool_call_ids(messages):
+            return False
+        if shutdown_told:
+            return False  # the computer is going down: new mail waits for the next spawn
+        found = midcycle_inbox.poll()
+        if not found:
+            return False
+        text, new_ids = found
+        flush_note = _flush_stream_messages_to_checkpoint(agent, config, messages)
+        tlog(f"MID-CYCLE MAIL: checkpoint {flush_note}")
+        if flush_note.startswith(("flush-failed", "skip-local-unresolved")):
+            tlog("MID-CYCLE MAIL: skipping inject — checkpoint not safe")
+            return False
+        midcycle_inbox.commit(new_ids)
+        nonlocal turn_base, warned_80, warned_end_off
+        was_open = listening.opened
+        if listening.note_rows(midcycle_inbox.last_rows):
+            # A person wrote: fresh step allowance for this chat turn (§1.5.5).
+            turn_base = step_count - call_steps
+            warned_80 = warned_end_off = False
+            tlog("LISTEN: " + ("new chat turn" if was_open else "window open — a person wrote mid-cycle"))
+        digest = hashlib.sha256(",".join(sorted(new_ids)).encode()).hexdigest()[:16]
+        injected = HumanMessage(content=text, id=f"midcycle-{digest}")
+        input_messages = [injected]
+        messages.append(injected)
+        tlog(
+            f"MID-CYCLE MAIL: injected {len(new_ids)} unread message(s) "
+            f"for {args.agent} (step {step_count})"
+        )
+        return True
+
+    try:
+        while (step_count - call_steps - turn_base) < max_steps and not cycle_ended:
+            _HARNESS_VIEW_CTX["steps_remaining"] = max_steps - (step_count - call_steps - turn_base)
+            # Each stream invocation processes until a budget threshold or completion.
+            # With checkpointing, the graph state persists between invocations —
+            # we only need to pass NEW messages (e.g., the budget warning).
+            #
+            # The inner `while True` retries this invocation on a transient
+            # transport error: the checkpointer holds all completed steps, so we
+            # re-invoke with the SAME input (idempotent by id) to resume.
+            transient_attempt = 0
+            stream_natural_end = False
+            # No model call the cycle cannot finish (state_long_cycles.md §1.3 rule 1).
+            if (
+                deadline_warnings.close_due()
+                and not _in_call_turn()
+                and not _unresolved_tool_call_ids(messages)
+            ):
+                tlog(f"\n[TIME LIMIT] Not starting another step (step {step_count}). Closing the cycle.")
+                cycle_ended = True
+                limit_stop = True
+                break
+            step_clock.start()
+            while True:
+                try:
+                    for chunk in active_agent.stream({"messages": input_messages}, config=config):
+                        step_count += 1
+                        if _in_call_turn():
+                            call_steps += 1
+                            live_runtime.turn_steps += 1
+                        if "agent" in chunk:
+                            msg = chunk["agent"]["messages"][0]
+                            messages.append(msg)
+                            write_running_telemetry(args.agent, messages)
+                            # A model reply arrived: stall timer and step clock (§1.2, §1.7).
+                            step_clock.note_reply(counted=not _in_call_turn())
+                            _HEARTBEAT.beat()
+                            _HEARTBEAT.set_hold("tools", bool(getattr(msg, "tool_calls", None)))
+                            if not _in_call_turn():
+                                _declined = refusal_reason(msg)
+                                if _declined:
+                                    refusals_in_row += 1
+                                    declined_reply = (msg, _declined)
+                                    tlog(f"[REFUSAL] {execution_model} declined a reply (reason: {_declined})")
+                                    # Nothing else to do with this reply: the run ends here
+                                    # and the refusal is handled below (§2.7 B6).
+                                    continue
+                                refusals_in_row = 0
+                                declined_reply = None
+                                _search_line = search_log_line(msg)
+                                if _search_line:
+                                    tlog(_search_line)
+                            if not _in_call_turn():
+                                for tc in (getattr(msg, "tool_calls", None) or []):
+                                    if tc.get("id"):
+                                        open_tool_calls[tc["id"]] = (tc.get("name", "?"), tc.get("args"))
+                            # Call turns log one line per request (runtime); the call log keeps detail.
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                tool_names = ", ".join(tc.get("name", "?") for tc in msg.tool_calls)
+                                # Agent sends keep a listening window alive (§1.4 rule 5).
+                                for tc in msg.tool_calls:
+                                    cmd = str((tc.get("args") or {}).get("command") or "").strip()
+                                    if tc.get("name") == "agictl_message" and cmd.startswith("send"):
+                                        listening.note_activity()
+                                if _in_call_turn():
+                                    live_runtime.note_tool_calls(
+                                        [tc.get("name", "?") for tc in msg.tool_calls], msg.content,
+                                    )
+                                else:
+                                    tlog(f"[STEP {step_count}/{max_steps}] AGENT → tool call: {tool_names}")
+                            elif not _in_call_turn():
+                                content = _reply_text(msg)
+                                preview = content[:200].replace("\n", " ")
+                                tlog(f"[STEP {step_count}/{max_steps}] AGENT → {preview}")
+                            # The model has replied to a viewed video: from here it is a note (§1.15 rule 5).
+                            if view_hold.release_once():
+                                tlog("VIEW HOLD: the video is now a note")
+                        elif "tools" in chunk:
+                            if reply_draft is not None:
+                                reply_draft.finish()  # the send has run: the message replaces the draft
+                            msg = chunk["tools"]["messages"][0]
+                            messages.append(msg)
+                            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                            preview = content[:200].replace("\n", " ")
+                            if not _in_call_turn():
+                                tlog(f"[STEP {step_count}/{max_steps}] TOOL  ← {preview}")
+                            _HEARTBEAT.set_hold("tools", bool(_unresolved_tool_call_ids(messages)))
+                            # Same call, same result, seen before? (§1.5)
+                            _called = open_tool_calls.pop(getattr(msg, "tool_call_id", None), None)
+                            if _called:
+                                last_tool_label = call_label(*_called)
+                                repeats = repeat_guard.note(_called[0], _called[1], content)
+                                if repeats >= repeat_guard.notice_at:
+                                    tlog(f"[LOOP] Same call and result {repeats} times: {last_tool_label}")
+
+                            tool_name = getattr(msg, "name", "") or ""
+                            if tool_name in ("agictl_view_image", "agictl_view_video") and isinstance(content, str):
+                                try:
+                                    view_payload = json.loads(content)
+                                except json.JSONDecodeError:
+                                    view_payload = {}
+                                if view_payload.get("success") and view_payload.get("inject"):
+                                    inject_msg = _build_view_image_message(
+                                        view_payload,
+                                        _HARNESS_VIEW_CTX.get("provider_family", "openai_compat"),
+                                    )
+                                    if inject_msg and inject_msg.id:
+                                        # The media is held in memory and put back on every
+                                        # call (pre_model_hook); the message that enters the
+                                        # checkpoint is the text note (§1.15). Taking the media
+                                        # out between two calls would restart the provider's
+                                        # prompt cache on every viewed item.
+                                        from model_drivers.message_adapters import trim_image_parts_from_message
+                                        # A video is sent once: it is too large to upload on every call.
+                                        _is_video = tool_name == "agictl_view_video"
+                                        became_notes = view_hold.hold(
+                                            inject_msg.id, inject_msg.content, once=_is_video,
+                                        )
+                                        if _is_video:
+                                            tlog("VIEW HOLD: the video goes with the next model call only")
+                                        else:
+                                            tlog(
+                                                f"VIEW HOLD: {len(view_hold)} viewed item(s) stay in what the "
+                                                f"model is sent until the cycle ends (limit {view_hold.limit})"
+                                            )
+                                        if became_notes:
+                                            tlog(
+                                                f"VIEW HOLD: limit reached — the {became_notes} oldest "
+                                                f"are now notes"
+                                            )
+                                        # Queue for break-and-reinvoke (see VIEW RE-INVOKE
+                                        # below). Mid-stream update_state does NOT reach the
+                                        # running agent node, so we must re-invoke the stream.
+                                        pending_view_injects.append(HumanMessage(
+                                            content=trim_image_parts_from_message(
+                                                inject_msg.content, view_payload.get("path", ""),
+                                            ),
+                                            id=inject_msg.id,
+                                        ))
+
+                            # ── Cycle End Detection ──
+                            # When the agent calls `agictl cycle end`, break immediately so
+                            # telemetry writes before the process terminates.
+                            if "\U0001f6d1 Cycle ended:" in content:
+                                tlog(f"\n--- CYCLE END DETECTED (step {step_count}) ---")
+                                # Mail that landed during this reply still has to be
+                                # handled. Only hold the end when the tool batch is
+                                # closed; an open tool call keeps the existing break.
+                                if _inject_midcycle_mail():
+                                    break
+                                cycle_ended = True
+                                break
+
+                        # ── VIEW RE-INVOKE (multimodal image injection) ──
+                        # A live agent.stream() Pregel loop holds its channels in
+                        # memory and never re-reads an externally written checkpoint
+                        # mid-run, so update_state cannot inject an image into the
+                        # current turn. Mirror the budget-warning pattern: once the
+                        # current tool batch is fully resolved, break and re-invoke
+                        # with the queued image HumanMessage(s) as input — only then
+                        # does the agent node actually receive the image.
+                        # SAFETY GATE: wait until no tool_call from the latest
+                        # AIMessage is unanswered in the local mirror.
+                        # CHECKPOINT FLUSH: breaking the stream can leave ToolMessages
+                        # as pending writes (parallel view+tools especially) — flush
+                        # the local transcript before re-invoke or LangGraph raises
+                        # INVALID_CHAT_HISTORY on dangling tool_calls.
+                        if pending_view_injects and not _unresolved_tool_call_ids(messages):
+                            flush_note = _flush_stream_messages_to_checkpoint(
+                                agent, config, messages,
+                            )
+                            tlog(f"VIEW RE-INVOKE: checkpoint {flush_note}")
+                            if flush_note.startswith(("flush-failed", "skip-local-unresolved")):
+                                tlog(
+                                    "VIEW RE-INVOKE: aborting image inject — "
+                                    "checkpoint not safe (avoid INVALID_CHAT_HISTORY)"
+                                )
+                                pending_view_injects = []
+                            else:
+                                input_messages = pending_view_injects
+                                messages.extend(pending_view_injects)
+                                tlog(
+                                    f"VIEW RE-INVOKE: feeding {len(pending_view_injects)} "
+                                    f"image message(s) to the model (step {step_count})"
+                                )
+                                pending_view_injects = []
+                                break
+
+                        # ── Budget Warnings ──
+                        # Break the stream and re-invoke with the warning as a genuine HumanMessage.
+                        # The agent sees it as new input and can wrap up gracefully.
+                        #
+                        # SAFETY GATE: never interject while any tool_call from the latest
+                        # AIMessage is still awaiting its ToolMessage. With parallel tool
+                        # calls that means waiting for the whole batch — not just the
+                        # agent chunk. Breaking mid-batch checkpoints dangling tool_calls
+                        # and the re-invoke raises INVALID_CHAT_HISTORY.
+                        pending_tool_calls = bool(_unresolved_tool_call_ids(messages))
+                        remaining = max_steps - (step_count - call_steps - turn_base)
+                        warning = None
+
+                        # Unread mail fetched while this cycle holds the lock.
+                        # Same break-and-reinvoke as the budget warning below.
+                        if _inject_midcycle_mail():
+                            break
+
+                        # ── Live call: per-request step allowance ──
+                        if (
+                            _in_call_turn()
+                            and not pending_tool_calls
+                            and live_runtime.turn_steps >= CALL_TURN_STEP_CAP
+                            and not live_runtime.cap_nudged
+                        ):
+                            live_runtime.cap_nudged = True
+                            flush_note = _flush_stream_messages_to_checkpoint(agent, config, messages)
+                            if not flush_note.startswith("flush-failed"):
+                                input_messages = [HumanMessage(content=live_step_cap_message(), id=str(uuid.uuid4()))]
+                                messages.append(input_messages[0])
+                                tlog(f"LIVE CALL: step allowance reached (step {step_count})")
+                                break
+
+                        # ── Repeated call: close the cycle (state_long_cycles.md §1.5 rule 3) ──
+                        if not pending_tool_calls and not _in_call_turn() and repeat_guard.stop_due():
+                            loop_stop = repeat_guard.stop_due()
+                            tlog(f"\n[LOOP] {loop_stop}. Terminating cycle.")
+                            # Leave the thread whole for the next spawn (tool results flushed).
+                            tlog(f"[LOOP] checkpoint {_flush_stream_messages_to_checkpoint(agent, config, messages)}")
+                            cycle_ended = True
+                            break
+
+                        # ── Time limit: no model call the cycle cannot finish (§1.3 rule 1) ──
+                        # A tool batch just closed, so a model call is next.
+                        if (
+                            "tools" in chunk
+                            and not pending_tool_calls
+                            and not _in_call_turn()
+                            and deadline_warnings.close_due()
+                        ):
+                            tlog(f"\n[TIME LIMIT] Not starting another step (step {step_count}). Closing the cycle.")
+                            # Leave the thread whole for the next spawn (tool results flushed).
+                            tlog(f"[TIME LIMIT] checkpoint {_flush_stream_messages_to_checkpoint(agent, config, messages)}")
+                            cycle_ended = True
+                            limit_stop = True
+                            break
+
+                        if pending_tool_calls or _in_call_turn():
+                            pass  # defer warning to the next chunk; none during call turns
+                        elif remaining <= end_off_remaining and not warned_end_off:
+                            warned_end_off = True
+                            warned_80 = True  # suppress a stale 80% warning after this one
+                            warning = budget_end_off_message(step_count - call_steps - turn_base, max_steps)
+                        elif (step_count - call_steps - turn_base) >= budget_80 and not warned_80:
+                            warned_80 = True
+                            warning = budget_wrap_message(step_count - call_steps - turn_base, max_steps)
+
+                        # Time left before Lifeline's hard stop. Same gate as the budget
+                        # warnings; a budget warning in this chunk goes first.
+                        time_stage = None
+                        warn_tag = "[BUDGET]"
+                        on_sent = None  # runs once the message is in the conversation
+                        gate_open = not pending_tool_calls and not _in_call_turn()
+                        if not warning and gate_open:
+                            time_due = deadline_warnings.due(listening=listening.should_wait())
+                            if time_due:
+                                time_stage, warning = time_due
+                                warn_tag = "[DEADLINE]"
+                                if time_stage == CLOSE_NOW and listening.should_wait():
+                                    # The window closes with the last time warning (§1.5.3).
+                                    warning = listening.begin_closing("deadline")
+                                    tlog("LISTEN: window closed — last time warning before the limit")
+
+                        # Repeated call: told once at 3 (state_long_cycles.md §1.5 rule 2).
+                        if not warning and gate_open:
+                            notice = repeat_guard.notice_due()
+                            if notice:
+                                warning, warn_tag, on_sent = notice, "[LOOP]", repeat_guard.mark_noticed
+
+                        # Check-in every 30 minutes (state_long_cycles.md §1.6). The line is
+                        # always written; the message is held back while a person is chatting
+                        # and once the wrap-up warning's time has started.
+                        if gate_open:
+                            checkin_minutes = checkins.due()
+                            if checkin_minutes:
+                                checkins.mark()
+                                _checkin_text = checkin_line(
+                                    checkin_minutes, step_count - call_steps,
+                                    usage_totals(messages)[0], last_tool_label,
+                                )
+                                _write_checkin_line(_checkin_text)
+                                _left = deadline_warnings.time_left()
+                                _in_wrap_up = _left is not None and _left <= deadline_warnings.wrap_up_lead()
+                                tlog(f"[CHECK-IN] {_checkin_text}")  # shown in agitop's cycle log
+                                if not warning and not listening.should_wait() and not _in_wrap_up:
+                                    warning, warn_tag = checkin_message(checkin_minutes), "[CHECK-IN]"
+
+                        # Shutdown comes before any other notice in this step.
+                        if gate_open and not shutdown_told and _shutdown_requested():
+                            warning = shutdown_message(_shutdown_seconds_left())
+                            warn_tag, time_stage, on_sent = "[SHUTDOWN]", None, _mark_shutdown_told
+
+                        if warning:
+                            tlog(f"{warn_tag} Injecting warning into agent conversation (step {step_count})")
+                            tlog(f"{warn_tag} {warning}")
+                            # Flush streamed ToolMessages before break-and-reinvoke —
+                            # same pending-writes hazard as VIEW RE-INVOKE.
+                            flush_note = _flush_stream_messages_to_checkpoint(
+                                agent, config, messages,
+                            )
+                            tlog(f"{warn_tag} checkpoint {flush_note}")
+                            if flush_note.startswith("flush-failed"):
+                                tlog(
+                                    f"{warn_tag} Skipping warning inject — "
+                                    "checkpoint flush failed"
+                                )
+                            else:
+                                if time_stage is not None:
+                                    deadline_warnings.mark(time_stage)
+                                if on_sent is not None:
+                                    on_sent()
+                                # Break this stream — re-invoke with warning as the only new input.
+                                input_messages = [HumanMessage(content=warning, id=str(uuid.uuid4()))]
+                                messages.append(input_messages[0])
+                                break
+
+                        # ── Hard Budget Enforcement ──
+                        # Same safety gate: wait until every parallel tool_call in the
+                        # current batch has its ToolMessage before terminating.
+                        if (step_count - call_steps - turn_base) >= max_steps and not pending_tool_calls:
+                            tlog(f"\n[BUDGET EXCEEDED] Hard limit reached ({step_count}/{max_steps}). Terminating cycle.")
+                            cycle_ended = True
+                            budget_hard_stop = True
+                            break
+                    else:
+                        # Stream completed naturally (agent produced final response with no tool calls)
+                        stream_natural_end = True
+                except Exception as e:
+                    # Transient transport blip (431/5xx/connection): back off and
+                    # resume from the checkpoint with the SAME input (idempotent).
+                    if _is_transient_transport_error(e) and transient_attempt < MAX_TRANSIENT_RETRIES:
+                        transient_attempt += 1
+                        delay = min(2 ** transient_attempt, 8)
+                        tlog(
+                            f"TRANSIENT API ERROR (attempt {transient_attempt}/{MAX_TRANSIENT_RETRIES}): "
+                            f"{type(e).__name__}: {e}. Resuming from checkpoint in {delay}s."
+                        )
+                        _HEARTBEAT.set_hold("tools", False)
+                        time.sleep(delay)
+                        continue
+                    # A replayed reasoning record was refused: send the request once
+                    # more without any (state_model_drivers.md §2.7 B4).
+                    if replay_guard.active and is_binding_error(e) and not binding_retry_used:
+                        binding_retry_used = True
+                        replay_guard.strip_all_next()
+                        tlog("REASONING REPLAY: provider refused a replayed record — retrying once without them")
+                        _HEARTBEAT.set_hold("tools", False)
+                        continue
+                    # A replayed provider tool call was refused: send the request once
+                    # more without the provider's tool parts (state_model_drivers.md §2.7 B19).
+                    if (
+                        replay_guard.wire == WIRE_ANTHROPIC and is_server_tool_error(e)
+                        and not replay_guard.server_tools_dropped
+                    ):
+                        replay_guard.drop_server_tools()
+                        tlog("SERVER TOOLS: provider refused a replayed search or code step — "
+                             "retrying once without the provider's tool parts")
+                        _HEARTBEAT.set_hold("tools", False)
+                        continue
+                    raise  # non-transient, or retry budget exhausted → crash
+                break  # stream invocation finished without a transient error
+
+            if stream_natural_end and declined_reply is not None:
+                # The declined reply leaves the thread. The first time, the agent is
+                # told and gets a turn to act on it; a second refusal in a row closes
+                # the cycle and Lifeline tells the Primary User (§2.7 B6).
+                _declined_msg, _declined_reason = declined_reply
+                declined_reply = None
+                if _declined_msg in messages:
+                    messages.remove(_declined_msg)
+                if checkpointer and getattr(_declined_msg, "id", None):
+                    # Removed in its own write, not with the next input: a retried
+                    # input must not ask for the same removal twice.
+                    try:
+                        agent.update_state(
+                            config, {"messages": [RemoveMessage(id=_declined_msg.id)]},
+                            as_node="__start__",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        tlog(f"[REFUSAL] Declined reply left in the thread — {e}")
+                if refusals_in_row < REFUSALS_BEFORE_CLOSE:
+                    _note = HumanMessage(content=refusal_note(_declined_reason), id=str(uuid.uuid4()))
+                    input_messages = [_note]
+                    messages.append(_note)
+                    tlog("[REFUSAL] The declined reply was discarded and the agent was told")
+                    continue
+                refusal_stop = refusal_summary(_declined_reason, execution_model)
+                tlog(refusal_closed_line(_declined_reason, execution_model))
+                cycle_ended = True
+                break
+            if stream_natural_end:
+                last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+                # ── Live call: the reply to "call ended" is the last-call note ──
+                if live_runtime is not None and live_runtime.awaiting_summary:
+                    live_runtime.capture_summary(last_ai.content if last_ai else "")
+                # ── Live call: speak this turn's answer, then wait for the next request ──
+                if live_runtime is not None and live_runtime.live:
+                    next_text = live_runtime.next_injection(last_ai.content if last_ai else "")
+                    if next_text is not None:
+                        next_msg = HumanMessage(content=next_text, id=str(uuid.uuid4()))
+                        input_messages = [next_msg]
+                        messages.append(next_msg)
+                        active_agent = call_agent if _in_call_turn() else agent
+                        continue
+                if _inject_midcycle_mail():
+                    continue
+                # ── Live Chat: wait for the next message instead of ending (§1.4) ──
+                if live_runtime is not None and (live_runtime.live or live_runtime.awaiting_summary):
+                    listening.note_activity()  # a call counts as activity (§1.7 rule 2)
+                if listening.should_wait():
+                    tlog(f"LISTEN: waiting for messages ({listening.minutes} min idle window)")
+                    step_clock.skip()  # waiting is not step time (§1.7 rule 1)
+                    with _HEARTBEAT.holding("mail"):
+                        close_reason = wait_for_mail(
+                            listening, _inject_midcycle_mail, tick=_CACHE_KEEPALIVE.tick,
+                            signal=mail_signal.raised if mail_signal.path else None)
+                    if close_reason == "mail":
+                        continue
+                    if close_reason == "shutdown":
+                        shutdown_told = True
+                    closing = listening.begin_closing(close_reason)
+                    tlog(f"LISTEN: window closed ({close_reason}) — asking the agent to end the cycle")
+                    flush_note = _flush_stream_messages_to_checkpoint(agent, config, messages)
+                    if not flush_note.startswith("flush-failed"):
+                        closing_msg = HumanMessage(content=closing, id=str(uuid.uuid4()))
+                        input_messages = [closing_msg]
+                        messages.append(closing_msg)
+                        continue
+                break
+
+        final_message = _reply_text(messages[-1])
+        tlog(f"\n--- CYCLE COMPLETE ({step_count} steps) ---")
+        tlog(final_message)
+    except Exception as e:
+        messages.append(AIMessage(content=f"FATAL EXCEPTION: {e}\nThe cycle crashed or hit recursion limit ({step_count} steps)."))
+        tlog(messages[-1].content)
+        _harness_crashed = True
+
+    # The cycle's own work is over; keep the heartbeat going while it is closed out.
+    _HEARTBEAT.set_hold("tools", False)
+    _HEARTBEAT.set_hold("closing", True)
+
+    if live_runtime is not None:
+        try:
+            if live_runtime.awaiting_summary:
+                last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+                live_runtime.capture_summary(last_ai.content if last_ai else "")
+            live_runtime.shutdown("failed" if _harness_crashed else "ended")
+        except Exception as e:
+            tlog(f"LIVE CALL: shutdown error — {e}")
+        if call_steps:
+            tlog(f"LIVE CALL: {call_steps} call-turn steps (outside the cycle budget)")
+
+    result_messages = messages
+
+    total_tokens, prompt_tokens, completion_tokens = usage_totals(result_messages)
+
+    # Fallback: char-based estimation if no provider reported tokens
+    if total_tokens == 0 and result_messages:
+        total_chars = sum(len(m.content) for m in result_messages if hasattr(m, "content") and isinstance(m.content, str))
+        prompt_chars = sum(len(m.content) for m in result_messages if isinstance(m, (HumanMessage, SystemMessage)) and isinstance(m.content, str))
+        completion_chars = sum(len(m.content) for m in result_messages if isinstance(m, AIMessage) and isinstance(m.content, str))
+        # ~4 chars per token is a rough estimate
+        prompt_tokens = prompt_chars // 4
+        completion_tokens = completion_chars // 4
+        total_tokens = total_chars // 4
+
+    cache_read, cache_write = cache_totals(result_messages)
+    # Keep-alive pings are requests too: their tokens belong to the cycle.
+    ping_in, ping_out, ping_read, ping_write = _keepalive_usage()
+    total_tokens += ping_in + ping_out
+    prompt_tokens += ping_in
+    completion_tokens += ping_out
+    cache_read += ping_read
+    cache_write += ping_write
+    cache_line = cache_log_line(prompt_tokens, cache_read, cache_write,
+                                pings=_CACHE_KEEPALIVE.pings if _CACHE_KEEPALIVE is not None else 0)
+    if cache_line:
+        tlog(cache_line)
+
+    write_telemetry(args.agent, total_tokens, prompt_tokens, completion_tokens, result_messages,
+                    cached_tokens=cache_read, cache_write_tokens=cache_write)
+
+    # Viewed media are never saved (§1.15); this cleans a checkpoint written before that.
+    if checkpointer:
+        _trim_view_inject_payloads(agent, config)
+
+    # ── Cleanup checkpointer connection ──
+    if checkpointer and hasattr(checkpointer, 'conn'):
+        try:
+            checkpointer.conn.close()
+        except:
+            pass
+
+    # ── Exit with error code if crash occurred ──
+    # This is critical for the circuit breaker — exit code 0 hides failures.
+    if _harness_crashed:
+        sys.exit(1)
+
+    # Hard step budget: finalize cycle + signal lifeline to respawn (exit 53).
+    if budget_hard_stop:
+        _finalize_cycle_step_budget(args.agent, step_count - call_steps, max_steps)
+        sys.exit(EXIT_STEP_BUDGET)
+
+    # Time limit: the harness closes the cycle; Lifeline respawns on the same thread (exit 54).
+    if limit_stop:
+        minutes_run = max(1, int(round((time.time() - harness_started_epoch) / 60.0)))
+        _finalize_cycle_with_handoff(
+            args.agent, time_limit_summary(minutes_run, step_count - call_steps),
+            "TIME LIMIT", messages, last_tool_label,
+        )
+        sys.exit(EXIT_TIME_LIMIT)
+
+    # The provider declined twice: the harness closes the cycle with the reason. Exit 0;
+    # Lifeline reads the log line, waits before the next cycle and tells the Primary User.
+    if refusal_stop:
+        _close_cycle_from_harness(args.agent, refusal_stop, "REFUSAL")
+
+    # Repeated call: closed with what was repeated; counts toward the breaker (exit 55).
+    if loop_stop:
+        _finalize_cycle_with_handoff(args.agent, loop_stop, "LOOP", messages, last_tool_label)
+        sys.exit(EXIT_LOOP)
+
+if __name__ == "__main__":
+    main()

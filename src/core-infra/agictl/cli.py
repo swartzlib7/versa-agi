@@ -1,0 +1,16114 @@
+#!/usr/bin/env python3
+"""
+agictl — Versa AGi CLI (V3)
+Data-model-driven command groups: system, agent, task, message, cycle, project, connection.
+All effectful commands return JSON confirming what occurred.
+"""
+
+import os
+import sys
+import json
+import re
+import time
+import sqlite3
+import shutil
+import subprocess
+import tempfile
+import click
+from rich.console import Console
+from rich.table import Table
+
+# Add core-infra to path for data readers
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+import caller_identity  # noqa: E402
+
+# Who is asking, taken from sudo's own record, before anything below reads it
+# (the database paths a few lines down, and every guard in this file).
+if __name__ == "__main__":
+    import pwd as _pwd
+    _refused = caller_identity.settle(
+        os.environ,
+        euid=os.geteuid(),
+        running_as=_pwd.getpwuid(os.geteuid()).pw_name,
+        args=sys.argv[1:],
+        agents_db=(caller_identity._paths_env_value("VERSA_AGENTS_DB")
+                   or "/var/lib/versa-agi/agents.db"),
+    )
+    if _refused:
+        print(json.dumps({"success": False, "error": _refused}))
+        sys.exit(1)
+
+import db_connect  # noqa: E402
+import agent_limits  # noqa: E402
+import local_time  # noqa: E402
+
+# These modules are only available on full (client/local) installs.
+# Server-only topology deploys a minimal agictl subset (model commands only).
+try:
+    from agitop.data import AgentReader, MessageReader, TasksReader
+except ImportError:
+    AgentReader = MessageReader = TasksReader = None
+
+from privilege_guard import (  # noqa: E402
+    coa_autonomous_allowed,
+    coa_autonomous_changed_since_sync,
+    install_role_change_allowed,
+    privilege_escalation_hit,
+    refuse_agent_coa_autonomous,
+    sudoers_line,
+)
+from identity import provision_identity
+from comms import fetch_inbox, send_message, mark_message_processed, build_attachments
+import message_attachments
+from model_hf_ingest import (
+    CLASS_VLM,
+    HfIngestError,
+    activation_block_reason,
+    atomic_move_into,
+    default_hf_download,
+    inspect_hf_source,
+    load_sycl_meta,
+    meta_value,
+    migrate_skip_reason,
+    activate_needs_docker_restart,
+    activate_needs_mmproj_reload,
+    catalog_input_modalities_after_probe,
+    ensure_sycl_vlm_subdir,
+    sycl_main_gguf_path,
+    sycl_mmproj_on_disk,
+    sycl_vlm_subdir,
+    chat_image_content_parts,
+    drop_name_from_csv,
+    ensure_name_in_csv,
+    install_paired_file,
+    load_probe_image,
+    plan_sycl_additionals,
+    plan_sycl_remove,
+    resolve_activate_parallel,
+    sycl_remove_block_reason,
+    size_gb_from_bytes,
+    size_gb_from_path,
+    sycl_import_block_reason,
+    topology_import_block_reason,
+    validate_gguf_file,
+)
+from model_media_ingest import (
+    CATALOG_LABELS,
+    MEDIA_STORE,
+    RUNTIME_MEDIA,
+    STOCK_MEDIA_CATALOG_KEYS,
+    bundle_manifest,
+    inspect_media_source,
+    list_hf_media_recipes,
+    load_bundle_manifest,
+    load_media_bundles,
+    media_bundle_value,
+    media_import_block_reason,
+    media_output_ext,
+    media_output_kind,
+    media_runtime_status,
+    media_usage,
+    align_ltx_frames,
+    align_ltx_spatial,
+    apply_ltx_orientation,
+    ltx_vae_decode_note,
+    plan_media_bundle,
+    recipe_generate_defaults,
+    resolve_ltx_size,
+    remove_media_bundle_dir,
+    rename_media_bundle_dir,
+    resolve_bundle_dir,
+    topology_media_import_block_reason,
+    validate_component_file,
+)
+
+try:
+    from model_catalog import (
+        WORK_MODALITIES,
+        OUTPUT_DELIVERY_MODALITIES,
+        assigned_local_catalog_rows_to_upsert,
+        catalog_label_after_probe,
+        catalog_row_to_value,
+        load_catalog as _mc_load_catalog,
+        parse_catalog_row,
+        validate_model_routing_prefs,
+        validate_preferred_model_key,
+        validate_preferred_output_key,
+    )
+except ImportError:
+    WORK_MODALITIES = OUTPUT_DELIVERY_MODALITIES = None
+    assigned_local_catalog_rows_to_upsert = catalog_label_after_probe = None
+    catalog_row_to_value = _mc_load_catalog = parse_catalog_row = None
+    validate_model_routing_prefs = validate_preferred_model_key = validate_preferred_output_key = None
+
+try:
+    from openrouter_catalog import (
+        enrich_catalog_dict,
+        fetch_openrouter_index_with_fallback,
+        list_addable_models,
+        openrouter_configured,
+        or_model_summary,
+    )
+except ImportError:
+    enrich_catalog_dict = fetch_openrouter_index_with_fallback = None
+    list_addable_models = openrouter_configured = or_model_summary = None
+
+try:
+    import provider_catalog as _pc
+except ImportError:
+    _pc = None
+
+# ─── Configuration ────────────────────────────────────
+def get_config():
+    conf_path = os.getenv("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
+    try:
+        with open(conf_path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def get_agent_name():
+    """Resolve agent name natively using config namespace or OS user."""
+    config_path = os.getenv("AGICTL_CONFIG", "")
+    if config_path:
+        basename = os.path.basename(config_path)
+        if basename.endswith("_config.json"):
+            return basename.replace("_config.json", "").lower()
+    
+    import getpass
+    try:
+        user = getpass.getuser()
+        if user in ("coa", "watchdog"):
+            return "coa"
+        if user.startswith("agi-"):
+            return user[4:]
+    except Exception:
+        pass
+
+    config = get_config()
+    name = config.get("identity", {}).get("first_name", "Unknown").lower()
+    return "coa" if name == "versa" else name
+
+# ─── Role ENUM (from Product Spec §3.5) ───────────────
+VALID_ROLES = [
+    "coa",         # Chief Orchestrator Agent
+    "watchdog",    # System Watchdog
+    "pa",          # Personal Assistant
+    "ba",          # Business Analyst
+    "sa",          # Technical Architect
+    "dev",         # Developer Agent
+    "devops",      # DevOps Agent
+    "qa",          # QA Agent
+    "mm",          # Marketing Manager
+    "sr",          # Subject Researcher
+    "sysmon",      # System Monitor
+    "accountant",  # Accountant (Organization / bookkeeping)
+    "custom",      # Custom Agent (generic, COA fills specifics)
+]
+
+ROLE_LABELS = {
+    "coa": "Chief Orchestrator Agent", "watchdog": "System Watchdog",
+    "pa": "Personal Assistant", "ba": "Business Analyst",
+    "sa": "Technical Architect", "dev": "Developer Agent",
+    "devops": "DevOps Agent", "qa": "QA Agent",
+    "mm": "Marketing Manager", "sr": "Subject Researcher",
+    "sysmon": "System Monitor", "accountant": "Accountant",
+    "custom": "Custom Agent",
+}
+
+ROLES_DIR = "/etc/versa-agi/poise/roles"
+
+MAX_ACTIVE_AGENTS = 3
+
+agents_db = os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+messages_db = os.getenv("AGICTL_MESSAGES_DB", "/var/lib/versa-agi/messages.db")
+tasks_db = os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
+cycles_db = os.getenv("AGICTL_CYCLES_DB", "/var/lib/versa-agi/coa/cycles.db")
+
+# Data readers — only available on full installs (not server-only topology)
+if AgentReader is not None:
+    agent_reader = AgentReader(agents_db, cycles_db, messages_db, tasks_db)
+    message_reader = MessageReader(messages_db)
+    tasks_reader = TasksReader(tasks_db)
+else:
+    agent_reader = message_reader = tasks_reader = None
+
+console = Console()
+error_console = Console(stderr=True)
+
+def json_response(*args, **kwargs):
+    """Standard JSON response for effectful commands.
+
+    Runner payloads may already include ``success``. A positional flag wins so
+    ``json_response(True, **result)`` does not raise TypeError at call binding.
+    """
+    if args:
+        success = args[0]
+        kwargs.pop("success", None)
+    else:
+        success = kwargs.pop("success", True)
+    result = {"success": success, **kwargs}
+    print(json.dumps(result))
+    return success
+
+# ─── Root CLI ─────────────────────────────────────────
+def _product_version(default: str = "unknown") -> str:
+    """Shipped semver from core-infra/VERSION (same file agitop / setup.sh use)."""
+    try:
+        from agitop.version import read_product_version
+        return read_product_version(default)
+    except ImportError:
+        vf = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+        try:
+            value = open(vf, encoding="utf-8").read().strip()
+            return value or default
+        except OSError:
+            return default
+
+
+@click.group()
+@click.version_option(
+    version=_product_version(),
+    prog_name="agictl",
+    message="%(prog)s %(version)s",
+)
+def cli():
+    """Versa AGi Control Interface — agictl"""
+    pass
+
+# ═══════════════════════════════════════════════════════
+# 1. SYSTEM — System-level administration
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def system():
+    """System-level administration (config, identity, workspace, security)."""
+    pass
+
+@system.group()
+def config():
+    """Manage system configuration."""
+    pass
+
+# What an agent's account is shown in place of a key, token, secret or password (PERM-A9).
+CONFIG_SECRET_HIDDEN = "[hidden]"
+_CONFIG_SECRET_ENDINGS = ("_key", "_token", "_secret", "_password")
+_CONFIG_SECRET_NAMES = {"key", "token", "secret", "password", "apikey"}
+# Sections an agent's account may read and not change: who it is on VersaVoice, and who
+# its Primary User is.
+_CONFIG_AGENT_READ_ONLY = ("versavoice", "primary_user")
+
+
+def _config_key_is_secret(name) -> bool:
+    low = str(name).lower()
+    return low in _CONFIG_SECRET_NAMES or low.endswith(_CONFIG_SECRET_ENDINGS)
+
+
+def _config_without_secrets(value):
+    """A copy of a config value with every key, token, secret and password hidden."""
+    if isinstance(value, dict):
+        return {k: (CONFIG_SECRET_HIDDEN if _config_key_is_secret(k) and v not in (None, "")
+                    else _config_without_secrets(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_config_without_secrets(v) for v in value]
+    return value
+
+
+def _config_caller_is_agent() -> bool:
+    """True for every caller but root and watchdog (the wrapper and `settle` name the rest)."""
+    return bool(os.getenv("AGICTL_AGENT_USER"))
+
+
+@config.command("get")
+@click.argument("key", required=False, default=None)
+def system_config_get(key):
+    """Read a config value. No key = return all config as JSON.
+
+    An agent's account never receives a key, token, secret or password: the value is
+    shown as "[hidden]". agictl uses those values itself on the agent's behalf.
+    """
+    cfg = get_config()
+    if _config_caller_is_agent():
+        if key and any(_config_key_is_secret(p) for p in key.split(".")):
+            print(json.dumps({"key": key, "value": CONFIG_SECRET_HIDDEN, "restricted": True}))
+            return
+        cfg = _config_without_secrets(cfg)
+    if key:
+        parts = key.split(".")
+        val = cfg
+        for p in parts:
+            if isinstance(val, dict):
+                val = val.get(p)
+            else:
+                val = None
+                break
+        print(json.dumps({"key": key, "value": val}))
+    else:
+        print(json.dumps(cfg, indent=2))
+
+@config.command("set")
+@click.argument("key")
+@click.argument("value")
+def system_config_set(key, value):
+    """Write a config value. Returns JSON confirmation.
+
+    An agent's account cannot change a key, token, secret or password, its VersaVoice
+    account, or who its Primary User is.
+    """
+    conf_path = os.getenv("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
+    if _config_caller_is_agent():
+        parts = key.split(".")
+        if parts[0] in _CONFIG_AGENT_READ_ONLY or any(_config_key_is_secret(p) for p in parts):
+            json_response(False, error=(
+                f"'{key}' is set by setup and the Primary User, not by an agent. "
+                "Ask the Primary User if it is wrong."))
+            sys.exit(1)
+    try:
+        cfg = get_config()
+        parts = key.split(".")
+        target = cfg
+        for p in parts[:-1]:
+            target = target.setdefault(p, {})
+        target[parts[-1]] = value
+        with open(conf_path, "w") as f:
+            json.dump(cfg, f, indent=2)
+        json_response(True, key=key, value=value)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+def _write_setup_ini_value(section: str, key: str, value: str) -> tuple[bool, str]:
+    """Write one setup.ini value and sync the source copy. (ok, error)."""
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if not os.path.isfile(ini_path):
+        return False, "setup.ini not found"
+    try:
+        _update_ini_key(ini_path, section, key, value)
+        _sync_ini_to_source(ini_path)
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+    return True, ""
+
+
+@config.command("set-ini")
+@click.argument("section")
+@click.argument("key")
+@click.argument("value")
+def system_config_set_ini(section, key, value):
+    """Write a configuration key/value to setup.ini.
+
+    Preserves all comments and formatting.
+    """
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+
+    if not os.path.isfile(ini_path):
+        json_response(False, error="setup.ini not found")
+        sys.exit(1)
+
+    section_l = (section or "").strip().lower()
+    key_l = (key or "").strip().lower()
+    value_s = str(value).strip()
+
+    if section_l == "coa" and key_l == "autonomous":
+        if value_s.lower() not in ("true", "false"):
+            json_response(False, error="coa.autonomous must be 'true' or 'false'")
+            sys.exit(1)
+        want_enabled = value_s.lower() == "true"
+        denied = refuse_agent_coa_autonomous(
+            want_enabled, os.getenv("AGICTL_AGENT_USER"), _coa_os_user()
+        )
+        if denied:
+            json_response(False, error=denied)
+            sys.exit(1)
+        ok, err = _ensure_coa_autonomous_sudoers(want_enabled)
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
+    elif section_l == "system" and key_l == "install_role":
+        current = (_read_ini_value("system", "install_role", "normal") or "normal")
+        ok_role, role_err = install_role_change_allowed(current, value_s)
+        if not ok_role:
+            json_response(False, error=role_err)
+            sys.exit(1)
+        value_s = value_s.strip().lower()
+        value = value_s
+    elif section_l == "agent" and key_l == "model_routing_mode":
+        if value_s.lower() not in ("pool", "preferred"):
+            json_response(False, error="model_routing_mode must be 'pool' or 'preferred'")
+            sys.exit(1)
+    elif section_l == "agent" and key_l == "timeout_minutes":
+        # agent_limits is imported at the top of this file. A second import here made the
+        # name local to this function, so the live_chat branch below failed with
+        # UnboundLocalError and agitop could not save Live Chat (3.7.0 to 3.9.3).
+        err = agent_limits.timeout_error(value_s)
+        if err:
+            json_response(False, error=err)
+            sys.exit(1)
+        value_s = str(int(value_s.strip()))
+        value = value_s
+    elif section_l == "model_routing" and key_l in WORK_MODALITIES and value_s:
+        ok, err = validate_preferred_model_key(value_s, key_l)
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
+    elif section_l == "output_routing" and key_l in OUTPUT_DELIVERY_MODALITIES and value_s:
+        ok, err = validate_preferred_output_key(value_s, key_l)
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
+    elif section_l == "versavoice" and key_l == "sync_interval":
+        if value_s not in _VV_SYNC_INTERVALS:
+            json_response(
+                False,
+                error="sync_interval must be one of: " + ", ".join(_VV_SYNC_INTERVALS),
+            )
+            sys.exit(1)
+    elif section_l == "versavoice" and key_l == "profile_sync":
+        if value_s not in ("daily", "weekly", "monthly"):
+            json_response(False, error="profile_sync must be daily, weekly, or monthly")
+            sys.exit(1)
+    elif section_l == "compaction" and key_l == "model":
+        value_s = value_s.strip()
+        value = value_s
+        if value_s:
+            cat = _load_catalog()
+            entry = cat.get(value_s)
+            if not entry:
+                json_response(False, error=f"'{value_s}' is not in the model catalog")
+                sys.exit(1)
+            if not entry.get("enabled", True):
+                json_response(False, error=f"'{value_s}' is not an enabled catalog model")
+                sys.exit(1)
+    elif section_l == "live_chat" and key_l == "idle_minutes":
+        if os.getenv("AGICTL_AGENT_USER"):
+            json_response(False, error="Live Chat is not changed with set-ini. COA, when the "
+                                       "Primary User asks: agictl system live-chat set "
+                                       "off|5|10|15|30. The Primary User: agitop → System "
+                                       "Settings → Live Chat.")
+            sys.exit(1)
+        err = agent_limits.listen_minutes_error(value_s)
+        if err:
+            json_response(False, error=err)
+            sys.exit(1)
+        value_s = str(int(value_s.strip()))
+        value = value_s
+    elif section_l == "live_call" or (section_l == "features" and key_l == "live_call"):
+        if os.getenv("AGICTL_AGENT_USER"):
+            json_response(False, error="Live Call settings are Primary User only "
+                                       "(agitop → System Settings → Live Call). COA changes the "
+                                       "call model with: agictl model live-call use <key>")
+            sys.exit(1)
+        import live_call_config
+        ok, err, value = live_call_config.validate_setting(section_l, key_l, value_s)
+        if not ok:
+            json_response(False, error=err)
+            sys.exit(1)
+
+    try:
+        _update_ini_key(ini_path, section, key, value)
+        _sync_ini_to_source(ini_path)
+        extra = {}
+        if section_l == "coa" and key_l == "autonomous" and value_s.lower() == "false":
+            extra["instanceSync"] = _sync_instance_after_disarm()
+        json_response(True, section=section, key=key, value=value, **extra)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+SUDOERS_COA_AUTONOMOUS = "/etc/sudoers.d/versa_agi_coa_autonomous"
+
+
+def _coa_os_user() -> str:
+    """OS user that owns the COA grant (not the agents.db name)."""
+    user = _read_paths_env_key("VERSA_COA_USER")
+    if user:
+        return user.strip()
+    return "coa"
+
+
+def _agictl_root_bin() -> str:
+    """Inner binary first — the PATH wrapper is not needed and can confuse sudoers."""
+    for candidate in ("/usr/local/lib/versa-agi/agictl", "/usr/local/bin/agictl"):
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.abspath(sys.argv[0])
+
+
+def _write_coa_autonomous_sudoers(enabled: bool) -> tuple[bool, str]:
+    """Write or remove the COA autonomous sudoers file. Caller must be root."""
+    if enabled:
+        try:
+            body = sudoers_line(_coa_os_user())
+        except ValueError as exc:
+            return False, str(exc)
+        fd, tmp = tempfile.mkstemp(prefix="versa_agi_coa_autonomous_")
+        try:
+            os.write(fd, body.encode())
+            os.close(fd)
+            fd = -1
+            os.chmod(tmp, 0o440)
+            chk = subprocess.run(
+                ["visudo", "-c", "-f", tmp],
+                capture_output=True, text=True, timeout=10,
+            )
+            if chk.returncode != 0:
+                err = (chk.stderr or chk.stdout or "visudo rejected sudoers").strip()
+                return False, err
+            shutil.move(tmp, SUDOERS_COA_AUTONOMOUS)
+            os.chmod(SUDOERS_COA_AUTONOMOUS, 0o440)
+            tmp = ""
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+    elif os.path.isfile(SUDOERS_COA_AUTONOMOUS):
+        try:
+            os.remove(SUDOERS_COA_AUTONOMOUS)
+        except OSError as exc:
+            return False, str(exc)
+    return True, ""
+
+
+def _ensure_coa_autonomous_sudoers(enabled: bool) -> tuple[bool, str]:
+    """Apply the grant as root, escalating via watchdog's agictl sudoers if needed."""
+    if os.geteuid() == 0:
+        return _write_coa_autonomous_sudoers(enabled)
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+    result = subprocess.run(
+        [
+            "sudo", "-n", _agictl_root_bin(),
+            "system", "config", "apply-coa-sudoers",
+            "--enabled", "true" if enabled else "false",
+        ],
+        capture_output=True, text=True, timeout=15, env=env,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        return False, (
+            f"Could not write {SUDOERS_COA_AUTONOMOUS} ({err}). "
+            "Re-save System Settings from a session that can passwordless-sudo agictl, "
+            "or run setup.sh --update."
+        )
+    return True, ""
+
+
+@config.command("apply-coa-sudoers")
+@click.option("--enabled", type=click.Choice(["true", "false"]), required=True)
+def system_config_apply_coa_sudoers(enabled):
+    """Write or remove COA autonomous sudoers. Root only. Called by set-ini."""
+    if os.geteuid() != 0:
+        json_response(False, error="apply-coa-sudoers requires root")
+        sys.exit(1)
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="Agents cannot apply the autonomous sudoers grant")
+        sys.exit(1)
+    ok, err = _write_coa_autonomous_sudoers(enabled == "true")
+    if not ok:
+        json_response(False, error=err)
+        sys.exit(1)
+    json_response(True, enabled=enabled, sudoers=SUDOERS_COA_AUTONOMOUS)
+
+
+def _validate_versavoice_api_token(token: str) -> tuple[bool, str]:
+    """Live-check sponsor token via GET /account.
+
+    Success: ``(True, uid)``. Failure: ``(False, error)``.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = "https://us-central1-versavoice-s777.cloudfunctions.net/api/v1/account"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "Versa-AGi/set-key",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, (
+                "Invalid VersaVoice API token. Generate a sponsor token in the "
+                "VersaVoice app (Settings → Personal → Versa AGi & API → "
+                "Enable → Generate Token)."
+            )
+        return False, f"VersaVoice API rejected token (HTTP {exc.code})"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Could not verify VersaVoice token (network): {exc}"
+
+    if not isinstance(data, dict) or not (data.get("uid") or "").strip():
+        return False, "VersaVoice API returned no account uid for this token"
+    return True, (data.get("uid") or "").strip()
+
+
+def _read_install_acceptance_email() -> str:
+    path = "/etc/versa-agi/install-acceptance.json"
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return (data.get("email") or data.get("installEmail") or data.get("install_email") or "").strip()
+
+
+def _reprovision_after_sponsor_change(token: str, new_uid: str) -> list[str]:
+    """Clear stale sub-account binds and register under the new sponsor token."""
+    from comms import api_request as _vv_get
+
+    touched: list[str] = []
+    account = _vv_get("/account", token) or {}
+    display = (
+        account.get("displayName")
+        or account.get("firstName")
+        or ""
+    )
+    first = _read_ini_value("agent", "first_name", "Versa") or "Versa"
+    last = _read_ini_value("agent", "last_name", "(COA)") or "(COA)"
+    language = _read_ini_value("agent", "language", "en") or "en"
+    country = _read_ini_value("agent", "country", "") or ""
+    voice = _read_ini_value("agent", "voice", "female") or "female"
+    install_email = _read_install_acceptance_email()
+    role = (_read_ini_value("system", "install_role", "normal") or "normal").strip().lower()
+    vv_key = (_read_ini_value("system", "vv_agent_key", "") or "").strip()
+    coa_key = vv_key if role == "sentinel" and vv_key else "coa"
+    coa_os = _coa_os_user()
+
+    import glob as _glob
+
+    for config_file in _glob.glob("/etc/versa-agi/*_config.json"):
+        try:
+            with open(config_file, "r") as f:
+                cfg = json.load(f)
+            cfg.setdefault("primary_user", {})
+            cfg["primary_user"]["uid"] = new_uid
+            if display:
+                cfg["primary_user"]["display_name"] = display
+            cfg.setdefault("versavoice", {})
+            cfg["versavoice"]["sub_account_id"] = None
+            cfg["versavoice"]["status"] = None
+            cfg["versavoice"]["api_token"] = token
+            with open(config_file, "w") as f:
+                json.dump(cfg, f, indent=2)
+            touched.append(f"{config_file}:cleared-bind")
+        except Exception:
+            continue
+
+    agents_db_path = _get_agents_db_path()
+    rows = []
+    if os.path.isfile(agents_db_path):
+        conn = db_connect.connect_compat(agents_db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, os_user FROM agents WHERE name != 'watchdog'"
+        ).fetchall()
+        conn.close()
+    if not rows:
+        rows = [{"name": "coa", "os_user": coa_os}]
+
+    for row in rows:
+        name = (row["name"] or "").strip()
+        os_user = (row["os_user"] or name).strip()
+        if not name:
+            continue
+        agent_key = coa_key if name == "coa" or os_user == coa_os else name
+        fn = first if agent_key in (coa_key, "coa") else name.replace("-", " ").title()
+        ln = last if agent_key in (coa_key, "coa") else "(Agent)"
+        provision_identity(
+            os_user,
+            token,
+            first_name=fn,
+            last_name=ln,
+            language=language,
+            country=country,
+            voice=voice,
+            agents_db=agents_db_path,
+            install_email=install_email or None,
+            agent_key=agent_key,
+        )
+        touched.append(f"provision:{name}")
+    return touched
+
+
+# Search API keys: set-key type → [search] key in setup.ini (state_web_access.md §1.2 rule 8).
+SEARCH_KEY_INI = {"brave_search": "brave_api_key", "exa": "exa_api_key"}
+# What COA and the dashboard call them → set-key type.
+SEARCH_KEY_ALIASES = {"brave": "brave_search", "brave_search": "brave_search", "exa": "exa"}
+SEARXNG_PROVIDER_SCRIPT = "/usr/local/lib/versa-agi/providers/searxng.sh"
+SEARXNG_APPLY_TIMEOUT_SECONDS = 420
+
+
+def search_key_ok(value: str) -> bool:
+    """Blank (remove) or a plain key: the same characters `searxng_safe_value` accepts."""
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:/@+=-]*", value or "")) and len(value or "") <= 256
+
+
+def _apply_search_settings(script: str = "") -> tuple[bool, str]:
+    """Rewrite SearXNG's settings and recreate its container. Root only.
+
+    Returns (applied, note). Not applied is not an error: the key is saved and
+    the next `setup.sh --update` applies it.
+    """
+    script = script or SEARXNG_PROVIDER_SCRIPT
+    if not os.path.isfile(script):
+        return False, "Key saved. SearXNG will pick it up on the next update (sudo versa-agi-update)."
+    if not _get_search_config()["enabled"]:
+        return False, "Key saved. Web search is turned off, so SearXNG was not changed."
+    env = dict(os.environ, VERSA_SETUP_PARENT="1")
+    try:
+        proc = subprocess.run(["bash", script], capture_output=True, text=True,
+                              timeout=SEARXNG_APPLY_TIMEOUT_SECONDS, env=env)
+    except subprocess.TimeoutExpired:
+        return False, "Key saved. Refreshing SearXNG took too long; run sudo versa-agi-update."
+    except Exception as e:  # noqa: BLE001
+        return False, f"Key saved. SearXNG was not refreshed ({e}); run sudo versa-agi-update."
+    tail = [re.sub(r"\x1b\[[0-9;]*m", "", ln).strip() for ln in (proc.stdout or "").splitlines()]
+    probe = next((ln for ln in reversed(tail) if "Test search" in ln), "")
+    if proc.returncode != 0:
+        return False, "Key saved. SearXNG refresh failed; run sudo versa-agi-update and read its output."
+    return True, probe or "SearXNG refreshed."
+
+
+@system.command("set-key", hidden=True)
+@click.argument("key_type", type=click.Choice(
+    ["gemini", "versavoice", "xai", "openai", "anthropic", "openrouter", "brave_search", "exa"]))
+@click.argument("value")
+def system_set_key(key_type, value):
+    """Update an API key/token and propagate to all locations. Requires root.
+
+    Key types:
+      gemini     - Gemini API Key → coa.env, *.env, .bashrc, setup.ini
+      versavoice - VersaVoice API Token → coa_config.json, *_config.json, setup.ini
+                   (live-validated against GET /account before write)
+      xai        - xAI API Key → provider_keys.env, setup.ini
+      openai     - OpenAI API Key → provider_keys.env, setup.ini
+      anthropic  - Anthropic API Key → provider_keys.env, setup.ini
+      openrouter - OpenRouter API Key → provider_keys.env, setup.ini
+      brave_search - Brave Search API key → setup.ini [search], then SearXNG is refreshed
+      exa        - Exa API key → setup.ini [search], then SearXNG is refreshed
+                   (for these two, the value `off` removes the key)
+    """
+    import glob
+    import re
+    import configparser
+
+    if os.geteuid() != 0:
+        json_response(False, error="system set-key requires root. Use: sudo agictl system set-key ...")
+        sys.exit(1)
+
+    if not value.strip():
+        json_response(False, error="Value cannot be empty")
+        sys.exit(1)
+
+    updated_files = []
+    errors = []
+
+    # ── Resolve setup.ini path ──
+    # Canonical location: /etc/versa-agi/setup.ini
+    # Fallback: relative to script (works in source tree during development)
+    _ini_canonical = "/etc/versa-agi/setup.ini"
+    _ini_dev = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    setup_ini = _ini_canonical if os.path.isfile(_ini_canonical) else _ini_dev
+
+    def _sed_replace(filepath, pattern, replacement):
+        """In-place sed-style replace. Returns True if file was modified."""
+        try:
+            if not os.path.isfile(filepath):
+                return False
+            with open(filepath, "r") as f:
+                content = f.read()
+            new_content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+            if new_content != content:
+                with open(filepath, "w") as f:
+                    f.write(new_content)
+                return True
+            return False
+        except Exception as e:
+            errors.append(f"{filepath}: {e}")
+            return False
+
+    def _ini_set(section, key, val):
+        """Update or insert a key in setup.ini preserving format."""
+        if not os.path.isfile(setup_ini):
+            return
+        try:
+            with open(setup_ini, "r") as f:
+                lines = f.readlines()
+            in_section = False
+            section_start = -1
+            found = False
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    if in_section and not found:
+                        # Insert before next section
+                        lines.insert(i, f"{key}={val}\n")
+                        found = True
+                        break
+                    in_section = (stripped == f"[{section}]")
+                    if in_section:
+                        section_start = i
+                elif in_section and stripped.startswith(f"{key}="):
+                    lines[i] = f"{key}={val}\n"
+                    found = True
+                    break
+            if in_section and not found:
+                # Append at end of file while still in section
+                lines.append(f"{key}={val}\n")
+                found = True
+            if found:
+                with open(setup_ini, "w") as f:
+                    f.writelines(lines)
+                updated_files.append(setup_ini)
+                _sync_ini_to_source(setup_ini)
+        except Exception as e:
+            errors.append(f"setup.ini: {e}")
+
+    # ════════════════════════════════════════════════
+    # GEMINI API KEY
+    # ════════════════════════════════════════════════
+    if key_type == "gemini":
+        # 1. coa.env
+        coa_env = "/etc/versa-agi/coa.env"
+        if _sed_replace(coa_env, r"^GEMINI_API_KEY=.*$", f"GEMINI_API_KEY={value}"):
+            updated_files.append(coa_env)
+
+        # 2. Sub-agent .env files
+        for env_file in glob.glob("/etc/versa-agi/*.env"):
+            if env_file == coa_env:
+                continue  # Already handled
+            basename = os.path.basename(env_file)
+            if basename in ("provider_keys.env", "inference_endpoint.env", "paths.env"):
+                continue  # Not agent env files
+            if _sed_replace(env_file, r"^GEMINI_API_KEY=.*$", f"GEMINI_API_KEY={value}"):
+                updated_files.append(env_file)
+
+        # 3. COA .bashrc
+        bashrc = "/home/coa/.bashrc"
+        if _sed_replace(bashrc, r'^export GEMINI_API_KEY=".*"$', f'export GEMINI_API_KEY="{value}"'):
+            updated_files.append(bashrc)
+
+        # 4. setup.ini — Google key (provider enable is step 5)
+        _ini_set("third_party", "google_api_key", value)
+
+        # 5. Enable Google provider in models.ini (same pattern as TP set-key)
+        _activate_google_provider_on_key(updated_files, errors)
+
+    # ════════════════════════════════════════════════
+    # VERSAVOICE API TOKEN
+    # ════════════════════════════════════════════════
+    elif key_type == "versavoice":
+        # Live-validate against GET /account before writing (reject fakes).
+        ok_vv, vv_err_or_uid = _validate_versavoice_api_token(value.strip())
+        if not ok_vv:
+            json_response(False, error=vv_err_or_uid or "Invalid VersaVoice API token")
+            sys.exit(1)
+        new_sponsor_uid = vv_err_or_uid
+
+        old_sponsor_uid = ""
+        coa_cfg_path = "/etc/versa-agi/coa_config.json"
+        if os.path.isfile(coa_cfg_path):
+            try:
+                with open(coa_cfg_path, "r") as f:
+                    old_sponsor_uid = (
+                        (json.load(f).get("primary_user") or {}).get("uid") or ""
+                    ).strip()
+            except Exception:
+                old_sponsor_uid = ""
+
+        # 1. Update all *_config.json files
+        for config_file in glob.glob("/etc/versa-agi/*_config.json"):
+            try:
+                with open(config_file, "r") as f:
+                    cfg = json.load(f)
+                if "versavoice" not in cfg:
+                    cfg["versavoice"] = {}
+                cfg["versavoice"]["api_token"] = value
+                with open(config_file, "w") as f:
+                    json.dump(cfg, f, indent=2)
+                updated_files.append(config_file)
+            except Exception as e:
+                errors.append(f"{config_file}: {e}")
+
+        # 2. setup.ini
+        _ini_set("versavoice", "api_token", value)
+
+        # 3. New sponsor — re-provision COA and sub-agents (handover)
+        if new_sponsor_uid and new_sponsor_uid != old_sponsor_uid:
+            try:
+                handed = _reprovision_after_sponsor_change(
+                    value.strip(), new_sponsor_uid
+                )
+                updated_files.extend(handed)
+            except Exception as e:
+                errors.append(f"identity reprovision: {e}")
+
+    # ════════════════════════════════════════════════
+    # XAI API KEY
+    # ════════════════════════════════════════════════
+    elif key_type == "xai":
+        provider_keys_env = _provider_keys_env_path()
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, r"^XAI_API_KEY=.*$", f"XAI_API_KEY={value}"):
+                updated_files.append(provider_keys_env)
+            else:
+                try:
+                    with open(provider_keys_env, "a") as f:
+                        f.write(f"\nXAI_API_KEY={value}\n")
+                    updated_files.append(provider_keys_env)
+                except Exception as e:
+                    errors.append(f"{provider_keys_env}: {e}")
+        else:
+            try:
+                with open(provider_keys_env, "w") as f:
+                    f.write(f"XAI_API_KEY={value}\n")
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
+            except Exception as e:
+                errors.append(f"{provider_keys_env}: {e}")
+
+        _ini_set("third_party", "xai_api_key", value)
+        _activate_third_party_on_key("xai", updated_files, errors)
+
+    # ════════════════════════════════════════════════
+    # OPENAI API KEY
+    # ════════════════════════════════════════════════
+    elif key_type == "openai":
+        provider_keys_env = _provider_keys_env_path()
+        env_var = "OPENAI_API_KEY"
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(provider_keys_env)
+            else:
+                try:
+                    with open(provider_keys_env, "a") as f:
+                        f.write(f"\n{env_var}={value}\n")
+                    updated_files.append(provider_keys_env)
+                except Exception as e:
+                    errors.append(f"{provider_keys_env}: {e}")
+        else:
+            try:
+                with open(provider_keys_env, "w") as f:
+                    f.write(f"{env_var}={value}\n")
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
+            except Exception as e:
+                errors.append(f"{provider_keys_env}: {e}")
+
+        _ini_set("third_party", "openai_api_key", value)
+        _activate_third_party_on_key("openai", updated_files, errors)
+
+    # ════════════════════════════════════════════════
+    # ANTHROPIC API KEY
+    # ════════════════════════════════════════════════
+    elif key_type == "anthropic":
+        provider_keys_env = _provider_keys_env_path()
+        env_var = "ANTHROPIC_API_KEY"
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(provider_keys_env)
+            else:
+                try:
+                    with open(provider_keys_env, "a") as f:
+                        f.write(f"\n{env_var}={value}\n")
+                    updated_files.append(provider_keys_env)
+                except Exception as e:
+                    errors.append(f"{provider_keys_env}: {e}")
+        else:
+            try:
+                with open(provider_keys_env, "w") as f:
+                    f.write(f"{env_var}={value}\n")
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
+            except Exception as e:
+                errors.append(f"{provider_keys_env}: {e}")
+
+        _ini_set("third_party", "anthropic_api_key", value)
+        _activate_third_party_on_key("anthropic", updated_files, errors)
+
+    # ════════════════════════════════════════════════
+    # OPENROUTER API KEY
+    # ════════════════════════════════════════════════
+    elif key_type == "openrouter":
+        provider_keys_env = _provider_keys_env_path()
+        env_var = "OPENROUTER_API_KEY"
+        if os.path.isfile(provider_keys_env):
+            if _sed_replace(provider_keys_env, rf"^{env_var}=.*$", f"{env_var}={value}"):
+                updated_files.append(provider_keys_env)
+            else:
+                try:
+                    with open(provider_keys_env, "a") as f:
+                        f.write(f"\n{env_var}={value}\n")
+                    updated_files.append(provider_keys_env)
+                except Exception as e:
+                    errors.append(f"{provider_keys_env}: {e}")
+        else:
+            try:
+                with open(provider_keys_env, "w") as f:
+                    f.write(f"{env_var}={value}\n")
+                    f.write("OR_SITE_URL=https://versa-agi.com\n")
+                    f.write("OR_APP_NAME=Versa AGi\n")
+                _ensure_provider_keys_env_permissions(provider_keys_env)
+                updated_files.append(provider_keys_env)
+            except Exception as e:
+                errors.append(f"{provider_keys_env}: {e}")
+
+        if os.path.isfile(provider_keys_env):
+            for attr_kv in (
+                ("OR_SITE_URL", "https://versa-agi.com"),
+                ("OR_APP_NAME", "Versa AGi"),
+            ):
+                attr, attr_val = attr_kv
+                if not _sed_replace(provider_keys_env, rf"^{attr}=.*$", f"{attr}={attr_val}"):
+                    try:
+                        with open(provider_keys_env, "a") as f:
+                            f.write(f"{attr}={attr_val}\n")
+                    except Exception as e:
+                        errors.append(f"{provider_keys_env}: {e}")
+
+        _ini_set("third_party", "openrouter_api_key", value)
+        _activate_third_party_on_key("openrouter", updated_files, errors)
+
+    # ════════════════════════════════════════════════
+    # SEARCH API KEYS (state_web_access.md §1.2 rule 8)
+    # ════════════════════════════════════════════════
+    elif key_type in SEARCH_KEY_INI:
+        new_value = "" if value.strip().lower() == "off" else value.strip()
+        if not search_key_ok(new_value):
+            json_response(False, key_type=key_type,
+                          error="That does not look like an API key (letters, digits and . _ - only).")
+            sys.exit(1)
+        _ini_set("search", SEARCH_KEY_INI[key_type], new_value)
+        if not errors:
+            applied, note = _apply_search_settings()
+            json_response(True, key_type=key_type, files_updated=len(updated_files),
+                          updated_files=updated_files, key_set=bool(new_value), applied=applied, note=note)
+            return
+
+    # ── Report result ──
+    if errors:
+        json_response(False, key_type=key_type, updated_files=updated_files, errors=errors)
+        sys.exit(1)
+    else:
+        json_response(True, key_type=key_type, files_updated=len(updated_files), updated_files=updated_files)
+
+def _update_notes_delivered(conn) -> dict:
+    """Release versions whose note this instance has had: {"3.9.0": "<delivered at, UTC>"}."""
+    try:
+        row = conn.execute("SELECT value FROM config WHERE key=?", ("update_notes_delivered",)).fetchone()
+        value = json.loads(row[0]) if row and row[0] else {}
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _update_note_in_inbox(message_id: str) -> bool:
+    """True when this release's note is already in messages.db, read or unread."""
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        found = conn.execute("SELECT 1 FROM messages WHERE message_id=? LIMIT 1", (message_id,)).fetchone()
+        conn.close()
+        return bool(found)
+    except Exception:
+        return False
+
+
+def _deliver_update_note(message_id: str, text: str) -> bool:
+    """Put one notice from Lifeline in COA's inbox (no outbox copy). True when stored."""
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        conn.execute(
+            "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
+            "message_id, text, mode, status, channel) "
+            "VALUES ('received', 'lifeline', 'coa', 'Lifeline', ?, ?, 'typed', 'unprocessed', 'internal')",
+            (message_id, text),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _installed_version() -> str:
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION"),
+                  encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+@system.command("update-notes", hidden=True)
+@click.option("--deliver", is_flag=True, help="Send COA each release note this instance has not had, once")
+@click.option("--mark-delivered", is_flag=True,
+              help="Record every shipped release note as delivered without sending (new installation)")
+@click.option("--notes-dir", default=None, hidden=True)
+@click.option("--installed-version", default=None, hidden=True)
+def system_update_notes(deliver, mark_delivered, notes_dir, installed_version):
+    """Update notes for COA (state_update_notes.md). No option: list notes and their state.
+
+    Run by setup.sh at the end of an install (--mark-delivered) or an update
+    (--deliver). A note is named for its release (3.9.0.md) and delivery is
+    recorded per release version, so a release's note is sent once.
+    """
+    from agictl import update_notes
+
+    if deliver and mark_delivered:
+        json_response(False, error="--deliver and --mark-delivered cannot be combined")
+        sys.exit(1)
+    notes = update_notes.list_notes(notes_dir or update_notes.NOTES_DIR)
+    installed = installed_version if installed_version is not None else _installed_version()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        delivered = _update_notes_delivered(conn)
+    except Exception as e:
+        json_response(False, error=f"cycles.db: {e}")
+        sys.exit(1)
+
+    if not deliver and not mark_delivered:
+        conn.close()
+        json_response(True, installed_version=installed, notes=[
+            {"name": n["name"], "title": n["title"], "chars": len(n["text"]), "draft": n["draft"],
+             "delivered_at": local_time.show(delivered.get(n["version"])) if n["version"] in delivered else "",
+             "problem": n["problem"]}
+            for n in notes
+        ])
+        return
+
+    def record(version: str) -> bool:
+        # One write per release, right after its note is stored: an interrupted
+        # run never leaves a sent note unrecorded for long.
+        delivered[version] = local_time.to_store(local_time.utc_now())
+        try:
+            _config_set(conn, update_notes.CONFIG_KEY, json.dumps(delivered, sort_keys=True))
+            conn.commit()
+            return True
+        except Exception:
+            return False
+
+    sent, already, failed = [], [], []
+    skipped = [{"name": n["name"], "problem": n["problem"]} for n in notes if n["problem"] and not n["draft"]]
+    for note in update_notes.due_notes(notes, delivered, installed):
+        version = note["version"]
+        mid = update_notes.message_id(version)
+        if deliver:
+            if _update_note_in_inbox(mid):
+                # Sent by an earlier run whose record was lost: record it, do not send again.
+                record(version)
+                already.append(version)
+                continue
+            if not _deliver_update_note(mid, update_notes.message_text(note)):
+                failed.append(version)
+                continue
+        if record(version):
+            sent.append(version)
+        else:
+            failed.append(version)
+    conn.close()
+    json_response(not failed, mode="deliver" if deliver else "mark-delivered", installed_version=installed,
+                  **({"sent": sent, "already_in_inbox": already} if deliver else {"marked": sent}),
+                  skipped=skipped, failed=failed)
+    if failed:
+        sys.exit(1)
+
+
+def _live_chat_ini_path() -> str:
+    """setup.ini as `system config set-ini` resolves it ("" when there is none)."""
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    return ini_path if os.path.isfile(ini_path) else ""
+
+
+def _live_chat_state() -> dict:
+    """Both settings of agitop → System Settings → Live Chat, as they are stored."""
+    import agent_limits
+    minutes = agent_limits.snap_listen_minutes(
+        _read_ini_value("live_chat", "idle_minutes", str(agent_limits.DEFAULT_LISTEN_MINUTES))
+    )
+    link_on = _read_ini_value("features", "live_link", "false").strip().lower() == "true"
+    link = {"enabled": link_on}
+    try:
+        from agitop.data.system_reader import read_link_state
+        report = read_link_state()
+        link["state"] = report.get("state", "none") if link_on else "off"
+        if link_on and report.get("detail"):
+            link["detail"] = report["detail"]
+    except Exception:
+        link["state"] = "none" if link_on else "off"
+    return {
+        "enabled": minutes > 0,
+        "listening_minutes": minutes,
+        "listening_choices": ["off"] + [str(c) for c in agent_limits.LISTEN_MINUTES_CHOICES if c],
+        "live_link": link,
+    }
+
+
+def _live_chat_refusal() -> str:
+    """Empty when the caller may change Live Chat: COA or the Primary User (state_live_chat.md D24)."""
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        return ("Permission denied: only COA or the Primary User can change Live Chat "
+                f"(caller: {caller})")
+    return ""
+
+
+def _live_chat_write(section: str, key: str, value: str) -> str:
+    """Write one Live Chat key. Returns an error message, or ""."""
+    ini_path = _live_chat_ini_path()
+    if not ini_path:
+        return "setup.ini not found"
+    try:
+        _update_ini_key(ini_path, section, key, value)
+        _sync_ini_to_source(ini_path)
+    except Exception as e:
+        return str(e)
+    return ""
+
+
+@system.group("live-chat", invoke_without_command=True)
+@click.pass_context
+def system_live_chat(ctx):
+    """Live Chat: whether it is on, the listening time, and Live Link.
+
+    The same two settings as agitop → System Settings → Live Chat. With no
+    subcommand, shows them. COA changes them only when the Primary User asks.
+    """
+    if ctx.invoked_subcommand is None:
+        json_response(True, **_live_chat_state())
+
+
+@system_live_chat.command("set")
+@click.argument("minutes")
+def system_live_chat_set(minutes):
+    """Set the chat listening time: off, 5, 10, 15 or 30 (minutes).
+
+    COA or the Primary User only. Off means an agent answers and its cycle
+    ends; the next message wakes it again. Holds from each agent's next cycle.
+    """
+    import agent_limits
+    denied = _live_chat_refusal()
+    if denied:
+        json_response(False, error=denied)
+        sys.exit(1)
+    wanted = str(minutes).strip().lower()
+    wanted = "0" if wanted == "off" else wanted
+    err = agent_limits.listen_minutes_error(wanted)
+    if err:
+        json_response(False, error=err + " Use off, 5, 10, 15 or 30.")
+        sys.exit(1)
+    before = _live_chat_state()["listening_minutes"]
+    err = _live_chat_write("live_chat", "idle_minutes", str(int(wanted)))
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
+    json_response(True, was_minutes=before, **_live_chat_state(),
+                  applies="From each agent's next cycle. A chat that is open keeps the "
+                          "listening time it started with.")
+
+
+@system_live_chat.command("link")
+@click.argument("switch", type=click.Choice(["on", "off"], case_sensitive=False))
+def system_live_chat_link(switch):
+    """Switch Live Link on or off.
+
+    COA or the Primary User only. With Live Link on, this machine keeps one
+    outbound request open to the VersaVoice AI API and is told the moment an
+    agent has a new message. No inbound connection is accepted either way.
+    """
+    denied = _live_chat_refusal()
+    if denied:
+        json_response(False, error=denied)
+        sys.exit(1)
+    before = _live_chat_state()["live_link"]["enabled"]
+    err = _live_chat_write("features", "live_link", "true" if switch.lower() == "on" else "false")
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
+    json_response(True, was_enabled=before, **_live_chat_state(),
+                  applies="The link service follows within a minute. Until it reports, "
+                          "live_link.state still shows the earlier state.")
+
+
+@system.command("whoami")
+def system_whoami():
+    """Print agent identity (name, role, OS user, VV-UID) as JSON."""
+    config = get_config()
+    identity = config.get("identity", {})
+    vv = config.get("versavoice", {})
+    pu = config.get("primary_user", {})
+    result = {
+        "name": identity.get("first_name", "Unknown"),
+        "role": identity.get("role", "agent"),
+        "os_user": os.getenv("AGICTL_AGENT_USER", os.getenv("USER", "unknown")),
+        "language": identity.get("language", "en"),
+        "sub_account_id": vv.get("sub_account_id", ""),
+        "sponsor_uid": pu.get("uid", ""),
+        "sponsor_name": pu.get("display_name", "")
+    }
+    print(json.dumps(result, indent=2))
+
+@system.command("workspace-link")
+@click.argument("path")
+def system_workspace_link(path):
+    """Create symlink from agent's workspace/ to user-accessible path."""
+    config = get_config()
+    # Resolve workspace source — canonical COA layout: coa-env/workspace
+    workspace_src = config.get("workspace_path", "")
+    if not workspace_src:
+        os_user = os.getenv("USER", "coa")
+        home = os.path.expanduser(f"~{os_user}")
+        workspace_src = os.path.join(home, "coa-env", "workspace")
+    try:
+        if os.path.islink(path):
+            json_response(True, action="workspace_link", path=path, note="Symlink already exists", target=os.readlink(path))
+            return
+        if os.path.exists(path):
+            json_response(False, error=f"Path '{path}' already exists and is not a symlink. Remove it first.")
+            sys.exit(1)
+        if not os.path.isdir(workspace_src):
+            json_response(False, error=f"Workspace source '{workspace_src}' does not exist")
+            sys.exit(1)
+        os.symlink(workspace_src, path)
+        json_response(True, action="workspace_link", source=workspace_src, target=path)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@system.command("workspace-unlink")
+@click.argument("path", required=False, default=None)
+def system_workspace_unlink(path):
+    """Remove the workspace symlink. Refuses to delete real directories."""
+    if not path:
+        config = get_config()
+        path = config.get("workspace_link", "")
+    if not path:
+        json_response(False, error="No workspace link path specified or found in config")
+        sys.exit(1)
+    try:
+        if os.path.islink(path):
+            os.unlink(path)
+            json_response(True, action="workspace_unlink", path=path)
+        elif os.path.exists(path):
+            json_response(False, error=f"'{path}' is a real directory, not a symlink. Refusing to delete.")
+            sys.exit(1)
+        else:
+            json_response(True, action="workspace_unlink", path=path, note="Path does not exist, nothing to remove")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@system.group()
+def security():
+    """Manage the Security Blacklist."""
+    pass
+
+@security.command("blacklist")
+@click.argument("action", type=click.Choice(["add", "remove", "list"]))
+@click.argument("uid", required=False, default=None)
+def system_security_blacklist(action, uid):
+    """Manage the Security Blacklist for incoming message filtering."""
+    json_response(True, action=action, uid=uid, note="STUB — not yet implemented")
+
+
+@system.command("sync-profiles")
+def system_sync_profiles():
+    """Sync VersaVoice profile data for the Primary User and all connections.
+
+    Fetches /account (sponsor profile) and /connections (contact profiles).
+    Writes sponsor data to system_config.json and contact data to tasks.db connections table.
+    Called by Lifeline on a 7-day staleness schedule.
+    """
+    config = get_config()
+    vv = config.get("versavoice", {})
+    token = vv.get("api_token")
+    if not token:
+        json_response(False, error="VersaVoice API token not configured")
+        sys.exit(1)
+
+    from comms import api_request
+    from datetime import datetime
+    import sqlite3 as _sql
+    synced = {"sponsor_synced": False, "contacts_synced": 0}
+
+    # ── 1. Sync sponsor (Primary User) profile ──
+    account_data = api_request("/account", token)
+    if account_data:
+        pu = config.get("primary_user", {})
+        pu["display_name"] = account_data.get("displayName") or account_data.get("firstName", "")
+        pu["first_name"] = (account_data.get("firstName") or "").strip()
+        pu["uid"] = account_data.get("uid", pu.get("uid", ""))
+        pu["spokenLanguage"] = account_data.get("spokenLanguage", "en")
+        pu["countryOfBirth"] = account_data.get("countryOfBirth")
+        pu["nearestCity"] = account_data.get("nearestCity")
+        pu["countryOfResidence"] = account_data.get("countryOfResidence")
+        pu["stateOrProvince"] = account_data.get("stateOrProvince")
+        pu["chromosome"] = account_data.get("chromosome")
+        pu["dateOfBirth"] = account_data.get("dateOfBirth")
+        pu["abilities"] = account_data.get("abilities", [])
+        pu["profile_synced_at"] = datetime.now().isoformat()
+        config["primary_user"] = pu
+
+        # Write back to config
+        config_path = os.environ.get("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
+        try:
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+            synced["sponsor_synced"] = True
+        except Exception as e:
+            synced["sponsor_write_error"] = str(e)
+
+    # ── 2. Sync connections profile data ──
+    # Try to get connections from /account response first, fall back to /connections endpoint
+    contacts = account_data.get("connections", []) if account_data else []
+    if not contacts:
+        connections_data = api_request("/connections", token)
+        if isinstance(connections_data, list):
+            contacts = connections_data
+        elif isinstance(connections_data, dict):
+            # API returns {"success": true, "contacts": [...], "count": N}
+            contacts = connections_data.get("contacts", connections_data.get("connections", []))
+    if contacts:
+        try:
+            conn = _sql.connect(tasks_db, timeout=5)
+            for c in contacts:
+                uid = c.get("uid") or c.get("contactUid") or c.get("id")
+                if not uid:
+                    continue
+                try:
+                    display_name = c.get("displayName") or c.get("firstName", "Unknown")
+                    # Force-stringify complex values to prevent sqlite3 binding errors
+                    abilities_raw = c.get("abilities", [])
+                    abilities_json = json.dumps(abilities_raw) if abilities_raw else "[]"
+                    # Ensure all values are str or None (some API fields may return dicts)
+                    def _str(val):
+                        if val is None:
+                            return None
+                        if isinstance(val, (dict, list)):
+                            return json.dumps(val)
+                        return str(val)
+                    conn.execute("""
+                        INSERT INTO connections (uid, display_name, spoken_lang, country, city, country_of_residence, state_or_province, chromosome, date_of_birth, abilities, profile_synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                        ON CONFLICT(uid) DO UPDATE SET
+                            display_name = excluded.display_name,
+                            spoken_lang = excluded.spoken_lang,
+                            country = excluded.country,
+                            city = excluded.city,
+                            country_of_residence = excluded.country_of_residence,
+                            state_or_province = excluded.state_or_province,
+                            chromosome = excluded.chromosome,
+                            date_of_birth = excluded.date_of_birth,
+                            abilities = excluded.abilities,
+                            profile_synced_at = datetime('now')
+                    """, (
+                        uid, display_name,
+                        _str(c.get("spokenLanguage")),
+                        _str(c.get("countryOfBirth")),
+                        _str(c.get("nearestCity")),
+                        _str(c.get("countryOfResidence")),
+                        _str(c.get("stateOrProvince")),
+                        _str(c.get("chromosome")),
+                        _str(c.get("dateOfBirth")),
+                        abilities_json,
+                    ))
+                    synced["contacts_synced"] += 1
+                except Exception:
+                    continue  # Skip bad contacts, don't abort sync
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            synced["contacts_error"] = str(e)
+
+    json_response(True, **synced)
+
+
+_VV_SYNC_INTERVALS = (
+    "off", "5min", "15min", "30min",
+    "1hr", "3hr", "6hr", "12hr", "1d", "2d", "1w",
+)
+
+
+def _agi_tag_ids(raw_payload):
+    """Project and task IDs from inbox particle fields (Task 202)."""
+    if not raw_payload:
+        return [], []
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return [], []
+    if not isinstance(payload, dict):
+        return [], []
+    project_ids = []
+    for t in payload.get("agiProjects") or []:
+        if isinstance(t, dict):
+            pid = str(t.get("id") or "").strip()
+            if pid and pid not in project_ids:
+                project_ids.append(pid)
+    task_ids = []
+    for t in payload.get("agiTasks") or []:
+        if isinstance(t, dict):
+            tid = str(t.get("id") or "").strip()
+            if tid and tid not in task_ids:
+                task_ids.append(tid)
+            pp = str(t.get("projectId") or "").strip()
+            if pp and pp not in project_ids:
+                project_ids.append(pp)
+    return project_ids, task_ids
+
+
+def _reply_to_message_id(raw_payload):
+    """Inbound reply target (same id as inbox messageId / particle id)."""
+    if not raw_payload:
+        return ""
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    rid = str(payload.get("replyToMessageId") or "").strip()
+    return rid
+
+
+_VV_INSTANCE_SYNC_STAMP = "/var/lib/versa-agi/coa/.vv_instance_sync_at"
+
+
+def _vv_instance_sync_stamp_path():
+    return os.environ.get("AGICTL_VV_SYNC_STAMP", _VV_INSTANCE_SYNC_STAMP)
+
+
+def _request_instance_sync() -> None:
+    """Have Lifeline send the instance mirror to VersaVoice on its next pass.
+
+    The mirror goes out once per [versavoice] sync_interval (an hour by
+    default). Something the Primary User must act on in the app, a package
+    request for one, should not wait for that. Lifeline syncs when the stamp
+    is older than the interval, so the stamp is set back to zero. With the
+    interval off, nothing is sent, as before.
+    """
+    try:
+        with open(_vv_instance_sync_stamp_path(), "w") as fh:
+            fh.write("0\n")
+    except OSError:
+        pass
+
+
+def _vv_read_sync_interval():
+    raw = (_read_ini_value("versavoice", "sync_interval", "off") or "off").strip()
+    if raw == "1min":
+        raw = "5min"
+    if raw not in _VV_SYNC_INTERVALS:
+        return "off"
+    return raw
+
+
+def _vv_read_last_sync():
+    """Return (epoch_or_none, iso_or_none) from the shared last-fired stamp."""
+    path = _vv_instance_sync_stamp_path()
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        epoch = int(open(path, encoding="utf-8").read().strip())
+    except (OSError, ValueError):
+        return None, None
+    from datetime import datetime, timezone
+    return epoch, datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
+def _vv_write_last_sync():
+    """Stamp last-fired so Lifeline and a rare COA run share one clock."""
+    path = _vv_instance_sync_stamp_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(str(int(time.time())))
+    except OSError:
+        pass
+
+
+def _vv_instance_id():
+    from install_acceptance import _hostname_hash
+    return _hostname_hash()
+
+
+def _vv_instance_label():
+    ini = SETUP_INI_CANONICAL if os.path.isfile(SETUP_INI_CANONICAL) else ""
+    if ini:
+        try:
+            import configparser
+            cp = configparser.ConfigParser()
+            cp.read(ini)
+            label = (cp.get("agent", "call_sign", fallback="") or "").strip()
+            if label:
+                return label
+        except Exception:
+            pass
+    return socket_hostname_fallback()
+
+
+def socket_hostname_fallback():
+    import socket
+    return socket.gethostname() or "versa-agi"
+
+
+def _agent_vv_uid_map():
+    """Local agent name → VersaVoice sub-account UID from per-agent config."""
+    mapping = {}
+    names = []
+    try:
+        conn = db_connect.connect_compat(_get_agents_db_path(), timeout=5)
+        names = [r[0] for r in conn.execute("SELECT name FROM agents").fetchall()]
+        conn.close()
+    except Exception:
+        pass
+    for name in names:
+        path = f"/etc/versa-agi/{name}_config.json"
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                uid = (json.load(f).get("versavoice") or {}).get("sub_account_id")
+            if uid:
+                mapping[str(name)] = str(uid)
+        except Exception:
+            continue
+    return mapping
+
+
+def _coa_agent_name():
+    return (_read_paths_env_key("VERSA_COA_USER") or "coa").strip() or "coa"
+
+
+def _collect_instance_payload():
+    """Scoped projects / tasks / package requests for PUT /agi/instances."""
+    name_to_uid = _agent_vv_uid_map()
+    coa_name = _coa_agent_name()
+    coa_uid = name_to_uid.get(coa_name, "")
+    projects = []
+    tasks = []
+    packages = []
+    members_by_project = {}
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT project_id, member_id FROM project_members WHERE member_type='agent'"
+        ).fetchall():
+            pid = str(row["project_id"])
+            mid = row["member_id"]
+            uid = name_to_uid.get(mid)
+            if uid:
+                members_by_project.setdefault(pid, []).append(uid)
+        for row in conn.execute(
+            """SELECT p.id, p.name, p.description, p.status, p.type, p.platform,
+                      p.game_id, g.name AS game_name
+               FROM projects p
+               LEFT JOIN games g ON g.id = p.game_id
+               WHERE COALESCE(p.status, '') != 'archived'"""
+        ).fetchall():
+            pid = str(row["id"])
+            member_uids = list(dict.fromkeys(members_by_project.get(pid, [])))
+            projects.append({
+                "id": pid,
+                "name": row["name"] or "",
+                "description": row["description"] or "",
+                "status": row["status"] or "",
+                "type": row["type"] or "",
+                "platform": row["platform"] or "",
+                "gameName": row["game_name"] or "",
+                "gameId": str(row["game_id"]) if row["game_id"] is not None else None,
+                "memberUids": member_uids,
+                "unassigned": len(member_uids) == 0,
+            })
+        for row in conn.execute(
+            """SELECT id, project_id, task_kind, title, description, status,
+                      priority, assigned_to, due_date
+               FROM tasks
+               WHERE status NOT IN ('done', 'cancelled')
+                  OR (status = 'done' AND COALESCE(completed_at, updated_at)
+                        >= datetime('now', '-14 days'))"""
+        ).fetchall():
+            assignee = (row["assigned_to"] or "").strip()
+            assignee_uid = name_to_uid.get(assignee, "") if assignee else ""
+            unassigned = not assignee_uid
+            tasks.append({
+                "id": str(row["id"]),
+                "projectId": str(row["project_id"]) if row["project_id"] is not None else "",
+                "task_kind": row["task_kind"] or "standard",
+                "title": row["title"] or "",
+                "description": row["description"] or "",
+                "status": row["status"] or "",
+                "priority": row["priority"],
+                "assigned_to": assignee,
+                "assignedToUid": assignee_uid,
+                "unassigned": unassigned,
+                "due_date": row["due_date"],
+            })
+        conn.close()
+    except Exception as e:
+        return None, f"tasks.db: {e}"
+
+    try:
+        pkg_db = _get_agents_db_path()
+        conn = db_connect.connect_compat(pkg_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT name, status, reason, requested_by, requested_at FROM system_packages"
+        ).fetchall():
+            requester = (row["requested_by"] or "").strip()
+            requester_uid = name_to_uid.get(requester, "") if requester else ""
+            unknown = not requester_uid
+            packages.append({
+                "packageName": row["name"],
+                "status": row["status"] or "requested",
+                "reason": row["reason"] or "",
+                "requestedBy": requester,
+                "requestedByUid": requester_uid,
+                "requestedByUnknown": unknown,
+                "requestedAt": row["requested_at"],
+            })
+        conn.close()
+    except Exception as e:
+        return None, f"agents.db: {e}"
+
+    return {
+        "coaUid": coa_uid,
+        "agentUids": list(dict.fromkeys(name_to_uid.values())),
+        "coaAutonomous": _local_coa_autonomous(),
+        "hostname": socket_hostname_fallback(),
+        "projects": projects,
+        "tasks": tasks,
+        "packageRequests": packages,
+    }, None
+
+
+def _local_coa_autonomous():
+    """Checkbox value from setup.ini [coa] autonomous (not sudoers-file-only)."""
+    raw = (_read_ini_value("coa", "autonomous", "false") or "false").strip().lower()
+    return raw in ("true", "1", "yes", "on")
+
+
+def _apply_remote_coa_autonomous(desired):
+    """Apply PU Enable sudo access via existing set-ini. Idempotent."""
+    if desired is None:
+        return "skipped"
+    if isinstance(desired, str):
+        desired = desired.strip().lower() in ("true", "1", "yes", "on")
+    want = bool(desired)
+    if os.getenv("AGICTL_AGENT_USER"):
+        return "refused"
+    if _local_coa_autonomous() == want:
+        # Setting already on but the grant is not in effect: write it again.
+        from privilege_guard import sudoers_grant_present
+        if not want or sudoers_grant_present():
+            return "unchanged"
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+    result = subprocess.run(
+        [
+            "sudo", "-n", _agictl_root_bin(),
+            "system", "config", "set-ini",
+            "coa", "autonomous", "true" if want else "false",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    if result.returncode != 0 or not data.get("success"):
+        err = (
+            data.get("error")
+            or (result.stderr or result.stdout or "").strip()
+            or f"exit {result.returncode}"
+        )
+        return f"failed:{err}"
+    return "applied"
+
+
+def _sync_instance_after_disarm() -> str:
+    """PUT local Off to VersaVoice. Skip sudo apply on this hop (PUT/GET gap)."""
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+    try:
+        result = subprocess.run(
+            [
+                "sudo", "-n", _agictl_root_bin(),
+                "system", "sync-instance",
+                "--skip-coa-autonomous-apply",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"failed:{exc}"
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    if result.returncode != 0 or not data.get("success"):
+        err = (
+            data.get("error")
+            or (result.stderr or result.stdout or "").strip()
+            or f"exit {result.returncode}"
+        )
+        return f"failed:{err}"
+    return "applied"
+
+
+def _apply_remote_package_decision(name, status):
+    """Same SQL as pkg approve/deny (or revert to requested). Idempotent."""
+    name = (name or "").strip().lower()
+    if not name or status not in ("approved", "denied", "requested"):
+        return "skipped"
+    db_path = _get_agents_db_path()
+    conn = db_connect.connect_compat(db_path, timeout=5)
+    row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+    if not row:
+        conn.close()
+        return "missing"
+    if row[0] == status:
+        conn.close()
+        return "unchanged"
+    if status == "approved":
+        conn.execute(
+            "UPDATE system_packages SET status='approved', resolved_at=datetime('now'), "
+            "notified_at=NULL WHERE name=?",
+            (name,),
+        )
+    elif status == "denied":
+        conn.execute(
+            "UPDATE system_packages SET status='denied', resolved_at=datetime('now') WHERE name=?",
+            (name,),
+        )
+    else:
+        conn.execute(
+            "UPDATE system_packages SET status='requested', resolved_at=NULL, "
+            "notified_at=NULL WHERE name=?",
+            (name,),
+        )
+    conn.commit()
+    conn.close()
+    return status
+
+
+# The outcomes the VersaVoice API and app know (state_long_cycles.md §1.8).
+# shutdown: the computer was shut down with the cycle running (state_host_services.md §1.4.1).
+ACTIVITY_OUTCOMES = ("ok", "timeout", "runaway", "step_limit", "stall", "loop", "shutdown", "crash")
+
+
+@system.command("activity", hidden=True)
+@click.argument("event", type=click.Choice(["start", "end"]))
+@click.option("--sub-account", "sub_account", required=True, help="Agent VersaVoice sub-account id")
+@click.option("--token", required=True, envvar="AGICTL_VV_TOKEN",
+              help="VersaVoice API token; AGICTL_VV_TOKEN in the environment keeps it off the command line")
+@click.option("--cycle-id", "cycle_id", required=True, help="cycles.db id of this spawn")
+@click.option("--wake", type=click.Choice(["messages", "tasks", "forced"]), default="messages")
+@click.option("--listen-minutes", "listen_minutes", type=int, default=0,
+              help="Listening minutes the setting asks for (0 = Off)")
+@click.option("--hard-cap-epoch", "hard_cap_epoch", type=int, default=0,
+              help="Epoch seconds when Lifeline's timeout stops this run")
+@click.option("--outcome", type=click.Choice(ACTIVITY_OUTCOMES), default=None)
+@click.option("--duration-seconds", "duration_seconds", type=int, default=0)
+@click.option("--cycles-total", "cycles_total", type=int, default=0)
+@click.option("--channel-id", "channel_ids", multiple=True,
+              help="Channel of a waking message (repeatable); presence for the chat strip")
+@click.option("--link", "link_up", is_flag=True,
+              help="The link service is carrying mail, so the spawned fetch runs once a minute (start only)")
+@click.option("--proof-of-life", "proof_of_life", is_flag=True,
+              help="This spawn's inbox fetch will name the cycle about once a minute (start only)")
+@click.option("--ended-epoch", "ended_epoch", type=int, default=0,
+              help="Epoch seconds when a cut cycle really stopped (end only; a late report)")
+def system_activity(event, sub_account, token, cycle_id, wake, listen_minutes, hard_cap_epoch,
+                    outcome, duration_seconds, cycles_total, channel_ids, link_up, proof_of_life,
+                    ended_epoch):
+    """Report one agent spawn's start or end to VersaVoice (Lifeline only).
+
+    POST /agi/activity (state_live_chat.md §1.8). The app shows it in the chat
+    status strip and on the agent card. Prints {success, idleMinutes}: the
+    listening minutes VersaVoice granted (0 on any failure).
+    """
+    from datetime import datetime, timezone
+
+    from comms import api_request
+
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="agictl system activity is Lifeline only.", idleMinutes=0)
+        sys.exit(1)
+    body = {
+        "subAccountId": sub_account,
+        "event": event,
+        "cycleId": cycle_id,
+        "cyclesTotal": max(0, cycles_total),
+    }
+    if event == "start":
+        body["wake"] = wake
+        body["listenMinutes"] = max(0, listen_minutes)
+        body["channelIds"] = [c for c in dict.fromkeys(channel_ids) if c][:20]
+        if link_up:
+            body["link"] = True
+        # Proof of life (state_host_services.md §1.4.2): VersaVoice then counts
+        # the cycle as ended when the fetch stops naming it for 3 minutes.
+        if proof_of_life:
+            body["proofOfLife"] = True
+        if hard_cap_epoch > 0:
+            body["hardCapAt"] = datetime.fromtimestamp(hard_cap_epoch, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+    else:
+        body["outcome"] = outcome or "crash"
+        body["durationSeconds"] = max(0, duration_seconds)
+        # A late report for a cycle that was cut off (state_host_services.md §1.6.3).
+        if ended_epoch > 0:
+            body["endedAt"] = datetime.fromtimestamp(ended_epoch, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+    resp = api_request("/agi/activity", token, method="POST", body=body, timeout=15)
+    if isinstance(resp, dict) and resp.get("success"):
+        data = resp.get("data") or {}
+        try:
+            granted = max(0, int(data.get("idleMinutes") or 0))
+        except (TypeError, ValueError):
+            granted = 0
+        json_response(True, event=event, idleMinutes=granted, applied=data.get("applied"))
+        return
+    message = resp.get("message") or resp.get("error") if isinstance(resp, dict) else None
+    json_response(False, error=str(message or "no response from VersaVoice"), idleMinutes=0)
+    sys.exit(1)
+
+
+@system.command("activity-backfill", hidden=True)
+@click.option("--sub-account", "sub_account", required=True, help="Agent VersaVoice sub-account id")
+@click.option("--token", required=True, envvar="AGICTL_VV_TOKEN",
+              help="VersaVoice API token; AGICTL_VV_TOKEN in the environment keeps it off the command line")
+@click.option("--agent", "agent_name", required=True, help="Agent name (cycles.db id prefix)")
+def system_activity_backfill(sub_account, token, agent_name):
+    """Send this agent's cycle history to VersaVoice once (Lifeline only).
+
+    Builds the agent card stats (last 20 cycles, outcome counts, last 48 h busy
+    time, all-time count) from cycles.db and posts event "backfill"; VersaVoice
+    replaces its stats doc (state_live_chat.md LCH-24).
+    """
+    from activity_backfill import build_stats
+    from comms import api_request
+
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="agictl system activity-backfill is Lifeline only.")
+        sys.exit(1)
+    agent_name = (agent_name or "").strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_-]*$", agent_name):
+        json_response(False, error=f"Invalid agent name '{agent_name}'.")
+        sys.exit(1)
+    rows = []
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        pattern = (f"{agent_name}-[0-9]*",)
+        try:
+            cur = conn.execute("SELECT id, started_at, ended_at, exit_code, wake_reason FROM cycles "
+                               "WHERE id GLOB ?", pattern)
+        except sqlite3.OperationalError:  # older table without wake_reason
+            cur = conn.execute("SELECT id, started_at, ended_at, exit_code FROM cycles WHERE id GLOB ?",
+                               pattern)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"cycles.db unreadable: {e}")
+        sys.exit(1)
+    stats = build_stats(rows)
+    resp = api_request("/agi/activity", token, method="POST", timeout=30, body={
+        "subAccountId": sub_account, "event": "backfill", "stats": stats,
+    })
+    if isinstance(resp, dict) and resp.get("success"):
+        json_response(True, agent=agent_name, cycles=stats["cyclesTotal"],
+                      recent=len(stats["recent"]), hours=len(stats["hourly"]))
+        return
+    message = resp.get("message") or resp.get("error") if isinstance(resp, dict) else None
+    json_response(False, error=str(message or "no response from VersaVoice"))
+    sys.exit(1)
+
+
+@system.command("sync-instance")
+@click.option(
+    "--status",
+    "status_only",
+    is_flag=True,
+    help="Print last-fired and sync_interval; no API calls.",
+)
+@click.option(
+    "--skip-coa-autonomous-apply",
+    is_flag=True,
+    help="PUT still sends local coaAutonomous; do not apply GET sudo (disarm hop).",
+)
+def system_sync_instance(status_only, skip_coa_autonomous_apply):
+    """Push projects/tasks/packages/coaAutonomous to VersaVoice and pull decisions.
+
+    PUT /agi/instances/{hostname_hash} then GET …/package-decisions.
+    coaAutonomous is sent only when [coa] autonomous changed since the last
+    sync (coa_autonomous_synced). Otherwise VersaVoice owns it: GET is applied
+    via set-ini coa autonomous unless --skip-coa-autonomous-apply (disarm hop).
+    Lifeline runs this on new inbox inserts, the PU Sync to VV schedule, or --force.
+    --status reports last-fired; do not loop the full command.
+    """
+    from datetime import datetime, timezone
+    from urllib.parse import quote
+
+    from comms import api_request
+
+    if status_only:
+        epoch, iso = _vv_read_last_sync()
+        json_response(
+            True,
+            lastSyncedAt=iso,
+            lastSyncedEpoch=epoch,
+            syncInterval=_vv_read_sync_interval(),
+        )
+        return
+
+    config = get_config()
+    vv = config.get("versavoice", {})
+    token = vv.get("api_token")
+    if not token:
+        json_response(False, error="VersaVoice API token not configured")
+        sys.exit(1)
+
+    instance_id = _vv_instance_id()
+    label = _vv_instance_label()
+    payload, err = _collect_instance_payload()
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
+
+    body = {"label": label, **payload}
+    auto_changed = coa_autonomous_changed_since_sync(
+        body.get("coaAutonomous"), vv.get("coa_autonomous_synced")
+    )
+    if auto_changed:
+        body["coaAutonomousChanged"] = True
+    else:
+        body.pop("coaAutonomous", None)
+    encoded = quote(instance_id, safe="")
+    put = api_request(f"/agi/instances/{encoded}", token, method="PUT", body=body)
+    if not put or not put.get("success"):
+        json_response(False, error="instance upsert failed", response=put)
+        sys.exit(1)
+
+    since = vv.get("package_decisions_since") or ""
+    dec_path = f"/agi/instances/{encoded}/package-decisions"
+    if since:
+        dec_path += f"?since={quote(str(since), safe='')}"
+    decisions_resp = api_request(dec_path, token) or {}
+    decisions = decisions_resp.get("decisions") or []
+    applied = {"approved": 0, "denied": 0, "requested": 0, "unchanged": 0, "missing": 0}
+    remote_auto = decisions_resp.get("coaAutonomous")
+    if skip_coa_autonomous_apply:
+        applied_auto = "skipped_disarm_hop"
+    elif isinstance(remote_auto, bool):
+        applied_auto = _apply_remote_coa_autonomous(remote_auto)
+    else:
+        applied_auto = None
+    prev_synced = vv.get("coa_autonomous_synced")
+    vv["coa_autonomous_synced"] = _local_coa_autonomous()
+    latest = since
+    for d in decisions:
+        if not isinstance(d, dict):
+            continue
+        result = _apply_remote_package_decision(d.get("packageName") or d.get("name"), d.get("status"))
+        if result in applied:
+            applied[result] += 1
+        resolved = d.get("resolved_at")
+        if resolved and (not latest or str(resolved) > str(latest)):
+            latest = str(resolved)
+
+    config_dirty = prev_synced != vv["coa_autonomous_synced"]
+    if latest and latest != since:
+        vv["package_decisions_since"] = latest
+        config_dirty = True
+    if config_dirty:
+        config["versavoice"] = vv
+        config_path = os.environ.get("AGICTL_CONFIG", "/etc/versa-agi/coa_config.json")
+        try:
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            _vv_write_last_sync()
+            json_response(
+                True,
+                instanceId=instance_id,
+                counts=put.get("counts"),
+                applied=applied,
+                coaAutonomousApplied=applied_auto,
+                since_write_error=str(e),
+            )
+            return
+
+    _vv_write_last_sync()
+    json_response(
+        True,
+        instanceId=instance_id,
+        label=label,
+        counts=put.get("counts"),
+        applied=applied,
+        coaAutonomousApplied=applied_auto,
+        syncedAt=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@system.command("vacuum")
+def system_vacuum():
+    """Compact all system databases (VACUUM).
+
+    Reclaims disk space after deletions. Safe to run at any time.
+    Covers: agents.db, messages.db, tasks.db, cycles.db, and all per-agent checkpoints.db.
+    For checkpoint DBs, prunes old checkpoint versions (keeping only the latest per thread)
+    before running VACUUM to reclaim space from accumulated LangGraph state.
+    """
+    import glob as _glob
+
+    db_targets = [
+        ("/var/lib/versa-agi/agents.db", "agents"),
+        ("/var/lib/versa-agi/messages.db", "messages"),
+        (os.environ.get("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db"), "tasks"),
+        (os.environ.get("AGICTL_CYCLES_DB", "/var/lib/versa-agi/coa/cycles.db"), "cycles"),
+    ]
+
+    # Discover per-agent checkpoint DBs
+    checkpoint_dbs = []
+    for cp in _glob.glob("/var/lib/versa-agi/*/cycles/checkpoints.db"):
+        agent = cp.split("/")[4]  # /var/lib/versa-agi/{agent}/cycles/checkpoints.db
+        db_targets.append((cp, f"checkpoints ({agent})"))
+        checkpoint_dbs.append(cp)
+
+    results = []
+    for db_path, label in db_targets:
+        if not os.path.exists(db_path):
+            results.append({"db": label, "status": "not found"})
+            continue
+        try:
+            before = os.path.getsize(db_path)
+            conn = db_connect.connect_compat(db_path, timeout=10)
+            # Prune old checkpoint versions before VACUUM
+            pruned = 0
+            if db_path in checkpoint_dbs:
+                try:
+                    # For each thread, keep only the latest checkpoint
+                    threads = [r[0] for r in conn.execute(
+                        "SELECT DISTINCT thread_id FROM checkpoints"
+                    ).fetchall()]
+                    for tid in threads:
+                        # Find the latest checkpoint_id for this thread
+                        row = conn.execute(
+                            "SELECT checkpoint_id FROM checkpoints "
+                            "WHERE thread_id = ? ORDER BY checkpoint_id DESC LIMIT 1",
+                            (tid,)
+                        ).fetchone()
+                        if row:
+                            latest = row[0]
+                            cursor = conn.execute(
+                                "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_id != ?",
+                                (tid, latest)
+                            )
+                            pruned += cursor.rowcount
+                    # Clean orphaned writes: every write whose own checkpoint is
+                    # gone. Matching on the thread alone left the writes of every
+                    # pruned checkpoint behind, because the thread still has its
+                    # newest one (found 2026-11-19: 16,686 of 22,834 rows in COA's
+                    # database, about 1.5 GB on threads that had one checkpoint).
+                    cursor = conn.execute(
+                        "DELETE FROM writes WHERE NOT EXISTS ("
+                        "SELECT 1 FROM checkpoints c WHERE c.thread_id = writes.thread_id "
+                        "AND c.checkpoint_ns = writes.checkpoint_ns "
+                        "AND c.checkpoint_id = writes.checkpoint_id)"
+                    )
+                    pruned += cursor.rowcount
+                    conn.commit()
+                except Exception:
+                    pass  # Pruning is best-effort — VACUUM still runs
+            conn.execute("VACUUM")
+            conn.close()
+            after = os.path.getsize(db_path)
+            saved = before - after
+            result_entry = {
+                "db": label,
+                "before": f"{before / 1024:.1f} KB",
+                "after": f"{after / 1024:.1f} KB",
+                "saved": f"{saved / 1024:.1f} KB" if saved > 0 else "0",
+                "status": "ok",
+            }
+            if pruned > 0:
+                result_entry["pruned_checkpoints"] = pruned
+            results.append(result_entry)
+        except Exception as e:
+            results.append({"db": label, "status": "error", "error": str(e)})
+
+    json_response(True, databases=results)
+
+
+# ─── Config Reconciliation (deterministic regeneration) ───
+# Run by setup.sh on EVERY run (fresh + --update): the shipped templates are the
+# authority for structure, comments, stock model lists, and new/removed keys;
+# user-provided content is preserved. See `system reconcile-config`.
+
+def _parse_ini_pairs(path):
+    """Parse {(section, key): value} from an INI file (line-based, comment-safe)."""
+    pairs = {}
+    section = None
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                section = s[1:-1]
+            elif section and s and not s.startswith("#") and "=" in s:
+                k, v = s.split("=", 1)
+                pairs[(section, k.strip())] = v.strip()
+    return pairs
+
+
+def _ini_section_body_lines(path, section):
+    """Return the raw body lines of an INI section (between its header and the next)."""
+    body, in_sec = [], False
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                if in_sec:
+                    break
+                in_sec = (s[1:-1] == section)
+                continue
+            if in_sec:
+                body.append(line.rstrip("\n"))
+    while body and not body[-1].strip():
+        body.pop()
+    return body
+
+
+def _is_stock_setup_key(section, key):
+    """True for setup.ini keys owned by the shipped template (never carried forward).
+
+    Setup.ini is no longer a model inventory. Shipped selection lives in
+    models.ini ``[shipped_models]``. Site-owned values (including the system
+    default ``[system] model``) carry forward on ``--update``.
+    """
+    return False
+
+
+def _reconcile_setup_ini(template, deployed):
+    """Regenerate the deployed setup.ini from the template, carrying user values forward.
+
+    The new file is the template verbatim (structure, comments, stock lists, new
+    keys with defaults), except that for every template key also present in the
+    deployed file the deployed value wins — unless the key is stock-owned
+    (`_is_stock_setup_key`). Deployed-only (deprecated) keys drop by design.
+    Returns the number of carried-forward values.
+    """
+    user_vals = _parse_ini_pairs(deployed)
+    out = []
+    section = None
+    carried = 0
+    with open(template) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                section = s[1:-1]
+                out.append(line)
+                continue
+            if section and s and not s.startswith("#") and "=" in s:
+                key = s.split("=", 1)[0].strip()
+                if (section, key) in user_vals and not _is_stock_setup_key(section, key):
+                    prefix = line[:line.index("=") + 1]
+                    out.append(f"{prefix}{user_vals[(section, key)]}\n")
+                    carried += 1
+                    continue
+            out.append(line)
+    with open(deployed, "w") as f:
+        f.writelines(out)
+    return carried
+
+
+# Shared local sections: shipped rows + registry-added user rows coexist here,
+# so reconciliation is a per-key union (deployed-only keys are preserved).
+_MODELS_UNION_SECTIONS = (
+    "local_models", "context_windows", "sycl_models", "sycl_model_meta",
+    "media_bundles", "catalog_removed",
+)
+
+_MODELS_SITE_SECTIONS = (
+    "catalog_custom", "providers_custom", "model_params_custom",
+    "providers_site", "provider_custom", "provider_overrides",
+    "catalog_selected", "catalog_overrides", "catalog_live_call_custom",
+)
+
+
+def _reconcile_models_ini(template, deployed):
+    """Regenerate the deployed models.ini from the template, preserving user content.
+
+    Preserved across regeneration:
+      - [catalog_custom] / [providers_custom] / [model_params_custom] bodies verbatim (the user layer)
+      - deployed-only keys in the shared local sections (registry-added models)
+    Everything else (header comments, [catalog_library], empty [catalog],
+    [providers] stubs, shipped local pipeline rows) comes fresh from the
+    template; `model migrate` injects live [catalog] rows for activated
+    providers from setup.ini right after.
+    """
+    custom_bodies = {
+        sec: _ini_section_body_lines(deployed, sec)
+        for sec in _MODELS_SITE_SECTIONS
+    }
+    tmpl_pairs = _parse_ini_pairs(template)
+    dep_pairs = _parse_ini_pairs(deployed)
+    union_extras = [
+        (sec, k, v)
+        for (sec, k), v in dep_pairs.items()
+        if sec in _MODELS_UNION_SECTIONS and (sec, k) not in tmpl_pairs
+    ]
+
+    shutil.copyfile(template, deployed)
+    for sec, body in custom_bodies.items():
+        if body:
+            _replace_ini_section_body(deployed, sec, body)
+    for sec, k, v in union_extras:
+        _upsert_models_ini_entry(deployed, sec, k, v)
+
+    custom_rows = sum(
+        1 for body in custom_bodies.values()
+        for l in body if "=" in l and not l.strip().startswith("#"))
+    return {"custom_rows_preserved": custom_rows,
+            "local_rows_unioned": len(union_extras)}
+
+
+@system.command("reconcile-config", hidden=True)
+@click.option("--setup-template", required=True, type=click.Path(exists=True),
+              help="Shipped stock template (prefer setup.ini.stock)")
+@click.option("--models-template", required=True, type=click.Path(exists=True),
+              help="Shipped models.ini template (installer directory)")
+def system_reconcile_config(setup_template, models_template):
+    """Regenerate deployed setup.ini + models.ini from the shipped templates.
+
+    Deterministic config refresh run by setup.sh on EVERY run (fresh and
+    --update alike). The template is authority for structure, comments, stock
+    model lists, and new/removed keys; user-provided content is preserved:
+    setup.ini user-owned values (keys, tokens, mode, hardware, ...), and
+    models.ini [catalog_custom]/[providers_custom]/[model_params_custom] plus registry-added rows in
+    [local_models]/[context_windows]/[sycl_models]. Follow with
+    'agictl model migrate' + 'agictl model sync'.
+    """
+    # Operator-only (same rationale as `model migrate`): agents must not be able
+    # to re-stamp system config. setup.sh runs as root (AGICTL_AGENT_USER unset).
+    if os.environ.get("AGICTL_AGENT_USER", ""):
+        json_response(False, error="'system reconcile-config' is Primary User / operator only.")
+        sys.exit(1)
+
+    result = {}
+    try:
+        from catalog_compat import (
+            migrate_gemini_section_split,
+            migrate_legacy_site_state,
+            snapshot_vanishing_presets,
+        )
+        if os.path.exists(SETUP_INI_CANONICAL):
+            result["gemini_section_split"] = migrate_gemini_section_split(
+                SETUP_INI_CANONICAL)
+        if os.path.exists(SETUP_INI_CANONICAL) and os.path.exists(_MODELS_INI_PATHS[0]):
+            result["legacy_catalog"] = migrate_legacy_site_state(
+                setup_path=SETUP_INI_CANONICAL,
+                models_path=_MODELS_INI_PATHS[0],
+            )
+        if os.path.exists(_MODELS_INI_PATHS[0]) and os.path.exists(models_template):
+            vanished = snapshot_vanishing_presets(
+                models_path=_MODELS_INI_PATHS[0],
+                template_path=models_template,
+            )
+            if vanished:
+                result["snapshotted_presets"] = vanished
+        # setup.ini: regenerate only when a deployed copy exists (fresh installs
+        # create it later, in setup.sh Step 13, from interactively collected values).
+        if os.path.exists(SETUP_INI_CANONICAL):
+            result["setup_ini_values_carried"] = _reconcile_setup_ini(
+                setup_template, SETUP_INI_CANONICAL)
+            result["setup_ini"] = "regenerated"
+            _sync_ini_to_source(SETUP_INI_CANONICAL)
+        else:
+            result["setup_ini"] = "absent (fresh install — created in Step 13)"
+
+        models_deployed = _MODELS_INI_PATHS[0]
+        if os.path.exists(models_deployed):
+            result.update(_reconcile_models_ini(models_template, models_deployed))
+            result["models_ini"] = "regenerated"
+        else:
+            shutil.copyfile(models_template, models_deployed)
+            result["models_ini"] = "seeded from template"
+    except PermissionError:
+        json_response(False, error="permission denied writing config (run as root)")
+        sys.exit(1)
+    except Exception as e:
+        json_response(False, error=f"reconcile failed: {e}")
+        sys.exit(1)
+
+    json_response(True, **result)
+
+
+# ═══════════════════════════════════════════════════════
+# 1b. MODEL — Local model management
+# ═══════════════════════════════════════════════════════
+
+# ─── Shared Helpers ──────────────────────────────────
+
+PATHS_ENV_FILE = "/etc/versa-agi/paths.env"
+PROVIDER_KEYS_ENV = "/etc/versa-agi/provider_keys.env"
+PROVIDER_KEYS_ENV_LEGACY = "/etc/versa-agi/inference_endpoint.env"
+SETUP_INI_CANONICAL = "/etc/versa-agi/setup.ini"
+SYCL_MODEL_DIR = "/opt/versa-agi/sycl-models"
+SYCL_CONTAINER = "versa-agi-sycl"
+SYCL_IMAGE_NAME = "versa-agi-sycl"
+SYCL_LLAMA_CPP_DEFAULT_TAG = "b10430"
+
+def _provider_keys_env_path() -> str:
+    """Resolve provider key store (migrated from inference_endpoint.env)."""
+    if os.path.isfile(PROVIDER_KEYS_ENV):
+        return PROVIDER_KEYS_ENV
+    if os.path.isfile(PROVIDER_KEYS_ENV_LEGACY):
+        return PROVIDER_KEYS_ENV_LEGACY
+    return PROVIDER_KEYS_ENV
+
+
+def _ensure_provider_keys_env_permissions(path: str) -> None:
+    try:
+        os.chmod(path, 0o600)
+        subprocess.run(["chown", "watchdog:watchdog", path], check=False, capture_output=True)
+    except OSError:
+        pass
+
+
+# ─── Intel SYCL Model Registry (dynamic) ──────────────────
+# Loaded from models.ini [sycl_models] section.
+# Format: model_key = hf_repo,gguf_filename,size_gb
+
+# Canonical models.ini path (deployed alongside setup.ini).
+# Server subset also keeps a copy under core-infra/config/.
+# Dev fallback: src/models.ini (parent of core-infra).
+_CORE_INFRA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MODELS_INI_PATHS = [
+    "/etc/versa-agi/models.ini",
+    os.path.join(_CORE_INFRA_DIR, "config", "models.ini"),
+    os.path.join(os.path.dirname(_CORE_INFRA_DIR), "models.ini"),
+]
+
+
+def _models_ini_parser():
+    """ConfigParser for models.ini — tolerant of duplicate sections (last wins)."""
+    import configparser
+    cfg = configparser.ConfigParser(delimiters=("=",), strict=False)
+    cfg.optionxform = str
+    return cfg
+
+
+def _load_sycl_registry():
+    """Load SYCL model registry from models.ini [sycl_models] section.
+
+    Returns dict: {name: {"repo": str, "file": str, "size_gb": int}}
+    Falls back to empty dict if models.ini is unavailable.
+    """
+    import configparser
+    ini = _models_ini_parser()
+    for path in _MODELS_INI_PATHS:
+        if os.path.exists(path):
+            ini.read(path)
+            break
+
+    if not ini.has_section("sycl_models"):
+        return {}
+
+    registry = {}
+    for key, value in ini.items("sycl_models"):
+        try:
+            parts = value.strip().split(",")
+            if len(parts) == 3:
+                repo = parts[0].strip()
+                gguf_file = parts[1].strip()
+                size_gb = int(parts[2].strip())
+                registry[key.strip()] = {
+                    "repo": repo,
+                    "file": gguf_file,
+                    "size_gb": size_gb,
+                }
+        except (ValueError, IndexError):
+            continue
+
+    return registry
+
+
+# Module-level cache — loaded once on import, can be reloaded
+SYCL_MODEL_MAP = _load_sycl_registry()
+
+
+def _resolve_models_ini_path():
+    """Return the first existing models.ini path (canonical, then dev fallback)."""
+    for path in _MODELS_INI_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _read_raw_section(path, section):
+    """Return an ordered {key: raw_value} dict for an INI section (case-preserving).
+
+    Empty dict when the file/section is absent. Keys keep their original case so
+    they round-trip with _upsert_models_ini_entry / _remove_ini_entry.
+    """
+    import configparser
+    ini = _models_ini_parser()
+    if path and os.path.exists(path):
+        try:
+            ini.read(path)
+        except configparser.Error:
+            return {}
+    if not ini.has_section(section):
+        return {}
+    return {k.strip(): v for k, v in ini.items(section)}
+
+
+# ── Isolation model (Edition 2.x) ──────────────────────────
+# Model/provider config has two physically separated origins inside models.ini:
+#   • baseline   : [catalog] / [providers]            — regenerated from setup.ini
+#                                                        by `agictl model migrate`
+#                                                        (DO NOT hand-edit)
+#   • user layer : [catalog_custom] / [providers_custom] — owned by the CLI /
+#                                                        dashboard, never touched
+#                                                        by migrate
+# The loaders below are the single merge point: the custom layer overlays the
+# baseline per-key (whole-row override), so every downstream consumer
+# (`_sync_catalog`, paths.env, agitop, the harness) sees one merged view.
+
+def _load_providers():
+    """Load the merged provider registry (baseline [providers] + [providers_custom]).
+
+    Returns dict: {slug: {"enabled": bool, "label": str, "cls": str,
+                          "origin": "baseline"|"custom"|"override"}}.
+    Format per row:  slug = enabled|Display Name|langchain_class
+    """
+    path = _resolve_models_ini_path()
+    base = _read_raw_section(path, "providers")
+    custom = _read_raw_section(path, "providers_custom")
+    out = {}
+
+    def _parse(slug, raw, origin):
+        parts = [p.strip() for p in raw.split("|")]
+        enabled = parts[0].lower() == "true" if parts else False
+        label = parts[1] if len(parts) > 1 else slug
+        cls = parts[2] if len(parts) > 2 else ""
+        out[slug] = {"enabled": enabled, "label": label, "cls": cls, "origin": origin}
+
+    for slug, raw in base.items():
+        _parse(slug, raw, "baseline")
+    for slug, raw in custom.items():
+        _parse(slug, raw, "override" if slug in base else "custom")
+    return out
+
+
+def _load_catalog():
+    """Load the merged model catalog (baseline [catalog] + [catalog_custom])."""
+    return _mc_load_catalog(_resolve_models_ini_path())
+
+
+def _replace_ini_section_body(path, section, body_lines):
+    """Replace the body of an INI section in-place, preserving all other content.
+
+    Everything between the ``[section]`` header line and the next ``[...]`` header
+    (or EOF) is replaced with ``body_lines``. Comments that live ABOVE the section
+    header are preserved; only the section's own body is rewritten. If the section
+    does not exist it is appended at the end of the file.
+    """
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    header = f"[{section}]"
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            break
+
+    new_body = [(l if l.endswith("\n") else l + "\n") for l in body_lines]
+
+    if start is None:
+        # Append a fresh section at EOF
+        if lines and lines[-1].strip() != "":
+            lines.append("\n")
+        lines.append(header + "\n")
+        lines.extend(new_body)
+        with open(path, "w") as f:
+            f.writelines(lines)
+        return
+
+    # Find the end of the section (next header or EOF)
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].strip().startswith("[") and lines[j].strip().endswith("]"):
+            end = j
+            break
+
+    # Preserve a single trailing blank line before the next section, if present
+    tail = []
+    if end < len(lines):
+        tail = ["\n"]
+
+    rebuilt = lines[:start + 1] + new_body + tail + lines[end:]
+    with open(path, "w") as f:
+        f.writelines(rebuilt)
+
+
+def _write_full_ini_section(path, section, entries, header_comment=None):
+    """Create or overwrite an INI section with ``entries`` (list of (key, value)).
+
+    Used by ``model migrate`` to author [providers]/[catalog]. Preserves the rest
+    of the file; appends the section (with optional comment) if it does not exist.
+    """
+    body = []
+    if not any(l.strip() == f"[{section}]" for l in open(path)):
+        # Section absent — append with optional comment block
+        with open(path, "r") as f:
+            content = f.read()
+        chunk = "\n"
+        if header_comment:
+            chunk += header_comment.rstrip("\n") + "\n"
+        chunk += f"[{section}]\n"
+        for k, v in entries:
+            chunk += f"{k:<29} = {v}\n"
+        if not content.endswith("\n"):
+            chunk = "\n" + chunk
+        with open(path, "w") as f:
+            f.write(content + chunk)
+        return
+    # Section present — replace its body
+    for k, v in entries:
+        body.append(f"{k:<29} = {v}\n")
+    _replace_ini_section_body(path, section, body)
+
+
+def _upsert_models_ini_entry(path, section, key, value):
+    """Update an existing ``key = value`` row in a models.ini section, or append it.
+
+    Unlike ``_update_models_ini_entry`` (add-if-missing only), this replaces the
+    value when the key already exists. Keys may contain ':' (e.g. ``gemma4:e4b``).
+    """
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    current = None
+    found = False
+    section_exists = False
+    insert_at = -1  # last line index belonging to the target section
+    entry = f"{key:<29} = {value}\n"
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            current = s[1:-1]
+            if current == section:
+                section_exists = True
+                insert_at = i  # header line; insert right after if section is empty
+            continue
+        if current == section:
+            eq = s.find("=")
+            if eq > 0:
+                insert_at = i  # track last real key line; skip blanks/comments
+                if s[:eq].strip() == key and not found:
+                    lines[i] = entry
+                    found = True
+
+    if not found:
+        if section_exists:
+            lines.insert(insert_at + 1, entry)
+        else:
+            # Section absent — append it
+            if lines and lines[-1].strip() != "":
+                lines.append("\n")
+            lines.append(f"[{section}]\n")
+            lines.append(entry)
+
+    with open(path, "w") as f:
+        f.writelines(lines)
+
+
+def _remove_ini_entry(path, section, key):
+    """Remove a ``key = …`` row from a models.ini section. Returns True if removed."""
+    with open(path, "r") as f:
+        lines = f.readlines()
+    current = None
+    out = []
+    removed = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            current = s[1:-1]
+            out.append(line)
+            continue
+        if current == section and s and not s.startswith("#"):
+            eq = s.find("=")
+            if eq > 0 and s[:eq].strip() == key:
+                removed = True
+                continue
+        out.append(line)
+    if removed:
+        with open(path, "w") as f:
+            f.writelines(out)
+    return removed
+
+
+def _sync_catalog():
+    """Regenerate derived model config from the [catalog] source of truth.
+
+    Refreshes the cloud/third-party paths.env registries (VERSA_CLOUD_MODELS,
+    VERSA_THIRD_PARTY_MODELS, VERSA_THIRD_PARTY_ENABLED, VERSA_COA_APPROVED_MODELS)
+    from the merged catalog + provider-enabled state. Edition 2.x readers (agitop
+    picker, harness model_context) read display labels / context windows from
+    [catalog] directly, so no legacy label sections are generated. Local models
+    and VERSA_LOCAL_MODELS are owned by the local pipeline and left untouched.
+
+    Returns (success: bool, payload: dict). Never raises for expected I/O issues —
+    permission problems are reported in payload['error'].
+    """
+    catalog = _load_catalog()
+    providers = _load_providers()
+
+    if not catalog:
+        return True, {"changed": False,
+                      "message": "No [catalog] section found — nothing to sync (run 'agictl model migrate')."}
+
+    cloud, third_party, coa = [], [], []
+    tp_provider_active = set()
+
+    for key, m in catalog.items():
+        cls = m["class"]
+        if cls == "third_party":
+            cls = "cloud"
+        if cls == "cloud":
+            prov = providers.get(m["provider"], {})
+            available = m["enabled"] and prov.get("enabled", False)
+            if available:
+                cloud.append(key)
+                transport = prov.get("transport") or "direct"
+                if transport != "direct":
+                    third_party.append(key)
+                    tp_provider_active.add(m["provider"])
+                if m["coa"]:
+                    coa.append(key)
+        # local rows are advisory in this edition — not synced here
+
+    errors = []
+
+    paths_updated = False
+    if os.path.isfile(PATHS_ENV_FILE):
+        try:
+            _update_paths_env_key("VERSA_CLOUD_MODELS", ",".join(cloud))
+            _update_paths_env_key("VERSA_THIRD_PARTY_MODELS", ",".join(third_party))
+            _update_paths_env_key("VERSA_THIRD_PARTY_ENABLED",
+                                  "true" if tp_provider_active else "false")
+            _update_paths_env_key("VERSA_COA_APPROVED_MODELS", ",".join(coa))
+            paths_updated = True
+        except PermissionError:
+            errors.append(f"permission denied: {PATHS_ENV_FILE} (use sudo)")
+        except Exception as e:
+            errors.append(f"{PATHS_ENV_FILE}: {e}")
+
+    payload = {
+        "changed": True,
+        "cloud_models": cloud, "third_party_models": third_party,
+        "coa_approved": coa, "third_party_enabled": bool(tp_provider_active),
+        "paths_env_updated": paths_updated,
+    }
+    if errors:
+        payload["error"] = "; ".join(errors)
+        return False, payload
+    payload["message"] = "Model catalog synced."
+    return True, payload
+
+
+def _resolve_protected_identities():
+    """Resolve COA/watchdog agent names and the COA display name.
+
+    setup.ini [users] defines the agent keys (OS usernames); the COA display
+    name (first + last, e.g. first_name=Versa last_name=(call_sign)) comes from
+    identity config (synced from VersaVoice), falling back to setup.ini
+    [agent] first_name/last_name. Never hardcode these identities.
+    Returns (coa_user, watchdog_user, coa_display).
+    """
+    import configparser
+    coa_user, watchdog_user = "coa", "watchdog"
+    first, last = "", ""
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            coa_user = cfg.get("users", "coa", fallback=coa_user) or coa_user
+            watchdog_user = cfg.get("users", "watchdog", fallback=watchdog_user) or watchdog_user
+            first = cfg.get("agent", "first_name", fallback="") or ""
+            last = cfg.get("agent", "last_name", fallback="") or ""
+            break
+    try:
+        # coa_config.json is a structural filename (hardcoded system-wide) —
+        # deliberately NOT derived from the configured username.
+        with open("/etc/versa-agi/coa_config.json") as f:
+            identity = json.load(f).get("identity", {})
+            first = identity.get("first_name") or first
+            last = identity.get("last_name") or last
+    except Exception:
+        pass
+    coa_display = " ".join(p for p in (first, last) if p)
+    return coa_user, watchdog_user, coa_display
+
+
+def _resolve_gpu_backend():
+    """Read gpu_backend from setup.ini. Returns 'standard' or 'intel'."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return cfg.get("local_ai", "gpu_backend", fallback="standard")
+    return "standard"
+
+
+def _resolve_topology():
+    """Read local_ai.topology from setup.ini. Returns local|server|client."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return cfg.get("local_ai", "topology", fallback="local").strip().lower()
+    return "local"
+
+
+def _resolve_hf_cli():
+    """Return huggingface CLI path or None."""
+    search = [
+        "/usr/local/bin/hf", "/usr/local/bin/huggingface-cli",
+        os.path.expanduser("~/.local/bin/hf"), os.path.expanduser("~/.local/bin/huggingface-cli"),
+    ]
+    sudo_user = os.environ.get("SUDO_USER", "")
+    if sudo_user:
+        search.extend([
+            f"/home/{sudo_user}/.local/bin/hf",
+            f"/home/{sudo_user}/.local/bin/huggingface-cli",
+        ])
+    return (
+        shutil.which("hf")
+        or shutil.which("huggingface-cli")
+        or next((p for p in search if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+    )
+
+
+def _resolve_sycl_port():
+    """Read sycl_port from setup.ini. Returns port string."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return cfg.get("local_ai", "sycl_port", fallback="8080")
+    return "8080"
+
+
+def _resolve_sycl_active_model():
+    """Read sycl_active_model from setup.ini."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return cfg.get("local_ai", "sycl_active_model", fallback="")
+    return ""
+
+
+def _resolve_loading_strategy():
+    """Read model_loading_strategy from setup.ini. Returns 'single' or 'router'."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return cfg.get("local_ai", "model_loading_strategy", fallback="single")
+    return "single"
+
+
+def _resolve_gguf_for_model(model_name):
+    """Look up GGUF filename from models.ini [sycl_models] section.
+    Returns the GGUF filename string, or the model_name itself as fallback."""
+    registry = _load_sycl_registry()
+    if model_name in registry:
+        return registry[model_name]["file"]
+    return model_name
+
+
+def _resolve_sycl_models_max():
+    """Read sycl_models_max from setup.ini (fallback: 1)."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            return int(cfg.get("local_ai", "sycl_models_max", fallback="1"))
+    return 1
+
+
+def _resolve_sycl_llama_cpp_tag():
+    """Read sycl_llama_cpp_tag from setup.ini (Docker image pin)."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            tag = (cfg.get("local_ai", "sycl_llama_cpp_tag", fallback="") or "").strip()
+            return tag or SYCL_LLAMA_CPP_DEFAULT_TAG
+    return SYCL_LLAMA_CPP_DEFAULT_TAG
+
+
+def _docker_image_exists(image: str) -> bool:
+    check = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True, text=True,
+    )
+    return check.returncode == 0
+
+
+def _resolve_sycl_image():
+    """Prefer versa-agi-sycl:<pin> so a preserved older pin can roll back."""
+    tag = _resolve_sycl_llama_cpp_tag()
+    versioned = f"{SYCL_IMAGE_NAME}:{tag}"
+    if _docker_image_exists(versioned):
+        return versioned
+    return SYCL_IMAGE_NAME
+
+
+def _blank_server_config_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() in ("", "unknown", "0.0.0.0"):
+        return True
+    return False
+
+
+def _detect_lan_ip() -> str:
+    try:
+        out = subprocess.run(
+            ["hostname", "-I"], capture_output=True, text=True, timeout=5
+        )
+        parts = (out.stdout or "").split()
+        if parts:
+            return parts[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _server_config_identity_defaults() -> dict:
+    """Fill topology / backend / LAN / port from setup.ini when activate rewrites state."""
+    import configparser
+    cfg = configparser.ConfigParser()
+    for path in [
+        SETUP_INI_CANONICAL,
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "setup.ini",
+        ),
+    ]:
+        if os.path.isfile(path):
+            cfg.read(path)
+            break
+    backend = ""
+    topology = "server"
+    sycl_port = "8080"
+    master = ""
+    if cfg.has_section("local_ai"):
+        backend = (cfg.get("local_ai", "gpu_backend", fallback="") or "").strip()
+        topology = (cfg.get("local_ai", "topology", fallback="server") or "server").strip()
+        sycl_port = (cfg.get("local_ai", "sycl_port", fallback="8080") or "8080").strip()
+        master = (cfg.get("local_ai", "inference_master_key", fallback="") or "").strip()
+    try:
+        port = int(sycl_port) if backend == "intel" else 4000
+    except ValueError:
+        port = 8080 if backend == "intel" else 4000
+    return {
+        "topology": topology or "server",
+        "gpu_backend": backend,
+        "lan_ip": _detect_lan_ip(),
+        "proxy_port": port,
+        "inference_master_key": master,
+    }
+
+
+def _merge_server_config_dict(existing: dict, updates: dict, identity: dict | None = None) -> dict:
+    """Keep identity keys activate used to wipe (gpu_backend, lan_ip, master key)."""
+    out = dict(existing or {})
+    for key, value in (identity or {}).items():
+        if value in (None, ""):
+            continue
+        if key not in out or _blank_server_config_value(out.get(key)):
+            out[key] = value
+    out.update(updates)
+    return out
+
+
+def _write_server_config(updates: dict) -> None:
+    import json as _json
+    path = "/etc/versa-agi/server_config.json"
+    existing: dict = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                loaded = _json.load(fh)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+    merged = _merge_server_config_dict(
+        existing, updates, _server_config_identity_defaults()
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(merged, fh, indent=2)
+        fh.write("\n")
+    os.chmod(path, 0o640)
+    try:
+        import pwd
+        import configparser as _cp
+        _ini = _cp.ConfigParser()
+        _ini.read(SETUP_INI_CANONICAL)
+        _wd_name = _ini.get("users", "watchdog", fallback="watchdog")
+        wdog = pwd.getpwnam(_wd_name)
+        os.chown(path, wdog.pw_uid, wdog.pw_gid)
+    except (KeyError, OSError):
+        pass
+
+
+def _resolve_sycl_concurrency():
+    """Read sycl_parallel, sycl_ctx_size, sycl_vram_gb from setup.ini.
+    Returns (parallel, ctx_size, vram_gb) as ints."""
+    import configparser
+    for path in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(path):
+            cfg = configparser.ConfigParser()
+            cfg.read(path)
+            parallel = int(cfg.get("local_ai", "sycl_parallel", fallback="1"))
+            ctx_size = int(cfg.get("local_ai", "sycl_ctx_size", fallback="4096"))
+            vram_gb = int(cfg.get("local_ai", "sycl_vram_gb", fallback="32"))
+            return parallel, ctx_size, vram_gb
+    return 1, 4096, 32
+
+
+def _calculate_concurrency(vram_gb, model_size_gb, ctx_size=4096):
+    """Calculate recommended parallel slots based on available VRAM.
+    Returns (recommended, max_slots, free_vram_gb)."""
+    kv_per_slot_mb = max(128, 256 * ctx_size // 4096)
+    free_vram_gb = max(0, vram_gb - model_size_gb)
+    free_mb = free_vram_gb * 1024
+    headroom_mb = 2048  # 2GB headroom
+
+    if free_mb <= headroom_mb:
+        return 1, 1, free_vram_gb
+
+    max_slots = min(8, max(1, (free_mb - headroom_mb) // kv_per_slot_mb))
+    recommended = min(4, max(1, max_slots // 2))
+    return recommended, max_slots, free_vram_gb
+
+
+def _query_sycl_models():
+    """List GGUF files in the SYCL model directory with sizes. Returns [{name, file, size, active}]."""
+    models = []
+    active_model = _resolve_sycl_active_model()
+    if not os.path.isdir(SYCL_MODEL_DIR):
+        return models
+    # Reload registry to catch any recent additions
+    registry = _load_sycl_registry()
+    found: list[tuple[str, str]] = []
+    for f in os.listdir(SYCL_MODEL_DIR):
+        fpath = os.path.join(SYCL_MODEL_DIR, f)
+        if os.path.isfile(fpath) and f.endswith(".gguf") and not f.lower().startswith("mmproj"):
+            found.append((f, fpath))
+        elif os.path.isdir(fpath):
+            nested = os.path.join(fpath, f"{f}.gguf")
+            if os.path.isfile(nested):
+                found.append((f"{f}.gguf", nested))
+            else:
+                for inner in os.listdir(fpath):
+                    if inner.endswith(".gguf") and not inner.lower().startswith("mmproj"):
+                        found.append((inner, os.path.join(fpath, inner)))
+                        break
+    for filename, fpath in found:
+        size_bytes = os.path.getsize(fpath)
+        if size_bytes >= 1_000_000_000:
+            size_str = f"{size_bytes / 1_000_000_000:.1f} GB"
+        elif size_bytes >= 1_000_000:
+            size_str = f"{size_bytes / 1_000_000:.1f} MB"
+        else:
+            size_str = f"{size_bytes} B"
+        model_name = filename
+        for mname, minfo in registry.items():
+            if minfo["file"] == filename:
+                model_name = mname
+                break
+        models.append({
+            "name": model_name,
+            "file": filename,
+            "size": size_str,
+            "size_bytes": size_bytes,
+            "active": model_name == active_model,
+        })
+    return models
+
+
+def _docker_restart_sycl(parallel=None, ctx_size=None, models_max=None, model_file=None):
+    """Stop/rm/run the SYCL Docker container (--models-dir).
+
+    Called when the loaded GGUF changes or when parallel/ctx/models-max change.
+    With sycl_models_max=1 the new GGUF is what llama-server will serve.
+    Returns (ok, message).
+    """
+    # Stop existing
+    subprocess.run(["docker", "stop", SYCL_CONTAINER], capture_output=True)
+    subprocess.run(["docker", "rm", SYCL_CONTAINER], capture_output=True)
+
+    # Check for WSL2
+    is_wsl = False
+    try:
+        with open("/proc/version", "r") as f:
+            if "microsoft" in f.read().lower():
+                is_wsl = True
+    except Exception:
+        pass
+
+    # Build device flags and environment overrides
+    devices = []
+    wsl_mounts = []
+    wsl_env = []
+
+    if is_wsl:
+        # WSL2 Windows driver translation bridge
+        if os.path.exists("/dev/dxg"):
+            devices.extend(["--device", "/dev/dxg"])
+        # WSL driver libraries mount
+        if os.path.isdir("/usr/lib/wsl"):
+            wsl_mounts.extend(["-v", "/usr/lib/wsl:/usr/lib/wsl"])
+        # WSL library path override (must include compiler libraries, app libs, and host drivers)
+        wsl_env.extend([
+            "-e",
+            "LD_LIBRARY_PATH=/app:/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/compiler/latest/linux/compiler/lib/intel64_lin:/opt/intel/oneapi/compiler/latest/linux/lib:/opt/intel/oneapi/umf/latest/lib:/opt/intel/oneapi/tcm/latest/lib:/opt/intel/oneapi/dnnl/latest/lib:/usr/lib/wsl/lib"
+        ])
+    else:
+        # Bare metal Linux setup
+        import glob
+        for dev in glob.glob("/dev/dri/renderD*") + glob.glob("/dev/dri/card*"):
+            devices.extend(["--device", dev])
+
+    sycl_port = _resolve_sycl_port()
+    sycl_image = _resolve_sycl_image()
+
+    # Read concurrency settings from setup.ini (or use provided overrides)
+    ini_parallel, ini_ctx_size, _ = _resolve_sycl_concurrency()
+    _parallel = str(parallel or ini_parallel)
+    _per_slot_ctx = ctx_size or ini_ctx_size
+    # llama-server --ctx-size is TOTAL context shared across all parallel slots.
+    # sycl_ctx_size is per-slot → multiply by parallel for the launch.
+    _ctx_total = str(_per_slot_ctx * int(_parallel))
+    _models_max = str(models_max or _resolve_sycl_models_max())
+
+    cmd = [
+        "docker", "run", "-d", "--name", SYCL_CONTAINER,
+        "--restart", "unless-stopped",
+    ] + devices + wsl_mounts + wsl_env + [
+        "-v", f"{SYCL_MODEL_DIR}:/models",
+        "-p", f"{sycl_port}:8080",
+        sycl_image,
+        "--models-dir", "/models",
+        "--models-max", _models_max,
+        "-ngl", "99", "--host", "0.0.0.0", "--port", "8080",
+        "--parallel", _parallel, "--ctx-size", _ctx_total,
+    ]
+    # Router discovers GGUFs from --models-dir. Do not also pass --model:
+    # llama-server ids are the filename stem (no .gguf). A second --model
+    # path with the extension fights on-demand load and the web UI.
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return False, f"Docker run failed: {result.stderr.strip()}"
+
+    # Wait for container to start
+    time.sleep(5)
+    check = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    if SYCL_CONTAINER in check.stdout:
+        return True, f"Container '{SYCL_CONTAINER}' running (port {sycl_port})"
+    return False, "Container may not have started"
+
+
+def _wait_sycl_model_ready(api_id: str, port: int, timeout_s: int = 600) -> tuple[bool, str]:
+    """Poll llama-server until the GGUF stem is loaded or the child fails."""
+    import urllib.request
+
+    url = f"http://127.0.0.1:{port}/v1/models"
+    deadline = time.time() + max(15, int(timeout_s))
+    last = "waiting"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                payload = json.loads(resp.read().decode())
+            for row in payload.get("data") or []:
+                if (row.get("id") or "") != api_id:
+                    continue
+                status = row.get("status") or {}
+                value = (status.get("value") or "").strip().lower()
+                if value == "loaded":
+                    return True, f"llama-server loaded {api_id}"
+                if status.get("failed") or value == "failed":
+                    exit_code = status.get("exit_code")
+                    return False, (
+                        f"llama-server failed to load {api_id}"
+                        + (f" (exit {exit_code})" if exit_code is not None else "")
+                    )
+                last = value or last
+        except (OSError, ValueError, json.JSONDecodeError):
+            last = "unreachable"
+        time.sleep(3)
+    return False, f"llama-server did not load {api_id} within {timeout_s}s ({last})"
+
+
+def _local_model_name_set():
+    registered, _ = _read_ini_csv("local_ai", "local_models")
+    local_names = set(registered)
+    prev_active = _resolve_sycl_active_model()
+    if prev_active:
+        local_names.add(prev_active)
+    return local_names
+
+
+def _agents_assigned_to_model(name):
+    """Agent names on this host whose catalog model is ``name``."""
+    key = (name or "").strip()
+    agents_db = "/var/lib/versa-agi/agents.db"
+    if not key or not os.path.isfile(agents_db):
+        return []
+    try:
+        conn = db_connect.connect_compat(agents_db)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM agents WHERE model = ?", (key,))
+        names = [row[0] for row in cursor.fetchall() if row and row[0]]
+        conn.close()
+        return names
+    except Exception:
+        return []
+
+
+def _media_catalog_keys():
+    """Stock + registered media bundle keys (must not use SYCL remove)."""
+    keys = [str(k).strip() for k in STOCK_MEDIA_CATALOG_KEYS if k]
+    try:
+        path = _resolve_models_ini_path()
+        if path:
+            keys.extend(load_media_bundles(path).keys())
+    except Exception:
+        pass
+    return keys
+
+
+def _parse_trailing_json(text):
+    """Last JSON object in stdout/stderr (agictl prints one payload line)."""
+    for line in reversed((text or "").splitlines()):
+        raw = line.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _sycl_inventory_present(name):
+    """True when this host still has catalog, CSV, or SYCL registry traces."""
+    key = (name or "").strip()
+    if not key:
+        return False
+    if key in _load_sycl_registry():
+        return True
+    current, _ = _read_ini_csv("local_ai", "local_models")
+    if key in current:
+        return True
+    try:
+        if key in _load_catalog():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _clear_sycl_inventory(name):
+    """Drop SYCL registry, catalog, and local_models CSV traces. Returns steps."""
+    key = (name or "").strip()
+    steps = []
+    if not key:
+        return steps
+    for path in _models_ini_write_targets():
+        for section in (
+            "sycl_models",
+            "sycl_model_meta",
+            "local_models",
+            "context_windows",
+            "catalog",
+            "catalog_custom",
+        ):
+            if _remove_ini_entry(path, section, key):
+                steps.append(f"{os.path.basename(path)} [{section}]")
+        if _remove_ini_entry(path, "model_params_custom", f"model:{key}"):
+            steps.append(f"{os.path.basename(path)} [model_params_custom]")
+        if _remove_ini_entry(path, "model_params", f"model:{key}"):
+            steps.append(f"{os.path.basename(path)} [model_params]")
+    _remember_catalog_removed(key)
+    current_models, ini_path = _read_ini_csv("local_ai", "local_models")
+    remaining = drop_name_from_csv(current_models, key)
+    if remaining != current_models:
+        if ini_path and _update_ini_csv("local_ai", "local_models", remaining, ini_path):
+            steps.append("setup.ini local_models")
+        current_models = remaining
+    if _update_paths_env_key("VERSA_LOCAL_MODELS", ",".join(current_models)):
+        steps.append("paths.env")
+    return steps
+
+
+def _gpu_host_sudo_error(detail):
+    """Rewrite remote ``sudo -n`` failures into an --update hint."""
+    text = (detail or "").strip()
+    low = text.lower()
+    if "password is required" in low or "a terminal is required" in low:
+        return (
+            "GPU host watchdog cannot passwordless-sudo 'agictl model sycl'. "
+            "On the GPU host run: sudo ./setup.sh --update"
+        )
+    return text or "GPU host remove returned no JSON"
+
+
+def _sycl_remove_on_gpu_host(name, dry_run, timeout=600):
+    """Client → GPU ``model sycl remove`` over watchdog SSH."""
+    from model_media_remote import (
+        build_gpu_host_agictl_cmd,
+        read_tunnel_host,
+        watchdog_ssh_key,
+    )
+
+    args = ["model", "sycl", "remove", name]
+    if dry_run:
+        args.append("--dry-run")
+    host = read_tunnel_host()
+    if not host:
+        raise HfIngestError(
+            "No tunnel_host in client_config.json — run setup_local.sh",
+            "no_tunnel_host",
+        )
+    cmd = build_gpu_host_agictl_cmd(
+        args,
+        topology="client",
+        tunnel_host=host,
+        ssh_key=watchdog_ssh_key(),
+    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    payload = _parse_trailing_json(result.stdout) or _parse_trailing_json(result.stderr)
+    if not payload:
+        raise HfIngestError(
+            _gpu_host_sudo_error(result.stderr or result.stdout),
+            "remote_failed",
+        )
+    if not payload.get("success"):
+        raise HfIngestError(
+            payload.get("error") or "GPU host remove failed",
+            payload.get("code") or "remote_failed",
+        )
+    return payload
+
+
+def _preview_local_agent_model_sweep():
+    """List (agent_name, old_model) that single-mode activate would retarget."""
+    affected = []
+    agents_db = "/var/lib/versa-agi/agents.db"
+    if not os.path.isfile(agents_db):
+        return affected
+    local_names = _local_model_name_set()
+    if not local_names:
+        return affected
+    try:
+        conn = db_connect.connect_compat(agents_db)
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(local_names))
+        cursor.execute(
+            f"SELECT name, model FROM agents WHERE model IN ({placeholders})",
+            list(local_names),
+        )
+        for agent_name, old_model in cursor.fetchall():
+            affected.append((agent_name, old_model))
+        conn.close()
+    except Exception:
+        pass
+    return affected
+
+
+def _update_all_local_agent_models(new_model):
+    """Update all local sub-agents in the agent registry to use the new model.
+    Returns list of (agent_name, old_model) tuples for affected agents."""
+    affected = _preview_local_agent_model_sweep()
+    agents_db = "/var/lib/versa-agi/agents.db"
+    if not affected or not os.path.isfile(agents_db):
+        return affected
+    local_names = _local_model_name_set()
+    try:
+        conn = db_connect.connect_compat(agents_db)
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(local_names))
+        cursor.execute(
+            f"UPDATE agents SET model = ? WHERE model IN ({placeholders})",
+            [new_model] + list(local_names),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return affected
+
+
+def _read_paths_env():
+    """Read paths.env into a dict."""
+    result = {}
+    if os.path.isfile(PATHS_ENV_FILE):
+        with open(PATHS_ENV_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    result[key] = val.strip('"')
+    return result
+
+
+def _update_paths_env_key(key, value):
+    """Update a single key in paths.env (in-place). Creates if missing."""
+    if not os.path.isfile(PATHS_ENV_FILE):
+        return False
+    with open(PATHS_ENV_FILE, "r") as f:
+        lines = f.readlines()
+    entry = f'{key}="{value}"\n'
+    found = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = entry
+            found = True
+            break
+    if not found:
+        lines.append(entry)
+    with open(PATHS_ENV_FILE, "w") as f:
+        f.writelines(lines)
+    return True
+
+
+def _read_ini_csv(section, key):
+    """Read a comma-separated value from setup.ini as a list."""
+    import configparser
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        # Dev fallback
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if not os.path.isfile(ini_path):
+        return [], None
+    cfg = configparser.ConfigParser()
+    cfg.read(ini_path)
+    if cfg.has_option(section, key):
+        raw = cfg.get(section, key).strip()
+        return [m.strip() for m in raw.split(",") if m.strip()], ini_path
+    return [], ini_path
+
+
+def _read_ini_value(section, key, default=""):
+    """Read a single scalar value from setup.ini (canonical, then dev fallback)."""
+    import configparser
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if not os.path.isfile(ini_path):
+        return default
+    cfg = configparser.ConfigParser()
+    try:
+        cfg.read(ini_path)
+    except configparser.Error:
+        return default
+    return cfg.get(section, key, fallback=default).strip()
+
+
+def _update_ini_csv(section, key, values, ini_path=None):
+    """Update a comma-separated key in setup.ini preserving format."""
+    if not ini_path:
+        ini_path = SETUP_INI_CANONICAL
+        if not os.path.isfile(ini_path):
+            ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if not os.path.isfile(ini_path):
+        return False
+    new_val = ",".join(values)
+    with open(ini_path, "r") as f:
+        lines = f.readlines()
+    in_section = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_section = (stripped == f"[{section}]")
+        elif in_section and stripped.startswith(f"{key}="):
+            lines[i] = f"{key}={new_val}\n"
+            break
+    with open(ini_path, "w") as f:
+        f.writelines(lines)
+    _sync_ini_to_source(ini_path)
+    return True
+
+
+def _sync_ini_to_source(written_path: str = SETUP_INI_CANONICAL):
+    """Copy written setup.ini back to the source repo copy (if discoverable).
+
+    Keeps the source INI (next to setup.sh) in sync with the deployed
+    copy at /etc/versa-agi/setup.ini after runtime mutations.
+    """
+    source_ini = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "setup.ini"
+    )
+    try:
+        written_real = os.path.realpath(written_path)
+        source_real = os.path.realpath(source_ini)
+        if os.path.exists(source_ini) and written_real != source_real:
+            shutil.copy2(written_path, source_ini)
+    except Exception:
+        pass  # Non-fatal — source may not be writable
+
+
+def _update_models_ini_entry(models_ini_path: str, section: str, key: str, value: str):
+    """Add or update a key=value entry in a models.ini section.
+
+    If the key already exists in the section, it is left unchanged.
+    If the section exists but the key doesn't, the entry is appended.
+    If the section doesn't exist, it is created at the end of the file.
+    """
+    with open(models_ini_path, "r") as f:
+        lines = f.readlines()
+
+    in_section = False
+    section_found = False
+    key_found = False
+    section_end = len(lines)  # Default: end of file
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_section:
+                section_end = i
+                break
+            in_section = (stripped == f"[{section}]")
+            if in_section:
+                section_found = True
+        elif in_section and stripped and not stripped.startswith("#"):
+            # Check if key already exists (keys may contain colons, e.g. qwen3:8b)
+            eq_pos = stripped.find("=")
+            if eq_pos > 0 and stripped[:eq_pos].strip() == key:
+                key_found = True
+                break
+
+    if key_found:
+        return  # Already registered
+
+    entry_line = f"{key:<25s} = {value}\n"
+
+    if section_found:
+        # Append entry at end of section
+        lines.insert(section_end, entry_line)
+    else:
+        # Create section at end of file
+        lines.append(f"\n[{section}]\n")
+        lines.append(entry_line)
+
+    with open(models_ini_path, "w") as f:
+        f.writelines(lines)
+
+def _resolve_ollama_cmd():
+    """Resolve the correct ollama binary.
+
+    Used by the standard backend (NVIDIA/AMD). Intel backend uses Docker SYCL instead.
+    """
+    for path in ["/usr/local/bin/ollama", "/usr/bin/ollama"]:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return shutil.which("ollama")
+
+
+def _resolve_ollama_host():
+    """Read Ollama host from paths.env or setup.ini."""
+    env = _read_paths_env()
+    # Not stored directly in paths.env — read from setup.ini
+    import configparser
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if os.path.isfile(ini_path):
+        cfg = configparser.ConfigParser()
+        cfg.read(ini_path)
+        if cfg.has_option("local_ai", "ollama_host"):
+            return cfg.get("local_ai", "ollama_host").strip()
+    return "http://localhost:11434"
+
+
+def _query_ollama_models():
+    """Query Ollama API for pulled models. Returns {name: {size, modified}}."""
+    import urllib.request
+    import urllib.error
+    host = _resolve_ollama_host()
+    url = f"{host}/api/tags"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+        models = {}
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            size_bytes = m.get("size", 0)
+            if size_bytes >= 1_000_000_000:
+                size_str = f"{size_bytes / 1_000_000_000:.1f} GB"
+            elif size_bytes >= 1_000_000:
+                size_str = f"{size_bytes / 1_000_000:.1f} MB"
+            else:
+                size_str = f"{size_bytes} B"
+            models[name] = {"size": size_str, "size_bytes": size_bytes, "modified": m.get("modified_at", "")}
+        return models
+    except Exception:
+        return {}
+
+
+# ─── Model Command Group ────────────────────────────
+
+@cli.group()
+def model():
+    """Local model management (list, add, remove)."""
+    pass
+
+
+@model.command("list")
+@click.option("--table", "as_table", is_flag=True, help="Display as formatted table instead of JSON")
+def model_list(as_table):
+    """List registered local models with pull status.
+
+    Shows all models from setup.ini [local_ai] local_models, with
+    their pull status and size from the Ollama API or SYCL model directory.
+    """
+    # Access control: block sub-agents (allow COA, watchdog, root, Primary User)
+    caller = os.getenv("AGICTL_AGENT_USER", "")
+    if caller and caller not in ("coa", "watchdog"):
+        json_response(False, error="model list is not available to sub-agents")
+        sys.exit(1)
+
+    gpu_backend = _resolve_gpu_backend()
+
+    if gpu_backend == "intel":
+        # Check topology — client delegates to the server via SSH
+        import configparser as _cp
+        _ini = _cp.ConfigParser()
+        for p in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+            if os.path.isfile(p):
+                _ini.read(p)
+                break
+        _topology = _ini.get("local_ai", "topology", fallback="local")
+
+        if _topology == "client":
+            # Delegate to server — SSH and run agictl model list there
+            import subprocess, json as _json
+            client_cfg_path = "/etc/versa-agi/client_config.json"
+            tunnel_host = None
+            if os.path.isfile(client_cfg_path):
+                with open(client_cfg_path) as f:
+                    tunnel_host = _json.load(f).get("tunnel_host")
+            if not tunnel_host:
+                json_response(False, error="No tunnel_host configured — run setup_local.sh")
+                sys.exit(1)
+
+            wd_user = _ini.get("users", "watchdog", fallback="watchdog")
+            ssh_key = f"/home/{wd_user}/.ssh/versa_agi_ed25519"
+            try:
+                result = subprocess.run(
+                    ["sudo", "-u", wd_user, "ssh", "-i", ssh_key,
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                     f"{wd_user}@{tunnel_host}",
+                     "agictl model list"],
+                    capture_output=True, text=True, timeout=20
+                )
+                if result.returncode != 0:
+                    json_response(False, error=f"Server returned error: {result.stderr.strip()}")
+                    sys.exit(1)
+                models = _json.loads(result.stdout)
+            except subprocess.TimeoutExpired:
+                json_response(False, error="SSH connection to server timed out")
+                sys.exit(1)
+            except Exception as e:
+                json_response(False, error=f"Failed to query server: {e}")
+                sys.exit(1)
+
+            if as_table:
+                table = Table(title=f"Local Models — Intel SYCL (via {tunnel_host})")
+                table.add_column("Model", style="cyan")
+                table.add_column("Active", style="green")
+                table.add_column("Registered", style="green")
+                table.add_column("Downloaded", style="green")
+                table.add_column("Size", style="yellow")
+                for m in models:
+                    table.add_row(
+                        f"{'★ ' if m.get('active') else '  '}{m['name']}",
+                        "✓" if m.get("active") else "—",
+                        "✓" if m.get("registered") else "✗",
+                        "✓" if m.get("downloaded") else "✗",
+                        m.get("size") or "—",
+                    )
+                console.print(table)
+            else:
+                for m in models:
+                    m.pop("size_bytes", None)
+                print(json.dumps(models, indent=2))
+            return
+
+        # Local/server topology: check filesystem directly
+        registered, _ = _read_ini_csv("local_ai", "local_models")
+        sycl_models = _query_sycl_models()
+        downloaded_names = {m["name"] for m in sycl_models}
+        downloaded_map = {m["name"]: m for m in sycl_models}
+
+        models = []
+        for name in registered:
+            info = downloaded_map.get(name, {})
+            models.append({
+                "name": name,
+                "registered": True,
+                "downloaded": name in downloaded_names,
+                "active": info.get("active", False),
+                "size": info.get("size"),
+                "size_bytes": info.get("size_bytes"),
+                "file": info.get("file"),
+            })
+        # Include downloaded GGUFs not in registry
+        for m in sycl_models:
+            if m["name"] not in registered:
+                models.append({
+                    "name": m["name"],
+                    "registered": False,
+                    "downloaded": True,
+                    "active": m["active"],
+                    "size": m["size"],
+                    "size_bytes": m["size_bytes"],
+                    "file": m["file"],
+                })
+
+        if as_table:
+            table = Table(title="Local Models (Intel SYCL)")
+            table.add_column("Model", style="cyan")
+            table.add_column("Active", style="green")
+            table.add_column("Registered", style="green")
+            table.add_column("Downloaded", style="green")
+            table.add_column("Size", style="yellow")
+            for m in models:
+                table.add_row(
+                    f"{'★ ' if m['active'] else '  '}{m['name']}",
+                    "✓" if m["active"] else "—",
+                    "✓" if m["registered"] else "✗",
+                    "✓" if m["downloaded"] else "✗",
+                    m["size"] or "—",
+                )
+            console.print(table)
+        else:
+            for m in models:
+                m.pop("size_bytes", None)
+            print(json.dumps(models, indent=2))
+    else:
+        # Standard: existing Ollama-based listing
+        registered, _ = _read_ini_csv("local_ai", "local_models")
+        pulled = _query_ollama_models()
+
+        models = []
+        for name in registered:
+            info = pulled.get(name, {})
+            models.append({
+                "name": name,
+                "registered": True,
+                "pulled": name in pulled,
+                "size": info.get("size"),
+                "size_bytes": info.get("size_bytes"),
+            })
+        # Include pulled models not in registry (pulled externally)
+        for name, info in pulled.items():
+            if name not in registered:
+                models.append({
+                    "name": name,
+                    "registered": False,
+                    "pulled": True,
+                    "size": info.get("size"),
+                    "size_bytes": info.get("size_bytes"),
+                })
+
+        if as_table:
+            table = Table(title="Local Models")
+            table.add_column("Model", style="cyan")
+            table.add_column("Registered", style="green")
+            table.add_column("Pulled", style="green")
+            table.add_column("Size", style="yellow")
+            for m in models:
+                table.add_row(
+                    m["name"],
+                    "✓" if m["registered"] else "✗",
+                    "✓" if m["pulled"] else "✗",
+                    m["size"] or "—",
+                )
+            console.print(table)
+        else:
+            # Strip size_bytes from JSON output (internal use only)
+            for m in models:
+                m.pop("size_bytes", None)
+            print(json.dumps(models, indent=2))
+
+
+@model.command("add")
+@click.argument("name")
+@click.option("--no-pull", is_flag=True, help="Register only — skip ollama pull")
+def model_add(name, no_pull):
+    """Pull and register a local model.
+
+    Standard: Pulls the model via Ollama.
+    Intel: Downloads GGUF via HuggingFace CLI.
+    Both: registers in setup.ini and updates paths.env. Requires root (sudo).
+    """
+    if os.geteuid() != 0:
+        json_response(False, error="model add requires root. Use: sudo agictl model add ...")
+        sys.exit(1)
+
+    errors = []
+    steps = []
+    gpu_backend = _resolve_gpu_backend()
+
+    # ── 1. Download model ──
+    if not no_pull:
+        if gpu_backend == "intel":
+            # Intel: download GGUF via HuggingFace CLI
+            registry = _load_sycl_registry()
+            if name not in registry:
+                json_response(False, error=f"Model '{name}' not in SYCL registry. Register with: agictl model registry add {name} --repo <hf_repo> --file <gguf> --size <gb>. Known: {', '.join(registry.keys())}")
+                sys.exit(1)
+            repo = registry[name]["repo"]
+            gguf_file = registry[name]["file"]
+            gguf_path = os.path.join(SYCL_MODEL_DIR, gguf_file)
+
+            if os.path.isfile(gguf_path):
+                steps.append(f"already downloaded: {gguf_file}")
+            else:
+                os.makedirs(SYCL_MODEL_DIR, exist_ok=True)
+                print(f"Downloading: {gguf_file} ...")
+                _pip_search_paths = [
+                    "/usr/local/bin/hf", "/usr/local/bin/huggingface-cli",
+                    os.path.expanduser("~/.local/bin/hf"), os.path.expanduser("~/.local/bin/huggingface-cli"),
+                ]
+                _sudo_user = os.environ.get("SUDO_USER", "")
+                if _sudo_user:
+                    _pip_search_paths.extend([
+                        f"/home/{_sudo_user}/.local/bin/hf",
+                        f"/home/{_sudo_user}/.local/bin/huggingface-cli",
+                    ])
+                hf_cmd = (
+                    shutil.which("hf")
+                    or shutil.which("huggingface-cli")
+                    or next((p for p in _pip_search_paths if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+                )
+                if not hf_cmd:
+                    json_response(False, error="HuggingFace CLI not found. Install: sudo pipx install huggingface_hub[cli]")
+                    sys.exit(1)
+                result = subprocess.run(
+                    [hf_cmd, "download", repo, "--include", gguf_file, "--local-dir", SYCL_MODEL_DIR],
+                )
+                if result.returncode != 0:
+                    json_response(False, error=f"HuggingFace download failed for {repo}")
+                    sys.exit(1)
+                steps.append(f"downloaded:{gguf_file}")
+        else:
+            # Standard: pull via Ollama
+            ollama_cmd = _resolve_ollama_cmd()
+            if not ollama_cmd:
+                json_response(False, error="Ollama binary not found. Is Ollama installed?")
+                sys.exit(1)
+            ollama_host = _resolve_ollama_host()
+            env = os.environ.copy()
+            env["OLLAMA_HOST"] = ollama_host
+            print(f"Pulling model: {name} ...")
+            result = subprocess.run([ollama_cmd, "pull", name], env=env)
+            if result.returncode != 0:
+                json_response(False, error=f"ollama pull {name} failed (exit {result.returncode})")
+                sys.exit(1)
+            steps.append(f"pulled:{name}")
+
+    # ── 2. Register in setup.ini ──
+    current_models, ini_path = _read_ini_csv("local_ai", "local_models")
+    if name not in current_models:
+        current_models.append(name)
+        if ini_path and _update_ini_csv("local_ai", "local_models", current_models, ini_path):
+            steps.append("setup.ini updated")
+        else:
+            errors.append("Failed to update setup.ini")
+    else:
+        steps.append("already in setup.ini")
+
+    # ── 2.5. Register in models.ini (label + context window) ──
+    try:
+        sys.path.insert(0, '/usr/local/lib/versa-agi')
+        from harness.model_context import get_model_context, _FALLBACK_CONTEXT_MAP
+        recommended, max_ctx = get_model_context(name)
+        # Determine models.ini path (canonical → dev fallback)
+        models_ini_path = None
+        for p in _MODELS_INI_PATHS:
+            if os.path.isfile(p):
+                models_ini_path = p
+                break
+        if models_ini_path:
+            # Generate human-readable display label from model key
+            # e.g. "qwen3.6:35b" → "Qwen3.6 35B — User-added model"
+            family_size = name.split(":")
+            family = family_size[0].capitalize()
+            size_tag = family_size[1].upper() if len(family_size) > 1 else ""
+            display_label = f"{family} {size_tag} — User-added model".strip() if size_tag else f"{family} — User-added model"
+            _update_models_ini_entry(models_ini_path, "local_models", name, display_label)
+            if recommended > 0 or max_ctx > 0:
+                _update_models_ini_entry(models_ini_path, "context_windows", name, f"{recommended},{max_ctx}")
+            steps.append("models.ini updated")
+    except Exception as e:
+        steps.append(f"models.ini skipped ({e})")
+
+    # ── 3. Update paths.env ──
+    new_csv = ",".join(current_models)
+    if _update_paths_env_key("VERSA_LOCAL_MODELS", new_csv):
+        steps.append("paths.env updated")
+    else:
+        errors.append("Failed to update paths.env")
+
+    if errors:
+        json_response(False, model=name, steps=steps, errors=errors)
+        sys.exit(1)
+    else:
+        result_data = {"model": name, "action": "added", "steps": steps}
+        if gpu_backend == "intel":
+            result_data["hint"] = f"Activate with: sudo agictl model activate {name}"
+        json_response(True, **result_data)
+
+
+@model.group("hf")
+def model_hf():
+    """Inspect Hugging Face sources before any local-model mutation."""
+    pass
+
+
+@model_hf.command("inspect")
+@click.argument("source")
+def model_hf_inspect(source):
+    """Classify a Hugging Face GGUF/source without downloading or writing config.
+
+    Accepts huggingface.co URLs, hf://org/repo/file.gguf, or bare org/repo.
+    """
+    try:
+        result = inspect_hf_source(source)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        json_response(False, error=str(exc), code="inspect_failed")
+        sys.exit(1)
+    json_response(True, **result.to_dict())
+
+
+@model.group("sycl")
+def model_sycl():
+    """Intel SYCL / llama.cpp GGUF import (chat runtime only)."""
+    pass
+
+
+@model_sycl.command("import")
+@click.argument("source")
+@click.option("--name", required=True, help="Local catalog/registry key (e.g. gemma4:e4b)")
+@click.option("--runtime", type=click.Choice(["chat"]), required=True,
+              help="Runtime family. Phase 1: chat only. Media is TD-LOCAL-MEDIA-001.")
+@click.option("--label", default="", help="Display label for local_models / pickers")
+@click.option("--size", "size_gb", type=int, default=None, help="Override size_gb (else Hub bytes)")
+@click.option("--confirm-unknown", is_flag=True,
+              help="Required when Hub classification is unknown")
+@click.option("--dry-run", is_flag=True, help="Inspect and report plan; write nothing")
+def model_sycl_import(source, name, runtime, label, size_gb, confirm_unknown, dry_run):
+    """Download a chat GGUF (and VLM projector) into SYCL storage. Never activates.
+
+    A ``chat_vlm_mmproj`` source also stores ``mmproj`` as an additional. Re-import
+    of an existing key completes a missing projector. Catalog stays text-only
+    until vision probe. Refuses media pipelines. Clients import on the GPU
+    server, then run ``agictl model refresh``.
+    """
+    topo = _resolve_topology()
+    gpu_backend = _resolve_gpu_backend()
+    blocked = topology_import_block_reason(topo, gpu_backend)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, gpu_backend=gpu_backend)
+        sys.exit(1)
+
+    if os.geteuid() != 0 and not dry_run:
+        json_response(False, error="model sycl import requires root. Use: sudo agictl model sycl import ...")
+        sys.exit(1)
+
+    try:
+        inspected = inspect_hf_source(source)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+
+    guard = sycl_import_block_reason(
+        inspected.classification, runtime, confirm_unknown=confirm_unknown,
+    )
+    if guard:
+        json_response(
+            False,
+            error=guard,
+            classification=inspected.classification,
+            reasons=inspected.reasons,
+            next_step=inspected.next_step,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    selected = inspected.selected_file
+    filename = selected.path if selected else inspected.source.filename
+    if not filename:
+        json_response(False, error="Source does not name a GGUF file. Pass hf://org/repo/file.gguf")
+        sys.exit(1)
+    repo = inspected.source.repo_id
+    resolved_size = size_gb if size_gb is not None else size_gb_from_bytes(
+        selected.size if selected else None, fallback=1,
+    )
+    display_label = label or name
+    models_ini_path = _resolve_models_ini_path()
+    existing_meta = (load_sycl_meta(models_ini_path) or {}).get(name) or {} if models_ini_path else {}
+    additionals = plan_sycl_additionals(
+        main_file=os.path.basename(filename),
+        dest_dir=SYCL_MODEL_DIR,
+        inspect_files=inspected.files,
+        meta=existing_meta,
+    )
+    plan = {
+        "name": name,
+        "runtime": runtime,
+        "classification": inspected.classification,
+        "repo": repo,
+        "file": filename,
+        "size_gb": resolved_size,
+        "sycl_dir": SYCL_MODEL_DIR,
+        "activate": False,
+        "input_modalities": "text",
+        "additionals": additionals,
+    }
+    if inspected.classification == CLASS_VLM:
+        plan["mmproj_warning"] = (
+            "Projector will be stored. Catalog stays text-only until vision probe."
+            if additionals
+            else "VLM repo has no mmproj-*.gguf. Imported as text-only chat."
+        )
+
+    if dry_run:
+        json_response(True, action="dry_run", plan=plan, inspect=inspected.to_dict(), mutated=False)
+        return
+
+    registry = _load_sycl_registry()
+    dest_path = sycl_main_gguf_path(SYCL_MODEL_DIR, os.path.basename(filename))
+    already = os.path.isfile(dest_path) and name in registry
+    need_download = (not already) or any(not extra.get("exists") for extra in additionals)
+    steps = []
+    created_dest = False
+    created_additionals = []
+    additional_downloaded = False
+    tmpdir = None
+    try:
+        hf_cmd = None
+        if need_download:
+            hf_cmd = _resolve_hf_cli()
+            if not hf_cmd:
+                json_response(False, error="HuggingFace CLI not found. Install: sudo pipx install huggingface_hub[cli]", mutated=False)
+                sys.exit(1)
+            tmpdir = tempfile.mkdtemp(prefix="versa-sycl-import-")
+        if already:
+            steps.append(f"already downloaded: {os.path.basename(filename)}")
+        else:
+            print(f"Downloading: {filename} ...")
+            downloaded = default_hf_download(repo, filename, tmpdir, hf_cmd)
+            validate_gguf_file(downloaded)
+            dest_path = atomic_move_into(downloaded, SYCL_MODEL_DIR)
+            created_dest = True
+            steps.append(f"downloaded:{os.path.basename(dest_path)}")
+
+        if additionals:
+            layout = ensure_sycl_vlm_subdir(SYCL_MODEL_DIR, os.path.basename(filename))
+            dest_path = layout.get("main") or dest_path
+            steps.extend(layout.get("steps") or [])
+
+        for extra in additionals:
+            if extra.get("exists") and os.path.isfile(extra.get("path") or ""):
+                steps.append(f"already downloaded: {extra['file']}")
+                continue
+            print(f"Downloading: {extra['source']} ...")
+            extra_dl = default_hf_download(repo, extra["source"], tmpdir, hf_cmd)
+            validate_gguf_file(extra_dl)
+            extra_dir = sycl_vlm_subdir(SYCL_MODEL_DIR, os.path.basename(filename))
+            extra_path = install_paired_file(extra_dl, extra_dir, extra["file"])
+            extra["exists"] = True
+            extra["path"] = extra_path
+            created_additionals.append(extra_path)
+            additional_downloaded = True
+            steps.append(f"downloaded:{extra['file']}")
+
+        resolved_size = size_gb_from_path(dest_path, fallback=resolved_size)
+        plan["size_gb"] = resolved_size
+        plan["additionals"] = additionals
+        entry_value = f"{repo},{os.path.basename(dest_path)},{resolved_size}"
+        meta = {
+            **existing_meta,
+            "class": inspected.classification,
+            "runtime": runtime,
+            "source": inspected.source.as_hf_uri(),
+            "repo": repo,
+            "file": os.path.basename(dest_path),
+            "revision": inspected.source.revision or "main",
+            "sha256": (selected.sha256 if selected else None),
+            "confirm_unknown": bool(confirm_unknown),
+        }
+        mmproj = next((extra for extra in additionals if extra.get("role") == "mmproj"), None)
+        if mmproj:
+            meta["mmproj"] = mmproj["file"]
+            meta["mmproj_source"] = mmproj["source"]
+        if not models_ini_path:
+            raise HfIngestError("models.ini not found", "no_models_ini")
+        _upsert_models_ini_entry(models_ini_path, "sycl_models", name, entry_value)
+        _upsert_models_ini_entry(models_ini_path, "sycl_model_meta", name, meta_value(meta))
+        _upsert_models_ini_entry(models_ini_path, "local_models", name, display_label)
+        _forget_catalog_removed(name)
+        steps.append("models.ini updated")
+
+        current_models, ini_path = _read_ini_csv("local_ai", "local_models")
+        if name not in current_models:
+            current_models.append(name)
+            if ini_path and _update_ini_csv("local_ai", "local_models", current_models, ini_path):
+                steps.append("setup.ini updated")
+            else:
+                raise HfIngestError("Failed to update setup.ini local_models", "setup_ini")
+        if _update_paths_env_key("VERSA_LOCAL_MODELS", ",".join(current_models)):
+            steps.append("paths.env updated")
+    except Exception as exc:  # noqa: BLE001
+        if created_dest and dest_path and os.path.isfile(dest_path) and not already:
+            try:
+                os.remove(dest_path)
+                steps.append("rolled back GGUF")
+            except OSError:
+                pass
+        for extra_path in created_additionals:
+            if extra_path and os.path.isfile(extra_path):
+                try:
+                    os.remove(extra_path)
+                    steps.append(f"rolled back {os.path.basename(extra_path)}")
+                except OSError:
+                    pass
+        json_response(False, error=str(exc), steps=steps, mutated=False)
+        sys.exit(1)
+    finally:
+        if tmpdir and os.path.isdir(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    hint = f"Registered as text-only chat. Activate separately: sudo agictl model activate {name}"
+    if any(extra.get("role") == "mmproj" for extra in additionals):
+        hint = (
+            f"{hint} Projector stored. Catalog stays text-only until vision probe."
+        )
+    json_response(
+        True,
+        action="already_imported" if already and not additional_downloaded else "imported",
+        steps=steps,
+        hint=hint,
+        **plan,
+    )
+
+
+@model_sycl.command("remove")
+@click.argument("name")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+@click.option(
+    "--confirm-agent-assignments",
+    is_flag=True,
+    help="Allow remove while agents still list this key (does not retarget them)",
+)
+def model_sycl_remove(name, dry_run, confirm_agent_assignments):
+    """Delete a SYCL chat model: GGUF, registry, catalog, and local_models.
+
+    Media bundles use ``model media remove``. The loaded GGUF must be switched
+    first. On topology=client this SSHs to the GPU host, then cleans this machine.
+    """
+    key = (name or "").strip()
+    topo = _resolve_topology()
+    if os.geteuid() != 0 and not dry_run:
+        json_response(
+            False,
+            error="model sycl remove requires root. Use: sudo agictl model sycl remove ...",
+            mutated=False,
+        )
+        sys.exit(1)
+
+    blocked = sycl_remove_block_reason(
+        key,
+        active_model="" if topo == "client" else _resolve_sycl_active_model(),
+        media_keys=_media_catalog_keys(),
+        assigned_agents=_agents_assigned_to_model(key),
+        confirm_agent_assignments=confirm_agent_assignments,
+    )
+    if blocked:
+        json_response(False, error=blocked, mutated=False)
+        sys.exit(1)
+
+    if topo == "client":
+        try:
+            remote = _sycl_remove_on_gpu_host(key, dry_run)
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code, mutated=False)
+            sys.exit(1)
+        local_steps = []
+        if not dry_run:
+            local_steps = _clear_sycl_inventory(key)
+            try:
+                _sync_catalog()
+            except Exception:
+                pass
+        action = "dry_run" if dry_run else (
+            "already_removed" if remote.get("action") == "already_removed" and not local_steps
+            else "removed"
+        )
+        json_response(
+            True,
+            action=action,
+            name=key,
+            topology=topo,
+            gpu=remote,
+            local_steps=local_steps,
+            mutated=not dry_run,
+            hint="Agents still assigned keep this key until you retarget them.",
+        )
+        return
+
+    gpu_backend = _resolve_gpu_backend()
+    if gpu_backend != "intel":
+        json_response(
+            False,
+            error="model sycl remove is for Intel SYCL. Use: sudo agictl model remove <name>",
+            gpu_backend=gpu_backend,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    registry = _load_sycl_registry()
+    plan = plan_sycl_remove(key, registry, SYCL_MODEL_DIR)
+    present = _sycl_inventory_present(key) or plan["gguf_exists"] or plan.get("mmproj_exists")
+    steps = []
+    if dry_run:
+        json_response(
+            True,
+            action="dry_run",
+            name=key,
+            topology=topo,
+            plan=plan,
+            inventory_present=present,
+            mutated=False,
+        )
+        return
+
+    if plan["delete_gguf"]:
+        try:
+            os.remove(plan["path"])
+            steps.append(f"deleted {plan['file']}")
+        except OSError as exc:
+            json_response(False, error=f"Failed to delete GGUF: {exc}", plan=plan, mutated=False)
+            sys.exit(1)
+    elif plan["shared_keys"]:
+        steps.append(f"kept GGUF (also used by {', '.join(plan['shared_keys'])})")
+    elif plan["in_registry"] and not plan["gguf_exists"]:
+        steps.append("GGUF already absent")
+
+    if plan.get("delete_mmproj"):
+        try:
+            os.remove(plan["mmproj_path"])
+            steps.append(f"deleted {plan['mmproj_file']}")
+        except OSError as exc:
+            json_response(False, error=f"Failed to delete mmproj: {exc}", plan=plan, mutated=True)
+            sys.exit(1)
+    if plan.get("delete_subdir"):
+        sub = plan.get("subdir") or ""
+        try:
+            if sub and os.path.isdir(sub) and not os.listdir(sub):
+                os.rmdir(sub)
+                steps.append(f"removed {os.path.basename(sub)}/")
+        except OSError:
+            pass
+
+    steps.extend(_clear_sycl_inventory(key))
+    try:
+        _sync_catalog()
+    except Exception:
+        pass
+
+    action = "already_removed" if not present and not steps else "removed"
+    json_response(
+        True,
+        action=action,
+        name=key,
+        topology=topo,
+        plan=plan,
+        steps=steps,
+        mutated=action == "removed",
+        hint=(
+            "Activate another model first if this was loaded. "
+            "On a client, run sudo agictl model refresh after GPU-only leftover cleanup."
+        ),
+    )
+
+
+@model.group("media")
+def model_media():
+    """Local Utility media bundles (not llama-server). Image paint + LTX video."""
+    pass
+
+
+@model_media.command("inspect")
+@click.argument("source")
+@click.option("--name", default="", help="Planned bundle key (default qwen-image-2512)")
+def model_media_inspect(source, name):
+    """Classify a Hugging Face source and print the media bundle plan. No download."""
+    try:
+        payload = inspect_media_source(source, dest_key=name)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        json_response(False, error=str(exc), code="inspect_failed")
+        sys.exit(1)
+    json_response(True, **payload)
+
+
+@model_media.command("import")
+@click.argument("source")
+@click.option("--name", required=True, help="Bundle key (e.g. qwen-image-2512)")
+@click.option("--runtime", type=click.Choice(["media"]), required=True,
+              help="Must be media. Chat GGUFs use model sycl import --runtime chat.")
+@click.option("--confirm-unknown", is_flag=True,
+              help="Required when Hub classification is unknown")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+def model_media_import(source, name, runtime, confirm_unknown, dry_run):
+    """Download a media bundle into /opt/versa-agi/media-models. Never a chat model.
+
+    Does not create a Utility Profile or ModelDriver binding. Clients import
+    on the GPU host (topology=local or server).
+    """
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+
+    if os.geteuid() != 0 and not dry_run:
+        json_response(False, error="model media import requires root. Use: sudo agictl model media import ...")
+        sys.exit(1)
+
+    try:
+        inspected = inspect_hf_source(source)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+
+    guard = media_import_block_reason(
+        inspected.classification, runtime, confirm_unknown=confirm_unknown,
+    )
+    if guard:
+        json_response(
+            False,
+            error=guard,
+            classification=inspected.classification,
+            next_step=inspected.next_step,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    plan = plan_media_bundle(inspected, dest_key=name)
+    if plan is None:
+        json_response(
+            False,
+            error=(
+                "No media bundle recipe for this source yet. "
+                "Qwen-Image-2512 is the first supported recipe."
+            ),
+            classification=inspected.classification,
+            mutated=False,
+        )
+        sys.exit(1)
+
+    dest_dir = os.path.join(MEDIA_STORE, name)
+    payload = {
+        "name": name,
+        "runtime": runtime,
+        "classification": inspected.classification,
+        "store_dir": dest_dir,
+        "sycl_dir": SYCL_MODEL_DIR,
+        "bundle": plan.to_dict(),
+        "activate": False,
+        "utility_profile": False,
+        "driver_bound": False,
+    }
+    if dry_run:
+        json_response(True, action="dry_run", **payload, mutated=False)
+        return
+
+    models_ini_path = _resolve_models_ini_path()
+    if not models_ini_path:
+        json_response(False, error="models.ini not found", mutated=False)
+        sys.exit(1)
+
+    hf_cmd = _resolve_hf_cli()
+    if not hf_cmd:
+        json_response(False, error="HuggingFace CLI not found. Install: sudo pipx install huggingface_hub[cli]", mutated=False)
+        sys.exit(1)
+
+    steps = []
+    created = []
+    tmpdir = None
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        tmpdir = tempfile.mkdtemp(prefix="versa-media-import-")
+        for component in plan.components:
+            dest_name = os.path.basename(component.filename)
+            dest_path = os.path.join(dest_dir, dest_name)
+            if os.path.isfile(dest_path):
+                steps.append(f"already:{component.role}:{dest_name}")
+                continue
+            print(f"Downloading {component.role}: {component.filename} ...")
+            downloaded = default_hf_download(
+                component.repo, component.filename, tmpdir, hf_cmd,
+            )
+            validate_component_file(downloaded, component.validate)
+            moved = atomic_move_into(downloaded, dest_dir)
+            created.append(moved)
+            steps.append(f"downloaded:{component.role}:{os.path.basename(moved)}")
+
+        manifest = bundle_manifest(
+            plan, source=inspected.source.as_hf_uri(), revision=inspected.source.revision,
+        )
+        manifest_path = os.path.join(dest_dir, "bundle.json")
+        with open(manifest_path, "w") as fh:
+            json.dump(manifest, fh, indent=2, sort_keys=True)
+        _upsert_models_ini_entry(
+            models_ini_path, "media_bundles", name, media_bundle_value(manifest),
+        )
+        steps.append("models.ini [media_bundles] updated")
+    except Exception as exc:  # noqa: BLE001
+        for path in created:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        json_response(False, error=str(exc), steps=steps, mutated=False)
+        sys.exit(1)
+    finally:
+        if tmpdir and os.path.isdir(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    json_response(
+        True,
+        action="imported",
+        steps=steps,
+        hint=(
+            "Bundle stored. Not a chat model. Next: "
+            f"agictl model media usage {name} && "
+            f"agictl model media generate --name {name} --prompt '…'"
+        ),
+        **payload,
+    )
+
+
+@model_media.command("runtime")
+def model_media_runtime():
+    """Report whether pinned sd-cli is installed on this host."""
+    json_response(True, **media_runtime_status())
+
+
+@model_media.command("recipes")
+def model_media_recipes():
+    """List recognized Hugging Face media recipes (not a Hub search)."""
+    json_response(True, models=list_hf_media_recipes())
+
+
+@model_media.command("usage")
+@click.argument("name", required=False, default="")
+def model_media_usage(name):
+    """Print how to use a local media model (VRAM, size, commands). Not token cost."""
+    try:
+        json_response(True, **media_usage(name))
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+
+
+@model_media.command("rename")
+@click.argument("old")
+@click.argument("new")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+def model_media_rename(old, new, dry_run):
+    """Rename a media bundle directory and its [media_bundles] inventory key.
+
+    Does not change catalog rows or Utility Profiles. GPU host only.
+    """
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+
+    try:
+        moved = rename_media_bundle_dir(old, new, dry_run=dry_run)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+
+    models_ini_path = _resolve_models_ini_path()
+    inventory = "unchanged"
+    if models_ini_path:
+        bundles = load_media_bundles(models_ini_path)
+        old_key, new_key = moved["old"], moved["new"]
+        if old_key in bundles and new_key not in bundles:
+            inventory = "rename"
+            if not dry_run:
+                _upsert_models_ini_entry(
+                    models_ini_path,
+                    "media_bundles",
+                    new_key,
+                    media_bundle_value(bundles[old_key]),
+                )
+                _remove_ini_entry(models_ini_path, "media_bundles", old_key)
+        elif new_key in bundles and old_key not in bundles:
+            inventory = "already"
+        elif old_key in bundles and new_key in bundles:
+            json_response(
+                False,
+                error=(
+                    f"[media_bundles] already has both '{old_key}' and '{new_key}'. "
+                    "Remove the stale key by hand."
+                ),
+                code="inventory_collision",
+                mutated=False,
+                **moved,
+            )
+            sys.exit(1)
+        elif old_key not in bundles and new_key not in bundles:
+            try:
+                manifest = load_bundle_manifest(moved["new_dir"])
+            except HfIngestError:
+                inventory = "missing"
+            else:
+                inventory = "register"
+                if not dry_run:
+                    _upsert_models_ini_entry(
+                        models_ini_path,
+                        "media_bundles",
+                        new_key,
+                        media_bundle_value(manifest),
+                    )
+
+    json_response(
+        True,
+        action="renamed" if not dry_run else "dry_run",
+        inventory=inventory,
+        models_ini=models_ini_path,
+        mutated=not dry_run,
+        **moved,
+    )
+
+
+@model_media.command("remove")
+@click.argument("name")
+@click.option("--dry-run", is_flag=True, help="Plan only; write nothing")
+def model_media_remove(name, dry_run):
+    """Delete a media bundle directory and its [media_bundles] inventory key.
+
+    Does not delete Utility Profiles — on a full-stack host use
+    ``agictl utility model remove <name>``. GPU host only.
+    """
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+
+    try:
+        removed = remove_media_bundle_dir(name, dry_run=dry_run)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+
+    models_ini_path = _resolve_models_ini_path()
+    inventory = "unchanged"
+    if models_ini_path:
+        bundles = load_media_bundles(models_ini_path)
+        key = removed["name"]
+        if key in bundles:
+            inventory = "remove"
+            if not dry_run:
+                _remove_ini_entry(models_ini_path, "media_bundles", key)
+        else:
+            inventory = "missing"
+
+    json_response(
+        True,
+        action="removed" if not dry_run else "dry_run",
+        inventory=inventory,
+        models_ini=models_ini_path,
+        mutated=not dry_run,
+        **removed,
+    )
+
+
+@model_media.command("register")
+@click.argument("name")
+def model_media_register(name):
+    """Write [media_bundles] from an already-imported bundle.json. No download."""
+    topo = _resolve_topology()
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo, mutated=False)
+        sys.exit(1)
+    try:
+        bundle_dir = resolve_bundle_dir(name)
+        manifest = load_bundle_manifest(bundle_dir)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+    models_ini_path = _resolve_models_ini_path()
+    if not models_ini_path:
+        json_response(False, error="models.ini not found", mutated=False)
+        sys.exit(1)
+    _upsert_models_ini_entry(
+        models_ini_path, "media_bundles", name, media_bundle_value(manifest),
+    )
+    json_response(
+        True,
+        action="registered",
+        name=name,
+        store_dir=bundle_dir,
+        models_ini=models_ini_path,
+        mutated=True,
+    )
+
+
+@model_media.command("generate")
+@click.option("--name", required=True, help="Bundle key (e.g. qwen-image-2512)")
+@click.option("--usage", "show_usage", is_flag=True,
+              help="Print usage for --name and exit (does not paint)")
+@click.option("--prompt", default="", help="Paint brief (required unless --usage)")
+@click.option("--size", default=None, help="LTX size: 720p, 1080p, 2k (4k needs the spatial upscaler)")
+@click.option("--orientation", default=None, help="LTX: landscape or portrait (swaps width/height)")
+@click.option("--width", default=None, type=int, help="Width (recipe default if omitted)")
+@click.option("--height", default=None, type=int, help="Height (recipe default if omitted)")
+@click.option("--steps", default=None, type=int, help="Steps (recipe default if omitted)")
+@click.option("--cfg-scale", default=None, type=float, help="CFG (recipe default if omitted)")
+@click.option("--offload", is_flag=True, help="sd-cli --offload-to-cpu if VRAM is tight")
+@click.option("--seed", default=None, type=int, help="RNG seed (random if omitted; sd-cli default is 42)")
+@click.option("--frames", default=None, type=int, help="Video frames (LTX recipe default if omitted)")
+@click.option("--fps", default=None, type=int, help="Video fps (LTX recipe default if omitted)")
+@click.option("--image", "image_path", default="", help="Start image for LTX I2V")
+@click.option("--out", "out_path", default="", help="Destination PNG or WebM path")
+def model_media_generate(
+    name, prompt, size, orientation, width, height, steps, offload, out_path,
+    show_usage, cfg_scale, seed, frames, fps, image_path,
+):
+    """Generate a PNG or WebM from a local media bundle. Not llama-server.
+
+    On topology=client, generates on the GPU host over SSH and copies the
+    artifact here.
+    """
+    if show_usage:
+        try:
+            json_response(True, **media_usage(name))
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code)
+            sys.exit(1)
+        return
+
+    if not (prompt or "").strip():
+        json_response(False, error="--prompt is required unless you pass --usage")
+        sys.exit(1)
+
+    if size:
+        if width is not None or height is not None:
+            json_response(
+                False,
+                error="Pass --size or --width/--height, not both.",
+            )
+            sys.exit(1)
+        try:
+            width, height = resolve_ltx_size(size, orientation)
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code)
+            sys.exit(1)
+    elif orientation:
+        if media_output_kind(name) != "video":
+            json_response(False, error="--orientation is for LTX video only.")
+            sys.exit(1)
+        defaults = recipe_generate_defaults(name)
+        try:
+            width, height = apply_ltx_orientation(
+                defaults["width"] if width is None else width,
+                defaults["height"] if height is None else height,
+                orientation,
+            )
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code)
+            sys.exit(1)
+
+    topo = _resolve_topology()
+    if topo == "client":
+        dest_ext = media_output_ext(name)
+        dest = out_path.strip() or os.path.join(
+            "/tmp/versa-agi-media-out",
+            f"{name}-{int(time.time())}.{dest_ext}",
+        )
+        from model_media_remote import MediaRemoteError, remote_media_generate
+
+        try:
+            payload = remote_media_generate(
+                name,
+                prompt,
+                dest,
+                width=width,
+                height=height,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                seed=seed,
+                offload=offload,
+                frames=frames,
+                fps=fps,
+                image=image_path,
+                topology="client",
+                on_progress=lambda line: print(line, flush=True),
+            )
+        except MediaRemoteError as exc:
+            json_response(False, error=exc.message, code=exc.code, topology=topo)
+            sys.exit(1)
+        json_response(
+            True,
+            topology=topo,
+            hint=(
+                f"Generated on the GPU host; {dest_ext} is on this machine. "
+                f"Standing profile: agictl utility run {name}."
+            ),
+            **payload,
+        )
+        return
+
+    blocked = topology_media_import_block_reason(topo)
+    if blocked:
+        json_response(False, error=blocked, topology=topo)
+        sys.exit(1)
+
+    runtime = media_runtime_status()
+    if not runtime.get("ready"):
+        json_response(
+            False,
+            error=(
+                "Pinned sd-cli is not ready on this host. "
+                "On the GPU host run: sudo ./setup.sh --update"
+            ),
+            runtime=runtime,
+        )
+        sys.exit(1)
+
+    try:
+        bundle_dir = resolve_bundle_dir(name)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code)
+        sys.exit(1)
+    if not os.path.isdir(bundle_dir):
+        json_response(
+            False,
+            error=f"Bundle directory missing: {bundle_dir}. Import first.",
+            store_dir=bundle_dir,
+        )
+        sys.exit(1)
+
+    dest_ext = media_output_ext(name, bundle_dir)
+    dest = out_path.strip() or os.path.join(
+        "/tmp/versa-agi-media-out",
+        f"{name}-{int(time.time())}.{dest_ext}",
+    )
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+
+    warning = ""
+    try:
+        ps = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            check=False, capture_output=True, text=True,
+        )
+        if "versa-agi-sycl" in (ps.stdout or ""):
+            warning = (
+                "llama-server container versa-agi-sycl is running and shares the GPU. "
+                "Large media plus llama-server may OOM; retry with --offload or stop chat first."
+            )
+    except OSError:
+        pass
+
+    from model_drivers.errors import DriverError
+
+    try:
+        recipe = str(load_bundle_manifest(bundle_dir).get("recipe") or name)
+    except Exception:  # noqa: BLE001
+        recipe = name
+    kind = media_output_kind(name, bundle_dir)
+    if kind == "video":
+        from model_drivers.libraries.local_media_video_out_sdcpp import generate as produce
+    else:
+        from model_drivers.libraries.local_media_image_out_sdcpp import generate as produce
+
+    defaults = recipe_generate_defaults(recipe)
+    width = defaults["width"] if width is None else width
+    height = defaults["height"] if height is None else height
+    steps = defaults["steps"] if steps is None else steps
+    cfg_scale = defaults["cfg_scale"] if cfg_scale is None else cfg_scale
+    frames = defaults.get("video_frames") if frames is None else frames
+    fps = defaults.get("fps") if fps is None else fps
+    if kind == "video":
+        width = align_ltx_spatial(width)
+        height = align_ltx_spatial(height)
+        frames = align_ltx_frames(frames)
+    offload_eff = bool(offload or defaults.get("offload"))
+
+    produce_config = {
+        "bundle_dir": bundle_dir,
+        "recipe": recipe,
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "offload": offload_eff,
+        "seed": seed,
+        "out_dir": os.path.dirname(dest) or "/tmp/versa-agi-media-out",
+        "out_name": os.path.basename(dest),
+    }
+    if kind == "video":
+        produce_config["video_frames"] = frames
+        produce_config["fps"] = fps
+        if image_path:
+            produce_config["init_img"] = image_path
+        vae_note = ltx_vae_decode_note(width, height, frames)
+        print(
+            f"Generating {width}×{height} × {frames} frames @ {fps} fps, "
+            f"{steps} steps. This can take a long time; progress follows.",
+            flush=True,
+        )
+        if vae_note:
+            print(vae_note, flush=True)
+
+    try:
+        artifact = produce(prompt=prompt, config=produce_config)
+    except DriverError as exc:
+        json_response(False, error=exc.message, code=exc.code, warning=warning or None)
+        sys.exit(1)
+
+    if not os.path.isfile(dest):
+        with open(dest, "wb") as fh:
+            fh.write(artifact.data)
+
+    registered = name in load_media_bundles(_resolve_models_ini_path())
+    payload = {
+        "action": "generated",
+        "name": name,
+        "path": dest,
+        "bytes": len(artifact.data),
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "seed": (artifact.usage or {}).get("seed"),
+        "offload": offload_eff,
+        "registered": registered,
+        "warning": warning or None,
+        "hint": (
+            f"Generated without a Utility run. Standing profile: "
+            f"agictl utility run {name}."
+        ),
+    }
+    if kind == "video":
+        payload["video_frames"] = frames
+        payload["fps"] = fps
+    json_response(True, **payload)
+
+
+@model.command("remove")
+@click.argument("name")
+@click.option("--delete", is_flag=True, help="Also delete model weights from Ollama (ollama rm)")
+def model_remove(name, delete):
+    """Unregister a local model.
+
+    Removes the model from setup.ini and updates paths.env.
+    Standard: optionally deletes model weights with --delete (ollama rm).
+    Intel: optionally deletes GGUF file with --delete. Requires root (sudo).
+    """
+    if os.geteuid() != 0:
+        json_response(False, error="model remove requires root. Use: sudo agictl model remove ...")
+        sys.exit(1)
+
+    errors = []
+    steps = []
+    gpu_backend = _resolve_gpu_backend()
+
+    # ── Intel: warn if removing active model ──
+    if gpu_backend == "intel":
+        active = _resolve_sycl_active_model()
+        if name == active:
+            json_response(False, error=f"Cannot remove active model '{name}'. Switch first: sudo agictl model activate <other>")
+            sys.exit(1)
+
+    # ── 1. Remove from setup.ini ──
+    current_models, ini_path = _read_ini_csv("local_ai", "local_models")
+    if name in current_models:
+        current_models.remove(name)
+        if ini_path and _update_ini_csv("local_ai", "local_models", current_models, ini_path):
+            steps.append("setup.ini updated")
+        else:
+            errors.append("Failed to update setup.ini")
+    else:
+        steps.append("not in setup.ini (already removed)")
+
+    # ── 2. Update paths.env ──
+    new_csv = ",".join(current_models)
+    if _update_paths_env_key("VERSA_LOCAL_MODELS", new_csv):
+        steps.append("paths.env updated")
+    else:
+        errors.append("Failed to update paths.env")
+
+    # ── 4. Optionally delete model weights ──
+    if delete:
+        if gpu_backend == "intel":
+            # Delete GGUF file
+            registry = _load_sycl_registry()
+            if name in registry:
+                gguf_file = registry[name]["file"]
+                gguf_path = os.path.join(SYCL_MODEL_DIR, gguf_file)
+                if os.path.isfile(gguf_path):
+                    os.remove(gguf_path)
+                    steps.append(f"deleted: {gguf_file}")
+                else:
+                    steps.append(f"GGUF not found: {gguf_file}")
+            else:
+                errors.append(f"Model '{name}' not in SYCL registry. Register with: agictl model registry add {name} --repo <hf_repo> --file <gguf> --size <gb>")
+        else:
+            # Standard: ollama rm
+            ollama_cmd = _resolve_ollama_cmd()
+            if ollama_cmd:
+                ollama_host = _resolve_ollama_host()
+                env = os.environ.copy()
+                env["OLLAMA_HOST"] = ollama_host
+                result = subprocess.run(
+                    [ollama_cmd, "rm", name],
+                    env=env,
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    steps.append(f"ollama rm {name}")
+                else:
+                    errors.append(f"ollama rm failed: {result.stderr.strip()}")
+            else:
+                errors.append("Ollama binary not found — could not delete weights")
+
+    if errors:
+        json_response(False, model=name, steps=steps, errors=errors)
+        sys.exit(1)
+    else:
+        json_response(True, model=name, action="removed", deleted=delete, steps=steps)
+
+
+@model.command("run")
+@click.argument("name")
+@click.argument("prompt", required=False, default=None)
+@click.option("--temperature", "-t", type=float, default=0.7, help="Sampling temperature (0.0–2.0)")
+@click.option("--max-tokens", "-m", type=int, default=8192, help="Maximum response tokens (Gemma 4: up to 256K context)")
+@click.option(
+    "--image",
+    "image_spec",
+    default=None,
+    help="JPEG/PNG path, or 'probe' for a built-in 32x32 PNG (vision probe).",
+)
+def model_run(name, prompt, temperature, max_tokens, image_spec):
+    """Test a local model via the Inference Endpoint or Ollama.
+
+    Send a one-shot prompt. ``--image probe`` (or a JPEG/PNG path) is the
+    SYCL vision probe: on success the catalog may gain ``image``.
+
+    Examples:
+      agictl model run gemma4:e4b "Hello, who are you?"
+      agictl model run qwen3.6:35b "What color is this? One word." --image probe
+      agictl model run gemma4:e4b  # enters interactive mode
+    """
+    import urllib.request
+    import urllib.error
+
+    # Resolve proxy URL from paths.env
+    inference_url = ""
+    ollama_host = "http://localhost:11434"
+    paths_env = "/etc/versa-agi/paths.env"
+    if os.path.exists(paths_env):
+        with open(paths_env, "r") as f:
+            for line in f:
+                if line.startswith("VERSA_INFERENCE_URL="):
+                    inference_url = line.strip().split("=", 1)[1].strip('"')
+                elif line.startswith("VERSA_OLLAMA_HOST="):
+                    ollama_host = line.strip().split("=", 1)[1].strip('"')
+
+    # Interactive mode if no prompt given
+    if not prompt:
+        click.echo(f"[agictl model run] Interactive mode — model: {name}")
+        click.echo(f"[agictl model run] Type 'exit' or Ctrl+C to quit.\n")
+        try:
+            while True:
+                prompt = click.prompt("You", prompt_suffix="> ")
+                if prompt.lower() in ("exit", "quit", "/q"):
+                    break
+                _run_model_prompt(
+                    name, prompt, temperature, max_tokens, inference_url, ollama_host,
+                    image_spec=image_spec,
+                )
+                click.echo("")
+        except (KeyboardInterrupt, EOFError):
+            click.echo("\n[agictl model run] Session ended.")
+        return
+
+    _run_model_prompt(
+        name, prompt, temperature, max_tokens, inference_url, ollama_host,
+        image_spec=image_spec,
+    )
+
+
+def _run_model_prompt(name, prompt, temperature, max_tokens, inference_url, ollama_host, image_spec=None):
+    """Send a single prompt to a local model and print the response."""
+    import urllib.request
+    import urllib.error
+
+    gpu_backend = _resolve_gpu_backend()
+    content = prompt
+    if image_spec:
+        try:
+            image_bytes, mime = load_probe_image(image_spec)
+        except HfIngestError as exc:
+            click.echo(f"Error: {exc.message}", err=True)
+            sys.exit(1)
+        content = chat_image_content_parts(prompt, image_bytes, mime)
+        click.echo(
+            "[agictl model run] Image attached. First SYCL load can take many minutes.",
+            err=True,
+        )
+
+    api_name = name
+    if gpu_backend == "intel":
+        try:
+            from provider_runtime import _resolve_sycl_api_model
+            api_name = _resolve_sycl_api_model(name)
+        except Exception:
+            row = (_load_sycl_registry() or {}).get(name) or {}
+            api_name = (row.get("file") or name).removesuffix(".gguf")
+
+    # Build endpoint list based on backend
+    endpoints = []
+    if gpu_backend == "intel":
+        # Intel: try Docker SYCL directly first, then Inference Server
+        sycl_port = _resolve_sycl_port()
+        endpoints.append(("SYCL", f"http://localhost:{sycl_port}/v1/chat/completions", api_name))
+        if inference_url:
+            endpoints.append(("Inference Server", f"{inference_url}/v1/chat/completions", api_name))
+    else:
+        # Standard: try Ollama directly first, then Inference Server
+        endpoints.append(("Ollama", f"{ollama_host}/api/chat", name))
+        if inference_url:
+            endpoints.append(("Inference Server", f"{inference_url}/v1/chat/completions", name))
+
+    for backend_name, url, model_name in endpoints:
+        try:
+            if "v1/chat/completions" in url:
+                # OpenAI-compatible (Inference Server or SYCL)
+                body = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": content}],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                }
+            else:
+                # Ollama native API
+                body = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": content}],
+                    "stream": False,
+                    "options": {"temperature": temperature, "num_predict": max_tokens},
+                }
+
+            data = json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            click.echo(f"[{backend_name}] Sending request (model={model_name})...", err=True)
+            with urllib.request.urlopen(req, timeout=900) as response:
+                result = json.loads(response.read().decode("utf-8"))
+
+            # Extract response text
+            if "choices" in result:
+                # OpenAI format
+                text = result["choices"][0]["message"]["content"]
+            elif "message" in result:
+                # Ollama format
+                text = result["message"]["content"]
+            else:
+                text = json.dumps(result, indent=2)
+
+            click.echo(text)
+            if image_spec and gpu_backend == "intel":
+                applied, detail = _apply_sycl_vision_catalog(name)
+                if applied:
+                    click.echo(
+                        f"[agictl model run] Catalog '{name}' input_modalities → {detail}",
+                        err=True,
+                    )
+                else:
+                    click.echo(
+                        f"[agictl model run] Probe ok; catalog not updated ({detail}). "
+                        f"sudo agictl catalog update {name} --input-modalities text,image",
+                        err=True,
+                    )
+            return
+
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            click.echo(f"[{backend_name}] HTTP {e.code}: {body[:500]}", err=True)
+            if image_spec and "mmproj" in body.lower():
+                click.echo(
+                    "[agictl model run] Pairing failed — llama-server did not attach the projector. "
+                    "Restart with: sudo agictl model activate {name}".format(name=name),
+                    err=True,
+                )
+            continue
+        except (TimeoutError, urllib.error.URLError) as e:
+            # Connection refused, timeout, or unreachable — try next backend silently
+            click.echo(f"[{backend_name}] Unavailable ({e}), trying next...", err=True)
+            continue
+        except Exception as e:
+            click.echo(f"[{backend_name}] Error: {e}", err=True)
+            continue
+
+    click.echo("Error: Could not reach Inference Endpoint or Ollama. Is the local AI backend running?", err=True)
+    sys.exit(1)
+
+
+def _apply_sycl_vision_catalog(name):
+    """After a successful image probe, advertise text,image on this catalog key."""
+    if _mc_load_catalog is None or catalog_row_to_value is None:
+        return False, "catalog helpers unavailable"
+    cat = _mc_load_catalog()
+    if name not in cat:
+        return False, "catalog row missing"
+    row = dict(cat[name])
+    row["input_modalities"] = catalog_input_modalities_after_probe(
+        row.get("input_modalities")
+    )
+    if catalog_label_after_probe is not None:
+        row["label"] = catalog_label_after_probe(row.get("label"))
+    value = catalog_row_to_value(row)
+    targets = _models_ini_write_targets()
+    if not targets:
+        return False, "models.ini not found"
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "catalog_custom", name, value)
+        models_ini = _resolve_models_ini_path()
+        if models_ini:
+            meta = dict((load_sycl_meta(models_ini) or {}).get(name) or {})
+            meta["mmproj_probe"] = "ok"
+            _upsert_models_ini_entry(models_ini, "sycl_model_meta", name, meta_value(meta))
+    except PermissionError:
+        return False, "permission denied (use sudo)"
+    except OSError as exc:
+        return False, str(exc)
+    return True, row["input_modalities"]
+
+
+@model.command("activate")
+@click.argument("name")
+@click.option("--ctx", "ctx_override", type=int, default=None,
+              help="Override context window size per slot (e.g. 4096, 8192, 16384, 32768). Persisted to setup.ini.")
+@click.option("--parallel", "parallel_override", type=int, default=None,
+              help="Override parallel slot count (1-8). Persisted to setup.ini.")
+@click.option("--confirm-agent-sweep", is_flag=True,
+              help="Required in single mode when agents would be retargeted and stdin is not a TTY.")
+@click.option("--confirm-unknown", is_flag=True,
+              help="Required to activate a key classified as unknown at import.")
+def model_activate(name, ctx_override, parallel_override, confirm_agent_sweep, confirm_unknown):
+    """Switch the active/default model on the Intel SYCL backend.
+
+    Updates setup.ini and paths.env. Always sets sycl_active_model (the loaded GGUF).
+    In single mode, syncs all local sub-agents. Router mode leaves agent assignments.
+    Docker restarts when the loaded GGUF, --ctx/--parallel, or a newly
+    landed mmproj projector changes.
+
+    Only available when gpu_backend=intel. Requires root (sudo).
+
+    Examples:
+
+      sudo agictl model activate gemma4:26b
+
+      sudo agictl model activate gemma4:e4b --ctx 32768 --parallel 8
+
+      sudo agictl model activate qwen3.6:35b --ctx 8192
+    """
+    if os.geteuid() != 0:
+        json_response(False, error="model activate requires root. Use: sudo agictl model activate ...")
+        sys.exit(1)
+
+    gpu_backend = _resolve_gpu_backend()
+    if gpu_backend != "intel":
+        json_response(False, error="model activate is only available for Intel SYCL backend (gpu_backend=intel)")
+        sys.exit(1)
+
+    # Validate model name against dynamic registry
+    registry = _load_sycl_registry()
+    if name not in registry:
+        json_response(False, error=f"Unknown model '{name}'. Register with: agictl model registry add {name} --repo <hf_repo> --file <gguf> --size <gb>. Known: {', '.join(registry.keys())}")
+        sys.exit(1)
+
+    meta = load_sycl_meta(_resolve_models_ini_path()).get(name)
+    if meta and confirm_unknown:
+        meta = {**meta, "confirm_unknown": True}
+    activate_guard = activation_block_reason(meta)
+    if activate_guard:
+        json_response(False, error=activate_guard, classification=(meta or {}).get("class"))
+        sys.exit(1)
+
+    # Check model is downloaded (flat or stem subdirectory)
+    gguf_file = registry[name]["file"]
+    gguf_path = sycl_main_gguf_path(SYCL_MODEL_DIR, gguf_file)
+    if not os.path.isfile(gguf_path):
+        # Fallback: scan directory for the file (handles symlinks, case drift)
+        found_path = None
+        if os.path.isdir(SYCL_MODEL_DIR):
+            for f in os.listdir(SYCL_MODEL_DIR):
+                if f == gguf_file or f.lower() == gguf_file.lower():
+                    candidate = os.path.join(SYCL_MODEL_DIR, f)
+                    if os.path.isfile(candidate) or os.path.islink(candidate):
+                        found_path = candidate
+                        break
+        if found_path:
+            gguf_path = found_path
+            gguf_file = os.path.basename(found_path)
+        else:
+            dir_listing = []
+            if os.path.isdir(SYCL_MODEL_DIR):
+                dir_listing = [f for f in os.listdir(SYCL_MODEL_DIR) if f.endswith(".gguf")]
+            json_response(False, error=(
+                f"Model not downloaded. Expected: {gguf_path}\n"
+                f"Directory {SYCL_MODEL_DIR} contains: {dir_listing or '(empty or missing)'}\n"
+                f"Run first: sudo agictl model add {name}"
+            ))
+            sys.exit(1)
+
+    strategy = _resolve_loading_strategy()
+    current_active = _resolve_sycl_active_model()
+    model_changed = name != current_active
+    layout_steps = []
+    if sycl_mmproj_on_disk(SYCL_MODEL_DIR, gguf_file):
+        layout = ensure_sycl_vlm_subdir(SYCL_MODEL_DIR, gguf_file)
+        layout_steps = layout.get("steps") or []
+        if layout.get("main") and os.path.isfile(layout["main"]):
+            gguf_path = layout["main"]
+    mmproj_reload = activate_needs_mmproj_reload(
+        meta, SYCL_MODEL_DIR, gguf_file,
+    ) or bool(layout_steps)
+
+    # Keep the loaded key in setup.ini local_models. --update can drop a
+    # key that import added if the clone CSV lagged.
+    all_local, ini_csv_path = _read_ini_csv("local_ai", "local_models")
+    registered_local = ensure_name_in_csv(all_local, name)
+    if registered_local != all_local:
+        if ini_csv_path:
+            _update_ini_csv("local_ai", "local_models", registered_local, ini_csv_path)
+        _update_paths_env_key("VERSA_LOCAL_MODELS", ",".join(registered_local))
+    catalog_added = _ensure_local_keys_in_live_catalog(registered_local)
+
+    model_size_gb = size_gb_from_path(
+        gguf_path, fallback=int(registry[name].get("size_gb") or 10),
+    )
+    ini_parallel, ini_ctx_size, ini_vram_gb = _resolve_sycl_concurrency()
+    use_ctx = ctx_override if ctx_override is not None else ini_ctx_size
+    recommended, max_slots, free_vram = _calculate_concurrency(
+        ini_vram_gb, model_size_gb, use_ctx,
+    )
+    use_parallel = resolve_activate_parallel(
+        ini_parallel, recommended, parallel_override,
+    )
+    parallel_clamped = parallel_override is None and use_parallel != ini_parallel
+
+    # Already the loaded GGUF (sycl_active_model) and no slot/ctx/mmproj change.
+    if (
+        not model_changed
+        and ctx_override is None
+        and parallel_override is None
+        and not parallel_clamped
+        and not mmproj_reload
+    ):
+        json_response(
+            True,
+            model=name,
+            action="already_active",
+            registered=name in registered_local,
+            catalog_added=catalog_added,
+            message=f"'{name}' is already the active model",
+        )
+        return
+
+    errors = []
+    steps = []
+    steps.extend(layout_steps)
+    affected = []
+
+    # ── 1. Agent sync (strategy-dependent) ──
+    if strategy == "single":
+        preview = _preview_local_agent_model_sweep()
+        if preview:
+            click.echo(f"\n  Single mode will retarget {len(preview)} local agent(s):", err=True)
+            for a, m in preview:
+                click.echo(f"    • {a}: {m} → {name}", err=True)
+            click.echo("", err=True)
+            if not confirm_agent_sweep:
+                if sys.stdin.isatty():
+                    if not click.confirm("Proceed with agent sweep?", default=False):
+                        json_response(False, error="activation cancelled", affected_agents=[
+                            {"agent": a, "previous_model": m} for a, m in preview
+                        ])
+                        sys.exit(1)
+                else:
+                    json_response(
+                        False,
+                        error="Single-mode activate would retarget local agents. Re-run with --confirm-agent-sweep.",
+                        affected_agents=[{"agent": a, "previous_model": m} for a, m in preview],
+                    )
+                    sys.exit(1)
+        affected = _update_all_local_agent_models(name)
+        if affected:
+            steps.append(f"updated {len(affected)} agent(s)")
+        else:
+            steps.append("no agents affected")
+    else:
+        # Router: agents keep individual assignments — no sweep
+        steps.append("router mode — agents keep individual model assignments")
+
+    # ── 2. Concurrency info ──
+    click.echo(f"  Concurrency for {name}:", err=True)
+    click.echo(f"    Model: ~{model_size_gb}GB, VRAM: {ini_vram_gb}GB, Free: ~{free_vram}GB", err=True)
+    click.echo(f"    Slots: {use_parallel} (recommended: {recommended}, max: {max_slots})", err=True)
+    click.echo(f"    Context: {use_ctx} per slot", err=True)
+    if parallel_clamped:
+        click.echo(
+            f"    Clamped slots {ini_parallel} → {use_parallel} so this GGUF fits.",
+            err=True,
+        )
+        steps.append(
+            f"clamped parallel {ini_parallel} → {use_parallel} (recommended {recommended} for ~{model_size_gb}GB)"
+        )
+    elif recommended < use_parallel:
+        click.echo(
+            f"    Warning: {use_parallel} slots may not fit this GGUF. "
+            f"Retry with --parallel {recommended} if the container fails to load.",
+            err=True,
+        )
+        steps.append(
+            f"slot warning: parallel={use_parallel}, recommended={recommended} for ~{model_size_gb}GB"
+        )
+
+    # ── 3. Docker restart when the loaded GGUF or slot/ctx settings change ──
+    if activate_needs_docker_restart(
+        model_changed=model_changed,
+        ctx_override=ctx_override,
+        parallel_override=parallel_override,
+        parallel_changed=parallel_clamped,
+        mmproj_reload=mmproj_reload,
+    ):
+        if mmproj_reload:
+            click.echo("  Restarting Docker so llama-server can pair the projector...", err=True)
+        else:
+            click.echo("  Restarting Docker (loading the selected GGUF)...", err=True)
+        ok, msg = _docker_restart_sycl(
+            parallel=use_parallel,
+            ctx_size=use_ctx,
+            model_file=gguf_file,
+        )
+        if ok:
+            steps.append(msg)
+            api_id = os.path.basename(gguf_file).removesuffix(".gguf")
+            click.echo(
+                f"  Router is up. {api_id} loads on the first request "
+                f"(web UI pick or chat), not at activate.",
+                err=True,
+            )
+            steps.append(f"router ready; {api_id} loads on demand")
+            if mmproj_reload:
+                models_ini_path = _resolve_models_ini_path()
+                if models_ini_path:
+                    updated = dict(meta or {})
+                    updated["mmproj_router"] = True
+                    _upsert_models_ini_entry(
+                        models_ini_path, "sycl_model_meta", name, meta_value(updated),
+                    )
+                    steps.append("sycl_model_meta mmproj_router")
+        else:
+            errors.append(msg)
+    else:
+        steps.append("Docker restart not needed (already loaded)")
+
+    # ── 4. Update setup.ini (comment-preserving, sed-style) ──
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if os.path.isfile(ini_path):
+        # Always record the loaded GGUF. Router vs single only changes agent sweep.
+        _update_ini_key(ini_path, "local_ai", "sycl_active_model", name)
+        _update_ini_key(ini_path, "local_ai", "default_model", name)
+        if ctx_override is not None:
+            _update_ini_key(ini_path, "local_ai", "sycl_ctx_size", str(use_ctx))
+        if parallel_override is not None or parallel_clamped:
+            _update_ini_key(ini_path, "local_ai", "sycl_parallel", str(use_parallel))
+        _sync_ini_to_source(ini_path)
+        steps.append(f"setup.ini updated (strategy={strategy})")
+    else:
+        errors.append("setup.ini not found")
+
+    # ── 5. Update paths.env — all models always available (router architecture) ──
+    all_local, ini_csv_path = _read_ini_csv("local_ai", "local_models")
+    if name not in all_local:
+        all_local = ensure_name_in_csv(all_local, name)
+        if ini_csv_path:
+            _update_ini_csv("local_ai", "local_models", all_local, ini_csv_path)
+        steps.append(f"registered '{name}' in local_models")
+    all_local_str = ",".join(all_local) if all_local else name
+    if _update_paths_env_key("VERSA_LOCAL_MODELS", all_local_str):
+        steps.append(f"paths.env VERSA_LOCAL_MODELS → {all_local_str}")
+    else:
+        errors.append("paths.env VERSA_LOCAL_MODELS update failed")
+
+    if strategy == "single":
+        if _update_paths_env_key("VERSA_ACTIVE_LOCAL_MODEL", name):
+            steps.append(f"paths.env VERSA_ACTIVE_LOCAL_MODEL → {name}")
+
+    # ── 7. Merge server_config.json (do not wipe gpu_backend / lan_ip / key) ──
+    try:
+        import datetime
+        _write_server_config({
+            "sycl_ctx_size": use_ctx,
+            "sycl_parallel": use_parallel,
+            "sycl_models_max": _resolve_sycl_models_max(),
+            "sycl_vram_gb": ini_vram_gb,
+            "active_model": name,
+            "default_model": name,
+            "model_loading_strategy": strategy,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        steps.append("server_config.json updated")
+    except Exception as e:
+        errors.append(f"server_config.json write failed: {e}")
+
+    if errors:
+        json_response(False, model=name, steps=steps, errors=errors)
+        sys.exit(1)
+    else:
+        result_data = {
+            "model": name,
+            "action": "activated",
+            "strategy": strategy,
+            "steps": steps,
+            "previous_model": current_active,
+            "catalog_added": catalog_added,
+        }
+        if affected:
+            result_data["affected_agents"] = [{"agent": a, "previous_model": m} for a, m in affected]
+        json_response(True, **result_data)
+
+
+def _ensure_local_keys_in_live_catalog(keys: list[str]) -> list[str]:
+    """Write assigned local keys into ``[catalog]`` when migrate has not yet.
+
+    ``model refresh`` and activate update ``local_models`` / pickers. Harness
+    ``load_catalog()`` only reads ``[catalog]`` + custom unless the library
+    fallback applies — persist the row so Model Manager and the next migrate
+    stay aligned.
+    """
+    if not keys or assigned_local_catalog_rows_to_upsert is None:
+        return []
+    targets = _models_ini_write_targets()
+    if not targets:
+        return []
+    added: list[str] = []
+    try:
+        rows = assigned_local_catalog_rows_to_upsert(
+            targets[0], assigned_local=keys
+        )
+        for key, raw in rows:
+            for path in targets:
+                _upsert_models_ini_entry(path, "catalog", key, raw)
+            added.append(key)
+    except (OSError, PermissionError):
+        return []
+    return added
+
+
+@model.command("refresh")
+def model_refresh():
+    """Query remote inference server and sync model inventory.
+
+    Discovers ALL downloaded models on the server via 'agictl model list'
+    (SSH for client topology, direct call for local topology). Updates
+    VERSA_LOCAL_MODELS with the full list and VERSA_ACTIVE_LOCAL_MODEL
+    with the running model.
+    """
+    import configparser, json as _json
+
+    # Read topology from setup.ini
+    ini_path = SETUP_INI_CANONICAL
+    if not os.path.isfile(ini_path):
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+    if not os.path.isfile(ini_path):
+        json_response(False, error="setup.ini not found")
+        sys.exit(1)
+
+    cfg = configparser.ConfigParser()
+    cfg.read(ini_path)
+    topology = cfg.get("local_ai", "topology", fallback="local")
+
+    if topology == "server":
+        json_response(False, error="model refresh is for client/local topologies — this is a server")
+        sys.exit(1)
+
+
+    # ── Phase 1: Discover ALL models and active model ──
+    # For SYCL, only one model is loaded in VRAM at a time, but the server
+    # may have many GGUFs downloaded. We query 'agictl model list' which
+    # returns structured JSON with name, downloaded, and active fields.
+    all_downloaded = []
+    active_model = ""
+    server_config_synced = {}
+
+    if topology == "client":
+        import subprocess
+        # Read SSH credentials from client_config.json
+        client_cfg_path = "/etc/versa-agi/client_config.json"
+        tunnel_host = None
+        if os.path.isfile(client_cfg_path):
+            with open(client_cfg_path) as f:
+                client_cfg = _json.load(f)
+            tunnel_host = client_cfg.get("tunnel_host")
+
+        if not tunnel_host:
+            json_response(False, error="No tunnel_host in client_config.json — run setup_local.sh to configure client mode")
+            sys.exit(1)
+
+        wd_user = cfg.get("users", "watchdog", fallback="watchdog")
+        ssh_key = f"/home/{wd_user}/.ssh/versa_agi_ed25519"
+        ssh_base = ["sudo", "-u", wd_user, "ssh", "-i", ssh_key,
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", "ConnectTimeout=5",
+                    "-o", "BatchMode=yes",
+                    f"{wd_user}@{tunnel_host}"]
+
+        # Query the server's model inventory via agictl
+        try:
+            result = subprocess.run(
+                ssh_base + ["agictl model list"],
+                capture_output=True, text=True, timeout=20
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                server_models = _json.loads(result.stdout)
+                for m in server_models:
+                    if m.get("downloaded"):
+                        all_downloaded.append(m["name"])
+                    if m.get("active"):
+                        active_model = m["name"]
+        except Exception:
+            pass  # SSH may fail — fall back gracefully
+
+        # Sync server_config.json (VRAM, ctx_size, parallel slots, etc.)
+        try:
+            remote_path = "/etc/versa-agi/server_config.json"
+            result = subprocess.run(
+                ssh_base + [f"cat {remote_path}"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                server_config_synced = _json.loads(result.stdout)
+
+                # Store key values in local setup.ini
+                for ini in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+                    if os.path.isfile(ini):
+                        try:
+                            if "sycl_ctx_size" in server_config_synced:
+                                _update_ini_key(ini, "local_ai", "sycl_ctx_size", str(server_config_synced["sycl_ctx_size"]))
+                            if "sycl_parallel" in server_config_synced:
+                                _update_ini_key(ini, "local_ai", "sycl_parallel", str(server_config_synced["sycl_parallel"]))
+                            if "sycl_vram_gb" in server_config_synced:
+                                _update_ini_key(ini, "local_ai", "sycl_vram_gb", str(server_config_synced["sycl_vram_gb"]))
+                        except Exception:
+                            pass  # best-effort
+        except Exception:
+            pass  # server_config.json may not exist yet — that's OK
+
+    else:
+        # Local topology — query models directly
+        sycl_models = _query_sycl_models()
+        for m in sycl_models:
+            if m.get("downloaded"):
+                all_downloaded.append(m["name"])
+            if m.get("active"):
+                active_model = m["name"]
+
+    # ── Phase 3: Resolve final model list ──
+    # Prefer filesystem scan; fall back to /v1/models if scan returned nothing
+    if all_downloaded:
+        models = all_downloaded
+    elif active_model:
+        models = [active_model]
+    else:
+        json_response(False, error="No models discovered — server may be unreachable")
+        sys.exit(1)
+
+    models_csv = ",".join(models)
+
+    # Update paths.env with full downloaded list
+    _update_paths_env_key("VERSA_LOCAL_MODELS", models_csv)
+
+    # Update setup.ini (both copies)
+    for ini in [SETUP_INI_CANONICAL, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")]:
+        if os.path.isfile(ini):
+            try:
+                _update_ini_key(ini, "local_ai", "local_models", models_csv)
+            except Exception:
+                pass  # best-effort
+
+    # ── Phase 4: Sync active model ──
+    # Star only: server_config.json, then `agictl model list` active flag.
+    # Do not invent "active" from inventory order (listdir / /v1/models[0]).
+    if server_config_synced and server_config_synced.get("active_model"):
+        active_model = server_config_synced["active_model"]
+    if active_model:
+        _update_paths_env_key("VERSA_ACTIVE_LOCAL_MODEL", active_model)
+
+    catalog_added = _ensure_local_keys_in_live_catalog(models)
+
+    json_response(True,
+                  models=models,
+                  active_model=active_model,
+                  catalog_added=catalog_added,
+                  source="ssh+agictl" if topology == "client" else "local",
+                  server_config=server_config_synced if server_config_synced else None)
+
+
+# ─── Model Registry Subcommand Group ────────────────────
+# CRUD operations for the [sycl_models] section in models.ini
+
+@model.command("sync")
+def model_sync():
+    """Regenerate derived model config from the [catalog] source of truth.
+
+    Refreshes the cloud/third-party model registries in paths.env
+    (VERSA_CLOUD_MODELS, VERSA_THIRD_PARTY_MODELS, VERSA_THIRD_PARTY_ENABLED,
+    VERSA_COA_APPROVED_MODELS) from the merged catalog. Edition 2.x readers
+    (agitop picker, harness model_context) read labels/context windows from
+    [catalog] directly, so no legacy label sections are regenerated.
+
+    Local models and topology-dependent keys (VERSA_LOCAL_MODELS) are owned by
+    the local pipeline and left untouched in this edition. Idempotent — a no-op
+    when [catalog] is absent (pre-migration systems).
+    """
+    ok, payload = _sync_catalog()
+    if not ok:
+        json_response(False, **payload)
+        sys.exit(1)
+    json_response(True, **payload)
+
+
+@model.group("openrouter")
+def openrouter_cmd():
+    """Browse OpenRouter and add models to the Versa catalog."""
+    pass
+
+
+@openrouter_cmd.command("status")
+def openrouter_status_cmd():
+    """Report whether OpenRouter is enabled and keyed."""
+    ok, reason = openrouter_configured()
+    json_response(True, configured=ok, reason=reason if not ok else "")
+
+
+@openrouter_cmd.command("list")
+@click.option("--addable-only/--all", "addable_only", default=True,
+              help="Default: chat-capable models not already in catalog")
+@click.option("--table", "as_table", is_flag=True)
+@click.option("--refresh", is_flag=True, help="Bypass the cache and repull live")
+def openrouter_list_cmd(addable_only, as_table, refresh):
+    """List models from the OpenRouter API (public listing; no API key required)."""
+    import provider_model_cache
+    if refresh:
+        provider_model_cache.clear("openrouter")
+    try:
+        index = fetch_openrouter_index_with_fallback(use_cache=True)
+    except Exception as e:
+        json_response(False, error=f"OpenRouter API unavailable: {e}")
+        sys.exit(1)
+    cat = _load_catalog()
+    if addable_only:
+        models = list_addable_models(cat.keys(), index)
+    else:
+        from openrouter_catalog import is_chat_capable
+        models = [
+            or_model_summary(m)
+            for m in sorted(index.values(), key=lambda x: x.get("id", ""))
+            if is_chat_capable(m)
+        ]
+    if as_table:
+        if not models:
+            click.echo("No OpenRouter models.")
+            return
+        click.echo(f"{'ID':<36} {'CTX':<8} {'IN→OUT':<18} {'$/M in':<8} {'$/M out':<8} WORK")
+        for r in models:
+            io = f"{r['input_modalities']}→{r['output_modalities']}"
+            pr = r.get("pricing") or {}
+            pin = pr.get("prompt_per_m", 0)
+            pout = pr.get("completion_per_m", 0)
+            click.echo(
+                f"{r['id']:<36} {r.get('context_length') or 0:<8} {io:<18} "
+                f"{pin:<8.4g} {pout:<8.4g} {r['work_modality']}"
+            )
+        return
+    json_response(True, count=len(models), models=models)
+
+
+_OPENROUTER_DEFAULT_MODEL_PARAMS = json.dumps({
+    "reasoning_effort": "none",
+    "allowed_reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh"],
+}, separators=(",", ":"))
+
+
+@openrouter_cmd.command("add")
+@click.argument("model_id")
+@click.option("--coa-approved/--no-coa-approved", default=None,
+              help="Default: library-row coa flag, else false (tick COA on Import)")
+@click.option("--router-eligible/--no-router-eligible", default=True)
+@click.option("--no-sync", is_flag=True)
+def openrouter_add_cmd(model_id, coa_approved, router_eligible, no_sync):
+    """Add an OpenRouter model to [catalog_custom] using live API metadata."""
+    cat = _load_catalog()
+    if model_id in cat:
+        json_response(False, error=f"Model '{model_id}' already in catalog")
+        sys.exit(1)
+    try:
+        index = fetch_openrouter_index_with_fallback()
+    except Exception as e:
+        json_response(False, error=f"OpenRouter API unavailable: {e}")
+        sys.exit(1)
+    or_model = index.get(model_id)
+    if not or_model:
+        json_response(False, error=f"Model '{model_id}' not found on OpenRouter")
+        sys.exit(1)
+    from openrouter_catalog import is_chat_capable
+    if not is_chat_capable(or_model):
+        json_response(False, error=f"Model '{model_id}' is not chat-capable (no text output)")
+        sys.exit(1)
+    if coa_approved is None:
+        coa_approved = _library_coa_flag(model_id)
+    ctx = or_model.get("context_length") or 131072
+    summary = or_model_summary(or_model)
+    row = {
+        "class": "cloud",
+        "provider": "openrouter",
+        "enabled": True,
+        "coa": coa_approved,
+        "ctx_recommended": 0,
+        "ctx_max": int(ctx) if ctx else 131072,
+        "work_modality": summary["work_modality"],
+        "input_modalities": summary["input_modalities"],
+        "output_modalities": summary["output_modalities"],
+        "router_eligible": router_eligible,
+        "label": summary["label"],
+    }
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    try:
+        if _library_row(model_id):
+            _select_known_catalog_key(model_id, coa_override=coa_approved)
+        else:
+            value = catalog_row_to_value(row)
+            for path in targets:
+                _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    try:
+        from openrouter_catalog import patch_models_ini_openrouter_pricing
+        for path in targets:
+            patch_models_ini_openrouter_pricing(path, keys=[model_id])
+    except Exception:
+        pass
+    payload = {
+        "action": "openrouter_add",
+        "key": model_id,
+        "label": summary["label"],
+        "driver_hints": _driver_hints_for_model(model_id, row),
+    }
+    _auto_sync_and_respond(payload, not no_sync)
+
+
+@openrouter_cmd.command("patch-template")
+@click.option("--models-ini", "models_ini", default=None, help="Path to models.ini template")
+def openrouter_patch_template_cmd(models_ini):
+    """Refresh OpenRouter metadata on [catalog] OR rows and [catalog_pricing] for all catalog keys."""
+    from openrouter_catalog import patch_models_ini_openrouter_rows, patch_models_ini_openrouter_pricing
+    if not models_ini:
+        models_ini = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "models.ini",
+        )
+    try:
+        updated = patch_models_ini_openrouter_rows(models_ini)
+        priced = patch_models_ini_openrouter_pricing(models_ini, keys=None)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    json_response(True, action="openrouter_patch_template", updated=updated, count=len(updated),
+                  pricing_updated=priced, pricing_count=len(priced), path=models_ini)
+
+
+# ─── Provider-agnostic catalog source (xAI / OpenAI / Anthropic / Google) ─────
+# Same "import from provider" pattern as the OpenRouter group, generalized to
+# each direct-API provider via provider_catalog.
+
+_PROVIDER_DEFAULT_MODEL_PARAMS = json.dumps({
+    "reasoning_effort": "none",
+    "allowed_reasoning_efforts": ["none", "minimal", "low", "medium", "high"],
+}, separators=(",", ":"))
+
+
+def _setup_ini_live_paths() -> list[str]:
+    """Deployed setup.ini plus the source copy next to setup.sh, if present."""
+    paths = [SETUP_INI_CANONICAL]
+    src = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "setup.ini",
+    )
+    if src not in paths:
+        paths.append(src)
+    return [p for p in paths if os.path.isfile(p)]
+
+
+def _append_setup_csv(section, key, value):
+    """Append ``value`` to a comma-separated setup.ini key (every live copy)."""
+    _forget_catalog_removed(value)
+    for ini in _setup_ini_live_paths():
+        existing = _read_ini_csv(section, key)[0]
+        if value not in existing:
+            existing.append(value)
+            try:
+                _update_ini_key(ini, section, key, ",".join(existing))
+            except Exception:
+                pass
+
+
+def _drop_setup_csv(section, option, value):
+    """Remove ``value`` from a comma-separated setup.ini key (every live copy)."""
+    import configparser
+    for ini in _setup_ini_live_paths():
+        cfg = configparser.ConfigParser()
+        try:
+            cfg.read(ini)
+        except configparser.Error:
+            continue
+        if not cfg.has_option(section, option):
+            continue
+        items = [m.strip() for m in cfg.get(section, option).split(",") if m.strip()]
+        if value not in items:
+            continue
+        try:
+            _update_ini_key(ini, section, option, ",".join(m for m in items if m != value))
+        except Exception:
+            pass
+
+
+def _drop_catalog_key_from_setup_ini(key):
+    """Drop a catalog key from every setup.ini activation CSV."""
+    _drop_setup_csv("local_ai", "local_models", key)
+    slugs = list(_read_ini_csv("third_party", "providers")[0] or [])
+    for slug in dict.fromkeys([*slugs, "xai", "openai", "anthropic", "openrouter"]):
+        _drop_setup_csv("third_party", f"{slug}_models", key)
+
+
+def _catalog_removed_keys() -> set[str]:
+    """Operator-removed catalog keys (survive --update via [catalog_removed])."""
+    import configparser
+    out: set[str] = set()
+    for path in _MODELS_INI_PATHS:
+        if not os.path.isfile(path):
+            continue
+        cfg = configparser.ConfigParser(delimiters=("=",), strict=False)
+        cfg.optionxform = str
+        try:
+            cfg.read(path)
+        except configparser.Error:
+            continue
+        if not cfg.has_section("catalog_removed"):
+            continue
+        out.update(k.strip() for k in cfg.options("catalog_removed") if k.strip())
+    return out
+
+
+def _remember_catalog_removed(key):
+    for path in _models_ini_write_targets():
+        _upsert_models_ini_entry(path, "catalog_removed", key, "1")
+
+
+def _forget_catalog_removed(key):
+    for path in _models_ini_write_targets():
+        _remove_ini_entry(path, "catalog_removed", key)
+
+
+@model.group("source")
+def source_cmd():
+    """Import models from a configured provider's Models API into the catalog."""
+    pass
+
+
+@source_cmd.command("providers")
+def source_providers_cmd():
+    """List providers with Import eligibility (API key present = configured)."""
+    if _pc is None:
+        json_response(False, error="provider_catalog unavailable on this install")
+        sys.exit(1)
+    rows = []
+    for slug in _pc.supported_providers():
+        ok, reason = _pc.provider_configured(slug)
+        rows.append({
+            "slug": slug,
+            "label": _pc.PROVIDER_LABEL.get(slug, slug),
+            "configured": ok,
+            "reason": reason,
+        })
+    json_response(True, providers=rows,
+                  configured=[r["slug"] for r in rows if r["configured"]])
+
+
+@source_cmd.command("status")
+@click.argument("provider")
+def source_status_cmd(provider):
+    """Report whether a provider is enabled and keyed."""
+    ok, reason = _pc.provider_configured(provider)
+    json_response(True, provider=provider, configured=ok, reason=reason if not ok else "")
+
+
+@source_cmd.command("list")
+@click.argument("provider")
+@click.option("--addable-only/--all", "addable_only", default=True,
+              help="Default: chat-capable models not already in catalog")
+@click.option("--table", "as_table", is_flag=True)
+@click.option("--refresh", is_flag=True, help="Bypass the cache and repull live")
+def source_list_cmd(provider, addable_only, as_table, refresh):
+    """List models from a provider's Models API."""
+    ok, reason = _pc.provider_configured(provider)
+    if not ok:
+        json_response(False, error=reason)
+        sys.exit(1)
+    import provider_model_cache
+    if refresh:
+        provider_model_cache.clear(provider)
+    try:
+        index = _pc.fetch_index(provider, use_cache=True)
+    except Exception as e:
+        json_response(False, error=f"{_pc.PROVIDER_LABEL.get(provider, provider)} API unavailable: {e}")
+        sys.exit(1)
+    cat = _load_catalog()
+    if addable_only:
+        models = _pc.list_addable_models(provider, cat.keys(), index)
+    else:
+        models = [
+            _pc.model_summary(provider, m)
+            for m in sorted(index.values(), key=lambda x: str(x.get("id") or x.get("name") or ""))
+            if _pc.is_chat_capable(provider, m)
+        ]
+    if as_table:
+        if not models:
+            click.echo("No models.")
+            return
+        click.echo(f"{'ID':<40} {'CTX':<10} {'IN→OUT':<18} WORK")
+        for r in models:
+            io = f"{r['input_modalities']}→{r['output_modalities']}"
+            click.echo(f"{r['id']:<40} {str(r.get('context_length') or '—'):<10} {io:<18} {r['work_modality']}")
+        return
+    json_response(True, provider=provider, count=len(models), models=models)
+
+
+@source_cmd.command("add")
+@click.argument("provider")
+@click.argument("model_id")
+@click.option("--coa-approved/--no-coa-approved", default=None,
+              help="Default: library-row coa flag, else false (tick COA on Import)")
+@click.option("--router-eligible/--no-router-eligible", default=True)
+@click.option("--no-sync", is_flag=True)
+def source_add_cmd(provider, model_id, coa_approved, router_eligible, no_sync):
+    """Add a provider model to [catalog_custom] using live API metadata."""
+    if provider == "openrouter":
+        json_response(False, error="Use `agictl model openrouter add` for OpenRouter")
+        sys.exit(1)
+    ok, reason = _pc.provider_configured(provider)
+    if not ok:
+        json_response(False, error=reason)
+        sys.exit(1)
+    cat = _load_catalog()
+    if model_id in cat:
+        json_response(False, error=f"Model '{model_id}' already in catalog")
+        sys.exit(1)
+    try:
+        index = _pc.fetch_index(provider)
+    except Exception as e:
+        json_response(False, error=f"{_pc.PROVIDER_LABEL.get(provider, provider)} API unavailable: {e}")
+        sys.exit(1)
+    raw = index.get(model_id)
+    if not raw:
+        json_response(False, error=f"Model '{model_id}' not found on {_pc.PROVIDER_LABEL.get(provider, provider)}")
+        sys.exit(1)
+    if not _pc.is_chat_capable(provider, raw):
+        json_response(False, error=f"Model '{model_id}' is not chat-capable (no text output)")
+        sys.exit(1)
+    summary = _pc.model_summary(provider, raw)
+    if coa_approved is None:
+        coa_approved = _library_coa_flag(model_id)
+    ctx = summary.get("context_length") or 131072
+    model_class = "cloud"
+    row = {
+        "class": model_class,
+        "provider": provider,
+        "enabled": True,
+        "coa": coa_approved,
+        "ctx_recommended": 0,
+        "ctx_max": int(ctx),
+        "work_modality": summary["work_modality"],
+        "input_modalities": summary["input_modalities"],
+        "output_modalities": summary["output_modalities"],
+        "router_eligible": router_eligible,
+        "label": summary["label"],
+    }
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    try:
+        if _library_row(model_id):
+            _select_known_catalog_key(model_id, coa_override=coa_approved)
+        else:
+            value = catalog_row_to_value(row)
+            for path in targets:
+                _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    # Best-effort pricing via OpenRouter (native list rates not exposed uniformly).
+    try:
+        from openrouter_catalog import patch_models_ini_openrouter_pricing
+        for path in targets:
+            patch_models_ini_openrouter_pricing(path, keys=[model_id])
+    except Exception:
+        pass
+    payload = {
+        "action": "source_add",
+        "provider": provider,
+        "key": model_id,
+        "label": summary["label"],
+        "driver_hints": _driver_hints_for_model(model_id, row),
+    }
+    _auto_sync_and_respond(payload, not no_sync)
+
+
+@source_cmd.command("refresh")
+@click.argument("provider")
+@click.option("--models-ini", "models_ini", default=None, help="Path to models.ini (default: all live copies)")
+def source_refresh_cmd(provider, models_ini):
+    """Refresh modalities + context on a provider's [catalog] rows from its live API."""
+    ok, reason = _pc.provider_configured(provider)
+    if not ok:
+        json_response(False, error=reason)
+        sys.exit(1)
+    paths = [models_ini] if models_ini else _models_ini_write_targets()
+    if not paths:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    updated: list[str] = []
+    try:
+        for path in paths:
+            updated = _pc.patch_models_ini_provider_rows(path, provider) or updated
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    json_response(True, action="source_refresh", provider=provider,
+                  updated=sorted(set(updated)), count=len(set(updated)))
+
+
+def _catalog_baseline_meta(ini):
+    """Parse stock metadata for migrate inject ({key: full row dict}).
+
+    Prefers ``[catalog_library]`` (shipped metadata; not the live Models tab),
+    then falls back to ``[catalog]`` for older trees that still embed stock rows
+    in the live baseline.
+    """
+    meta = {}
+    for section in ("catalog_library", "catalog"):
+        if not ini.has_section(section):
+            continue
+        for key, raw in ini.items(section):
+            k = key.strip()
+            if k in meta:
+                continue
+            parsed = parse_catalog_row(raw)
+            if parsed:
+                meta[k] = parsed
+    return meta
+
+
+def _library_coa_flag(model_id):
+    """True when [catalog_library] marks this key COA; else False."""
+    try:
+        ini = _models_ini_parser()
+        for path in _MODELS_INI_PATHS:
+            if os.path.isfile(path):
+                ini.read(path)
+                break
+        return bool(_catalog_baseline_meta(ini).get(model_id, {}).get("coa"))
+    except Exception:
+        return False
+
+
+def _library_row(model_id):
+    try:
+        ini = _models_ini_parser()
+        for path in _MODELS_INI_PATHS:
+            if os.path.isfile(path):
+                ini.read(path)
+                break
+        return _catalog_baseline_meta(ini).get(model_id)
+    except Exception:
+        return None
+
+
+def _select_known_catalog_key(model_id, *, coa_override=None):
+    """Mark a system preset as site-selected. No full custom row, no generic params."""
+    import json
+    targets = _models_ini_write_targets()
+    if not targets:
+        raise RuntimeError("models.ini not found")
+    lib = _library_row(model_id) or {}
+    for path in targets:
+        _upsert_models_ini_entry(path, "catalog_selected", model_id, "true")
+        if coa_override is not None and bool(lib.get("coa")) != bool(coa_override):
+            _upsert_models_ini_entry(
+                path, "catalog_overrides", model_id,
+                json.dumps({"coa": bool(coa_override)}, separators=(",", ":")),
+            )
+
+
+def _gemini_credentials_present() -> bool:
+    """True when Gemini API key or GCP vault credentials are configured."""
+    coa_env = "/etc/versa-agi/coa.env"
+    try:
+        if os.path.isfile(coa_env):
+            with open(coa_env, "r", encoding="utf-8") as f:
+                for line in f:
+                    m = re.match(r"^\s*GEMINI_API_KEY=(.+)$", line)
+                    if m:
+                        val = m.group(1).strip().strip('"').strip("'")
+                        if val and not val.startswith("#"):
+                            return True
+    except Exception:
+        pass
+    if os.path.isfile("/etc/versa-agi/vault/gcp-credentials.json"):
+        return True
+    # Do not treat setup.ini api_key alone as "enabled" — the shipped template
+    # may carry a placeholder/stale value while Step 9b skipped writing coa.env.
+    return False
+
+
+def _gemini_provider_enabled() -> bool:
+    """Google is on when listed in models.ini [providers_site]."""
+    try:
+        from provider_registry import _read_raw_section, site_enabled_slugs
+        from model_catalog import resolve_models_ini_path
+        path = resolve_models_ini_path()
+        site = _read_raw_section(path, "providers_site")
+        if "enabled" in site:
+            return "google" in site_enabled_slugs(path)
+    except Exception:
+        pass
+    return False
+
+
+def _activate_google_provider_on_key(updated_files=None, errors=None):
+    """Setting a Gemini key implies Google provider enable + inject cloud models."""
+    updated_files = updated_files if updated_files is not None else []
+    errors = errors if errors is not None else []
+    try:
+        from provider_registry import set_site_enabled
+        for path in _models_ini_write_targets():
+            set_site_enabled(path, "google", True)
+            if path not in updated_files:
+                updated_files.append(path)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"models.ini provider enable (google): {e}")
+    # Inject setup.ini cloud_models into live [catalog] (same as TP activate).
+    if not os.environ.get("AGICTL_AGENT_USER", ""):
+        _ensure_coa_shipped_on_activate("google", errors)
+        try:
+            _migrate_catalog_baseline(force=False)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"model migrate on activate (google): {e}")
+        _import_missing_coa_shipped("google", errors)
+    try:
+        _sync_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _build_migration_rows(target):
+    """Derive ([providers], [catalog]) from shipped selection + site overlays.
+
+    Returns (provider_rows, catalog_rows) as ordered lists of (key, value).
+    """
+    import configparser
+    from model_catalog import (
+        apply_catalog_overrides,
+        compute_live_catalog_keys,
+        local_provider_for_backend,
+    )
+    from provider_registry import load_merged_providers, provider_row_to_value
+
+    mini = _models_ini_parser()
+    if target and os.path.exists(target):
+        mini.read(target)
+
+    cat_meta = _catalog_baseline_meta(mini)
+
+    def _local_label(key, default):
+        if mini.has_section("local_models"):
+            return mini.get("local_models", key, fallback=default).strip() or default
+        return default
+
+    def _local_ctx(key, default_max):
+        if mini.has_section("context_windows"):
+            val = mini.get("context_windows", key, fallback="")
+            if "," in val:
+                try:
+                    a, b = val.split(",")[0].strip(), val.split(",")[1].strip()
+                    return int(a or "0"), int(b or str(default_max))
+                except ValueError:
+                    pass
+        return 0, default_max
+
+    local_models = _read_ini_csv("local_ai", "local_models")[0]
+    removed = _catalog_removed_keys()
+    providers = load_merged_providers(target)
+
+    or_index: dict = {}
+    try:
+        or_index = fetch_openrouter_index_with_fallback()
+    except Exception:
+        or_index = {}
+
+    provider_rows = []
+    for slug, prow in providers.items():
+        if prow.get("class") == "local":
+            continue
+        provider_rows.append((slug, provider_row_to_value(prow)))
+
+    catalog_rows = []
+    live_keys = compute_live_catalog_keys(target)
+    resolved: dict[str, dict] = {}
+    for k in live_keys:
+        if k in removed:
+            continue
+        m = cat_meta.get(k, {})
+        if not m and mini.has_section("catalog_custom") and mini.has_option("catalog_custom", k):
+            m = parse_catalog_row(mini.get("catalog_custom", k)) or {}
+        if not m:
+            continue
+        row = {
+            "class": m.get("class") or "cloud",
+            "provider": m.get("provider") or "",
+            "enabled": True,
+            "coa": bool(m.get("coa")),
+            "ctx_recommended": m.get("ctx_recommended", 0),
+            "ctx_max": m.get("ctx_max") or 131072,
+            "work_modality": m.get("work_modality", "balanced"),
+            "input_modalities": m.get("input_modalities", "text"),
+            "output_modalities": m.get("output_modalities", "text"),
+            "router_eligible": m.get("router_eligible", False),
+            "label": m.get("label", k),
+        }
+        if row["class"] == "third_party":
+            row["class"] = "cloud"
+        if row.get("provider") == "openrouter" and k in or_index:
+            row = enrich_catalog_dict(row, or_index[k], preserve_label=True)
+        resolved[k] = row
+    apply_catalog_overrides(resolved, target)
+    for k, row in resolved.items():
+        catalog_rows.append((k, catalog_row_to_value(row)))
+
+    gpu_backend = _resolve_gpu_backend()
+    local_provider = local_provider_for_backend(gpu_backend)
+    is_llamacpp = local_provider == "llamacpp"
+    # Cloud-only Client (install type 1) sets local_ai.enabled=false + mode=cloud.
+    # Local / Ollama / llama.cpp catalog rows only when Local AI topology is on.
+    local_ai_enabled = (
+        _read_ini_value("local_ai", "enabled", "false").strip().lower() == "true"
+    )
+    exec_mode = _read_ini_value("system", "mode", "cloud").strip().lower()
+    include_local = local_ai_enabled and exec_mode in ("local", "hybrid")
+
+    if include_local:
+        provider_rows.append((
+            "ollama",
+            f"{'false' if is_llamacpp else 'true'}|Local (Ollama)|ChatOllama",
+        ))
+        provider_rows.append((
+            "llamacpp",
+            f"{'true' if is_llamacpp else 'false'}|Local (llama.cpp / SYCL)|ChatOpenAI",
+        ))
+        # ── Local (advisory; pipeline-owned [local_models]/[context_windows]) ──
+        local_keys = local_models or (
+            [k for k, _ in mini.items("local_models")]
+            if mini.has_section("local_models") else [])
+        sycl_meta = load_sycl_meta(_resolve_models_ini_path())
+        for k in local_keys:
+            if k in removed:
+                continue
+            if migrate_skip_reason(sycl_meta.get(k)):
+                continue
+            rec, mx = _local_ctx(k, 4096)
+            m = cat_meta.get(k, {})
+            lbl = m.get("label", _local_label(k, k))
+            row = {
+                "class": "local", "provider": local_provider, "enabled": True, "coa": False,
+                "ctx_recommended": rec, "ctx_max": mx,
+                "work_modality": m.get("work_modality", "local"),
+                "input_modalities": m.get("input_modalities", "text"),
+                "output_modalities": m.get("output_modalities", "text"),
+                "router_eligible": m.get("router_eligible", False),
+                "label": lbl,
+            }
+            catalog_rows.append((k, catalog_row_to_value(row)))
+        provider_rows.append(("local_media", "true|Local media (sd-cli)|"))
+        media_keys = []
+        if mini.has_section("media_bundles"):
+            media_keys = [k for k, _ in mini.items("media_bundles") if k and not k.startswith("#")]
+        for k in dict.fromkeys([*media_keys, *STOCK_MEDIA_CATALOG_KEYS]):
+            if k in removed:
+                continue
+            m = cat_meta.get(k, {})
+            if k not in STOCK_MEDIA_CATALOG_KEYS and m.get("provider") not in ("local_media", "", None):
+                continue
+            if k not in STOCK_MEDIA_CATALOG_KEYS and not m:
+                continue
+            row = {
+                "class": "local",
+                "provider": "local_media",
+                "enabled": True,
+                "coa": False,
+                "ctx_recommended": int(m.get("ctx_recommended") or 0),
+                "ctx_max": int(m.get("ctx_max") or 0),
+                "work_modality": m.get("work_modality", "local"),
+                "input_modalities": m.get("input_modalities", "text"),
+                "output_modalities": m.get("output_modalities", "image"),
+                "router_eligible": False,
+                "label": m.get("label") or CATALOG_LABELS.get(k) or f"{k} — Local sd-cli paint",
+            }
+            catalog_rows.append((k, catalog_row_to_value(row)))
+    else:
+        # Keep registry stubs disabled so a later Local AI enable + migrate can flip them.
+        provider_rows.append(("ollama", "false|Local (Ollama)|ChatOllama"))
+        provider_rows.append(
+            ("llamacpp", "false|Local (llama.cpp / SYCL)|ChatOpenAI")
+        )
+        provider_rows.append(("local_media", "false|Local media (sd-cli)|"))
+
+    return provider_rows, catalog_rows
+
+
+_BASELINE_PROVIDERS_HEADER = (
+    "# Provider Registry — BASELINE (generated from setup.ini by "
+    "`agictl model migrate`).\n"
+    "# DO NOT hand-edit; add/override providers via `agictl provider` "
+    "(writes [providers_custom]).")
+_BASELINE_CATALOG_HEADER = (
+    "# Unified Model Catalog — BASELINE (generated from setup.ini by "
+    "`agictl model migrate`).\n"
+    "# DO NOT hand-edit; add/override models via `agictl model catalog` "
+    "(writes [catalog_custom]).")
+
+
+def _modality_token_set(raw: str) -> set[str]:
+    return {x.strip() for x in (raw or "text").split(",") if x.strip()}
+
+
+def _refresh_catalog_custom_io_from_baseline(path: str, catalog_rows: list) -> int:
+    """Promote stock I/O metadata from fresh baseline onto [catalog_custom] overrides.
+
+    Custom rows survive migrate by design (disable snapshots, dashboard edits).
+    When the shipped template adds modalities, stale overrides must not shadow
+    the new baseline. Refresh input/output when baseline is a strict superset;
+    always preserve ``enabled`` from the custom row.
+    """
+    baseline: dict[str, dict] = {}
+    for key, raw in catalog_rows:
+        parsed = parse_catalog_row(raw)
+        if parsed:
+            baseline[key.strip()] = parsed
+
+    custom = _read_raw_section(path, "catalog_custom")
+    if not custom:
+        return 0
+
+    updated = 0
+    for key, custom_raw in custom.items():
+        base = baseline.get(key)
+        if not base:
+            continue
+        cust = parse_catalog_row(custom_raw)
+        if not cust:
+            continue
+        changed = False
+        base_in = _modality_token_set(base.get("input_modalities", "text"))
+        cust_in = _modality_token_set(cust.get("input_modalities", "text"))
+        if base_in > cust_in:
+            cust["input_modalities"] = base.get("input_modalities", "text")
+            changed = True
+        base_out = _modality_token_set(base.get("output_modalities", "text"))
+        cust_out = _modality_token_set(cust.get("output_modalities", "text"))
+        if base_out > cust_out:
+            cust["output_modalities"] = base.get("output_modalities", "text")
+            changed = True
+        if changed:
+            _upsert_models_ini_entry(path, "catalog_custom", key, catalog_row_to_value(cust))
+            updated += 1
+    return updated
+
+
+def _clear_ini_section(path, section):
+    """Empty an INI section's body in place (keeps the header). No-op if absent."""
+    if section in {l.strip()[1:-1] for l in open(path)
+                   if l.strip().startswith("[") and l.strip().endswith("]")}:
+        _replace_ini_section_body(path, section, [])
+
+
+def _seed_models_ini_if_missing() -> str | None:
+    """Create /etc/versa-agi/models.ini from a shipped stock/template if absent.
+
+    Returns the seeded path. Used so ``model migrate`` can populate
+    Providers/Models after a clean install that omitted models.ini
+    (setup.sh normally scaffolds from models.ini.stock first).
+    """
+    canonical = _MODELS_INI_PATHS[0]
+    if os.path.exists(canonical):
+        return canonical
+    # core-infra/agictl → ../../models.ini.stock (installer src/)
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_root = os.path.abspath(os.path.join(here, "..", ".."))
+    candidates = [
+        os.path.join(src_root, "models.ini.stock"),
+        os.path.join(src_root, "models.ini"),
+        os.path.join(here, "..", "config", "models.ini"),
+    ]
+    os.makedirs(os.path.dirname(canonical), exist_ok=True)
+    for c in candidates:
+        c = os.path.abspath(c)
+        if os.path.isfile(c):
+            shutil.copyfile(c, canonical)
+            return canonical
+    # Last resort: empty shell with required section headers so migrate can write.
+    with open(canonical, "w") as f:
+        f.write(
+            "# Seeded empty models.ini — baseline filled by model migrate\n"
+            "[providers]\n\n[providers_custom]\n\n[catalog_library]\n\n"
+            "[catalog]\n\n[catalog_custom]\n\n[model_params]\n\n"
+            "[model_params_custom]\n\n[local_models]\n\n[context_windows]\n\n"
+            "[sycl_models]\n"
+        )
+    return canonical
+
+
+def _migrate_catalog_baseline(force: bool = False) -> dict:
+    """Rebuild models.ini [catalog]/[providers] baseline from setup.ini CSVs.
+
+    Returns a stats dict. Raises FileNotFoundError / PermissionError on failure.
+    Used by ``agictl model migrate`` and by set-key / provider enable so stock
+    OpenRouter (etc.) rows appear when a provider is activated without a full
+    setup --update.
+    """
+    target = _resolve_models_ini_path()
+    if not target:
+        target = _seed_models_ini_if_missing()
+    if not target:
+        raise FileNotFoundError("models.ini not found")
+
+    provider_rows, catalog_rows = _build_migration_rows(target)
+    write_targets = _models_ini_write_targets() or [target]
+
+    custom_io_refreshed = 0
+    for path in write_targets:
+        _write_full_ini_section(path, "providers", provider_rows,
+                                header_comment=_BASELINE_PROVIDERS_HEADER)
+        _write_full_ini_section(path, "catalog", catalog_rows,
+                                header_comment=_BASELINE_CATALOG_HEADER)
+        if not force:
+            custom_io_refreshed += _refresh_catalog_custom_io_from_baseline(path, catalog_rows)
+        if force:
+            _clear_ini_section(path, "providers_custom")
+            _clear_ini_section(path, "catalog_custom")
+            _clear_ini_section(path, "model_params_custom")
+
+    return {
+        "models": len(catalog_rows),
+        "providers": len(provider_rows),
+        "custom_io_refreshed": custom_io_refreshed,
+        "files": write_targets,
+        "mode": "force-reset" if force else "baseline",
+    }
+
+
+@model.command("migrate")
+@click.option("--force", is_flag=True,
+              help="Factory reset: also wipe [catalog_custom]/[providers_custom] (discards all CLI/dashboard edits)")
+def model_migrate(force):
+    """Regenerate the setup.ini baseline ([catalog]/[providers]) in models.ini.
+
+    The **baseline** sections are rebuilt from setup.ini on every run, so model
+    additions, edits, and removals made in setup.ini always propagate. The
+    **user layer** ([catalog_custom]/[providers_custom], owned by the CLI and
+    dashboard) is left untouched and overlays the baseline at read time — so
+    runtime edits survive. `setup.sh` calls this (then `model sync`) on every run.
+
+    `--force` additionally wipes the user layer for a full factory reset to
+    setup.ini. Idempotent in both modes.
+    """
+    # Guard: `migrate` is an install/operator-time action — it regenerates the
+    # baseline from setup.ini (which only operators edit). The COA's own model work
+    # goes through `model catalog`/`provider`/`sync`; it never needs to migrate, and
+    # `--force` would let it factory-reset itself unattended. So restrict the whole
+    # command to the Primary User / operator. AGICTL_AGENT_USER is set by
+    # agictl-wrapper to the real OS caller for agent invocations; a direct
+    # root/PU/dashboard (sudo) call leaves it empty and is allowed (e.g. setup.sh).
+    if os.environ.get("AGICTL_AGENT_USER", ""):
+        json_response(
+            False,
+            error="'model migrate' is Primary User / operator only (run by setup.sh "
+                  "or the operator). Agents manage models via 'model catalog', "
+                  "'provider', and 'model sync'.",
+        )
+        sys.exit(1)
+
+    try:
+        stats = _migrate_catalog_baseline(force=force)
+    except FileNotFoundError as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    json_response(True, changed=True,
+                  mode=stats["mode"],
+                  models=stats["models"], providers=stats["providers"],
+                  custom_io_refreshed=stats["custom_io_refreshed"],
+                  files=stats["files"],
+                  message=(("Reset baseline and cleared the custom layer from setup.ini. "
+                            if force else
+                            "Regenerated [catalog]/[providers] baseline from setup.ini "
+                            "(custom layer preserved). ")
+                           + "Run 'agictl model sync' to refresh derived config."))
+
+
+# ─── Model Catalog Subcommand Group ─────────────────────
+# Full CRUD over the unified [catalog] section (all model classes).
+
+def _models_ini_write_targets():
+    """models.ini paths to write to (every existing copy). Errors if none exist."""
+    return [p for p in _MODELS_INI_PATHS if os.path.exists(p)]
+
+
+def _auto_sync_and_respond(base_payload, do_sync):
+    """Shared tail for mutating catalog/provider commands: optionally sync, then respond."""
+    if do_sync:
+        ok, sync_payload = _sync_catalog()
+        base_payload["synced"] = ok
+        if not ok:
+            base_payload["sync_error"] = sync_payload.get("error")
+            json_response(False, **base_payload)
+            sys.exit(1)
+    else:
+        base_payload["synced"] = False
+    json_response(True, **base_payload)
+
+
+def _driver_hints_for_model(key, model):
+    """Return non-blocking COA hints for declared non-text capability gaps."""
+
+    from model_drivers.registry import advise_driver_gaps
+
+    catalog = _load_catalog()
+    catalog[key] = dict(model)
+    return advise_driver_gaps(
+        key,
+        input_modalities=[
+            item.strip()
+            for item in str(model.get("input_modalities") or "").split(",")
+            if item.strip()
+        ],
+        output_modalities=[
+            item.strip()
+            for item in str(model.get("output_modalities") or "").split(",")
+            if item.strip()
+        ],
+        catalog=catalog,
+        providers=_load_providers(),
+    )
+
+
+@model.group()
+def catalog():
+    """Manage the unified model catalog (cloud, third-party, local)."""
+    pass
+
+
+@catalog.command("list")
+@click.option("--class", "model_class",
+              type=click.Choice(["cloud", "third_party", "local"]), default=None,
+              help="Filter by model class")
+@click.option("--table", "as_table", is_flag=True, help="Human-readable table instead of JSON")
+def catalog_list(model_class, as_table):
+    """List catalog entries, optionally filtered by class."""
+    from model_catalog import load_catalog_pricing
+    from harness.model_params import resolve_model_params
+    try:
+        from model_drivers.registry import catalog_driver_enrichment
+    except ImportError:
+        catalog_driver_enrichment = None
+    cat = _load_catalog()
+    providers = _load_providers()
+    pricing = load_catalog_pricing()
+    rows = []
+    want_class = "cloud" if model_class == "third_party" else model_class
+    for key, m in cat.items():
+        if want_class and m["class"] != want_class:
+            continue
+        row = {"key": key, **m}
+        if catalog_driver_enrichment is not None:
+            row.update(
+                catalog_driver_enrichment(
+                    key,
+                    m,
+                    catalog=cat,
+                    providers=providers,
+                )
+            )
+        else:
+            row.setdefault("driver_summary", "text-native")
+        resolved = resolve_model_params(key)
+        row["reasoning_effort"] = resolved.get("reasoning_effort") or "none"
+        pr = pricing.get(key)
+        if pr:
+            row["pricing"] = pr
+            row["prompt_per_m"] = pr.get("prompt_per_m", 0)
+            row["completion_per_m"] = pr.get("completion_per_m", 0)
+        rows.append(row)
+    if as_table:
+        if not rows:
+            click.echo("No catalog entries.")
+            return
+        click.echo(f"{'KEY':<32} {'CLASS':<12} {'WORK':<10} {'EN':<3} {'COA':<4} {'RTR':<4} {'$/M in':<8} {'$/M out':<8} {'I/O':<14} {'DRIVERS':<28} LABEL")
+        for r in rows:
+            io = f"{r.get('input_modalities','text')}→{r.get('output_modalities','text')}"
+            pin = r.get("prompt_per_m")
+            pout = r.get("completion_per_m")
+            pin_s = f"{pin:.4g}" if pin else "—"
+            pout_s = f"{pout:.4g}" if pout else "—"
+            click.echo(f"{r['key']:<32} {r['class']:<12} {r.get('work_modality','balanced'):<10} "
+                       f"{'✓' if r['enabled'] else '·':<3} {'✓' if r['coa'] else '·':<4} "
+                       f"{'✓' if r.get('router_eligible') else '·':<4} {pin_s:<8} {pout_s:<8} "
+                       f"{io:<14} {r['driver_summary']:<28} {r['label']}")
+        return
+    json_response(True, count=len(rows), models=rows)
+
+
+@catalog.command("add")
+@click.argument("key")
+@click.option("--class", "model_class", required=True,
+              type=click.Choice(["cloud", "third_party", "local"]))
+@click.option("--provider", required=True, help="Provider slug (must exist in [providers])")
+@click.option("--label", required=True, help="Display label for pickers")
+@click.option("--ctx-recommended", type=int, default=0, help="Recommended context window (0 for cloud)")
+@click.option("--ctx-max", type=int, default=0, help="Maximum context window (drives trim budget)")
+@click.option("--coa-approved/--no-coa-approved", default=False, help="Allow assignment to the COA")
+@click.option("--enabled/--disabled", default=True, help="Offer the model at runtime")
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default="balanced")
+@click.option("--input-modalities", default="text", help="CSV: text,image,audio,video")
+@click.option("--output-modalities", default="text", help="CSV: text,image,audio,video")
+@click.option("--router-eligible/--no-router-eligible", default=False, help="Include in auto-routing pool")
+@click.option("--gguf-repo", default=None, help="(local) HuggingFace repo — also registers [sycl_models]")
+@click.option("--gguf-file", default=None, help="(local) GGUF filename")
+@click.option("--size", "size_gb", type=int, default=None, help="(local) approximate GGUF size in GB")
+@click.option("--no-sync", is_flag=True, help="Skip regenerating derived config")
+def catalog_add(key, model_class, provider, label, ctx_recommended, ctx_max,
+                coa_approved, enabled, work_modality, input_modalities, output_modalities,
+                router_eligible, gguf_repo, gguf_file, size_gb, no_sync):
+    """Add a model to the catalog.
+
+    For remote models the provider must be enabled (and keyed) before the
+    model is routed at runtime. For local models, pass --gguf-* to also register
+    SYCL download metadata; run 'agictl model add <key>' afterwards to download.
+    """
+    if model_class == "third_party":
+        model_class = "cloud"
+    cat = _load_catalog()
+    if key in cat:
+        json_response(False, error=f"Model '{key}' already in catalog. Use 'catalog update'.")
+        sys.exit(1)
+    providers = _load_providers()
+    if provider not in providers:
+        json_response(False, error=f"Provider '{provider}' not in [providers]. "
+                      f"Add it first: agictl provider add {provider} --label '<name>' --class <ChatX>. "
+                      f"Known: {', '.join(providers.keys()) or '(none)'}")
+        sys.exit(1)
+    if model_class == "local" and provider not in ("ollama", "llamacpp", "local_media"):
+        json_response(False, error=f"Local models must use provider 'ollama', 'llamacpp', or 'local_media', not '{provider}'.")
+        sys.exit(1)
+
+    if model_class == "local" and gguf_repo and gguf_file:
+        try:
+            inspected = inspect_hf_source(f"hf://{gguf_repo}/{gguf_file}")
+        except HfIngestError as exc:
+            json_response(False, error=exc.message, code=exc.code, mutated=False)
+            sys.exit(1)
+        if inspected.classification == "media_pipeline":
+            json_response(
+                False,
+                error=inspected.next_step or "Media pipelines cannot be registered as SYCL chat models.",
+                classification=inspected.classification,
+                next_step=inspected.next_step,
+                mutated=False,
+            )
+            sys.exit(1)
+
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    _forget_catalog_removed(key)
+
+    model_row = {
+        "class": model_class, "provider": provider, "enabled": enabled, "coa": coa_approved,
+        "ctx_recommended": ctx_recommended, "ctx_max": ctx_max,
+        "work_modality": work_modality, "input_modalities": input_modalities,
+        "output_modalities": output_modalities, "router_eligible": router_eligible,
+        "label": label,
+    }
+    value = catalog_row_to_value(model_row)
+    try:
+        for path in targets:
+            # User additions live in the custom overlay — never clobbered by migrate.
+            _upsert_models_ini_entry(path, "catalog_custom", key, value)
+            # Local models: also seed legacy metadata + SYCL registry so the
+            # existing local pipeline/pickers see them (advisory this edition).
+            if model_class == "local":
+                _upsert_models_ini_entry(path, "local_models", key, label)
+                if ctx_max:
+                    _upsert_models_ini_entry(path, "context_windows", key,
+                                             f"{ctx_recommended},{ctx_max}")
+                if gguf_repo and gguf_file and size_gb:
+                    _upsert_models_ini_entry(path, "sycl_models", key,
+                                             f"{gguf_repo},{gguf_file},{size_gb}")
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    payload = {"model": key, "class": model_class, "provider": provider,
+               "message": f"Added '{key}' to catalog.",
+               "driver_hints": _driver_hints_for_model(key, model_row)}
+    if model_class == "local":
+        payload["hint"] = f"Run 'sudo agictl model add {key}' to download/enable at runtime."
+    _auto_sync_and_respond(payload, do_sync=not no_sync)
+
+
+@catalog.command("update")
+@click.argument("key")
+@click.option("--label", default=None)
+@click.option("--provider", default=None)
+@click.option("--class", "model_class", default=None,
+              type=click.Choice(["cloud", "third_party", "local"]))
+@click.option("--ctx-recommended", type=int, default=None)
+@click.option("--ctx-max", type=int, default=None)
+@click.option("--enable/--disable", "enabled", default=None, help="Enable or disable the model")
+@click.option("--coa-approve/--coa-revoke", "coa", default=None, help="Toggle COA eligibility")
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--input-modalities", default=None)
+@click.option("--output-modalities", default=None)
+@click.option("--router-eligible/--no-router-eligible", "router_eligible", default=None)
+@click.option("--no-sync", is_flag=True)
+def catalog_update(key, label, provider, model_class, ctx_recommended, ctx_max,
+                   enabled, coa, work_modality, input_modalities, output_modalities,
+                   router_eligible, no_sync):
+    """Update fields on an existing catalog entry (only provided fields change)."""
+    cat = _load_catalog()
+    if key not in cat:
+        json_response(False, error=f"Model '{key}' not in catalog.")
+        sys.exit(1)
+    m = cat[key]
+    if provider is not None:
+        providers = _load_providers()
+        if provider not in providers:
+            json_response(False, error=f"Provider '{provider}' not in [providers].")
+            sys.exit(1)
+        m["provider"] = provider
+    if model_class is not None:
+        m["class"] = "cloud" if model_class == "third_party" else model_class
+    if label is not None:
+        m["label"] = label
+    if ctx_recommended is not None:
+        m["ctx_recommended"] = ctx_recommended
+    if ctx_max is not None:
+        m["ctx_max"] = ctx_max
+    if enabled is not None:
+        m["enabled"] = enabled
+    if coa is not None:
+        m["coa"] = coa
+    if work_modality is not None:
+        m["work_modality"] = work_modality
+    if input_modalities is not None:
+        m["input_modalities"] = input_modalities
+    if output_modalities is not None:
+        m["output_modalities"] = output_modalities
+    if router_eligible is not None:
+        m["router_eligible"] = router_eligible
+
+    value = catalog_row_to_value(m)
+    try:
+        for path in _models_ini_write_targets():
+            # Edits always land in the custom overlay — for a baseline model this
+            # writes a full-row override that wins at read time (and survives migrate).
+            _upsert_models_ini_entry(path, "catalog_custom", key, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    _auto_sync_and_respond(
+        {
+            "model": key,
+            "origin": m.get("origin"),
+            "message": f"Updated '{key}'.",
+            "driver_hints": _driver_hints_for_model(key, m),
+        },
+        do_sync=not no_sync,
+    )
+
+
+@catalog.command("remove")
+@click.argument("key")
+@click.option("--no-sync", is_flag=True)
+def catalog_remove(key, no_sync):
+    """Remove a model from the catalog and setup.ini activation lists.
+
+    Drops the key from setup.ini CSVs, deletes user-layer catalog/params rows,
+    records ``[catalog_removed]`` so a later ``--update`` migrate does not
+    re-inject a stock list entry, then rebuilds the [catalog] baseline.
+    """
+    cat = _load_catalog()
+    if key not in cat:
+        json_response(False, error=f"Model '{key}' not in catalog.")
+        sys.exit(1)
+
+    try:
+        _drop_catalog_key_from_setup_ini(key)
+        _remember_catalog_removed(key)
+        for path in _models_ini_write_targets():
+            _remove_ini_entry(path, "catalog_custom", key)
+            _remove_ini_entry(path, "local_models", key)
+            _remove_ini_entry(path, "model_params_custom", f"model:{key}")
+        _migrate_catalog_baseline(force=False)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    _auto_sync_and_respond(
+        {
+            "model": key,
+            "disabled_only": False,
+            "message": f"Removed '{key}' from catalog and setup.ini.",
+        },
+        do_sync=not no_sync,
+    )
+
+
+@catalog.command("reset")
+@click.argument("key")
+@click.option("--params/--no-params", "clear_params", default=True,
+              help="Also clear [model_params_custom] for this model (default: yes)")
+@click.option("--no-sync", is_flag=True)
+def catalog_reset(key, clear_params, no_sync):
+    """Drop [catalog_custom] overrides for a baseline model and revert to setup.ini stock.
+
+    Custom-added models (origin=custom) have no baseline — use ``catalog remove``.
+    Clears the user-layer catalog row; optionally clears per-model default params too.
+    """
+    cat = _load_catalog()
+    if key not in cat:
+        json_response(False, error=f"Model '{key}' not in catalog.")
+        sys.exit(1)
+    if cat[key].get("origin") == "custom":
+        json_response(
+            False,
+            error=f"'{key}' is a custom model — no baseline to restore. Use 'catalog remove'.",
+        )
+        sys.exit(1)
+
+    removed_catalog = False
+    removed_params = False
+    try:
+        for path in _models_ini_write_targets():
+            if _remove_ini_entry(path, "catalog_custom", key):
+                removed_catalog = True
+            if clear_params and _remove_ini_entry(path, "model_params_custom", f"model:{key}"):
+                removed_params = True
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    if not removed_catalog and not removed_params:
+        json_response(
+            True,
+            model=key,
+            reset=False,
+            message=f"'{key}' is already on the setup.ini baseline (no custom overrides).",
+        )
+        return
+
+    parts = [f"Reset '{key}' to setup.ini baseline."]
+    if removed_catalog:
+        parts.append("Catalog override removed.")
+    if removed_params:
+        parts.append("Custom default params cleared.")
+    _auto_sync_and_respond(
+        {"model": key, "reset": True, "catalog_custom_cleared": removed_catalog,
+         "params_cleared": removed_params, "message": " ".join(parts)},
+        do_sync=not no_sync,
+    )
+
+
+def _require_pu_or_coa():
+    """Reject sub-agent callers for PU/COA-only writes."""
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        json_response(False, error=f"Permission denied (caller: {caller})")
+        sys.exit(1)
+
+
+@model.group()
+def feedback():
+    """PU/COA model preference log for triage routing."""
+    pass
+
+
+@feedback.command("add")
+@click.option("--key", "catalog_key", required=True, help="Catalog model key")
+@click.option("--preference", required=True, type=click.Choice(["prefer", "avoid"]))
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--task-hint", default=None)
+@click.option("--note", default=None)
+def feedback_add(catalog_key, preference, work_modality, task_hint, note):
+    """Add a model feedback entry."""
+    _require_pu_or_coa()
+    cat = _load_catalog()
+    if catalog_key not in cat:
+        json_response(False, error=f"Model '{catalog_key}' not in catalog")
+        sys.exit(1)
+    created_by = os.environ.get("AGICTL_AGENT_USER") or "pu"
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        dup = conn.execute(
+            """SELECT id FROM model_feedback
+               WHERE catalog_key=? AND preference=?
+                 AND COALESCE(work_modality, '') = COALESCE(?, '')""",
+            (catalog_key, preference, work_modality),
+        ).fetchone()
+        if dup:
+            conn.close()
+            json_response(
+                False,
+                error=(
+                    f"Duplicate feedback: '{catalog_key}' + {preference}"
+                    + (f" + {work_modality}" if work_modality else " (any modality)")
+                ),
+            )
+            sys.exit(1)
+        conn.execute(
+            """INSERT INTO model_feedback
+               (catalog_key, work_modality, task_hint, preference, note, created_by)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (catalog_key, work_modality, task_hint, preference, note, created_by),
+        )
+        conn.commit()
+        row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        json_response(True, action="feedback_add", id=row_id, catalog_key=catalog_key,
+                      preference=preference)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("list")
+@click.option("--key", "catalog_key", default=None)
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--table", "as_table", is_flag=True)
+def feedback_list(catalog_key, work_modality, as_table):
+    """List model feedback entries."""
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        q = "SELECT * FROM model_feedback WHERE 1=1"
+        params = []
+        if catalog_key:
+            q += " AND catalog_key=?"
+            params.append(catalog_key)
+        if work_modality:
+            q += " AND (work_modality=? OR work_modality IS NULL)"
+            params.append(work_modality)
+        q += " ORDER BY updated_at DESC"
+        rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+        conn.close()
+        if as_table:
+            if not rows:
+                click.echo("No feedback entries.")
+                return
+            click.echo(f"{'ID':<5} {'KEY':<28} {'PREF':<7} {'MOD':<10} {'BY':<8} NOTE")
+            for r in rows:
+                click.echo(f"{r['id']:<5} {r['catalog_key']:<28} {r['preference']:<7} "
+                           f"{(r.get('work_modality') or 'any'):<10} {r['created_by']:<8} "
+                           f"{(r.get('note') or '')[:40]}")
+            return
+        json_response(True, count=len(rows), feedback=local_time.localize(rows))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("show")
+@click.argument("feedback_id", type=int)
+def feedback_show(feedback_id):
+    """Show one feedback entry."""
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM model_feedback WHERE id=?", (feedback_id,)).fetchone()
+        conn.close()
+        if not row:
+            json_response(False, error=f"Feedback {feedback_id} not found")
+            sys.exit(1)
+        json_response(True, feedback=local_time.localize(dict(row)))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("update")
+@click.argument("feedback_id", type=int)
+@click.option("--preference", type=click.Choice(["prefer", "avoid"]), default=None)
+@click.option("--work-modality", type=click.Choice(WORK_MODALITIES), default=None)
+@click.option("--task-hint", default=None)
+@click.option("--note", default=None)
+def feedback_update(feedback_id, preference, work_modality, task_hint, note):
+    """Update a model feedback entry."""
+    _require_pu_or_coa()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        row = conn.execute("SELECT id FROM model_feedback WHERE id=?", (feedback_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Feedback {feedback_id} not found")
+            sys.exit(1)
+        updates, params = [], []
+        for col, val in (
+            ("preference", preference), ("work_modality", work_modality),
+            ("task_hint", task_hint), ("note", note),
+        ):
+            if val is not None:
+                updates.append(f"{col}=?")
+                params.append(val)
+        if not updates:
+            json_response(False, error="No fields to update")
+            sys.exit(1)
+        updates.append("updated_at=datetime('now')")
+        params.append(feedback_id)
+        conn.execute(f"UPDATE model_feedback SET {', '.join(updates)} WHERE id=?", params)
+        conn.commit()
+        conn.close()
+        json_response(True, action="feedback_update", id=feedback_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@feedback.command("remove")
+@click.argument("feedback_id", type=int)
+def feedback_remove(feedback_id):
+    """Remove a model feedback entry."""
+    _require_pu_or_coa()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        cur = conn.execute("DELETE FROM model_feedback WHERE id=?", (feedback_id,))
+        conn.commit()
+        conn.close()
+        if cur.rowcount == 0:
+            json_response(False, error=f"Feedback {feedback_id} not found")
+            sys.exit(1)
+        json_response(True, action="feedback_remove", id=feedback_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@model.command("routing-context")
+@click.option("--agent", "agent_name", required=True)
+@click.option("--assigned-model", required=True)
+@click.option("--routing-enabled", type=int, default=0)
+@click.option("--routing-mode", default="")
+@click.option("--attachments", default="", help="Comma-separated attachment paths")
+def model_routing_context(agent_name, assigned_model, routing_enabled, routing_mode, attachments):
+    """Build ephemeral routing JSON for lifeline/harness (stdout JSON or empty)."""
+    from harness.model_routing import build_routing_context, detect_required_input_modalities
+    paths = [p for p in attachments.split(",") if p.strip()] if attachments else []
+    ctx = build_routing_context(
+        agent_name=agent_name,
+        assigned_model=assigned_model,
+        routing_enabled=bool(routing_enabled),
+        routing_mode=routing_mode or None,
+        required_input_modalities=detect_required_input_modalities(paths),
+    )
+    if ctx:
+        print(json.dumps(ctx))
+    else:
+        print("")
+
+
+# ─── Model Params Subcommand Group ─────────────────────
+# CRUD over [model_params_custom] — layered generation defaults.
+
+def _validate_params_scope(scope: str) -> str:
+    if scope == "default":
+        return scope
+    if scope.startswith("provider:"):
+        raise click.BadParameter(
+            "Provider scopes are no longer supported — use 'model:<id>' or per-agent overrides."
+        )
+    if scope.startswith("model:") and len(scope) > len("model:"):
+        return scope
+    raise click.BadParameter(
+        "Scope must be 'default' or 'model:<id>'"
+    )
+
+
+def _build_params_json(temperature, reasoning_effort, reasoning_max_tokens, extra,
+                       allowed_reasoning_efforts=None, think_mode=None, base=None,
+                       web_search=None, traits=None):
+    from harness.model_params import build_params_layer_update
+    return build_params_layer_update(
+        base=base,
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
+        reasoning_max_tokens=reasoning_max_tokens,
+        allowed_reasoning_efforts=allowed_reasoning_efforts,
+        think_mode=think_mode,
+        extra=extra,
+        web_search=web_search,
+        traits=traits,
+    )
+
+
+@model.group()
+def params():
+    """Manage layered model generation parameters (temperature, reasoning, extra)."""
+    pass
+
+
+@params.command("list")
+@click.option("--table", "as_table", is_flag=True, help="Human-readable table instead of JSON")
+def params_list(as_table):
+    """List all configured parameter layers (default, model:*)."""
+    from harness.model_params import list_model_params, resolve_model_params
+    layers = list_model_params()
+    rows = []
+    for scope, raw in sorted(layers.items()):
+        resolved_hint = None
+        if scope.startswith("model:"):
+            model_id = scope.split(":", 1)[1]
+            resolved_hint = resolve_model_params(model_id)
+        rows.append({"scope": scope, "params": raw, "resolved_for_model": resolved_hint})
+    if as_table:
+        if not rows:
+            click.echo("No model parameter layers configured.")
+            return
+        click.echo(f"{'SCOPE':<40} PARAMS")
+        for r in rows:
+            click.echo(f"{r['scope']:<40} {json.dumps(r['params'], separators=(',', ':'))}")
+        return
+    json_response(True, count=len(rows), layers=rows)
+
+
+@params.command("get")
+@click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
+def params_get(scope):
+    """Get params for a scope, including effective resolution for model:* scopes."""
+    from harness.model_params import (
+        list_model_params,
+        resolve_model_params,
+        allowed_reasoning_efforts,
+        _load_model_params_custom_layers,
+    )
+    layers = list_model_params()
+    custom_layers = _load_model_params_custom_layers()
+    payload = {
+        "scope": scope,
+        "params": custom_layers.get(scope, {}),
+        "effective": layers.get(scope, {}),
+    }
+    if scope.startswith("model:"):
+        from harness.model_params import reasoning_always_on, traits_for
+        model_id = scope.split(":", 1)[1]
+        payload["resolved"] = resolve_model_params(model_id)
+        payload["allowed_reasoning_efforts"] = list(allowed_reasoning_efforts(model_id))
+        payload["reasoning_always_on"] = reasoning_always_on(model_id)
+        payload["traits"] = traits_for(model_id).as_dict()
+    json_response(True, **payload)
+
+
+@params.command("set")
+@click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
+@click.option("--temperature", type=float, default=None, help="Sampling temperature (0.0–2.0)")
+@click.option("--reasoning-effort",
+              type=click.Choice(["none", "minimal", "low", "medium", "high", "max", "xhigh"]),
+              default=None, help="Reasoning effort level")
+@click.option("--reasoning-max-tokens", type=int, default=None, help="Reasoning token budget")
+@click.option("--allowed-reasoning-efforts", default=None,
+              help="CSV override for allowed reasoning levels (e.g. none,low,high,xhigh)")
+@click.option("--think-mode", type=click.Choice(["boolean", "levels"]), default=None,
+              help="Ollama thinking mapping: boolean (on/off) or levels (low/medium/high)")
+@click.option("--extra", default=None, help="JSON object merged into the passthrough bag")
+@click.option("--web-search", type=click.Choice(["on", "off"]), default=None,
+              help="The provider's own web search for this model (billed per search)")
+@click.option("--traits", default=None,
+              help="JSON object overriding request traits, e.g. '{\"streaming\":true}'; '{}' clears")
+@click.option("--no-sync", is_flag=True, help="Skip regenerating inference endpoint config")
+def params_set(scope, temperature, reasoning_effort, reasoning_max_tokens,
+               allowed_reasoning_efforts, think_mode, extra, web_search, traits, no_sync):
+    """Set or update params for a scope (writes [model_params_custom])."""
+    from harness.model_params import list_model_params
+    if not any(v is not None for v in (
+        temperature, reasoning_effort, reasoning_max_tokens, allowed_reasoning_efforts,
+        think_mode, extra, web_search, traits,
+    )):
+        json_response(False, error="Provide at least one of --temperature, --reasoning-effort, "
+                      "--reasoning-max-tokens, --allowed-reasoning-efforts, --think-mode, "
+                      "--extra, --web-search, --traits")
+        sys.exit(1)
+    if web_search == "on" and scope.startswith("model:"):
+        from harness.model_params import web_search_route
+        if not web_search_route(scope.split(":", 1)[1]):
+            json_response(False, error=f"'{scope.split(':', 1)[1]}' has no provider web search route. "
+                          "It is available for Claude and Gemini models through OpenRouter, "
+                          "for Claude models on Anthropic's own API, and for GPT-5.6 and later "
+                          "on OpenAI's own API.")
+            sys.exit(1)
+    if traits is not None:
+        try:
+            parsed_traits = json.loads(traits)
+            if not isinstance(parsed_traits, dict):
+                raise ValueError("traits must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            json_response(False, error=f"Invalid --traits JSON: {e}")
+            sys.exit(1)
+    if extra is not None:
+        try:
+            parsed = json.loads(extra)
+            if not isinstance(parsed, dict):
+                raise ValueError("extra must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            json_response(False, error=f"Invalid --extra JSON: {e}")
+            sys.exit(1)
+    layers = list_model_params()
+    try:
+        merged = _build_params_json(
+            temperature, reasoning_effort, reasoning_max_tokens, extra,
+            allowed_reasoning_efforts=allowed_reasoning_efforts,
+            think_mode=think_mode,
+            base=layers.get(scope) or {},
+            web_search=None if web_search is None else web_search == "on",
+            traits=parsed_traits if traits is not None else None,
+        )
+    except ValueError as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    value = json.dumps(merged, separators=(",", ":"))
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "model_params_custom", scope, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    payload = {"scope": scope, "params": merged, "message": f"Set params for '{scope}'."}
+    json_response(True, **payload)
+
+
+@params.command("clear")
+@click.argument("scope", callback=lambda ctx, param, value: _validate_params_scope(value))
+@click.option("--no-sync", is_flag=True)
+def params_clear(scope, no_sync):
+    """Remove a custom params override (reverts to lower layers)."""
+    if scope == "default":
+        json_response(False, error="Cannot clear the system default — edit the baseline [model_params] template instead.")
+        sys.exit(1)
+    removed_any = False
+    try:
+        for path in _models_ini_write_targets():
+            if _remove_ini_entry(path, "model_params_custom", scope):
+                removed_any = True
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    if not removed_any:
+        json_response(False, error=f"No custom params found for scope '{scope}'")
+        sys.exit(1)
+    payload = {"scope": scope, "message": f"Cleared custom params for '{scope}'."}
+    json_response(True, **payload)
+
+
+# ─── Provider Command Group ─────────────────────────────
+# CRUD over the [providers] registry in models.ini.
+
+@cli.group()
+def provider():
+    """Manage cloud/local model providers (xAI, OpenAI, Anthropic, ...)."""
+    pass
+
+
+@provider.command("list")
+@click.option("--table", "as_table", is_flag=True)
+def provider_list(as_table):
+    """List registered providers and their enabled state."""
+    provs = _load_providers()
+    rows = [{"slug": s, **info} for s, info in provs.items()]
+    if as_table:
+        if not rows:
+            click.echo("No providers registered.")
+            return
+        click.echo(f"{'SLUG':<12} {'EN':<3} {'CLASS':<26} LABEL")
+        for r in rows:
+            click.echo(f"{r['slug']:<12} {'✓' if r['enabled'] else '·':<3} {r['cls']:<26} {r['label']}")
+        return
+    json_response(True, count=len(rows), providers=rows)
+
+
+@provider.command("add")
+@click.argument("slug")
+@click.option("--label", required=True, help="Display name (e.g. 'Mistral')")
+@click.option("--class", "cls", required=True, help="LangChain class (e.g. ChatOpenAI, ChatAnthropic)")
+@click.option("--enable/--disable", "enabled", default=False, help="Enable immediately")
+@click.option("--no-sync", is_flag=True)
+def provider_add(slug, label, cls, enabled, no_sync):
+    """Register a new provider. The API key is set separately via 'system set-key'."""
+    provs = _load_providers()
+    if slug in provs:
+        json_response(False, error=f"Provider '{slug}' already exists. Use 'provider enable/disable'.")
+        sys.exit(1)
+    targets = _models_ini_write_targets()
+    if not targets:
+        json_response(False, error="models.ini not found")
+        sys.exit(1)
+    value = f"{'true' if enabled else 'false'}|{label}|{cls}"
+    try:
+        for path in targets:
+            _upsert_models_ini_entry(path, "providers_custom", slug, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    _auto_sync_and_respond(
+        {"provider": slug, "enabled": enabled,
+         "message": f"Registered provider '{slug}'. Set its key with "
+                    f"'sudo agictl system set-key {slug} <key>' if supported."},
+        do_sync=not no_sync)
+
+
+@provider.command("update")
+@click.argument("slug")
+@click.option("--label", default=None, help="New display name")
+@click.option("--class", "cls", default=None, help="LangChain class (e.g. ChatOpenAI)")
+@click.option("--enable/--disable", "enabled", default=None, help="Enable or disable the provider")
+@click.option("--no-sync", is_flag=True)
+def provider_update(slug, label, cls, enabled, no_sync):
+    """Update fields on an existing provider (only provided fields change).
+
+    Edits always land in the user layer ([providers_custom]); for a setup.ini
+    baseline provider this writes a full-row override that wins at read time and
+    survives `model migrate`.
+    """
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found. Add it with 'provider add'.")
+        sys.exit(1)
+    info = provs[slug]
+    new_enabled = info["enabled"] if enabled is None else enabled
+    new_label = info["label"] if label is None else label
+    new_cls = info["cls"] if cls is None else cls
+    value = f"{'true' if new_enabled else 'false'}|{new_label}|{new_cls}"
+    try:
+        for path in _models_ini_write_targets():
+            _upsert_models_ini_entry(path, "providers_custom", slug, value)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    _auto_sync_and_respond(
+        {"provider": slug, "enabled": new_enabled, "origin": info.get("origin"),
+         "message": f"Updated provider '{slug}'."},
+        do_sync=not no_sync)
+
+
+# Third-party slugs that have matching setup.ini keys ({slug}_enabled / {slug}_api_key).
+_THIRD_PARTY_SETUP_SLUGS = frozenset({"xai", "openai", "anthropic", "openrouter"})
+
+
+def _setup_ini_write_targets():
+    """Canonical + source setup.ini paths that exist and should stay in sync."""
+    paths = []
+    if os.path.isfile(SETUP_INI_CANONICAL):
+        paths.append(SETUP_INI_CANONICAL)
+    source_ini = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "setup.ini",
+    )
+    try:
+        if os.path.isfile(source_ini) and os.path.realpath(source_ini) not in {
+            os.path.realpath(p) for p in paths
+        }:
+            paths.append(source_ini)
+    except OSError:
+        pass
+    return paths
+
+
+def _ensure_coa_shipped_on_activate(slug, errors=None):
+    """Enable the provider in site state so migrate injects shipped keys."""
+    errors = errors if errors is not None else []
+    try:
+        from provider_registry import set_site_enabled
+        for path in _models_ini_write_targets():
+            set_site_enabled(path, slug, True)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"providers_site enable ({slug}): {exc}")
+
+
+def _import_missing_coa_shipped(slug, errors=None):
+    """Live-import shipped keys still missing after migrate (COA-approved)."""
+    errors = errors if errors is not None else []
+    try:
+        from shipped_models import keys_for_provider
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"shipped_models import: {exc}")
+        return
+    provider = slug
+    try:
+        cat = _load_catalog()
+    except Exception:
+        cat = {}
+    for model_id in keys_for_provider(provider):
+        if model_id in cat:
+            continue
+        try:
+            _live_import_coa_key(provider, model_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"coa shipped import {provider}/{model_id}: {exc}")
+
+
+def _live_import_coa_key(provider, model_id):
+    """Import one catalog key via the live provider API into [catalog_custom]."""
+    if provider == "openrouter":
+        from openrouter_catalog import (
+            fetch_openrouter_index_with_fallback,
+            is_chat_capable,
+            or_model_summary,
+        )
+        index = fetch_openrouter_index_with_fallback()
+        raw = index.get(model_id)
+        if not raw:
+            raise RuntimeError(f"not found on OpenRouter")
+        if not is_chat_capable(raw):
+            raise RuntimeError("not chat-capable")
+        summary = or_model_summary(raw)
+        ctx = raw.get("context_length") or 131072
+        model_class = "cloud"
+        params = _OPENROUTER_DEFAULT_MODEL_PARAMS
+    else:
+        if _pc is None:
+            raise RuntimeError("provider catalog unavailable")
+        raw_index = _pc.fetch_index(provider)
+        raw = raw_index.get(model_id)
+        if not raw:
+            raise RuntimeError(f"not found on {provider}")
+        if not _pc.is_chat_capable(provider, raw):
+            raise RuntimeError("not chat-capable")
+        summary = _pc.model_summary(provider, raw)
+        ctx = summary.get("context_length") or 131072
+        model_class = "cloud"
+        params = _PROVIDER_DEFAULT_MODEL_PARAMS
+    if _library_row(model_id):
+        _select_known_catalog_key(model_id, coa_override=True)
+        return
+    row = {
+        "class": model_class,
+        "provider": provider,
+        "enabled": True,
+        "coa": True,
+        "ctx_recommended": 0,
+        "ctx_max": int(ctx) if ctx else 131072,
+        "work_modality": summary["work_modality"],
+        "input_modalities": summary["input_modalities"],
+        "output_modalities": summary["output_modalities"],
+        "router_eligible": True,
+        "label": summary["label"],
+    }
+    targets = _models_ini_write_targets()
+    if not targets:
+        raise RuntimeError("models.ini not found")
+    value = catalog_row_to_value(row)
+    for path in targets:
+        _upsert_models_ini_entry(path, "catalog_custom", model_id, value)
+
+
+def _activate_third_party_on_key(slug, updated_files=None, errors=None):
+    """Setting a third-party API key implies enable — keep setup.ini + models.ini aligned.
+
+    Import buttons (``model source providers``) gate on setup.ini ``{slug}_enabled``
+    for OpenRouter and on models.ini enabled for other providers. Historically
+    ``system set-key`` / the API Keys modal only wrote the key, so a freshly keyed
+    OpenRouter never appeared as a Model source until Step 9d or a manual enable.
+    """
+    updated_files = updated_files if updated_files is not None else []
+    errors = errors if errors is not None else []
+    if slug not in _THIRD_PARTY_SETUP_SLUGS:
+        return
+    try:
+        from provider_registry import set_site_enabled
+        for path in _models_ini_write_targets():
+            set_site_enabled(path, slug, True)
+            if path not in updated_files:
+                updated_files.append(path)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"providers_site enable ({slug}): {e}")
+    # Re-migrate stock {slug}_models from setup.ini into the catalog baseline,
+    # then sync paths.env — otherwise enabling a key only flips the provider
+    # flag and agitop never sees shipped OpenRouter rows (e.g. z-ai/glm-5.2).
+    # Skip when an agent is the caller (same guard as `model migrate`).
+    if not os.environ.get("AGICTL_AGENT_USER", ""):
+        _ensure_coa_shipped_on_activate(slug, errors)
+        try:
+            _migrate_catalog_baseline(force=False)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"model migrate on activate ({slug}): {e}")
+        _import_missing_coa_shipped(slug, errors)
+    try:
+        _sync_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _provider_set_enabled(slug, enabled, no_sync):
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found. Add it with 'provider add'.")
+        sys.exit(1)
+    info = provs[slug]
+    try:
+        from provider_registry import set_site_enabled
+        for path in _models_ini_write_targets():
+            set_site_enabled(path, slug, enabled)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    if not os.environ.get("AGICTL_AGENT_USER", ""):
+        try:
+            _migrate_catalog_baseline(force=False)
+        except Exception:  # noqa: BLE001
+            pass
+    _auto_sync_and_respond(
+        {"provider": slug, "enabled": enabled, "origin": info.get("origin"),
+         "message": f"Provider '{slug}' {'enabled' if enabled else 'disabled'}."},
+        do_sync=not no_sync)
+
+
+@provider.command("enable")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_enable(slug, no_sync):
+    """Enable a provider (its models become routable once a key is present)."""
+    _provider_set_enabled(slug, True, no_sync)
+
+
+@provider.command("disable")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_disable(slug, no_sync):
+    """Disable a provider (its models are removed from the runtime registry)."""
+    _provider_set_enabled(slug, False, no_sync)
+
+
+@provider.command("remove")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_remove(slug, no_sync):
+    """Remove a provider from the registry (catalog rows referencing it remain).
+
+    Custom providers are deleted; setup.ini **baseline** providers cannot be
+    deleted here (migrate would re-add them) and are *disabled* via a custom
+    override instead. To drop a baseline provider, remove it from setup.ini.
+    """
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found.")
+        sys.exit(1)
+    info = provs[slug]
+    baseline_backed = info.get("origin") in ("baseline", "override")
+    try:
+        for path in _models_ini_write_targets():
+            if baseline_backed:
+                value = f"false|{info['label']}|{info['cls']}"
+                _upsert_models_ini_entry(path, "providers_custom", slug, value)
+            else:
+                _remove_ini_entry(path, "providers_custom", slug)
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+    if baseline_backed:
+        msg = (f"'{slug}' is a setup.ini baseline provider — disabled via override "
+               f"(remove it from setup.ini to drop entirely).")
+    else:
+        msg = f"Removed custom provider '{slug}'."
+    _auto_sync_and_respond({"provider": slug, "disabled_only": baseline_backed,
+                            "message": msg}, do_sync=not no_sync)
+
+
+@provider.command("reset")
+@click.argument("slug")
+@click.option("--no-sync", is_flag=True)
+def provider_reset(slug, no_sync):
+    """Drop [providers_custom] overrides for a baseline provider and revert to setup.ini stock.
+
+    Custom-added providers have no baseline — use ``provider remove``.
+    """
+    provs = _load_providers()
+    if slug not in provs:
+        json_response(False, error=f"Provider '{slug}' not found.")
+        sys.exit(1)
+    if provs[slug].get("origin") == "custom":
+        json_response(
+            False,
+            error=f"'{slug}' is a custom provider — no baseline to restore. Use 'provider remove'.",
+        )
+        sys.exit(1)
+
+    removed = False
+    try:
+        for path in _models_ini_write_targets():
+            if _remove_ini_entry(path, "providers_custom", slug):
+                removed = True
+    except PermissionError:
+        json_response(False, error="permission denied writing models.ini (use sudo)")
+        sys.exit(1)
+
+    if not removed:
+        json_response(
+            True,
+            provider=slug,
+            reset=False,
+            message=f"'{slug}' is already on the setup.ini baseline (no custom override).",
+        )
+        return
+
+    _auto_sync_and_respond(
+        {"provider": slug, "reset": True,
+         "message": f"Reset '{slug}' to setup.ini baseline (custom override removed)."},
+        do_sync=not no_sync,
+    )
+
+
+@model.group()
+def registry():
+    """Manage the SYCL model registry (add, update, remove, list)."""
+    pass
+
+
+@registry.command("list")
+def registry_list():
+    """List all registered SYCL models from models.ini."""
+    reg = _load_sycl_registry()
+    if not reg:
+        click.echo("No SYCL models registered in models.ini [sycl_models].", err=True)
+        json_response(True, models=[])
+        return
+
+    # Also load context windows for display
+    import configparser
+    ini = _models_ini_parser()
+    for path in _MODELS_INI_PATHS:
+        if os.path.exists(path):
+            ini.read(path)
+            break
+
+    results = []
+    for name, info in reg.items():
+        ctx_rec, ctx_max = 0, 0
+        if ini.has_section("context_windows"):
+            ctx_val = ini.get("context_windows", name, fallback="")
+            if "," in ctx_val:
+                try:
+                    ctx_rec, ctx_max = int(ctx_val.split(",")[0].strip()), int(ctx_val.split(",")[1].strip())
+                except ValueError:
+                    pass
+        results.append({
+            "name": name,
+            "repo": info["repo"],
+            "file": info["file"],
+            "size_gb": info["size_gb"],
+            "ctx_recommended": ctx_rec,
+            "ctx_max": ctx_max,
+        })
+
+    json_response(True, models=results)
+
+
+@registry.command("add")
+@click.argument("name")
+@click.option("--repo", required=True, help="HuggingFace repository (e.g. unsloth/Llama-4-8B-GGUF)")
+@click.option("--file", "gguf_file", required=True, help="GGUF filename (e.g. Llama-4-8B-Q4_K_M.gguf)")
+@click.option("--size", "size_gb", required=True, type=int, help="Approximate GGUF size in GB")
+@click.option("--ctx-recommended", type=int, default=0, help="Recommended context window (tokens)")
+@click.option("--ctx-max", type=int, default=0, help="Maximum context window (tokens)")
+@click.option("--label", default="", help="Display label for agitop (e.g. 'Llama 4 8B — Dense, 128K context')")
+def registry_add(name, repo, gguf_file, size_gb, ctx_recommended, ctx_max, label):
+    """Register a new SYCL model in models.ini."""
+    # Check for duplicate
+    reg = _load_sycl_registry()
+    if name in reg:
+        json_response(False, error=f"Model '{name}' already exists. Use 'agictl model registry update {name}' instead.")
+        sys.exit(1)
+
+    try:
+        inspected = inspect_hf_source(f"hf://{repo}/{gguf_file}")
+        if inspected.classification == "media_pipeline":
+            json_response(
+                False,
+                error=inspected.next_step or "Media pipelines cannot be registered as SYCL chat models.",
+                classification=inspected.classification,
+                next_step=inspected.next_step,
+                mutated=False,
+            )
+            sys.exit(1)
+    except HfIngestError as exc:
+        json_response(False, error=exc.message, code=exc.code, mutated=False)
+        sys.exit(1)
+
+    # Write to all models.ini copies
+    entry_value = f"{repo},{gguf_file},{size_gb}"
+    for ini_path in _MODELS_INI_PATHS:
+        if os.path.exists(ini_path):
+            _update_models_ini_entry(ini_path, "sycl_models", name, entry_value)
+            # Also register context window if provided
+            if ctx_recommended > 0 or ctx_max > 0:
+                ctx_val = f"{ctx_recommended},{ctx_max}"
+                _update_models_ini_entry(ini_path, "context_windows", name, ctx_val)
+            # Also register display label
+            display_label = label if label else name
+            _update_models_ini_entry(ini_path, "local_models", name, display_label)
+
+    json_response(True, model=name, repo=repo, file=gguf_file, size_gb=size_gb,
+                  ctx_recommended=ctx_recommended, ctx_max=ctx_max,
+                  message=f"Registered '{name}' in SYCL model registry")
+
+
+@registry.command("update")
+@click.argument("name")
+@click.option("--repo", default=None, help="Updated HuggingFace repository")
+@click.option("--file", "gguf_file", default=None, help="Updated GGUF filename")
+@click.option("--size", "size_gb", default=None, type=int, help="Updated GGUF size in GB")
+@click.option("--ctx-recommended", type=int, default=None, help="Updated recommended context")
+@click.option("--ctx-max", type=int, default=None, help="Updated maximum context")
+@click.option("--label", default=None, help="Updated display label")
+def registry_update(name, repo, gguf_file, size_gb, ctx_recommended, ctx_max, label):
+    """Update an existing SYCL model in the registry."""
+    reg = _load_sycl_registry()
+    if name not in reg:
+        json_response(False, error=f"Model '{name}' not found in registry. Use 'agictl model registry add' first.")
+        sys.exit(1)
+
+    current = reg[name]
+    new_repo = repo if repo else current["repo"]
+    new_file = gguf_file if gguf_file else current["file"]
+    new_size = size_gb if size_gb is not None else current["size_gb"]
+
+    entry_value = f"{new_repo},{new_file},{new_size}"
+
+    # Update in all models.ini copies using direct sed-like replacement
+    for ini_path in _MODELS_INI_PATHS:
+        if os.path.exists(ini_path):
+            # Read, find and replace the sycl_models entry
+            with open(ini_path, "r") as f:
+                content = f.read()
+            import re
+            # Match the key within [sycl_models] section
+            pattern = rf'(^{re.escape(name)}\s*=\s*).*'
+            new_content = re.sub(pattern, rf'\g<1>{entry_value}', content, count=1, flags=re.MULTILINE)
+            if new_content != content:
+                with open(ini_path, "w") as f:
+                    f.write(new_content)
+
+            # Update context windows if provided
+            if ctx_recommended is not None or ctx_max is not None:
+                import configparser
+                ini = _models_ini_parser()
+                ini.read(ini_path)
+                old_rec, old_max = 4096, 131072
+                if ini.has_section("context_windows"):
+                    ctx_val = ini.get("context_windows", name, fallback="4096,131072")
+                    parts = ctx_val.split(",")
+                    if len(parts) == 2:
+                        try:
+                            old_rec, old_max = int(parts[0].strip()), int(parts[1].strip())
+                        except ValueError:
+                            pass
+                final_rec = ctx_recommended if ctx_recommended is not None else old_rec
+                final_max = ctx_max if ctx_max is not None else old_max
+                ctx_entry = f"{final_rec},{final_max}"
+                with open(ini_path, "r") as f:
+                    content = f.read()
+                pattern = rf'(^\[context_windows\].*?^{re.escape(name)}\s*=\s*).*'
+                new_content = re.sub(pattern, rf'\g<1>{ctx_entry}', content, count=1, flags=re.MULTILINE | re.DOTALL)
+                if new_content != content:
+                    with open(ini_path, "w") as f:
+                        f.write(new_content)
+
+            # Update label if provided
+            if label is not None:
+                with open(ini_path, "r") as f:
+                    content = f.read()
+                pattern = rf'(^\[local_models\].*?^{re.escape(name)}\s*=\s*).*'
+                new_content = re.sub(pattern, rf'\g<1>{label}', content, count=1, flags=re.MULTILINE | re.DOTALL)
+                if new_content != content:
+                    with open(ini_path, "w") as f:
+                        f.write(new_content)
+
+    json_response(True, model=name, repo=new_repo, file=new_file, size_gb=new_size,
+                  message=f"Updated '{name}' in SYCL model registry")
+
+
+@registry.command("remove")
+@click.argument("name")
+def registry_remove(name):
+    """Remove a SYCL model from the registry."""
+    reg = _load_sycl_registry()
+    if name not in reg:
+        json_response(False, error=f"Model '{name}' not found in SYCL registry.")
+        sys.exit(1)
+
+    for ini_path in _MODELS_INI_PATHS:
+        if os.path.exists(ini_path):
+            with open(ini_path, "r") as f:
+                lines = f.readlines()
+            # Remove from [sycl_models] section only
+            new_lines = []
+            in_sycl = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    in_sycl = (stripped == "[sycl_models]")
+                if in_sycl and stripped and not stripped.startswith("#") and not stripped.startswith("["):
+                    eq_pos = stripped.find("=")
+                    if eq_pos > 0 and stripped[:eq_pos].strip() == name:
+                        continue  # Skip this line
+                new_lines.append(line)
+            with open(ini_path, "w") as f:
+                f.writelines(new_lines)
+
+    json_response(True, model=name, message=f"Removed '{name}' from SYCL registry. Note: [context_windows] and [local_models] entries preserved.")
+
+def _update_ini_key(ini_path, section, key, value):
+    """Update a single key in an INI file in-place.
+
+    If the key already exists under [section], its value is replaced.
+    If the key does not exist but the section does, the key is appended
+    after the last non-blank line of that section.
+    Operates line-by-line to avoid regex mis-matches across sections.
+    """
+    with open(ini_path, "r") as f:
+        lines = f.readlines()
+
+    current_section = None
+    key_found = False
+    section_end_idx = -1  # last content line index within target section
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped[1:-1]
+            continue
+        if current_section == section:
+            if stripped and not stripped.startswith("#"):
+                section_end_idx = i
+            eq = stripped.find("=")
+            if eq > 0 and stripped[:eq].strip() == key and not key_found:
+                lines[i] = f"{key}={value}\n"
+                key_found = True
+
+    if not key_found and section_end_idx >= 0:
+        # Append after the last content line in the section
+        lines.insert(section_end_idx + 1, f"{key}={value}\n")
+
+    with open(ini_path, "w") as f:
+        f.writelines(lines)
+
+
+def _read_paths_env_key(key):
+    """Read a single value from paths.env."""
+    if not os.path.isfile(PATHS_ENV_FILE):
+        return None
+    with open(PATHS_ENV_FILE, "r") as f:
+        for line in f:
+            if line.strip().startswith(f"{key}="):
+                val = line.strip().split("=", 1)[1].strip().strip('"')
+                return val
+    return None
+
+
+# ═══════════════════════════════════════════════════════
+# 2. AGENT — Agent registry & status
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def agent():
+    """Agent registry, status, and lifecycle management."""
+    pass
+
+@agent.command("list")
+@click.option("--all", "show_all", is_flag=True, help="Include inactive agents")
+def agent_list(show_all):
+    """List agents as JSON."""
+    if show_all:
+        agents = agent_reader.get_all_agents()
+    else:
+        agents = agent_reader.get_active_agents()
+    print(json.dumps(local_time.localize(agents), indent=2, default=str))
+
+@agent.command("show")
+@click.argument("name")
+def agent_show(name):
+    """Return all DB fields for a specific agent as JSON."""
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+        conn.close()
+        if row:
+            print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
+        else:
+            json_response(False, error=f"Agent '{name}' not found")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@agent.command("add")
+@click.argument("name")
+@click.option("--role", default="dev", type=click.Choice(VALID_ROLES), help="Agent role (from Sub-Agent Role Registry)")
+def agent_add(name, role):
+    """Register a new sub-agent in the database (metadata only).
+
+    Creates a pending agent record (inactive=1, status=pending_approval).
+    The Primary User must approve via the agitop dashboard to provision
+    the OS user, home directory, and activate the agent for spawning.
+    """
+    name = name.lower()
+    os_user = f"agi-{name}"  # OS user gets agi- prefix; DB name is the social name
+    agent_root = f"/home/{os_user}"
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        # Guard: block creation if any inactive agent is pending approval
+        pending = conn.execute(
+            "SELECT name FROM agents WHERE inactive=1 AND protected=0"
+        ).fetchone()
+        if pending:
+            conn.close()
+            json_response(False, error=f"Agent creation blocked: '{pending['name']}' is still pending approval. "
+                          "Wait for the Primary User to approve or remove it before creating another agent.")
+            sys.exit(1)
+        # Check if agent already exists (idempotent)
+        existing = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+        if existing:
+            conn.close()
+            result = dict(existing)
+            result["note"] = "Agent already exists"
+            print(json.dumps({"success": True, **{k: str(v) if v is not None else None for k, v in result.items()}}))
+            return
+        role_label = ROLE_LABELS.get(role, role)
+
+        # ── Resolve per-role settings from role.ini (if present) ──
+        role_model = None
+        role_anchor_style = "compact"
+        poise_dir = os.path.join(ROLES_DIR, role)
+        role_ini = os.path.join(poise_dir, "role.ini") if os.path.isdir(poise_dir) else None
+        if role_ini and os.path.isfile(role_ini):
+            import configparser
+            cfg = configparser.ConfigParser()
+            try:
+                cfg.read(role_ini)
+                if cfg.has_option("model", "model"):
+                    _m = cfg.get("model", "model").strip()
+                    if _m:
+                        role_model = _m
+                if cfg.has_option("poise", "anchor_style"):
+                    _a = cfg.get("poise", "anchor_style").strip().lower()
+                    if _a in ("full", "compact"):
+                        role_anchor_style = _a
+            except Exception:
+                pass
+
+        # ── Read defaults from setup.ini (stock harness defaults when absent) ──
+        import agent_limits
+        default_timeout = agent_limits.DEFAULT_TIMEOUT_MINUTES
+        default_runaway = agent_limits.DEFAULT_RUNAWAY_LINES
+        default_max_turns = 500
+        default_tool_budget = 5000
+        default_resume_enabled = 1
+        default_resume_max = 50
+        # Canonical location: /etc/versa-agi/setup.ini
+        setup_ini = "/etc/versa-agi/setup.ini"
+        if not os.path.isfile(setup_ini):
+            # Dev fallback: relative to source tree
+            setup_ini = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "setup.ini")
+        if os.path.isfile(setup_ini):
+            import configparser
+            _ini = configparser.ConfigParser()
+            try:
+                _ini.read(setup_ini)
+                if _ini.has_option("agent", "timeout_minutes"):
+                    default_timeout = agent_limits.clamp_timeout(_ini.get("agent", "timeout_minutes"))
+                if _ini.has_option("agent", "runaway_threshold"):
+                    default_runaway = int(_ini.get("agent", "runaway_threshold"))
+            except Exception:
+                pass
+
+        # ── Resolve num_ctx from model context map ──
+        role_num_ctx = 0
+        if role_model:
+            try:
+                sys.path.insert(0, '/usr/local/lib/versa-agi')
+                from harness.model_context import get_model_context
+                recommended, _ = get_model_context(role_model)
+                role_num_ctx = recommended
+            except ImportError:
+                role_num_ctx = 4096  # Safe default for local models
+
+        # ── INSERT into agents DB (pending approval) ──
+        conn.execute(
+            "INSERT INTO agents (name, os_user, workspace, role, model, status, inactive, "
+            "protected, requested_by, timeout_minutes, runaway_threshold, "
+            "max_session_turns, tool_output_token_budget, resume_enabled, "
+            "resume_max_messages, anchor_style, num_ctx) "
+            "VALUES (?, ?, ?, ?, ?, 'pending_approval', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, name, agent_root, role_label, role_model, get_agent_name(),
+             default_timeout, default_runaway, default_max_turns, default_tool_budget,
+             default_resume_enabled, default_resume_max, role_anchor_style, role_num_ctx)
+        )
+        conn.commit()
+        conn.close()
+        result_data = dict(agent=name, os_user=os_user, role=role_label, workspace=agent_root,
+                           status="pending_approval", inactive=True)
+        if role_model:
+            result_data["model"] = role_model
+        json_response(True, **result_data,
+                      note="Agent registered. The Primary User must approve via the agitop dashboard "
+                           "to provision the OS user and activate for spawning.")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@agent.command("list-roles")
+def agent_list_roles():
+    """List available sub-agent role templates from the deployed registry."""
+    import configparser
+    roles = []
+    if os.path.isdir(ROLES_DIR):
+        for entry in sorted(os.listdir(ROLES_DIR)):
+            entry_path = os.path.join(ROLES_DIR, entry)
+            # Directory-based roles only: role_id/poise.md + role_id/role.ini
+            # (fixed registry layout — setup.sh prunes anything else)
+            if os.path.isdir(entry_path):
+                role_id = entry
+                poise_path = os.path.join(entry_path, "poise.md")
+                ini_path = os.path.join(entry_path, "role.ini")
+                role_data = {"id": role_id, "name": ROLE_LABELS.get(role_id, role_id)}
+                if os.path.isfile(poise_path):
+                    role_data["poise_path"] = poise_path
+                if os.path.isfile(ini_path):
+                    role_data["config_path"] = ini_path
+                    cfg = configparser.ConfigParser()
+                    try:
+                        cfg.read(ini_path)
+                        if cfg.has_option("role", "description"):
+                            role_data["description"] = cfg.get("role", "description")
+                        if cfg.has_option("model", "model"):
+                            model_val = cfg.get("model", "model").strip()
+                            if model_val:
+                                role_data["model"] = model_val
+                    except Exception:
+                        pass
+                roles.append(role_data)
+    if roles:
+        print(json.dumps(roles, indent=2))
+    else:
+        print(json.dumps({"error": f"No role templates found in {ROLES_DIR}"}))
+
+
+@agent.command("approve", hidden=True)
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Force re-provisioning of an already active agent.")
+def agent_approve(name, force):
+    """Approve a pending sub-agent — provisions OS user, scaffolds home, activates.
+
+    This command requires root privileges (useradd). It is called by the
+    agitop dashboard's 'Approve & Provision' button, NOT by agents directly.
+    """
+    import shutil
+    name = name.lower()
+    os_user = f"agi-{name}"  # OS user gets agi- prefix; DB name is the social name
+    agent_root = f"/home/{os_user}"
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            json_response(False, error=f"Agent '{name}' not found")
+            sys.exit(1)
+        if row["inactive"] == 0 and not force:
+            json_response(True, agent=name, note="Already active")
+            return
+
+        role_label = row["role"] or "Custom Agent"
+        reverse_roles = {v: k for k, v in ROLE_LABELS.items()}
+        role_id = reverse_roles.get(role_label, "custom")
+
+        # ── Resolve role template (fixed registry path, no fallbacks) ──
+        # The registry is woven and refreshed by setup.sh on every install/update.
+        # A missing template means the host deployment is broken — fail before
+        # provisioning anything.
+        poise_source = os.path.join(ROLES_DIR, role_id, "poise.md")
+        if not os.path.isfile(poise_source):
+            conn.close()
+            json_response(False, error=f"Role template missing: {poise_source} — "
+                                       "run 'sudo setup.sh --update' to deploy the roles registry")
+            sys.exit(1)
+
+        # ── Create OS user with dedicated home ──
+        # --user-group: create a per-user group matching os_user (required for §IX credential isolation)
+        # --groups agi_agents: add to shared collaboration group as supplementary
+        # agi_spawn: the accounts watchdog may start cycles as (agents only)
+        subprocess.run(["groupadd", "-f", "agi_spawn"], capture_output=True, text=True)
+        result = subprocess.run(
+            ["useradd", "--system", "--user-group", "--home-dir", agent_root, "--create-home",
+             "--shell", "/usr/sbin/nologin", "--groups", "agi_agents,agi_spawn", os_user],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            if "already exists" not in result.stderr:
+                conn.close()
+                json_response(False, error=f"Failed to create OS user '{os_user}': {result.stderr.strip()}")
+                sys.exit(1)
+
+        # ── Scaffold directory structure ──
+        for d in [os.path.join(agent_root, ".agent", "skills"),
+                  os.path.join(agent_root, ".agent", "config"),
+                  os.path.join(agent_root, "workspace")]:
+            os.makedirs(d, exist_ok=True)
+
+        # ── Copy poise template from deployed roles ──
+        agent_data_dir = f"/var/lib/versa-agi/{name}"
+        os.makedirs(agent_data_dir, exist_ok=True)
+        subprocess.run(["chown", f"watchdog:{os_user}", agent_data_dir], check=False)
+        subprocess.run(["chmod", "750", agent_data_dir], check=False)
+
+        # Create canonical poise: /etc/versa-agi/poise/{agent_name}.md (flat copy from role template)
+        # Lifeline and agitop resolve poise at this deterministic path.
+        # poise_source was validated above — the copy is unconditional.
+        poise_canonical = f"/etc/versa-agi/poise/{name}.md"
+        if name != "coa":
+            shutil.copy2(poise_source, poise_canonical)
+            subprocess.run(["chown", "watchdog:watchdog", poise_canonical], check=False)
+            subprocess.run(["chmod", "640", poise_canonical], check=False)
+            click.echo(f"  ✓ Poise deployed: {poise_canonical} (from roles/{role_id})")
+
+        # Also copy to /var/lib for agent-local reference
+        poise_dest = os.path.join(agent_data_dir, "poise.md")
+        shutil.copy2(poise_source, poise_dest)
+
+        # ── Create duties.md (COA-writable assignment brief) ──
+        duties_dest = os.path.join(agent_data_dir, "duties.md")
+        duties_is_default = False
+        if not os.path.exists(duties_dest):
+            # No h1/h2 headings — this file is injected verbatim under a
+            # '## ── DUTIES & ASSIGNMENT ──' section header by Lifeline, so its
+            # internal headings must start at ### to preserve the hierarchy.
+            with open(duties_dest, "w") as f:
+                f.write(f"**Agent:** {name}  |  **Role:** {role_label}\n\n")
+                f.write("### Duties\n\n_Define this agent's specific duties, projects, and objectives here._\n\n")
+                f.write("### Notes\n\n_Add any operational notes, constraints, or context._\n")
+            duties_is_default = True
+
+        # ── Create .agent/system.md placeholder ──
+        system_md = os.path.join(agent_root, ".agent", "system.md")
+        if not os.path.exists(system_md):
+            with open(system_md, "w") as f:
+                f.write("# System prompt — generated by Lifeline before each spawn\n")
+
+        # ── Create README ──
+        readme_path = os.path.join(agent_root, "README.md")
+        if not os.path.exists(readme_path):
+            with open(readme_path, "w") as f:
+                f.write(f"# Agent: {name}\n\n**Role:** {role_label}  \n**OS User:** `{os_user}`  \n**Home:** `{agent_root}`\n\n")
+                f.write("Provisioned by `agictl agent approve`.\n\n")
+                f.write("## Rules\n\n- ALL project work MUST be inside `workspace/<project>/` directories\n")
+                f.write("- Use `agictl` for ALL infrastructure interaction\n- NEVER create project files outside `workspace/`\n\n")
+                f.write("## Directory Layout\n\n```\n")
+                f.write(f"{os_user}/\n├── .agent/           # Agent metadata + system prompt\n│   ├── system.md     # Generated by Lifeline each spawn\n│   ├── skills/\n│   └── config/\n├── workspace/        # 770\n└── README.md\n```\n")
+
+        # ── Set ownership & permissions ──
+        subprocess.run(["chown", "-R", f"{os_user}:agi_agents", agent_root], check=False)
+        # The home itself: COA, watchdog and the installing user through
+        # agi_govern; the agent as its owner; no other agent.
+        subprocess.run(["groupadd", "-f", "agi_govern"], check=False)
+        subprocess.run(["chown", f"{os_user}:agi_govern", agent_root], check=False)
+        subprocess.run(["chmod", "770", agent_root], check=False)
+        subprocess.run(["chmod", "2770", os.path.join(agent_root, "workspace")], check=False)
+        subprocess.run(["chmod", "770", os.path.join(agent_root, ".agent")], check=False)
+        # 640, as setup and the audit set them: the agent reads its duties and poise and
+        # cannot change them. Duties change through `agent set-duties` (watchdog).
+        subprocess.run(["chown", f"watchdog:{os_user}", duties_dest], check=False)
+        subprocess.run(["chmod", "640", duties_dest], check=False)
+        subprocess.run(["chown", f"watchdog:{os_user}", poise_dest], check=False)
+        subprocess.run(["chmod", "640", poise_dest], check=False)
+        subprocess.run(["chmod", "664", readme_path], check=False)
+        
+        # ── Setup persistent data directories (CYCLES) ──
+        agent_cycles_dir = os.path.join(agent_data_dir, "cycles")
+        os.makedirs(agent_cycles_dir, exist_ok=True)
+        subprocess.run(["chown", "-R", f"{os_user}:{os_user}", agent_cycles_dir], check=False)
+        subprocess.run(["chmod", "755", agent_cycles_dir], check=False)
+        view_cache_dir = os.path.join(agent_data_dir, "view-cache")
+        os.makedirs(view_cache_dir, exist_ok=True)
+        subprocess.run(["chown", "-R", f"{os_user}:{os_user}", view_cache_dir], check=False)
+        subprocess.run(["chmod", "770", view_cache_dir], check=False)
+        # system.md: Lifeline writes, everyone reads (444)
+        system_md_file = os.path.join(agent_root, ".agent", "system.md")
+        if os.path.exists(system_md_file):
+            subprocess.run(["chown", f"watchdog:agi_agents", system_md_file], check=False)
+            subprocess.run(["chmod", "444", system_md_file], check=False)
+
+        # ── Auto-assign to shared system projects if they exist ──
+        # Shared system projects live physically in COA's workspace and are
+        # symlinked into every agent's workspace/ at creation time:
+        #   AGi-Tools — shared scripts and tooling
+        # Versa-BusinessAdmin is reserved + COA-only — do not add it here.
+        # AGi-Knowledgebase is decommissioned — do not auto-join agents to it.
+        SHARED_SYSTEM_PROJECTS = ["AGi-Tools"]
+        try:
+            conn_tasks = db_connect.connect_compat(tasks_db, timeout=5)
+            conn_tasks.row_factory = sqlite3.Row
+            for shared_name in SHARED_SYSTEM_PROJECTS:
+                shared_proj = conn_tasks.execute(
+                    "SELECT id, workspace_path FROM projects WHERE name=?", (shared_name,)
+                ).fetchone()
+                if not shared_proj:
+                    continue
+                shared_path = shared_proj["workspace_path"]
+                shared_id = shared_proj["id"]
+                shared_dir = os.path.basename((shared_path or "").rstrip(os.sep)) or shared_name
+                agent_shared_link = os.path.join(agent_root, "workspace", shared_dir)
+                if os.path.exists(shared_path) and not os.path.exists(agent_shared_link):
+                    os.symlink(shared_path, agent_shared_link)
+                    subprocess.run(["chown", "-h", f"{os_user}:agi_agents", agent_shared_link], check=False)
+
+                # Auto-assign physical db record to grant query access
+                conn_tasks.execute(
+                    "INSERT OR IGNORE INTO project_members (project_id, member_type, member_id, display_name, workspace_path, branch, roles) "
+                    "VALUES (?, 'agent', ?, ?, ?, 'main', 'contributor')",
+                    (shared_id, name, name.upper(), agent_shared_link)
+                )
+            conn_tasks.commit()
+            conn_tasks.close()
+        except Exception:
+            pass
+
+        # ── Clone COA's .env for Gemini API key ──
+        coa_env_path = "/etc/versa-agi/coa.env"
+        agent_env_path = f"/etc/versa-agi/{name}.env"
+        if os.path.exists(coa_env_path):
+            shutil.copy2(coa_env_path, agent_env_path)
+            subprocess.run(["chown", "watchdog:watchdog", agent_env_path], check=False)
+            subprocess.run(["chmod", "600", agent_env_path], check=False)
+
+        # ── Generate SSH keypair for Git operations ──
+        ssh_dir = os.path.join(agent_root, ".ssh")
+        key_path = os.path.join(ssh_dir, "versa_agi_ed25519")
+        pub_key_path = key_path + ".pub"
+        ssh_public_key = ""
+        if not os.path.exists(key_path):
+            os.makedirs(ssh_dir, exist_ok=True)
+            os.chmod(ssh_dir, 0o700)
+            subprocess.run(
+                ["ssh-keygen", "-t", "ed25519", "-f", key_path, "-N", "", "-C", f"{os_user}@versa-agi"],
+                capture_output=True, text=True, timeout=30
+            )
+            os.chmod(key_path, 0o600)
+            os.chmod(pub_key_path, 0o644)
+            subprocess.run(["chown", "-R", f"{os_user}:agi_agents", ssh_dir], check=False)
+            # SSH config for GitHub/GitLab
+            ssh_config = os.path.join(ssh_dir, "config")
+            config_entries = (
+                f"\nHost github.com\n  IdentityFile {key_path}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n"
+                f"\nHost gitlab.com\n  IdentityFile {key_path}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n"
+            )
+            with open(ssh_config, "w") as f:
+                f.write(config_entries)
+            os.chmod(ssh_config, 0o644)
+            subprocess.run(["chown", f"{os_user}:agi_agents", ssh_config], check=False)
+        if os.path.exists(pub_key_path):
+            with open(pub_key_path) as f:
+                ssh_public_key = f.read().strip()
+
+        # ── Configure git identity + credential helper ──
+        git_name = f"{name.capitalize()} (AGi Agent)"
+        # Read PU email from COA config if available
+        try:
+            with open("/etc/versa-agi/coa_config.json", "r") as f:
+                coa_cfg = json.load(f)
+            pu_email = coa_cfg.get("primary_user", {}).get("email", "")
+        except Exception:
+            pu_email = ""
+        git_email = pu_email if pu_email else f"{name}@versa-agi.local"
+        # Set git config for the agent's home directory
+        git_config_path = os.path.join(agent_root, ".gitconfig")
+        git_config_content = (
+            f"[user]\n\tname = {git_name}\n\temail = {git_email}\n"
+            f"[credential]\n\thelper = store\n"
+        )
+        with open(git_config_path, "w") as f:
+            f.write(git_config_content)
+        os.chmod(git_config_path, 0o644)
+        subprocess.run(["chown", f"{os_user}:agi_agents", git_config_path], check=False)
+
+        # ── Deploy system skills ──
+        # Same rsync mirror as 'agent deploy-skills' — excludes coa_only and
+        # still-valid agent_created shares (stale shares are --deleted).
+        try:
+            _skills_deployed, _ = _rsync_skills_to_agent(name, os_user)
+            click.echo(f"  ✓ Skills deployed: {_skills_deployed} shipped skills")
+        except RuntimeError as e:
+            click.echo(f"  ⚠ Skills deploy failed: {e} — run 'sudo agictl agent deploy-skills {name}'")
+
+        # ── Provision VersaVoice Identity + Config ──
+        # Lifeline requires /etc/versa-agi/{name}_config.json for every agent.
+        # This creates the VV sub-account and writes the config file with
+        # inherited credentials from the COA config.
+        agent_config_path = f"/etc/versa-agi/{name}_config.json"
+        vv_provisioned = False
+        if not os.path.exists(agent_config_path):
+            try:
+                # Read VV API token from COA config
+                coa_cfg_path = "/etc/versa-agi/coa_config.json"
+                vv_token = None
+                if os.path.exists(coa_cfg_path):
+                    with open(coa_cfg_path, "r") as cf:
+                        coa_cfg = json.load(cf)
+                    vv_token = coa_cfg.get("versavoice", {}).get("api_token")
+
+                if vv_token:
+                    # Derive display name: capitalize the agent OS name
+                    display_first = name.replace("-", " ").replace("_", " ").title()
+                    display_last = "(Agent)"
+                    vv_provisioned = provision_identity(
+                        name, vv_token,
+                        first_name=display_first,
+                        last_name=display_last,
+                        language="en",
+                        country="",
+                        voice="female",
+                        agents_db=agents_db,
+                        agent_key=name,
+                    )
+                else:
+                    # No VV token — create a minimal config so Lifeline doesn't skip this agent
+                    minimal_config = {
+                        "agent": name,
+                        "identity": {"first_name": name.title(), "last_name": "(Agent)", "language": "en"},
+                        "versavoice": {"sub_account_id": None, "api_token": None, "status": "pending_setup"},
+                    }
+                    with open(agent_config_path, "w") as f:
+                        json.dump(minimal_config, f, indent=2)
+                    subprocess.run(["chown", "watchdog:watchdog", agent_config_path], check=False)
+                    subprocess.run(["chmod", "600", agent_config_path], check=False)
+            except Exception:
+                # Non-fatal — agent can still run without VV comms
+                if not os.path.exists(agent_config_path):
+                    minimal_config = {
+                        "agent": name,
+                        "identity": {"first_name": name.title(), "last_name": "(Agent)", "language": "en"},
+                        "versavoice": {"sub_account_id": None, "api_token": None, "status": "pending_setup"},
+                    }
+                    with open(agent_config_path, "w") as f:
+                        json.dump(minimal_config, f, indent=2)
+                    subprocess.run(["chown", "watchdog:watchdog", agent_config_path], check=False)
+                    subprocess.run(["chmod", "600", agent_config_path], check=False)
+
+        # ── Activate in DB ──
+        conn.execute(
+            "UPDATE agents SET os_user=?, inactive=0, status='idle', updated_at=datetime('now') WHERE name=?",
+            (os_user, name)
+        )
+        conn.commit()
+        conn.close()
+        result_kwargs = dict(agent=name, status="approved", inactive=False, workspace=agent_root,
+                             wake_guidance="The first VersaVoice message sent to this agent "
+                                           "will trigger their first wake cycle.",
+                             ssh_public_key=ssh_public_key)
+        if duties_is_default:
+            result_kwargs["duties_warning"] = (
+                f"duties.md is still the default template. Use 'sudo agictl agent set-duties {name} <file>' "
+                "to provide COA-authored duties before the agent's first wake cycle."
+            )
+        json_response(True, **result_kwargs)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@agent.command("activate")
+@click.argument("name")
+def agent_activate(name):
+    """Set inactive=0 and clear circuit breaker if tripped. Also unfreezes tasks."""
+    name = name.lower()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT inactive, status FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found in registry")
+            sys.exit(1)
+
+        was_circuit_broken = (row["status"] or "") in ("circuit_breaker", "halted")
+        was_inactive = row["inactive"] == 1
+
+        if not was_inactive and not was_circuit_broken:
+            conn.close()
+            json_response(True, agent=name, note="Already active")
+            return
+
+        # Warn if exceeding concurrent limit (Lifeline enforces the actual cap)
+        warning = None
+        if was_inactive:
+            active_count = conn.execute("SELECT COUNT(*) as c FROM agents WHERE inactive=0").fetchone()["c"]
+            if active_count >= MAX_ACTIVE_AGENTS:
+                warning = f"Note: {active_count + 1} agents will be active (Lifeline concurrent cap: {MAX_ACTIVE_AGENTS}). Extra agents will be queued."
+
+        # Activate agent + clear circuit breaker status
+        conn.execute(
+            "UPDATE agents SET inactive=0, status=NULL, status_message=NULL, updated_at=datetime('now') WHERE name=?",
+            (name,)
+        )
+        conn.commit()
+        conn.close()
+
+        result = {"agent": name, "status": "active"}
+
+        # Unfreeze tasks if recovering from circuit breaker
+        if was_circuit_broken:
+            # Clear failed cycle records that caused the trip — prevents immediate re-trip
+            try:
+                cycles_db_path = os.environ.get("AGICTL_CYCLES_DB", "/var/lib/versa-agi/coa/cycles.db")
+                if os.path.exists(cycles_db_path):
+                    cconn = db_connect.connect_compat(cycles_db_path, timeout=5)
+                    cconn.execute(
+                        "DELETE FROM cycles WHERE id GLOB ? AND exit_code IN (1, 42, 55, 97, 99)",
+                        (f"{name}-[0-9]*",)
+                    )
+                    cconn.commit()
+                    cconn.close()
+            except Exception:
+                pass  # Non-fatal — breaker may re-trip but won't crash
+
+            try:
+                import subprocess
+                subprocess.run(
+                    ["/usr/local/bin/agictl", "task", "unfreeze-all", name],
+                    capture_output=True, timeout=10
+                )
+                result["circuit_breaker"] = "cleared"
+                result["tasks"] = "unfrozen"
+            except Exception:
+                result["circuit_breaker"] = "cleared"
+                result["tasks"] = "unfreeze failed — run 'agictl task unfreeze-all' manually"
+
+        if warning:
+            result["warning"] = warning
+        json_response(True, **result)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+def _coa_skills_dir(conn=None):
+    """COA .agent/skills directory from agents.db workspace."""
+    close = False
+    if conn is None:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        close = True
+    try:
+        row = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+    finally:
+        if close:
+            conn.close()
+    if not row:
+        return None
+    ws = row["workspace"] if isinstance(row, sqlite3.Row) else row[0]
+    if not ws:
+        return None
+    return os.path.join(ws, ".agent", "skills")
+
+
+def _valid_shared_agent_created_names(conn):
+    """agent_created shares that still exist on COA and should survive fleet --delete."""
+    skills_dir = _coa_skills_dir(conn)
+    rows = conn.execute(
+        "SELECT name FROM skills WHERE type='agent_created' AND scope='all' "
+        "AND status IN ('ready', 'synced', 'updated')"
+    ).fetchall()
+    valid = []
+    for row in rows:
+        name = row["name"] if isinstance(row, sqlite3.Row) else row[0]
+        if skills_dir and os.path.isfile(os.path.join(skills_dir, f"{name}.md")):
+            valid.append(name)
+    return valid
+
+
+def _remove_skill_dest(path, os_user):
+    """Remove a dest skill file or asset dir; fall back to the agent user."""
+    if not path or not os.path.lexists(path):
+        return
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        return
+    except OSError:
+        pass
+    if os_user:
+        subprocess.run(["sudo", "-u", os_user, "rm", "-rf", path], check=False)
+
+
+def _rsync_skills_to_agent(name, os_user):
+    """Mirror shipped system skills to a sub-agent's .agent/skills/ via rsync --delete.
+
+    Single implementation shared by 'agent deploy-skills' (refresh) and
+    'agent approve' (initial provision). COA-only skills (scope='coa_only')
+    are excluded. Only still-valid agent_created shares (file on COA,
+    scope=all, ready/synced/updated) are excluded from --delete.
+    Returns (deployed_count, asset_dirs_count); raises RuntimeError on failure.
+    """
+    agent_root = f"/home/{os_user}"
+    skills_source = "/home/watchdog/core-infra/skills/"
+    skills_dest = os.path.join(agent_root, ".agent", "skills") + "/"
+
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        coa_only_rows = conn.execute(
+            "SELECT name FROM skills WHERE scope='coa_only'"
+        ).fetchall()
+        keep_share_names = _valid_shared_agent_created_names(conn)
+        conn.close()
+    except Exception:
+        coa_only_rows = []
+        keep_share_names = []
+
+    if not os.path.isdir(agent_root):
+        raise RuntimeError(f"Agent workspace not found: {agent_root}")
+    if not os.path.isdir(skills_source):
+        raise RuntimeError(f"Skills source not found: {skills_source}")
+
+    os.makedirs(skills_dest, exist_ok=True)
+    # Set directory ownership per file manifest: {os_user}:agi_agents 775
+    subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
+    subprocess.run(["chmod", "775", skills_dest], check=False)
+
+    # Build rsync command with dynamic exclusions
+    rsync_cmd = [
+        "rsync", "-a", "--delete",
+        "--exclude", "README.md",          # Never deploy the skills index
+    ]
+    # Exclude COA-only skills from sub-agent deploys
+    for coa_row in coa_only_rows:
+        skill_name = coa_row["name"]
+        rsync_cmd.extend(["--exclude", f"{skill_name}.md"])
+        rsync_cmd.extend(["--exclude", f"{skill_name}/"])  # co-located assets
+    # Keep only still-valid shares. Stale share-skill copies are --deleted.
+    for skill_name in keep_share_names:
+        rsync_cmd.extend(["--exclude", f"{skill_name}.md"])
+        rsync_cmd.extend(["--exclude", f"{skill_name}/"])
+
+    rsync_cmd.extend([skills_source, skills_dest])
+
+    result = subprocess.run(rsync_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"rsync failed: {result.stderr.strip()}")
+
+    # rsync --exclude protects dest files from --delete. A skill promoted from
+    # agent_created (scope=all, previously share-skill'd) to shipped coa_only
+    # must still be retracted from sub-agents.
+    for coa_row in coa_only_rows:
+        skill_name = coa_row["name"]
+        leftover_md = os.path.join(skills_dest, f"{skill_name}.md")
+        leftover_dir = os.path.join(skills_dest, skill_name)
+        _remove_skill_dest(leftover_md, os_user)
+        _remove_skill_dest(leftover_dir, os_user)
+
+    # Retract dest copies that are not shipped and not a still-valid share.
+    # Prior --exclude left user-owned asset dirs that rsync --delete cannot
+    # remove when this process is watchdog (dir is 2755 agent-owned).
+    shipped_names = set()
+    src_root = skills_source.rstrip("/")
+    if os.path.isdir(src_root):
+        for fn in os.listdir(src_root):
+            if fn == "README.md":
+                continue
+            if fn.endswith(".md"):
+                shipped_names.add(fn[:-3])
+            elif os.path.isdir(os.path.join(src_root, fn)):
+                shipped_names.add(fn)
+    keep_names = set(keep_share_names)
+    for coa_row in coa_only_rows:
+        keep_names.add(coa_row["name"] if isinstance(coa_row, sqlite3.Row) else coa_row[0])
+    if os.path.isdir(skills_dest):
+        for item in os.listdir(skills_dest):
+            if item == "README.md":
+                continue
+            base = item[:-3] if item.endswith(".md") else item
+            if base in keep_names or base in shipped_names:
+                continue
+            _remove_skill_dest(os.path.join(skills_dest, item), os_user)
+
+    # rsync -a preserves source ownership (watchdog) — restore dir per §IX.4
+    subprocess.run(["chown", f"{os_user}:agi_agents", skills_dest], check=False)
+    subprocess.run(["chmod", "775", skills_dest], check=False)
+
+    # Post-rsync: lock shipped only (System Design §IX). Agent-authored stay writable.
+    deployed = 0
+    asset_dirs_deployed = 0
+    import glob
+    for skill_file in glob.glob(os.path.join(skills_dest, "*.md")):
+        base = os.path.basename(skill_file)
+        name = base[:-3] if base.endswith(".md") else base
+        if name in shipped_names:
+            subprocess.run(["chown", "watchdog:agi_agents", skill_file], check=False)
+            subprocess.run(["chmod", "440", skill_file], check=False)
+            deployed += 1
+        else:
+            subprocess.run(["chown", f"{os_user}:agi_agents", skill_file], check=False)
+            subprocess.run(["chmod", "664", skill_file], check=False)
+
+    for item in os.listdir(skills_dest):
+        item_path = os.path.join(skills_dest, item)
+        if not os.path.isdir(item_path):
+            continue
+        subprocess.run(["chown", "-R", f"{os_user}:agi_agents", item_path], check=False)
+        if item in shipped_names:
+            subprocess.run(["chmod", "-R", "755", item_path], check=False)
+        else:
+            for dirpath, dirnames, filenames in os.walk(item_path):
+                os.chmod(dirpath, 0o2775)
+                for fn in filenames:
+                    os.chmod(os.path.join(dirpath, fn), 0o664)
+        asset_dirs_deployed += 1
+
+    return deployed, asset_dirs_deployed
+
+
+@agent.command("deploy-skills", hidden=True)
+@click.argument("name")
+def agent_deploy_skills(name):
+    """Deploy system skills to a sub-agent's workspace via rsync.
+
+    Mirrors read-only system skills from /home/watchdog/core-infra/skills/
+    to the agent's .agent/skills/ directory using rsync --delete.
+    Skills removed from the source are automatically cleaned from the target.
+    COA-only skills (scope='coa_only') are excluded from sub-agent deploys.
+    Requires root privileges.
+    Called by COA via sudo agictl or by the agitop dashboard.
+    """
+    name = name.lower()
+    # Resolve os_user from agents.db
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT os_user FROM agents WHERE name=?", (name,)).fetchone()
+        conn.close()
+        os_user = row["os_user"] if row else f"agi-{name}"
+    except Exception:
+        os_user = f"agi-{name}"
+
+    try:
+        deployed, asset_dirs_deployed = _rsync_skills_to_agent(name, os_user)
+    except RuntimeError as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+    skills_dest = os.path.join(f"/home/{os_user}", ".agent", "skills") + "/"
+    json_response(True, agent=name, skills_deployed=deployed, asset_dirs_deployed=asset_dirs_deployed, skills_path=skills_dest)
+
+@agent.command("share-skill", hidden=True)
+@click.argument("skill_path")
+@click.option("--agent", "target_agent", default=None, help="Target specific agent (default: all active sub-agents)")
+def agent_share_skill(skill_path, target_agent):
+    """Share a custom skill file with sub-agents.
+
+    Copies a skill file to active sub-agents' .agent/skills/ directories.
+    Requires root privileges (called via sudo agictl).
+    COA uses this to distribute custom-created skills to team members.
+    """
+    import shutil
+    if not os.path.isfile(skill_path):
+        json_response(False, error=f"Skill file not found: {skill_path}")
+        sys.exit(1)
+    if not skill_path.endswith(".md"):
+        json_response(False, error="Skill files must be .md format")
+        sys.exit(1)
+
+    basename = os.path.basename(skill_path)
+
+    # Get target agents
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    if target_agent:
+        agents = conn.execute(
+            "SELECT name, os_user FROM agents WHERE name=? AND name NOT IN ('coa','watchdog')",
+            (target_agent.lower(),)
+        ).fetchall()
+    else:
+        agents = conn.execute(
+            "SELECT name, os_user FROM agents WHERE inactive=0 AND name NOT IN ('coa','watchdog')"
+        ).fetchall()
+    conn.close()
+
+    if not agents:
+        json_response(False, error="No target agents found")
+        sys.exit(1)
+
+    results = []
+    skill_name = basename.replace(".md", "")
+    # Check for co-located asset directory next to the skill file
+    asset_src = os.path.join(os.path.dirname(skill_path), skill_name)
+    has_assets = os.path.isdir(asset_src)
+
+    for ag in agents:
+        agent_name = ag["name"]
+        ag_os_user = ag["os_user"] or f"agi-{agent_name}"
+        skills_dest = f"/home/{ag_os_user}/.agent/skills"
+        if not os.path.isdir(skills_dest):
+            os.makedirs(skills_dest, exist_ok=True)
+            subprocess.run(["chown", f"{ag_os_user}:agi_agents", skills_dest], check=False)
+            subprocess.run(["chmod", "775", skills_dest], check=False)
+        dest_file = os.path.join(skills_dest, basename)
+        # Remove existing read-only file before overwriting (440 blocks shutil.copy2)
+        if os.path.exists(dest_file):
+            os.remove(dest_file)
+        shutil.copy(skill_path, dest_file)
+        # share-skill copies agent_created work — not shipped. Manifest: 664.
+        subprocess.run(["chown", f"{ag_os_user}:agi_agents", dest_file], check=False)
+        subprocess.run(["chmod", "664", dest_file], check=False)
+
+        # Copy co-located asset directory if it exists
+        if has_assets:
+            asset_dest = os.path.join(skills_dest, skill_name)
+            if os.path.isdir(asset_dest):
+                shutil.rmtree(asset_dest)
+            shutil.copytree(asset_src, asset_dest)
+            subprocess.run(["chown", "-R", f"{ag_os_user}:agi_agents", asset_dest], check=False)
+            for dirpath, _dirnames, filenames in os.walk(asset_dest):
+                os.chmod(dirpath, 0o2775)
+                for fn in filenames:
+                    os.chmod(os.path.join(dirpath, fn), 0o664)
+
+        results.append(agent_name)
+
+    json_response(True, skill=basename, deployed_to=results, count=len(results), has_assets=has_assets)
+
+@agent.command("set-duties", hidden=True)
+@click.argument("name")
+@click.argument("duties_file", type=click.Path(exists=True))
+def agent_set_duties(name, duties_file):
+    """Copy a duties file to /var/lib/versa-agi/<name>/duties.md.
+
+    COA authors the duties markdown and uses this command (via sudo agictl)
+    to provision it before the agent's first wake cycle. This is the only
+    supported writer of live duties — do not edit home/.agent/duties.md
+    (that path is not injected by Lifeline). Requires root privileges.
+    """
+    import shutil
+    name = name.lower()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name, os_user, protected FROM agents WHERE name=?", (name,)).fetchone()
+        conn.close()
+        if not row:
+            json_response(False, error=f"Agent '{name}' not found")
+            sys.exit(1)
+        if row["protected"] == 1:
+            json_response(False, error=f"Cannot set duties for protected agent '{name}'")
+            sys.exit(1)
+        os_user = row["os_user"] or f"agi-{name}"
+        agent_data_dir = f"/var/lib/versa-agi/{name}"
+        duties_dest = os.path.join(agent_data_dir, "duties.md")
+        if not os.path.isdir(agent_data_dir):
+            os.makedirs(agent_data_dir, exist_ok=True)
+            subprocess.run(["chown", f"watchdog:{os_user}", agent_data_dir], check=False)
+            subprocess.run(["chmod", "750", agent_data_dir], check=False)
+        shutil.copy2(duties_file, duties_dest)
+        subprocess.run(["chown", f"watchdog:{os_user}", duties_dest], check=False)
+        subprocess.run(["chmod", "640", duties_dest], check=False)
+        json_response(True, agent=name, duties_path=duties_dest,
+                      note=f"Duties copied from {duties_file}")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@agent.command("deactivate")
+@click.argument("name")
+def agent_deactivate(name):
+    """Set inactive=1. Blocked for protected agents (coa/watchdog)."""
+    name = name.lower()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT inactive, protected FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found in registry")
+            sys.exit(1)
+        if row["protected"]:
+            conn.close()
+            json_response(False, error=f"Cannot deactivate '{name}': agent is protected")
+            sys.exit(1)
+        if row["inactive"] == 1:
+            conn.close()
+            json_response(True, agent=name, note="Already inactive")
+            return
+        conn.execute("UPDATE agents SET inactive=1, updated_at=datetime('now') WHERE name=?", (name,))
+        conn.commit()
+        conn.close()
+        json_response(True, agent=name, status="inactive")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+CHAT_CLOSE_DIR = os.getenv("VERSA_STATE_DIR", "/var/lib/versa-agi")
+
+
+def _open_cycle_id(agent_name: str) -> str:
+    """The agent's running cycle (cycles.db row with no ended_at), or ''."""
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        row = conn.execute(
+            "SELECT id FROM cycles WHERE id GLOB ? AND ended_at IS NULL "
+            "ORDER BY started_at DESC LIMIT 1",
+            (f"{agent_name}-[0-9]*",),
+        ).fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+@agent.command("chat-close")
+@click.argument("name")
+@click.option("--reason", type=click.Choice(["requested", "shutdown"]), default="requested",
+              help="Why the chat closes (the agent is told)")
+@click.option("--deadline-epoch", "deadline_epoch", type=int, default=0,
+              help="Epoch seconds by which the cycle must be closed (the shutdown guard)")
+def agent_chat_close(name, reason, deadline_epoch):
+    """Close an agent's live chat gracefully (Primary User only).
+
+    The agent finishes its current reply, then gets a closing message and ends
+    its cycle with a handoff (state_live_chat.md LCH-23). Unlike `agent kill`,
+    nothing is halted; the next message wakes the agent as usual.
+
+    With --reason shutdown the agent is told at its next safe point, in any
+    cycle, listening or not (state_host_services.md §1.4.1).
+    """
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="Permission denied. Only the Primary User can close an agent's chat "
+                                   "(agitop → agent → End chat).")
+        sys.exit(1)
+    name = (name or "").strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_-]*$", name):
+        json_response(False, error=f"Invalid agent name '{name}'.")
+        sys.exit(1)
+    cycle_id = _open_cycle_id(name)
+    if not cycle_id:
+        json_response(True, agent=name, closing=False,
+                      message=f"'{name}' has no cycle running — nothing to close.")
+        return
+    agent_dir = os.path.join(CHAT_CLOSE_DIR, name)
+    path = os.path.join(agent_dir, "chat_close")
+    try:
+        if not os.path.isdir(agent_dir):
+            raise FileNotFoundError(agent_dir)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(f"{cycle_id} {reason}" + (f" {deadline_epoch}" if deadline_epoch > 0 else "") + "\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception as e:
+        json_response(False, error=f"Could not request the close: {e}")
+        sys.exit(1)
+    json_response(True, agent=name, closing=True, cycleId=cycle_id, reason=reason,
+                  message=f"'{name}' will finish its current reply, hand off, and end its cycle.")
+
+
+@agent.command("kill")
+@click.argument("name")
+def agent_kill(name):
+    """Terminate a running sub-agent's cycle and prevent re-spawning.
+
+    COA-only command. Kills the agent's harness process via pkill,
+    sets status to 'halted' and inactive=1. Recovery via 'agictl agent activate'.
+    Protected agents (coa, watchdog) cannot be killed.
+    """
+    import subprocess as _sp
+    name = name.lower()
+
+    # Guard: only COA or watchdog can kill agents.
+    # AGICTL_AGENT_USER is set by the agictl-wrapper to the real OS caller and
+    # forwarded across the sudo->watchdog elevation (unlike VERSA_AGENT_NAME,
+    # which sudo strips). Empty => direct root/PU invocation, which is allowed.
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller not in ("coa", "watchdog"):
+        json_response(False, error=f"Permission denied: only COA or watchdog can kill agents (caller: {caller})")
+        sys.exit(1)
+
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name, os_user, protected, inactive, status FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found in registry")
+            sys.exit(1)
+        if row["protected"]:
+            conn.close()
+            json_response(False, error=f"Cannot kill '{name}': agent is protected")
+            sys.exit(1)
+
+        os_user = row["os_user"]
+        was_running = False
+
+        # Check if harness is running
+        check = _sp.run(
+            ["pgrep", "-u", os_user, "-f", "harness.agent_harness"],
+            capture_output=True, text=True
+        )
+        if check.returncode == 0 and check.stdout.strip():
+            was_running = True
+            # Kill the harness process — watchdog has permission via agi_agents sudoers
+            kill_result = _sp.run(
+                ["pkill", "-u", os_user, "-f", "harness.agent_harness"],
+                capture_output=True, text=True
+            )
+            if kill_result.returncode not in (0, 1):
+                # returncode 1 = no process found (race condition — already exited)
+                # Try fallback via sudo
+                _sp.run(
+                    ["sudo", "-u", os_user, "pkill", "-f", "harness.agent_harness"],
+                    capture_output=True, text=True, timeout=10
+                )
+
+        # Set status to halted + inactive regardless of whether it was running
+        caller_label = caller if caller else "Primary User (manual)"
+        conn.execute(
+            "UPDATE agents SET status='halted', status_message=?, inactive=1, updated_at=datetime('now') WHERE name=?",
+            (f"Cycle terminated by {caller_label}", name)
+        )
+        conn.commit()
+        conn.close()
+
+        result = {"agent": name, "status": "halted", "was_running": was_running, "terminated_by": caller_label}
+        if was_running:
+            result["note"] = "Harness process killed. Agent will not re-spawn until activated."
+        else:
+            result["note"] = "No running cycle found. Agent marked halted and will not spawn until activated."
+        json_response(True, **result)
+
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@agent.command("request-remove")
+@click.argument("name")
+@click.option("--reason", default="", help="Reason for removal request")
+def agent_request_remove(name, reason):
+    """Request removal of a sub-agent. Sets status to 'removal_requested' and deactivates.
+
+    This is the COA-level command — no root required. The Primary User must
+    confirm the removal via the agitop dashboard before the agent is purged.
+    """
+    name = name.lower()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name, protected, status FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found in registry")
+            sys.exit(1)
+        if row["protected"] == 1:
+            conn.close()
+            json_response(False, error=f"Cannot remove '{name}': agent is protected")
+            sys.exit(1)
+        if row["status"] == "removal_requested":
+            conn.close()
+            json_response(True, agent=name, note="Removal already requested — awaiting PU confirmation")
+            return
+
+        status_msg = reason if reason else "Removal requested — awaiting Primary User confirmation"
+        conn.execute(
+            "UPDATE agents SET status='removal_requested', inactive=1, status_message=?, updated_at=datetime('now') WHERE name=?",
+            (status_msg, name)
+        )
+        conn.commit()
+        conn.close()
+
+        # Notify Primary User via VersaVoice
+        config = get_config()
+        pu = config.get("primary_user", {})
+        sponsor_uid = pu.get("uid", "")
+        if sponsor_uid:
+            vv = config.get("versavoice", {})
+            token = vv.get("api_token")
+            sub_id = vv.get("sub_account_id")
+            if token and sub_id:
+                try:
+                    from comms import send_message
+                    msg_db = os.environ.get("AGICTL_MESSAGES_DB", "/var/lib/versa-agi/messages.db")
+                    notify_text = f"Agent '{name}' has been flagged for removal."
+                    if reason:
+                        notify_text += f" Reason: {reason}"
+                    notify_text += " Please confirm via the dashboard."
+                    send_message(token, sub_id, sponsor_uid, notify_text, "typed", msg_db)
+                except Exception:
+                    pass  # Non-fatal — PU will see it in agitop anyway
+
+        json_response(True, agent=name, status="removal_requested", message=status_msg)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@agent.command("confirm-remove", hidden=True)
+@click.argument("name")
+def agent_confirm_remove(name):
+    """Permanently remove a sub-agent after PU approval. Requires root.
+
+    This command is called by the agitop dashboard's 'Confirm Removal' button.
+    It performs: archive → VV cleanup → DB cleanup → config purge → home dir → OS user.
+    """
+    import shutil
+    from datetime import datetime as dt
+    name = name.lower()
+
+    if os.geteuid() != 0:
+        json_response(False, error="confirm-remove requires root privileges (sudo)")
+        sys.exit(1)
+
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name, protected, os_user, workspace, status FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found in registry")
+            sys.exit(1)
+        if row["protected"] == 1:
+            conn.close()
+            json_response(False, error=f"Cannot remove '{name}': agent is protected")
+            sys.exit(1)
+
+        workspace = row["workspace"] or ""
+        os_user = row["os_user"] or name
+        archive_path = None
+        vv_deleted = False
+
+        # Resolve actual workspace — try DB path first, then standard path
+        if not workspace or not os.path.isdir(workspace):
+            standard_path = f"/home/agi-{name}"
+            if os.path.isdir(standard_path):
+                workspace = standard_path
+
+        # ── 1. Archive workspace (always, for safety) ──
+        if workspace and os.path.isdir(workspace):
+            archive_dir = "/var/lib/versa-agi/archive"
+            os.makedirs(archive_dir, exist_ok=True)
+            # The home holds the agent's SSH key and git credentials: the
+            # folder and the archive are for their owner only.
+            try:
+                os.chmod(archive_dir, 0o700)
+            except OSError:
+                pass
+            timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"{name}_{timestamp}.tar.gz"
+            archive_full = os.path.join(archive_dir, archive_name)
+            _old_umask = os.umask(0o077)
+            try:
+                tar_result = subprocess.run(
+                    ["tar", "czf", archive_full, "-C", os.path.dirname(workspace), os.path.basename(workspace)],
+                    capture_output=True, check=False
+                )
+            finally:
+                os.umask(_old_umask)
+            if tar_result.returncode == 0:
+                archive_path = archive_full
+
+        # ── 2. Delete VersaVoice sub-account ──
+        agent_config_path = f"/etc/versa-agi/{name}_config.json"
+        if os.path.exists(agent_config_path):
+            try:
+                with open(agent_config_path, "r") as f:
+                    agent_cfg = json.load(f)
+                vv_sub_id = agent_cfg.get("versavoice", {}).get("sub_account_id")
+                vv_token = agent_cfg.get("versavoice", {}).get("api_token")
+                if vv_sub_id and vv_token:
+                    from comms import api_request
+                    result = api_request(
+                        f"/accounts/{vv_sub_id}", vv_token,
+                        method="DELETE"
+                    )
+                    vv_deleted = result is not None
+            except Exception:
+                pass  # Non-fatal — orphaned sub-account can be cleaned manually
+
+        # ── 3. Clean up database relations ──
+        coa_tasks_db = "/var/lib/versa-agi/coa/tasks.db"
+        if os.path.exists(coa_tasks_db):
+            try:
+                tconn = db_connect.connect_compat(coa_tasks_db, timeout=5)
+                tconn.execute("DELETE FROM tasks WHERE assigned_to=?", (name,))
+                tconn.commit()
+                tconn.close()
+            except Exception:
+                pass
+
+        # ── 4. Agent's data directory (/var/lib/versa-agi/{name}/) ──
+        agent_data_dir = f"/var/lib/versa-agi/{name}"
+        if os.path.isdir(agent_data_dir):
+            shutil.rmtree(agent_data_dir, ignore_errors=True)
+
+        # ── 5. Agent's config file ──
+        if os.path.exists(agent_config_path):
+            os.remove(agent_config_path)
+
+        # ── 6. Delete agent home directory ──
+        if workspace and os.path.isdir(workspace):
+            subprocess.run(["rm", "-rf", workspace], capture_output=True, check=False)
+
+        # ── 7. Delete OS user ──
+        subprocess.run(["userdel", os_user], capture_output=True, check=False)
+
+        # ── 8. Delete DB record ──
+        conn.execute("DELETE FROM agents WHERE name=?", (name,))
+        conn.commit()
+        conn.close()
+
+        result = {"agent": name, "status": "removed", "os_user_deleted": os_user, "vv_sub_account_deleted": vv_deleted}
+        if archive_path:
+            result["archive"] = archive_path
+        if workspace:
+            result["workspace_removed"] = workspace
+        json_response(True, **result)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@agent.command("cancel-remove")
+@click.argument("name")
+def agent_cancel_remove(name):
+    """Cancel a pending removal request — reactivates the agent."""
+    name = name.lower()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT status FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found")
+            sys.exit(1)
+        if row["status"] != "removal_requested":
+            conn.close()
+            json_response(False, error=f"Agent '{name}' is not pending removal (status: {row['status']})")
+            sys.exit(1)
+        conn.execute(
+            "UPDATE agents SET status='idle', inactive=0, status_message=NULL, updated_at=datetime('now') WHERE name=?",
+            (name,)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, agent=name, status="idle", message="Removal cancelled — agent reactivated")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@agent.command("remove", hidden=True)
+@click.argument("name")
+@click.option("--archive", is_flag=True, default=False, help="Deprecated — archive is now automatic on confirm-remove")
+def agent_remove(name, archive):
+    """Remove a sub-agent. Delegates to request-remove or confirm-remove based on privilege.
+
+    Non-root: sets status to 'removal_requested' (like request-remove).
+    Root: performs full removal immediately (like confirm-remove).
+    """
+    ctx = click.get_current_context()
+    if os.geteuid() == 0:
+        ctx.invoke(agent_confirm_remove, name=name)
+    else:
+        ctx.invoke(agent_request_remove, name=name, reason="")
+
+@agent.command("set-timeout")
+@click.argument("name")
+@click.argument("minutes", type=int)
+def agent_set_timeout(name, minutes):
+    """Set an agent's time limit in minutes (30–240). The harness closes the cycle there.
+
+    COA or the Primary User only. Lifeline reads the limit when it starts a
+    cycle, so a cycle that is running keeps the limit it started with.
+    """
+    import agent_limits
+    name = name.lower()
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        json_response(False, error="Permission denied: only COA or the Primary User can change an agent's "
+                                   f"time limit (caller: {caller})")
+        sys.exit(1)
+    err = agent_limits.timeout_error(minutes)
+    if err:
+        json_response(False, error=err)
+        sys.exit(1)
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        changed = conn.execute("UPDATE agents SET timeout_minutes=?, updated_at=datetime('now') WHERE name=?",
+                               (minutes, name)).rowcount
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    if not changed:
+        json_response(False, error=f"Agent '{name}' not found")
+        sys.exit(1)
+    json_response(True, agent=name, timeout_minutes=minutes,
+                  applies="From this agent's next cycle. A cycle that is running keeps the limit it started with.")
+
+
+@agent.command("set-model")
+@click.argument("name")
+@click.argument("model")
+@click.option("--clear", "clear_model", is_flag=True, help="Clear model assignment (use system default)")
+def agent_set_model(name, model, clear_model):
+    """Assign an AI model to an agent (same effect as agitop Agent Settings → Model).
+
+    Restricted to COA or the Primary User (sub-agents cannot reassign models).
+    """
+    name = name.lower()
+    new_model = None if clear_model else model
+    if not clear_model and not new_model:
+        json_response(False, error="Model argument required (or pass --clear)")
+        sys.exit(1)
+
+    # Guard: only COA or the Primary User (empty AGICTL_AGENT_USER => sudo/root/agitop).
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller != "coa":
+        json_response(False, error=f"Permission denied: only COA or the Primary User can assign agent models (caller: {caller})")
+        sys.exit(1)
+
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name, protected FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found")
+            sys.exit(1)
+
+        if new_model and name == "coa":
+            cat = _load_catalog()
+            coa_allowed = {key for key, m in cat.items() if m.get("coa")}
+            if coa_allowed and new_model not in coa_allowed:
+                conn.close()
+                json_response(False, error=f"Model '{new_model}' is not COA-approved. Allowed: {', '.join(sorted(coa_allowed))}")
+                sys.exit(1)
+
+        if new_model:
+            cat = _load_catalog()
+            known = set(cat.keys())
+            if new_model not in known:
+                conn.close()
+                json_response(False, error=f"Model '{new_model}' not in catalog. Add via 'agictl model catalog add'.")
+                sys.exit(1)
+
+        conn.execute(
+            """UPDATE agents SET model = ?, updated_at = datetime('now'),
+               status = CASE WHEN status = 'invalid_config' THEN 'idle' ELSE status END,
+               status_message = CASE WHEN status = 'invalid_config' THEN NULL ELSE status_message END
+               WHERE name = ?""",
+            (new_model, name),
+        )
+        if not new_model and name == "coa":
+            conn.execute(
+                "UPDATE agents SET status='invalid_config', "
+                "status_message='Assign a COA model via first-login setup', "
+                "updated_at=datetime('now') WHERE name='coa' "
+                "AND COALESCE(status,'') NOT IN ('circuit_breaker', 'halted', 'ide')"
+            )
+        context_warning = ""
+        if new_model:
+            try:
+                from harness.model_context import context_is_known, get_model_context
+                recommended, _ = get_model_context(new_model)
+                if not context_is_known(new_model):
+                    context_warning = (
+                        "The context window for this model is not known. "
+                        "It has been set to 4096. Set the real context size on this agent."
+                    )
+                # Always persist, including 0 (cloud Auto). `if recommended`
+                # is false for 0 and left a leftover 4K local default on COA.
+                conn.execute(
+                    "UPDATE agents SET num_ctx = ?, updated_at = datetime('now') WHERE name = ?",
+                    (int(recommended), name),
+                )
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        json_response(
+            True, agent=name, model=new_model or "",
+            message=f"Model assigned to '{name}'.",
+            **({"context_warning": context_warning} if context_warning else {}),
+        )
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@agent.command("toggle-comms")
+@click.argument("name")
+def agent_toggle_comms(name):
+    """Toggle external comms (can_message_connections) for a sub-agent.
+
+    Dashboard/Primary User only — controls whether the agent can send
+    connection requests and messages to non-sponsor VersaVoice contacts.
+    Protected agents (COA, watchdog) are always enabled.
+    """
+    name = name.lower()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name, protected, can_message_connections FROM agents WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Agent '{name}' not found")
+            sys.exit(1)
+        if row["protected"] == 1:
+            conn.close()
+            json_response(False, error=f"Protected agent '{name}' always has comms enabled")
+            return
+        new_val = 0 if row["can_message_connections"] else 1
+        conn.execute("UPDATE agents SET can_message_connections=?, updated_at=datetime('now') WHERE name=?",
+                     (new_val, name))
+        conn.commit()
+        conn.close()
+        state = "enabled" if new_val else "disabled"
+        json_response(True, agent=name, can_message_connections=new_val, state=state)
+    except Exception as e:
+        json_response(False, error=str(e))
+
+# ── Agent Status ──
+
+@agent.group()
+def status():
+    """Agent status management."""
+    pass
+
+@status.command("show")
+def agent_status_show():
+    """Read current agent status from agents.db."""
+    agent_name = get_agent_name()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT status, status_message FROM agents WHERE name=?", (agent_name,)).fetchone()
+        conn.close()
+        if row:
+            print(json.dumps({"agent": agent_name, "status": row["status"], "message": row["status_message"]}))
+        else:
+            json_response(False, error="Agent not found")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@status.command("set")
+@click.argument("state")
+@click.argument("summary", required=False, default="")
+def agent_status_set(state, summary):
+    """Write agent status + message to agents.db."""
+    agent_name = get_agent_name()
+    _holds = frozenset({"ide", "halted", "circuit_breaker", "invalid_config"})
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        row = conn.execute(
+            "SELECT status FROM agents WHERE name=?", (agent_name,)
+        ).fetchone()
+        current = (row[0] if row else "") or ""
+        if current == "ide":
+            conn.close()
+            json_response(
+                False,
+                error=(
+                    "IDE mode is cleared only by `agictl agent ide off` "
+                    "(Primary User or COA)."
+                ),
+            )
+            sys.exit(1)
+        if current in _holds and (state or "") not in _holds:
+            conn.close()
+            json_response(
+                False,
+                error=(
+                    f"Refusing to overwrite hold status '{current}'. "
+                    "IDE mode is cleared only by `agictl agent ide off` "
+                    "(Primary User or COA)."
+                ),
+            )
+            sys.exit(1)
+        conn.execute("UPDATE agents SET status=?, status_message=?, updated_at=datetime('now') WHERE name=?", (state, summary, agent_name))
+        conn.commit()
+        conn.close()
+        json_response(True, agent=agent_name, status=state, message=summary)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+# ── Agent Data (for Lifeline consumption) ──
+
+@agent.command("count")
+@click.option("--active", is_flag=True, help="Count only active agents")
+def agent_count(active):
+    """Return count of agents."""
+    agents = agent_reader.get_active_agents() if active else agent_reader.get_all_agents()
+    print(len(agents))
+
+@agent.command("summary")
+@click.option("--exclude-watchdog", is_flag=True, help="Omit the watchdog infrastructure row (sub-agent registry view — watchdog is not a messageable peer)")
+def agent_summary(exclude_watchdog):
+    """Return agent summary as markdown table for context injection."""
+    coa_user, watchdog_user, coa_display = _resolve_protected_identities()
+    agents = agent_reader.get_all_agents()
+    agents = sorted(agents, key=lambda x: (not x.get("protected", False), x["name"]))
+    print("| Name | Workspace | Role | Model | Status | Inactive | Requested By | Created At (local) |")
+    print("|---|---|---|---|---|---|---|---|")
+    for a in agents:
+        raw_name = a.get("name", "") or ""
+        if exclude_watchdog and raw_name == watchdog_user:
+            continue
+        name_str = raw_name.capitalize()
+        if raw_name == coa_user:
+            # Render the COA's configured display name (e.g. "Versa (COA)" —
+            # the marker ships as last_name in setup.ini) instead of the raw key.
+            name_str = coa_display or name_str
+        inactive_str = "True" if a.get("inactive") else "False"
+        status = a.get("status") or ""
+        print(f"| {name_str} | {a.get('workspace', '')} | {a.get('role') or ''} | {a.get('model') or ''} | {status} | {inactive_str} | {a.get('requested_by') or ''} | {local_time.show(a.get('created_at'))} |")
+
+@agent.command("ensure-protected")
+def agent_ensure_protected():
+    """Ensure coa/watchdog cannot be deactivated (self-heal)."""
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.execute("UPDATE agents SET inactive=0, updated_at=datetime('now') WHERE name IN ('coa', 'watchdog') AND inactive=1")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+@agent.command("get-active")
+def agent_get_active():
+    """Return active agents in pipe format for Lifeline (field 23 = model_routing_enabled)."""
+    agents = agent_reader.get_active_agents()
+    # Direct agents-table read — v_active_agents can be stale until init_agents_db view migration runs.
+    agent_overrides: dict[str, dict] = {}
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+            "SELECT name, tool_output_token_budget, model_routing_enabled FROM agents WHERE inactive=0"
+        ):
+            agent_overrides[row["name"]] = {
+                "tool_output_token_budget": row["tool_output_token_budget"],
+                "model_routing_enabled": row["model_routing_enabled"] or 0,
+            }
+        conn.close()
+    except Exception:
+        pass
+    for a in agents:
+        model = a.get("model") or ""
+        timeout = a.get("timeout_minutes", agent_limits.DEFAULT_TIMEOUT_MINUTES)
+        runaway = a.get("runaway_threshold", agent_limits.DEFAULT_RUNAWAY_LINES)
+        runaway_size = a.get("runaway_size_threshold", agent_limits.DEFAULT_RUNAWAY_SIZE_KB)
+        injection_mode = a.get("context_injection_mode") or "relevant"
+        token_budget = a.get("token_budget", 0)
+        max_turns = a.get("max_session_turns", 500)
+        ov = agent_overrides.get(a["name"], {})
+        tool_budget = ov.get("tool_output_token_budget")
+        if tool_budget is None:
+            tool_budget = a.get("tool_output_token_budget", 6000)
+        triage_model = a.get("triage_model") or ""
+        anchor_style = a.get("anchor_style") or "compact"
+        num_ctx = a.get("num_ctx", 0)
+        convo_depth = a.get("conversation_depth", 10)
+        resume_enabled = a.get("resume_enabled", 1)
+        resume_max_msgs = a.get("resume_max_messages", 50)
+        skill_mode = a.get("skill_injection_mode") or "hybrid"
+        temperature = a.get("temperature")
+        temperature_str = "" if temperature is None else str(temperature)
+        reasoning_effort = a.get("reasoning_effort") or ""
+        reasoning_max_tokens = a.get("reasoning_max_tokens")
+        reasoning_max_str = "" if reasoning_max_tokens is None else str(reasoning_max_tokens)
+        model_params_extra = a.get("model_params_extra") or ""
+        routing_enabled = ov.get("model_routing_enabled", a.get("model_routing_enabled", 0))
+        print(f"{a['name']}|{a['os_user']}|{a['workspace']}|{model}|{timeout}|{runaway}|{runaway_size}|{injection_mode}|{token_budget}|{max_turns}|{tool_budget}|{triage_model}|{anchor_style}|{num_ctx}|{convo_depth}|{resume_enabled}|{resume_max_msgs}|{skill_mode}|{temperature_str}|{reasoning_effort}|{reasoning_max_str}|{model_params_extra}|{routing_enabled}")
+
+
+# ═══════════════════════════════════════════════════════
+# 3. TASK — Cognitive task queue
+# ═══════════════════════════════════════════════════════
+
+def _caller_agent_name() -> str:
+    """Resolved logical agent name for the current caller."""
+    return os.environ.get("VERSA_AGENT_NAME") or get_agent_name()
+
+
+def _resolve_memory_target(requested: str | None) -> tuple[str, bool]:
+    """Own memory by default. Targeting another agent is COA/PU only."""
+    mine = _caller_agent_name()
+    explicit = bool((requested or "").strip())
+    name = (requested or "").strip() or mine
+    if explicit and name != mine:
+        _require_pu_or_coa()
+    return name, explicit
+
+
+def _memory_agent_option(f):
+    return click.option(
+        "--agent",
+        "target_agent",
+        default=None,
+        help="Target agent (COA/PU only; default: caller)",
+    )(f)
+
+
+def _is_privileged_task_caller() -> bool:
+    """COA, watchdog, or Primary User (direct/root invocation)."""
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if not caller:
+        return True
+    return caller in ("coa", "watchdog")
+
+
+def _assert_can_manage_agent_tasks(agent_name: str) -> None:
+    if _is_privileged_task_caller():
+        return
+    mine = _caller_agent_name()
+    if mine != agent_name:
+        json_response(
+            False,
+            error=f"Permission denied: can only manage your own tasks (caller: {mine})",
+        )
+        sys.exit(1)
+
+
+def _assert_can_manage_task_row(task_row: dict) -> None:
+    if _is_privileged_task_caller():
+        return
+    assignee = (task_row.get("assigned_to") or "").strip()
+    mine = _caller_agent_name()
+    if assignee != mine:
+        json_response(
+            False,
+            error=f"Permission denied: task is assigned to '{assignee}', not '{mine}'",
+        )
+        sys.exit(1)
+
+
+@cli.group()
+def task():
+    """Agent task queue management."""
+    pass
+
+def _typed_time_or_exit(text, option: str) -> str:
+    """A time typed for ``option`` → UTC text for storage. Local unless a zone is given.
+
+    `now` is the current moment. Anything that is not a date is refused, so a
+    word or a mis-typed value can never sit in a time column and fail to fire.
+    """
+    raw = str(text or "").strip()
+    if raw.lower() == "now":
+        return local_time.to_store(local_time.utc_now())
+    try:
+        return local_time.typed_to_store(raw)
+    except ValueError as exc:
+        json_response(False, error=f"{option}: {exc}")
+        sys.exit(1)
+
+
+@task.command("list")
+@click.option("--all", "show_all", is_flag=True, help="Show ALL tasks including done/cancelled")
+def task_list(show_all):
+    """List tasks. Default: active + due blocked only."""
+    if show_all:
+        tasks = tasks_reader.get_all_tasks() if hasattr(tasks_reader, 'get_all_tasks') else tasks_reader.get_active_tasks()
+    else:
+        tasks = tasks_reader.get_active_tasks()
+    print(json.dumps(local_time.localize(tasks), indent=2, default=str))
+
+@task.command("triage-registry", hidden=True)
+@click.option("--agent", "agent_name", required=True, help="Spawned agent this read is for")
+def task_triage_registry(agent_name):
+    """Projects and open tasks for one agent. Harness triage. JSON object."""
+    try:
+        from agent_reads import registry_for_agent
+        print(json.dumps(registry_for_agent(tasks_db, agent_name), default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@task.command("get")
+@click.argument("task_id", type=int)
+def task_get(task_id):
+    """Output full task context as JSON (includes recent progress journal)."""
+    task_data = tasks_reader.get_task(task_id)
+    if task_data:
+        try:
+            conn = db_connect.connect_compat(tasks_db, timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT created_at, agent_name, note FROM task_progress "
+                "WHERE task_id = ? ORDER BY id DESC LIMIT 10",
+                (task_id,)
+            ).fetchall()
+            conn.close()
+            # Reverse so entries read oldest → newest
+            task_data["recent_progress"] = [dict(r) for r in reversed(rows)]
+        except Exception:
+            task_data["recent_progress"] = []
+        print(json.dumps(local_time.localize(task_data), indent=2, default=str))
+    else:
+        json_response(False, error=f"Task {task_id} not found")
+
+@task.command("progress")
+@click.argument("task_id", type=int)
+@click.argument("note", required=False)
+@click.option("--last", "last_n", default=20, type=int, help="When listing: number of recent entries (default 20)")
+def task_progress(task_id, note, last_n):
+    """Append to or list a task's progress journal.
+
+    With text: appends a timestamped, attributed entry (append-only).
+    Without text: lists the journal as JSON, oldest first (``--last N``,
+    default 20). Listing has no date filter — it returns whatever rows
+    remain in the DB. Script/Utility journals are pruned to 7 days on each
+    deterministic append; standard-task journals are not auto-pruned.
+
+    Leave yourself breadcrumbs across cycles: what you did, how far you got,
+    what to do next. Standard-task entries from the last 7 days (up to 10
+    across active tasks) are injected into wake context; Script/Utility
+    journals are excluded from injection.
+    """
+    note = (note or "").strip()
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+
+        if not note:
+            # List mode
+            rows = conn.execute(
+                "SELECT id, created_at, agent_name, note FROM task_progress "
+                "WHERE task_id = ? ORDER BY id DESC LIMIT ?",
+                (task_id, last_n)
+            ).fetchall()
+            conn.close()
+            print(json.dumps(local_time.localize([dict(r) for r in reversed(rows)]), indent=2, default=str))
+            return
+
+        # Append mode
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            conn.close()
+            json_response(False, error=f"Task {task_id} not found")
+            sys.exit(1)
+        # Author resolution: prefer the explicit env hint, but fall back to the
+        # canonical resolver (AGICTL_CONFIG basename → OS user → config) rather
+        # than a hardcoded "coa" — otherwise a missing VERSA_AGENT_NAME silently
+        # misattributes every sub-agent's entries to the COA.
+        agent_name = os.environ.get("VERSA_AGENT_NAME") or get_agent_name()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
+            (task_id, agent_name, note)
+        )
+        conn.execute("UPDATE tasks SET updated_at = datetime('now') WHERE id = ?", (task_id,))
+        conn.commit()
+        entry_id = c.lastrowid
+        conn.close()
+        json_response(True, task_id=task_id, entry_id=entry_id, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@task.command("add")
+@click.argument("title")
+@click.option("--desc", default=None, help="Extended task description")
+@click.option("--priority", default="normal", type=click.Choice(["low", "normal", "high", "urgent"]))
+@click.option("--assignee", default=None, help="Agent assigned to the task (defaults to the current agent, resolved from VERSA_AGENT_NAME or the agent config)")
+@click.option("--project", default=None, type=int, help="Project ID to link the task to")
+@click.option("--callback", default=None, type=click.Choice(["notify_sponsor", "notify_connection", "await_reply", "check_connection", "none"]))
+@click.option("--source-msg", default=None, type=int, help="Source message ID")
+@click.option("--requested-by", default=None, help="UID of who originated the request")
+@click.option("--due-date", default=None,
+              help='Due date in local time: "YYYY-MM-DD HH:MM", or "now". Required for planned tasks')
+@click.option("--utility-task", is_flag=True, help="Create as Utility Task (links one Utility Model)")
+@click.option("--utility-model", default=None, help="utility_models.id (required with --utility-task)")
+@click.option("--utility-input-files", default=None, help="JSON array of input file paths")
+@click.option("--utility-output-override", default=None, help="Override UM output_path for this task")
+@click.option("--utility-start-alert", is_flag=True, help="VersaVoice alert to PU when run starts (utility or script)")
+@click.option("--utility-stop-alert", is_flag=True, help="VersaVoice alert to PU when run completes (utility or script)")
+@click.option("--utility-spawn-agent", default=None, help="Spawn this agent on successful UM completion")
+@click.option("--script-task", is_flag=True, help="Create as Script Task (runs a .sh from AGi-Tools — no agent spawn)")
+@click.option("--script-path", default=None, help="Path to the .sh inside AGi-Tools (required with --script-task)")
+@click.option("--script-parameters", default=None, help="Arguments passed to the script (argv-split)")
+@click.option("--script-interval", type=int, default=None, help="Recurrence interval in seconds (omit/0 = once-off)")
+def task_add(title, desc, priority, assignee, project, callback, source_msg, requested_by, due_date,
+             utility_task, utility_model, utility_input_files, utility_output_override,
+             utility_start_alert, utility_stop_alert, utility_spawn_agent,
+             script_task, script_path, script_parameters, script_interval):
+    """Insert a new task. Returns JSON with created record."""
+    # Dynamic assignee default: current agent, resolved robustly (env hint →
+    # canonical resolver) rather than a hardcoded 'coa'.
+    if assignee is None:
+        assignee = os.environ.get("VERSA_AGENT_NAME") or get_agent_name()
+    # Tasks default to 'planned' status — due_date is mandatory
+    if not due_date:
+        json_response(False, error="--due-date is required for planned tasks")
+        sys.exit(1)
+    # A typed time is local; it is stored in UTC (state_time_display.md §1 rule 3).
+    due_date = _typed_time_or_exit(due_date, "--due-date")
+    # Utility and Script modes are mutually exclusive (they share alert columns).
+    if utility_task and script_task:
+        json_response(False, error="--utility-task and --script-task are mutually exclusive")
+        sys.exit(1)
+    if utility_task:
+        if not utility_model:
+            json_response(False, error="--utility-model is required with --utility-task")
+            sys.exit(1)
+        from utility_store import get_utility_model
+        if not get_utility_model(utility_model):
+            json_response(False, error=f"Utility Model '{utility_model}' not found")
+            sys.exit(1)
+    elif script_task:
+        if not script_path:
+            json_response(False, error="--script-path is required with --script-task")
+            sys.exit(1)
+    else:
+        # Project is mandatory for standard tasks
+        if project is None:
+            json_response(False, error="--project is required. Use 'agictl project list' to find the correct project ID.")
+            sys.exit(1)
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        c = conn.cursor()
+        task_kind = "script" if script_task else ("utility" if utility_task else "standard")
+        is_special = utility_task or script_task
+        start_alert = 1 if utility_start_alert else 0
+        stop_alert = 1 if utility_stop_alert else (1 if is_special else 0)
+        c.execute(
+            "INSERT INTO tasks (title, description, priority, assigned_to, project_id, callback_action, "
+            "source_message_id, requested_by, due_date, task_kind, utility_model_id, utility_input_files, "
+            "utility_output_override, utility_start_alert, utility_stop_alert, utility_spawn_agent, "
+            "script_path, script_parameters, script_interval_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                title, desc, priority, assignee, project, callback, source_msg, requested_by, due_date,
+                task_kind, utility_model if utility_task else None, utility_input_files,
+                utility_output_override, start_alert, stop_alert, utility_spawn_agent,
+                script_path if script_task else None,
+                script_parameters if script_task else None,
+                script_interval if script_task else None,
+            ),
+        )
+        task_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        json_response(True, task_id=task_id, title=title, priority=priority, assigned_to=assignee,
+                      project_id=project, due_date=local_time.show(due_date), task_kind=task_kind,
+                      utility_model_id=utility_model if utility_task else None,
+                      script_path=script_path if script_task else None)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@task.command("run-due-scripts", hidden=True)
+@click.option("--agent", "agent_name", required=True)
+@click.option("--agent-workspace", default=None, help="Agent workspace root (lifeline-supplied; unused today, reserved for parity with utility)")
+def task_run_due_scripts(agent_name, agent_workspace):
+    """Lifeline: execute due Script Tasks for an agent (TD-SCRIPT-001).
+
+    Deterministic — runs a .sh from AGi-Tools as the owning agent, captures the
+    return code, and drives done/blocked + rc-based VersaVoice alerts. No LLM,
+    no harness, no agent spawn.
+    """
+    from utility_store import list_due_script_tasks
+    from script_runner import ScriptRunError, resolve_agitools_path, run_script_task
+    from agictl.utility_cli import _vv_utility_alert
+
+    def _queue_script_spawn_wake(spawn_agent: str, task_id: int, title: str, script: str, rc: int) -> None:
+        """Queue a lifeline wake for an agent after a successful Script Task."""
+        agent = (spawn_agent or "").strip()
+        if not agent:
+            return
+        wake_dir = f"/var/lib/versa-agi/{agent}"
+        os.makedirs(wake_dir, exist_ok=True)
+        wake_path = os.path.join(wake_dir, "utility_wake.json")
+        payload = {
+            "task_id": task_id,
+            "task_kind": "script",
+            "title": title,
+            "script": script,
+            "returncode": rc,
+        }
+        with open(wake_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    due = list_due_script_tasks(agent_name)
+    if not due:
+        json_response(True, agent=agent_name, count=0, runs=[])
+        return
+
+    agitools_root = resolve_agitools_path(tasks_db)
+    results = []
+    for t in due:
+        tid = t["id"]
+        title = t.get("title", "")
+        interval = t.get("script_interval_seconds") or 0
+        recurring = bool(interval and interval > 0)
+        basename = os.path.basename((t.get("script_path") or "").rstrip("/"))
+
+        if t.get("utility_start_alert"):
+            _vv_utility_alert(f"Script task #{tid} started — {title} ({basename}) on {agent_name}")
+
+        rc = None
+        try:
+            result = run_script_task(
+                t.get("script_path"),
+                agitools_root=agitools_root or "",
+                parameters=t.get("script_parameters"),
+                task_id=tid,
+            )
+            rc = result["returncode"]
+            success = result["success"]
+            tail = result.get("stderr_tail") or result.get("stdout_tail") or ""
+            status_word = "ok" if success else ("timeout" if result.get("timed_out") else "FAIL")
+            note = f"Script {basename} rc={rc} ({status_word})"
+            if tail:
+                note += "\n" + tail[:500]
+            ran_at = result.get("ran_at")
+        except ScriptRunError as e:
+            if e.code == "running":
+                # Lock held by a still-running invocation — leave due_date so the
+                # next tick retries; do not touch status.
+                results.append({"success": False, "task_id": tid, "code": e.code, "skipped": True})
+                continue
+            success = False
+            note = f"Script preflight failed ({e.code}): {e.message}"
+            ran_at = None
+
+        # Status routing (decision #3): once-off → done(rc==0)/blocked(rc!=0);
+        # recurring → stays 'planned', due_date re-armed by the interval.
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        sets = ["script_last_rc=?", "script_last_run_at=COALESCE(?, datetime('now'))", "updated_at=datetime('now')"]
+        params: list = [rc, ran_at]
+        if recurring:
+            sets.append("due_date=datetime('now', ?)")
+            params.append(f"+{int(interval)} seconds")
+        else:
+            if success:
+                sets.append("status='done'")
+                sets.append("completed_at=datetime('now')")
+            else:
+                sets.append("status='blocked'")
+        params.append(tid)
+        conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", params)
+        conn.execute(
+            "INSERT INTO task_progress (task_id, agent_name, note) VALUES (?, ?, ?)",
+            (tid, agent_name, note),
+        )
+        # Rolling 7-day retention for script journals (keeps Progress Journal
+        # bounded; these rows are not injected into agent system prompts).
+        conn.execute(
+            "DELETE FROM task_progress WHERE task_id = ? "
+            "AND created_at < datetime('now', '-7 days')",
+            (tid,),
+        )
+        conn.commit()
+        conn.close()
+
+        if t.get("utility_stop_alert"):
+            outcome = "ok" if success else "FAILED"
+            _vv_utility_alert(f"Script task #{tid} finished — {title} ({basename}): rc={rc} {outcome}")
+
+        # Spawn agent on successful, non-recurring completion (mirrors Utility Tasks).
+        spawn_agent = (t.get("utility_spawn_agent") or "").strip()
+        if spawn_agent and success and not recurring:
+            _queue_script_spawn_wake(spawn_agent, tid, title, basename, rc)
+
+        result_entry = {
+            "success": success, "task_id": tid, "returncode": rc,
+            "recurring": recurring, "title": title,
+        }
+        if spawn_agent and success and not recurring:
+            result_entry["spawn_agent"] = spawn_agent
+            result_entry["spawn_queued"] = True
+        results.append(result_entry)
+
+    json_response(True, agent=agent_name, count=len(results), runs=results)
+
+@task.command("update")
+@click.argument("task_id", type=int)
+@click.option("--status", "task_status", help="planned, in_progress, waiting, blocked, cancelled, done")
+@click.option("--desc", help="Update description")
+@click.option("--priority", help="low, normal, high, urgent")
+@click.option("--assignee", help="Agent assigned")
+@click.option("--due-date", help='Next wake/due date in local time: "YYYY-MM-DD HH:MM", or "now"')
+@click.option("--requested-by", help="UID of who originated the request")
+@click.option("--utility-model", default=None)
+@click.option("--utility-task/--no-utility-task", default=None)
+@click.option("--utility-input-files", default=None)
+@click.option("--utility-output-override", default=None)
+@click.option("--utility-start-alert/--no-utility-start-alert", default=None)
+@click.option("--utility-stop-alert/--no-utility-stop-alert", default=None)
+@click.option("--utility-spawn-agent", default=None)
+@click.option("--script-task/--no-script-task", default=None)
+@click.option("--script-path", default=None)
+@click.option("--script-parameters", default=None)
+@click.option("--script-interval", type=int, default=None)
+def task_update(task_id, task_status, desc, priority, assignee, due_date, requested_by,
+                utility_model, utility_task, utility_input_files, utility_output_override,
+                utility_start_alert, utility_stop_alert, utility_spawn_agent,
+                script_task, script_path, script_parameters, script_interval):
+    """Update specific fields on an existing task. Returns JSON."""
+    updates = {}
+    if task_status is not None: updates["status"] = task_status
+    if desc is not None: updates["description"] = desc
+    if priority is not None: updates["priority"] = priority
+    if assignee is not None: updates["assigned_to"] = assignee
+    if due_date is not None: updates["due_date"] = _typed_time_or_exit(due_date, "--due-date")
+    if requested_by is not None: updates["requested_by"] = requested_by
+    if utility_task is not None: updates["task_kind"] = "utility" if utility_task else "standard"
+    if utility_model is not None: updates["utility_model_id"] = utility_model
+    if utility_input_files is not None: updates["utility_input_files"] = utility_input_files
+    if utility_output_override is not None: updates["utility_output_override"] = utility_output_override
+    if utility_start_alert is not None: updates["utility_start_alert"] = 1 if utility_start_alert else 0
+    if utility_stop_alert is not None: updates["utility_stop_alert"] = 1 if utility_stop_alert else 0
+    if utility_spawn_agent is not None: updates["utility_spawn_agent"] = utility_spawn_agent
+    if script_task is not None: updates["task_kind"] = "script" if script_task else "standard"
+    if script_path is not None: updates["script_path"] = script_path
+    if script_parameters is not None: updates["script_parameters"] = script_parameters
+    if script_interval is not None: updates["script_interval_seconds"] = script_interval
+
+    if not updates:
+        json_response(False, error="No updates provided")
+        return
+
+    # Enforce: planned tasks must have a due_date
+    target_status = updates.get("status")
+    if target_status == "planned" and "due_date" not in updates:
+        # Check if due_date already exists on the task
+        existing = tasks_reader.get_task(task_id)
+        if not existing or not existing.get("due_date"):
+            json_response(False, error="--due-date is required when status is 'planned'")
+            return
+
+    if tasks_reader.update_task(task_id, updates):
+        reply = {"task_id": task_id, "updated_fields": list(updates.keys())}
+        if "due_date" in updates:
+            reply["due_date"] = local_time.show(updates["due_date"])   # the local time that was understood
+        json_response(True, **reply)
+    else:
+        json_response(False, error=f"Failed to update task {task_id}")
+
+@task.command("done")
+@click.argument("task_id", type=int)
+def task_done(task_id):
+    """Shortcut: mark task as done."""
+    if tasks_reader.update_task_status(task_id, "done"):
+        json_response(True, task_id=task_id, status="done")
+    else:
+        json_response(False, error=f"Failed to mark task {task_id} as done")
+
+@task.command("cancel")
+@click.argument("task_id", type=int)
+def task_cancel(task_id):
+    """Shortcut: mark task as cancelled."""
+    if tasks_reader.update_task_status(task_id, "cancelled"):
+        json_response(True, task_id=task_id, status="cancelled")
+    else:
+        json_response(False, error=f"Failed to cancel task {task_id}")
+
+@task.command("snooze")
+@click.argument("task_id", type=int)
+@click.argument("minutes", type=int, default=5)
+def task_snooze(task_id, minutes):
+    """Set wake_after and due_date to now + N min. Minimum 5 minutes, max 10080 (7 days)."""
+    if minutes < 5:
+        minutes = 5
+    if minutes > 10080:
+        minutes = 10080
+    if tasks_reader.snooze_task(task_id, minutes):
+        json_response(True, task_id=task_id, snoozed_minutes=minutes)
+    else:
+        json_response(False, error=f"Failed to snooze task {task_id}")
+
+@task.command("reminder")
+@click.argument("text")
+@click.option("--category", default="general", type=click.Choice(["general", "preference", "instruction", "constraint"]))
+def task_reminder(text, category):
+    """Shortcut: create a task of type reminder."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO tasks (title, description, priority, tags, assigned_to) VALUES (?, ?, 'normal', ?, ?)",
+            (f"[{category.upper()}] {text}", text, f"reminder,{category}", get_agent_name())
+        )
+        task_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        json_response(True, task_id=task_id, type="reminder", category=category, text=text)
+    except Exception as e:
+        json_response(False, error=str(e))
+
+# ── Task Data (for Lifeline consumption) ──
+
+@task.command("count-pending")
+@click.argument("agent_name")
+def task_count_pending(agent_name):
+    """Return count of pending active tasks."""
+    print(tasks_reader.count_pending(agent_name))
+
+@task.command("count-due-blocked")
+@click.argument("agent_name")
+def task_count_due_blocked(agent_name):
+    """Return count of blocked tasks past due date."""
+    print(tasks_reader.count_due_blocked(agent_name))
+
+@task.command("count-total-blocked")
+@click.argument("agent_name")
+def task_count_total_blocked(agent_name):
+    """Return count of all blocked tasks."""
+    print(tasks_reader.count_total_blocked(agent_name))
+
+@task.command("get-blocked-detail")
+@click.argument("agent_name")
+def task_get_blocked_detail(agent_name):
+    """Return blocked task details for diagnostics."""
+    detail = tasks_reader.get_blocked_detail(agent_name)
+    if detail:
+        print(detail)
+
+@task.command("freeze-all")
+@click.argument("agent_name")
+def task_freeze_all(agent_name):
+    """Freeze all non-terminal tasks for an agent. Saves prior status in pre_freeze_status."""
+    _assert_can_manage_agent_tasks(agent_name)
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        cursor = conn.execute(
+            """UPDATE tasks
+               SET pre_freeze_status = status, status = 'frozen', updated_at = datetime('now')
+               WHERE status NOT IN ('done', 'cancelled', 'frozen')
+                 AND (assigned_to = ? OR assigned_to IS NULL)""",
+            (agent_name,)
+        )
+        count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        json_response(True, frozen_count=count, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@task.command("unfreeze-all")
+@click.argument("agent_name")
+def task_unfreeze_all(agent_name):
+    """Unfreeze all frozen tasks for an agent. Restores prior status from pre_freeze_status."""
+    _assert_can_manage_agent_tasks(agent_name)
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        cursor = conn.execute(
+            """UPDATE tasks
+               SET status = COALESCE(pre_freeze_status, 'planned'), pre_freeze_status = NULL,
+                   spawn_attempts = 0, updated_at = datetime('now')
+               WHERE status = 'frozen'
+                 AND (assigned_to = ? OR assigned_to IS NULL)""",
+            (agent_name,)
+        )
+        count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        json_response(True, unfrozen_count=count, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@task.command("unfreeze")
+@click.argument("task_id", type=int)
+def task_unfreeze_one(task_id):
+    """Unfreeze a single frozen task. Restores pre_freeze_status and resets spawn_attempts."""
+    existing = tasks_reader.get_task(task_id)
+    if not existing:
+        json_response(False, error=f"Task {task_id} not found")
+        return
+    _assert_can_manage_task_row(existing)
+    if existing.get("status") != "frozen":
+        json_response(False, error=f"Task {task_id} is not frozen (status={existing.get('status')})")
+        return
+    restore = existing.get("pre_freeze_status") or "planned"
+    if tasks_reader.update_task(
+        task_id,
+        {"status": restore, "spawn_attempts": 0, "pre_freeze_status": None},
+    ):
+        json_response(True, task_id=task_id, status=restore, action="unfrozen")
+    else:
+        json_response(False, error=f"Failed to unfreeze task {task_id}")
+
+@task.command("count-frozen")
+@click.argument("agent_name")
+def task_count_frozen(agent_name):
+    """Return count of frozen tasks for an agent."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'frozen' AND (assigned_to = ? OR assigned_to IS NULL)",
+            (agent_name,)
+        ).fetchone()[0]
+        conn.close()
+        print(count)
+    except:
+        print("0")
+
+
+# ═══════════════════════════════════════════════════════
+# 4. MESSAGE — Communication
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def message():
+    """Communication via VersaVoice REST Adapter."""
+    pass
+
+
+def _is_vv_enabled() -> bool:
+    """Check if VersaVoice is enabled in setup.ini."""
+    try:
+        ini_path = "/etc/versa-agi/setup.ini"
+        import configparser
+        config = configparser.ConfigParser()
+        config.read(ini_path)
+        return config.get("versavoice", "enabled", fallback="true").lower() == "true"
+    except Exception:
+        return True  # Default: enabled (backward compat)
+
+
+def _local_agent_workspace(uid):
+    """Workspace of the agent on this machine that *uid* names, or None.
+
+    *uid* is an agent's name or its VersaVoice account id.
+    """
+    key = (uid or "").strip()
+    if not key:
+        return None
+    name = None
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        row = conn.execute("SELECT name, workspace FROM agents WHERE lower(name)=?",
+                           (key.lower(),)).fetchone()
+        if not row:
+            import glob
+            for cfg_path in glob.glob("/etc/versa-agi/*_config.json"):
+                try:
+                    with open(cfg_path, encoding="utf-8") as fh:
+                        account = (json.load(fh).get("versavoice") or {}).get("sub_account_id")
+                except (OSError, ValueError):
+                    continue
+                if account and account == key:
+                    name = os.path.basename(cfg_path)[: -len("_config.json")]
+                    row = conn.execute("SELECT name, workspace FROM agents WHERE lower(name)=?",
+                                       (name.lower(),)).fetchone()
+                    break
+        conn.close()
+    except Exception:
+        return None
+    return (row[1] or None) if row else None
+
+
+def _copy_attachments_to_recipient(workspace, message_id, paths):
+    """Copy an internal message's files into the recipient's own attachments
+    folder and return the new paths.
+
+    An agent's home is closed to the other agents, so the sender's path is not
+    one the recipient can open. A file that cannot be copied keeps its path.
+    """
+    target = os.path.join(workspace, ".agent", "attachments", message_id)
+    copied = []
+    for index, source in enumerate(paths):
+        try:
+            os.makedirs(target, exist_ok=True)
+            os.chmod(target, 0o2775)
+            name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(source)) or f"file_{index}"
+            dest = os.path.join(target, name)
+            if os.path.exists(dest):
+                dest = os.path.join(target, f"{index}_{name}")
+            shutil.copyfile(source, dest)
+            os.chmod(dest, 0o664)
+            copied.append(dest)
+        except OSError:
+            copied.append(source)
+    return copied
+
+
+def _send_as_internal(contact_uid, text, mode, db_path, attachment_paths=None):
+    """Route a message as internal (SQLite-only, no VV API).
+
+    Used by VV-gated routing when VersaVoice is disabled. The agent is
+    completely unaware — it called `message send` as normal and the
+    infrastructure decided to route locally.
+    """
+    sender = get_agent_name()
+    import uuid
+    msg_id = f"int_{uuid.uuid4().hex[:16]}"
+    recv_msg_id = f"int_{uuid.uuid4().hex[:16]}"
+
+    # Build attachment payload string (local paths, not cloud URLs)
+    attach_data = None
+    if attachment_paths:
+        filtered = [p for p in attachment_paths if p]
+        if filtered:
+            attach_data = json.dumps(filtered)
+
+    # The recipient gets its own copy of each file (its sender's home is
+    # closed to it). The sender's record keeps the sender's paths.
+    recv_attach_data = attach_data
+    if attach_data:
+        recipient_workspace = _local_agent_workspace(contact_uid)
+        if recipient_workspace:
+            recv_attach_data = json.dumps(
+                _copy_attachments_to_recipient(recipient_workspace, recv_msg_id,
+                                               json.loads(attach_data)))
+
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        conn.execute(
+            "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
+            "message_id, text, mode, status, channel, attachment_path) "
+            "VALUES ('sent', ?, ?, ?, ?, ?, ?, 'sent', 'internal', ?)",
+            (sender, contact_uid, sender, msg_id, text, mode, attach_data)
+        )
+        conn.execute(
+            "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
+            "message_id, text, mode, status, channel, attachment_path) "
+            "VALUES ('received', ?, ?, ?, ?, ?, ?, 'unprocessed', 'internal', ?)",
+            (sender, contact_uid, sender, recv_msg_id, text, mode, recv_attach_data)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, message_id=msg_id, sender=sender, recipient=contact_uid,
+                      channel="internal", text=text[:100])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@message.command("get")
+@click.argument("agent_uid")
+@click.option("--unread", is_flag=True, help="Only unprocessed messages")
+@click.option("--last-n-minutes", type=int, default=None, help="Messages from last N minutes")
+@click.option("--last-n-count", type=int, default=None, help="Last N messages")
+@click.option("--limit", type=int, default=50, help="Max results")
+@click.option("--contact", default=None, help="Filter by contact UID")
+def message_get(agent_uid, unread, last_n_minutes, last_n_count, limit, contact):
+    """Query messages for an agent/user from SQLite. Returns JSON array."""
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        aliases = [agent_uid]
+        config = get_config()
+        configured_uid = str(
+            config.get("versavoice", {}).get("sub_account_id") or ""
+        ).strip()
+        current_agent = get_agent_name()
+        if agent_uid in (configured_uid, current_agent):
+            for alias in (configured_uid, current_agent):
+                if alias and alias not in aliases:
+                    aliases.append(alias)
+
+        identity_placeholders = ",".join("?" for _ in aliases)
+        conditions = [
+            f"(to_user_id IN ({identity_placeholders}) "
+            f"OR from_user_id IN ({identity_placeholders}))"
+        ]
+        params = aliases + aliases
+        if unread:
+            conditions.append("status='unprocessed'")
+        if last_n_minutes:
+            conditions.append(f"created_at >= datetime('now', '-{last_n_minutes} minutes')")
+        if contact:
+            conditions.append("(from_user_id=? OR to_user_id=?)")
+            params.extend([contact, contact])
+        where = " AND ".join(conditions)
+        window = last_n_count if last_n_count else limit
+        query = (
+            f"SELECT * FROM ("
+            f"SELECT * FROM messages WHERE {where} "
+            f"ORDER BY created_at DESC LIMIT {int(window)}"
+            f") ORDER BY created_at ASC"
+        )
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            d = dict(r)
+            rid = _reply_to_message_id(d.get("raw_payload"))
+            if rid:
+                d["replyToMessageId"] = rid
+            out.append(d)
+        print(json.dumps(local_time.localize(out), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@message.command("send")
+@click.argument("contact_uid")
+@click.argument("text")
+@click.option("--mode", default="typed", type=click.Choice(["typed", "translate", "speak", "speak_translated"]))
+@click.option("--media", "--file", "media_paths", multiple=True,
+              help="Path to a picture (--media) or a file such as a PDF, spreadsheet or ZIP (--file) to attach (repeatable)")
+@click.option("--markdown", "markdown_paths", multiple=True, help="Path to markdown file to attach (repeatable)")
+# The old spelling: shipped skills named it until 3.9.1, and agents carry it in memories and summaries.
+@click.option("--markdown-paths", "markdown_paths_old", multiple=True, hidden=True)
+@click.option("--url", "urls", multiple=True, help="URL to attach (repeatable)")
+def message_send(contact_uid, text, mode, media_paths, markdown_paths, markdown_paths_old, urls):
+    """Send a message via REST Comms Adapter. Returns JSON.
+
+    VV-gated routing: when VersaVoice is disabled (setup.ini [versavoice] enabled=false),
+    outbound messages are auto-routed as internal SQLite records instead of calling the
+    VV REST API. Agents are completely unaware of this routing decision.
+    """
+    markdown_paths = tuple(markdown_paths) + tuple(markdown_paths_old)
+    to_versavoice = _is_vv_enabled()
+    # A message goes with every attachment it was given, or not at all (state_message_body.md rule 11).
+    cannot_attach = message_attachments.problems(media_paths, markdown_paths, urls,
+                                                 to_versavoice=to_versavoice)
+    if cannot_attach:
+        json_response(False, error=message_attachments.refusal(cannot_attach))
+        sys.exit(1)
+    # ── VV-Gated Routing ──
+    # When VV is disabled, route outbound messages internally instead of
+    # calling the VV REST API. The agent is completely unaware of this.
+    if not to_versavoice:
+        attachment_paths = list(media_paths) + list(markdown_paths)
+        # This route has no link attachment: links go under the text.
+        _send_as_internal(contact_uid, message_attachments.text_with_links(text, urls), mode, messages_db,
+                          attachment_paths=attachment_paths if attachment_paths else None)
+        return
+
+    config = get_config()
+    token = config.get("versavoice", {}).get("api_token")
+    sub_account_id = config.get("versavoice", {}).get("sub_account_id")
+    if not token or not sub_account_id:
+        json_response(False, error="VersaVoice identity not configured")
+        sys.exit(1)
+
+    # ── Identity Validation: agent can only send as itself ──
+    caller = get_agent_name()
+    try:
+        id_conn = db_connect.connect_compat(agents_db, timeout=5)
+        id_conn.row_factory = sqlite3.Row
+        agent_row = id_conn.execute(
+            "SELECT protected, can_message_connections FROM agents WHERE name=?", (caller,)
+        ).fetchone()
+        id_conn.close()
+        if agent_row:
+            is_protected = agent_row["protected"] == 1
+            can_comms = agent_row["can_message_connections"] == 1
+            # Non-privileged agents can only message the sponsor (Primary User)
+            if not is_protected and not can_comms:
+                sponsor_uid = config.get("primary_user", {}).get("uid", "")
+                if contact_uid != sponsor_uid:
+                    json_response(False, error=f"Agent '{caller}' cannot message non-sponsor contacts. "
+                                  "External comms not enabled. Do not retry — report this to the COA for activation.")
+                    sys.exit(1)
+    except Exception:
+        pass  # Fail open — DB unavailable shouldn't block comms entirely
+    
+    # Build attachments payload if any flags provided
+    attachments = None
+    if media_paths or markdown_paths or urls:
+        not_built = []
+        attachments = build_attachments(
+            token, sub_account_id, contact_uid,
+            media_paths=list(media_paths),
+            markdown_paths=list(markdown_paths),
+            urls=list(urls),
+            problems=not_built,
+        )
+        if not_built:
+            # For example an upload the server refused. The message must not go without it.
+            json_response(False, error=message_attachments.refusal(not_built))
+            sys.exit(1)
+        if not attachments:
+            attachments = None  # Don't send empty array
+    
+    success = send_message(token, sub_account_id, contact_uid, text, mode, messages_db, attachments=attachments)
+    if success:
+        att_count = len(attachments) if attachments else 0
+        result = {"recipient": contact_uid, "mode": mode, "text": text[:100]}
+        if att_count > 0:
+            result["attachments"] = att_count
+        json_response(True, **result)
+    else:
+        json_response(False, error="Failed to send message")
+        sys.exit(1)
+
+
+@message.command("internal")
+@click.argument("recipient_agent")
+@click.argument("text")
+@click.option("--from-pu", is_flag=True, default=False, help="Explicitly mark sender as the Primary User (used by agitop)")
+@click.option("--from-lifeline", is_flag=True, default=False, hidden=True,
+              help="Inbox notice from Lifeline. No outbox copy.")
+def message_internal(recipient_agent, text, from_pu, from_lifeline):
+    """Send an internal message to another agent (direct SQLite, no VV API).
+
+    Sub-agents use this to communicate with the COA and vice versa.
+    Messages are inserted directly into messages.db with channel='internal'.
+
+    When --from-pu is passed (e.g., from agitop), the sender identity is
+    resolved from the Primary User's profile in system_config.json.
+    """
+    recipient_agent = recipient_agent.lower()
+    sender = get_agent_name()
+    display_name = sender
+    try:
+        conn = db_connect.connect_compat(messages_db, timeout=5)
+        agents_conn = db_connect.connect_compat(agents_db, timeout=5)
+
+        # Verify recipient exists
+        recipient = agents_conn.execute("SELECT name FROM agents WHERE name=?", (recipient_agent,)).fetchone()
+        if not recipient:
+            agents_conn.close()
+            conn.close()
+            json_response(False, error=f"Agent '{recipient_agent}' not found in registry")
+            sys.exit(1)
+        agents_conn.close()
+
+        # Explicit PU identity when called from the dashboard.
+        # --from-lifeline is a system notice: inbox only, sender Lifeline.
+        if from_pu and from_lifeline:
+            conn.close()
+            json_response(False, error="--from-pu and --from-lifeline cannot be combined")
+            sys.exit(1)
+        if from_lifeline:
+            sender = "lifeline"
+            display_name = "Lifeline"
+        elif from_pu:
+            config = get_config()
+            pu = config.get("primary_user", {})
+            sender = pu.get("uid", "primary_user")
+            display_name = pu.get("display_name", "Primary User")
+
+        # Insert sender record (outbox view) — only for agent-to-agent.
+        # When --from-pu or --from-lifeline, skip the outbox record so the
+        # notice is not also stored as something the agent sent.
+        import uuid
+        msg_id = f"int_{uuid.uuid4().hex[:16]}"
+        if not from_pu and not from_lifeline:
+            conn.execute(
+                "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
+                "message_id, text, mode, status, channel) "
+                "VALUES ('sent', ?, ?, ?, ?, ?, 'typed', 'sent', 'internal')",
+                (sender, recipient_agent, display_name, msg_id, text)
+            )
+        # Insert recipient record (recipient's inbox view)
+        recv_msg_id = f"int_{uuid.uuid4().hex[:16]}"
+        conn.execute(
+            "INSERT INTO messages (direction, from_user_id, to_user_id, display_name, "
+            "message_id, text, mode, status, channel) "
+            "VALUES ('received', ?, ?, ?, ?, ?, 'typed', 'unprocessed', 'internal')",
+            (sender, recipient_agent, display_name, recv_msg_id, text)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, message_id=msg_id, sender=sender, recipient=recipient_agent,
+                      channel="internal", text=text[:100])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@message.command("mark-processed")
+@click.argument("message_id")
+def message_mark_processed(message_id):
+    """Mark a message as processed."""
+    if mark_message_processed(message_id, messages_db):
+        json_response(True, message_id=message_id, status="processed")
+    else:
+        json_response(False, error=f"Failed to mark message {message_id}")
+        sys.exit(1)
+
+@message.command("delete")
+@click.argument("message_id")
+@click.option("--channel", required=True, help="Channel ID (from message get output)")
+def message_delete(message_id, channel):
+    """Delete a VersaVoice message: from the cloud (this sub-account's space) and,
+    once the cloud confirms, its copy in the local database.
+
+    RESTRICTED: Only use when explicitly instructed by the Primary User.
+    Deletes only from this agent's space — the other participant's copy is preserved.
+    A local (agent-to-agent) message has no cloud copy: use `message delete-local`.
+    """
+    try:
+        local_row = message_reader._query("SELECT channel FROM messages WHERE message_id = ? LIMIT 1", (message_id,))
+    except Exception:
+        local_row = []
+    if local_row and local_row[0]["channel"] == "internal":
+        json_response(False, message_id=message_id,
+                      error="This is a local (agent-to-agent) message. It has no VersaVoice copy, so this "
+                            f"command cannot delete it. Use: agictl message delete-local {message_id}")
+        sys.exit(1)
+    config = get_config()
+    sub_account_id = config.get("versavoice", {}).get("sub_account_id")
+    token = config.get("versavoice", {}).get("api_token")
+
+    if not sub_account_id or not token:
+        json_response(False, error="VersaVoice not configured")
+        sys.exit(1)
+
+    from comms import api_request, delete_local_message, tombstone_message
+    endpoint = f"/messages/{message_id}?subAccountId={sub_account_id}&channelId={channel}"
+    result = api_request(endpoint, token, method="DELETE")
+
+    if result and result.get("success"):
+        tombstone_message(message_id, messages_db)
+        delete_local_message(message_id, messages_db)
+        json_response(True, message_id=message_id, channel=channel, status="deleted")
+    else:
+        error_msg = result.get("message", "API call failed") if result else "API call failed"
+        json_response(False, error=error_msg, message_id=message_id)
+        sys.exit(1)
+
+@message.command("delete-local")
+@click.argument("message_ids", nargs=-1)
+@click.option("--agent", "agent_name", default=None, help="Delete this agent's local messages (coa or a sub-agent)")
+@click.option("--channel", type=click.Choice(["all", "internal", "vv"]), default="all", show_default=True,
+              help="internal = between agents; vv = local copies of VersaVoice messages")
+@click.option("--with", "other", default=None, help="Only those exchanged with this agent, sender or contact uid")
+@click.option("--before", default=None, help='Only those created before this local time: "2026-11-01 00:00"')
+@click.option("--include-unread", is_flag=True, help="Also delete received messages not yet processed")
+@click.option("--dry-run", is_flag=True, help="Count what would be deleted; delete nothing")
+def message_delete_local(message_ids, agent_name, channel, other, before, include_unread, dry_run):
+    """Delete messages from this machine's database only. COA or Primary User only.
+
+    Covers both kinds of message an agent holds locally: the internal ones
+    between agents, and the local copies of VersaVoice messages (from the
+    Primary User or any contact). Nothing is sent to VersaVoice: the cloud
+    copy and the other person's copy stay as they are.
+
+    Give message ids, or --agent NAME for everything that agent sent and
+    received. Unread messages are kept unless --include-unread; a message
+    still waiting to be sent is always kept.
+    RESTRICTED: delete only when the Primary User asked for it. COA runs the
+    command itself; the Primary User does not have to.
+    """
+    _require_pu_or_coa()
+    if bool(message_ids) == bool(agent_name):
+        json_response(False, error="Give message ids, or --agent <name>: one or the other")
+        sys.exit(1)
+    if message_ids and (other or before):
+        json_response(False, error="--with and --before go with --agent, not with message ids")
+        sys.exit(1)
+    before_utc = ""
+    agent_ids = []
+    if agent_name:
+        agent_name = agent_name.lower()
+        try:
+            agents_conn = db_connect.connect_compat(agents_db, timeout=5)
+            known = agents_conn.execute("SELECT name FROM agents WHERE name=?", (agent_name,)).fetchone()
+            agents_conn.close()
+        except Exception as e:
+            json_response(False, error=str(e))
+            sys.exit(1)
+        if not known:
+            json_response(False, error=f"Agent '{agent_name}' not found in registry")
+            sys.exit(1)
+        # Internal rows carry the agent's name; VersaVoice rows carry its account id.
+        agent_ids = [agent_name]
+        vv_uid = _agent_vv_uid_map().get(agent_name)
+        if vv_uid:
+            agent_ids.append(vv_uid)
+        if before:
+            before_utc = _typed_time_or_exit(before, "--before")
+    try:
+        result = message_reader.delete_local_messages(
+            message_ids=message_ids, agent_ids=agent_ids, other=(other or "").strip(),
+            before_utc=before_utc, channel=channel, include_unread=include_unread, dry_run=dry_run)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    json_response(True, action="would_delete" if dry_run else "deleted", agent=agent_name,
+                  channel=channel, versavoice="not touched", **result)
+
+@message.command("sync-inbox")
+@click.argument("agent_user")
+@click.option("--agent-path", required=True)
+@click.option("--sub-account", required=True)
+@click.option("--token", required=True, envvar="AGICTL_VV_TOKEN",
+              help="VersaVoice API token; AGICTL_VV_TOKEN in the environment keeps it off the command line")
+@click.option("--full", is_flag=True, help="Ignore the stored cursor and pull the inbox from the beginning")
+@click.option("--cycle-id", "cycle_id", default="",
+              help="The agent's running cycle: this fetch is also its proof of life (Lifeline only)")
+def message_sync_inbox(agent_user, agent_path, sub_account, token, full, cycle_id):
+    """Pull messages from VersaVoice REST API and persist to SQLite."""
+    success, inserted = fetch_inbox(
+        agent_user, agent_path, sub_account, token, messages_db, full_sync=full, cycle_id=cycle_id
+    )
+    if not success:
+        sys.exit(1)
+    json_response(True, inserted=inserted)
+
+@message.command("count-unprocessed")
+@click.argument("sub_account")
+@click.argument("within_seconds", type=int)
+@click.option("--agent-name", default="", help="Agent name for internal message matching")
+def message_count_unprocessed(sub_account, within_seconds, agent_name):
+    """Count unprocessed received messages. WITHIN_SECONDS above 0 counts only
+    those received in the last that many seconds; 0 counts all of them."""
+    if within_seconds < 0:
+        raise click.BadParameter("must be 0 (no window) or a number of seconds", param_hint="WITHIN_SECONDS")
+    print(message_reader.count_unprocessed(sub_account, within_seconds, agent_name=agent_name))
+
+@message.command("received-unread", hidden=True)
+@click.option("--agent", "agent_name", required=True, help="Spawned agent this read is for")
+def message_received_unread(agent_name):
+    """Unprocessed received rows for one agent. Harness mailbox. JSON array."""
+    try:
+        from agent_reads import ids_for_spawned_agent, received_unread
+        config = get_config()
+        sub = str((config.get("versavoice") or {}).get("sub_account_id") or "").strip()
+        ids = ids_for_spawned_agent(agent_name, get_agent_name(), sub)
+        print(json.dumps(received_unread(messages_db, ids), default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@message.command("count-stale")
+@click.argument("sub_account")
+@click.argument("older_than_seconds", type=int)
+def message_count_stale(sub_account, older_than_seconds):
+    """Count messages stuck unprocessed past the cooldown."""
+    print(message_reader.count_stale(sub_account, older_than_seconds))
+
+@message.command("fail-stale")
+@click.argument("sub_account")
+@click.argument("older_than_seconds", type=int)
+def message_fail_stale(sub_account, older_than_seconds):
+    """Force-fail stale unprocessed messages."""
+    message_reader.fail_stale(sub_account, older_than_seconds)
+
+@message.command("blacklisted")
+@click.argument("sub_account")
+def message_blacklisted(sub_account):
+    """Return UIDs of unprocessed senders matching security blacklist."""
+    blocked_uids = tasks_reader.get_blocked_uids()
+    if blocked_uids:
+        bad_senders = message_reader.get_unprocessed_from(sub_account, blocked_uids)
+        if bad_senders:
+            print("\n".join(bad_senders))
+
+@message.command("outbound-streak")
+@click.argument("sub_account")
+@click.argument("contact_uid")
+@click.option("--agent-name", default="", help="Internal agent-name identity alias.")
+@click.option("--limit", default=10, type=click.IntRange(min=1), help="Recent rows to inspect.")
+def message_outbound_streak(sub_account, contact_uid, agent_name, limit):
+    """Return the identity-aware consecutive outbound streak for one contact."""
+    if message_reader is None:
+        json_response(False, error="Message reader unavailable")
+        raise click.exceptions.Exit(1)
+    try:
+        result = message_reader.get_outbound_streak(
+            sub_account,
+            contact_uid,
+            agent_name=agent_name,
+            limit=limit,
+        )
+    except Exception as exc:
+        json_response(False, error=f"Could not calculate outbound streak: {exc}")
+        raise click.exceptions.Exit(1)
+    print(json.dumps(result))
+
+
+@message.command("conversation-context")
+@click.argument("sub_account")
+@click.argument("sponsor_uid", required=False, default="")
+@click.option("--injection-mode", default="all", type=click.Choice(["all", "relevant"]),
+              help="'all' = inject ALL connection memories (COA). 'relevant' = only active sender memories (sub-agents).")
+@click.option("--agent-name", default="", help="Agent name for matching internal messages (to_user_id=agent_name).")
+@click.option("--depth", default=10, type=int, help="Number of historical messages per contact (default: 10).")
+@click.option(
+    "--max-chars",
+    default=40000,
+    type=int,
+    help="Failsafe char budget. Shrinks older history first; never head-cuts NEW MESSAGES. 0 = no limit.",
+)
+def message_conversation_context(sub_account, sponsor_uid, injection_mode, agent_name, depth, max_chars):
+    """Build conversation context blob for prompt injection (includes memory)."""
+    import sqlite3 as _sqlite3
+
+    # For internal messages, to_user_id is the agent name, not the VV UID.
+    # Build a list of IDs to match against to_user_id.
+    my_ids = [sub_account]
+    if agent_name and agent_name != sub_account:
+        my_ids.append(agent_name)
+
+    # ── Name resolver: connections table (tasks.db) first, messages.db fallback ──
+    _name_cache = {}
+    def _resolve_contact_name(uid, fallback=None):
+        if uid in _name_cache:
+            return _name_cache[uid]
+        name = fallback
+        # 1. Try connections table in tasks.db (canonical)
+        try:
+            tconn = db_connect.connect_compat(tasks_db, timeout=2)
+            tconn.row_factory = _sqlite3.Row
+            row = tconn.execute("SELECT display_name FROM connections WHERE uid=?", (uid,)).fetchone()
+            tconn.close()
+            if row and row["display_name"] and row["display_name"] != "Unknown":
+                name = row["display_name"]
+                _name_cache[uid] = name
+                return name
+        except Exception:
+            pass
+        # 2. Fallback to messages.db display_name
+        rows = message_reader._query(
+            "SELECT display_name FROM messages WHERE from_user_id=? AND display_name IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (uid,)
+        )
+        if rows and rows[0]["display_name"]:
+            name = rows[0]["display_name"]
+        _name_cache[uid] = name
+        return name or f"(uid:{uid[:8]}...)"
+
+    # Thread targets: ONLY senders with unprocessed messages (these get history)
+    thread_targets = {}
+    id_placeholders = ",".join("?" * len(my_ids))
+    rows = message_reader._query(
+        f"SELECT DISTINCT from_user_id, display_name FROM messages WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({id_placeholders})",
+        tuple(my_ids)
+    )
+    for r in rows:
+        uid = r["from_user_id"]
+        if uid and uid not in thread_targets:
+            msg_name = r["display_name"] if r["display_name"] else None
+            label = "PRIMARY" if uid == sponsor_uid else "CONNECTION"
+            thread_targets[uid] = {"name": _resolve_contact_name(uid, fallback=msg_name), "label": label}
+
+    # Memory-only contacts: depends on injection mode
+    # 'all' = inject ALL connection memories (COA default — full situational awareness)
+    # 'relevant' = only memories for senders with new messages (sub-agent default — minimal context)
+    memory_only_contacts = {}
+    if injection_mode == "all":
+        # COA: inject memory for top active contacts (even without new messages)
+        top_contacts = message_reader.get_top_contacts(sub_account, limit=4)
+        for uid in top_contacts:
+            if uid and uid not in thread_targets:
+                label = "PRIMARY" if uid == sponsor_uid else "CONNECTION"
+                memory_only_contacts[uid] = {"name": _resolve_contact_name(uid), "label": label}
+        # Also always include sponsor in memory-only if not already in threads
+        if sponsor_uid and sponsor_uid not in thread_targets and sponsor_uid not in memory_only_contacts:
+            name = _resolve_contact_name(sponsor_uid, fallback="Primary User")
+            memory_only_contacts[sponsor_uid] = {"name": name, "label": "PRIMARY"}
+
+    all_contacts = {**thread_targets, **memory_only_contacts}
+    if not all_contacts:
+        return
+
+    # ── Resolve agent name for memory queries ──
+    # Use --agent-name if provided (lifeline passes this); fallback to USER env
+    if not agent_name:
+        agent_name = os.getenv("USER", "coa")
+
+    # ── Load memory from tasks.db ──
+    contact_memories = {}
+    contact_profiles = {}
+    system_memories = []
+    project_memories = []
+    try:
+        tconn = db_connect.connect_compat(tasks_db, timeout=5)
+        tconn.row_factory = _sqlite3.Row
+        # Contact memories for all known contacts
+        for uid in all_contacts:
+            row = tconn.execute(
+                "SELECT * FROM agent_memory_connection WHERE agent_name=? AND contact_uid=?",
+                (agent_name, uid)
+            ).fetchone()
+            if row:
+                contact_memories[uid] = dict(row)
+        # Contact profiles from connections table
+        for uid in all_contacts:
+            row = tconn.execute(
+                "SELECT display_name, spoken_lang, country, city, country_of_residence, state_or_province, chromosome, date_of_birth, abilities FROM connections WHERE uid=?",
+                (uid,)
+            ).fetchone()
+            if row:
+                contact_profiles[uid] = dict(row)
+        # System memory (global — shared across all agents)
+        sys_rows = tconn.execute(
+            "SELECT key, value, agent_name AS stored_by FROM agent_memory_system ORDER BY key ASC"
+        ).fetchall()
+        system_memories = [dict(r) for r in sys_rows]
+        # Project memories: COA sees ALL projects with active tasks (orchestrator visibility).
+        # Sub-agents: own row preferred; if none, fall back to COA's row for projects they
+        # have active tasks on OR are members of (new assignees otherwise spawn blind).
+        # Archived/paused projects are excluded — their memory is retrievable via
+        # `agictl memory project get <id>` but must not consume spawn context.
+        is_coa = (agent_name == "coa")
+        if is_coa:
+            proj_rows = tconn.execute(
+                """SELECT DISTINCT amp.* FROM agent_memory_project amp
+                   JOIN projects p ON p.id = amp.project_id
+                   WHERE amp.agent_name=? AND p.status = 'active' AND (
+                       amp.project_id IN (
+                           SELECT DISTINCT t.project_id FROM tasks t
+                           WHERE t.project_id IS NOT NULL
+                             AND t.status IN ('planned','in_progress','waiting','blocked')
+                       )
+                       OR amp.updated_at >= datetime('now', '-7 days')
+                   )
+                   ORDER BY amp.updated_at DESC""",
+                (agent_name,)
+            ).fetchall()
+        else:
+            # Own row preferred. COA fallback only for projects with an active
+            # assigned task and no own row — membership alone is too broad
+            # (every agent is auto-joined to AGi-Tools).
+            proj_rows = tconn.execute(
+                """SELECT amp.* FROM agent_memory_project amp
+                   JOIN projects p ON p.id = amp.project_id
+                   WHERE p.status = 'active' AND (
+                     -- Own memory: active assigned tasks, or own recent updates
+                     (
+                       amp.agent_name = ?
+                       AND (
+                         amp.project_id IN (
+                           SELECT DISTINCT t.project_id FROM tasks t
+                           WHERE t.project_id IS NOT NULL
+                             AND t.status IN ('planned','in_progress','waiting','blocked')
+                             AND t.assigned_to = ?
+                         )
+                         OR amp.updated_at >= datetime('now', '-7 days')
+                       )
+                     )
+                     OR
+                     -- COA shared draft: active task on project, no own row yet
+                     (
+                       amp.agent_name = 'coa'
+                       AND amp.project_id IN (
+                         SELECT DISTINCT t.project_id FROM tasks t
+                         WHERE t.project_id IS NOT NULL
+                           AND t.status IN ('planned','in_progress','waiting','blocked')
+                           AND t.assigned_to = ?
+                       )
+                       AND amp.project_id NOT IN (
+                         SELECT project_id FROM agent_memory_project WHERE agent_name = ?
+                       )
+                     )
+                   )
+                   ORDER BY amp.updated_at DESC""",
+                (agent_name, agent_name, agent_name, agent_name)
+            ).fetchall()
+        project_memories = [dict(r) for r in proj_rows]
+        tconn.close()
+    except Exception:
+        pass  # Memory is additive — don't block spawn if query fails
+
+    # ── Primary User profile from config ──
+    config = get_config()
+    pu = config.get("primary_user", {})
+    if sponsor_uid and pu.get("uid") == sponsor_uid:
+        contact_profiles.setdefault(sponsor_uid, {})
+        cp = contact_profiles[sponsor_uid]
+        # Config data takes precedence (fresher than connections table)
+        cp["spoken_lang"] = cp.get("spoken_lang") or pu.get("spokenLanguage")
+        cp["country"] = cp.get("country") or pu.get("countryOfBirth")
+        cp["city"] = cp.get("city") or pu.get("nearestCity")
+        cp["country_of_residence"] = cp.get("country_of_residence") or pu.get("countryOfResidence")
+        cp["state_or_province"] = cp.get("state_or_province") or pu.get("stateOrProvince")
+        cp["chromosome"] = cp.get("chromosome") or pu.get("chromosome")
+        cp["date_of_birth"] = cp.get("date_of_birth") or pu.get("dateOfBirth")
+        cp["abilities"] = cp.get("abilities") or json.dumps(pu.get("abilities", []))
+
+    # ── Profile block builder ──
+    def _build_profile_block(uid, name, label):
+        """Generate a PROFILE block with communication directives."""
+        prof = contact_profiles.get(uid)
+        if not prof:
+            return ""
+        parts = [f"[PROFILE: {name} ({label})]"]
+        attrs = []
+        lang = prof.get("spoken_lang")
+        if lang:
+            attrs.append(f"Language: {lang}")
+        country = prof.get("country")
+        if country:
+            attrs.append(f"Dialect Origin (country where language was learned): {country}")
+        city = prof.get("city")
+        if city:
+            attrs.append(f"Dialect Region (city/region influencing speech patterns): {city}")
+        residence = prof.get("country_of_residence")
+        if residence:
+            attrs.append(f"Country of residence: {residence}")
+        state_prov = prof.get("state_or_province")
+        if state_prov:
+            attrs.append(f"State / Province: {state_prov}")
+        if attrs:
+            parts.append(f"  {' | '.join(attrs)}")
+        chrom = prof.get("chromosome")
+        dob = prof.get("date_of_birth")
+        voice_attrs = []
+        if chrom:
+            voice_label = {
+                "XY": "male", "XX": "female", "Reflective": "reflective",
+                # Legacy values cached from older syncs
+                "X": "male", "Y": "female", "None": "reflective",
+            }.get(chrom, chrom)
+            voice_attrs.append(f"Voice: {voice_label} ({chrom})")
+        if dob:
+            voice_attrs.append(f"DOB: {dob}")
+        if voice_attrs:
+            parts.append(f"  {' | '.join(voice_attrs)}")
+        abilities_raw = prof.get("abilities")
+        if abilities_raw:
+            try:
+                abilities = json.loads(abilities_raw) if isinstance(abilities_raw, str) else abilities_raw
+                if abilities:
+                    ability_strs = [f"{a['name']} ({a.get('level', '?')})" for a in abilities if isinstance(a, dict)]
+                    if ability_strs:
+                        parts.append(f"  Abilities: {', '.join(ability_strs)}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # Auto-generated communication directives
+        directives = []
+        if lang and lang != "en":
+            directives.append(f"Communicate in {lang}. Translate if needed.")
+        elif lang:
+            directives.append("Communicate in English.")
+        if country:
+            directives.append(
+                f"Dialect origin is {country} (where they learned the language — not country of residence)."
+            )
+        if residence:
+            live_bits = [residence]
+            if state_prov:
+                live_bits.append(state_prov)
+            directives.append(f"Lives in {', '.join(live_bits)}.")
+        if chrom == "X":
+            directives.append("This person hears a MALE voice for your spoken messages.")
+        elif chrom == "Y":
+            directives.append("This person hears a FEMALE voice for your spoken messages.")
+        if directives:
+            parts.append(f"  → {' '.join(directives)}")
+        return "\n".join(parts) + "\n"
+
+    output = ""
+
+    # Fetch unprocessed messages early (used for cold-start / presence checks) but
+    # emit them LAST in this blob — after project memory, profiles, and history —
+    # so the agent grounds in context first and the unread mail gets maximum
+    # recency weight. CONTEXT MAP still lists messages as work-priority #1.
+    new_messages = message_reader._query(
+        f"SELECT message_id, from_user_id, display_name, text, original_text, created_at, raw_payload "
+        f"FROM messages WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({id_placeholders}) "
+        f"ORDER BY created_at ASC",
+        tuple(my_ids)
+    )
+    if not new_messages:
+        # Older / test schemas may lack raw_payload — still inject unread bodies.
+        new_messages = message_reader._query(
+            f"SELECT message_id, from_user_id, display_name, text, original_text, created_at "
+            f"FROM messages WHERE status='unprocessed' AND direction='received' AND to_user_id IN ({id_placeholders}) "
+            f"ORDER BY created_at ASC",
+            tuple(my_ids)
+        )
+
+    # ── Cold start nudge ──
+    # Note: system_memories (operational) is now injected by lifeline directly into the prompt
+    if not contact_memories and not system_memories and not project_memories:
+        output += "⚠ No memory data found — this is your first cycle with the memory system. Use the memory_management skill at cycle end to begin building context.\n\n"
+
+    # ── Project memory section ──
+    # Fields are capped at injection — key_decisions in particular grows without
+    # bound as agents append history. Full record stays retrievable on demand.
+    PROJECT_MEMORY_FIELD_CAP = 600
+
+    def _cap_pm_field(text, project_id):
+        text = str(text)
+        if len(text) <= PROJECT_MEMORY_FIELD_CAP:
+            return text
+        return text[:PROJECT_MEMORY_FIELD_CAP].rstrip() + f"… [truncated — full: agictl memory project get {project_id}]"
+
+    if project_memories:
+        output += "--- PROJECT MEMORY ---\n"
+        for pm in project_memories:
+            pid = pm['project_id']
+            author = pm.get("agent_name") or ""
+            shared_tag = f" (shared — from {author})" if author and author != agent_name else ""
+            output += f"  [Project #{pid}]{shared_tag}\n"
+            if pm.get("current_phase"):
+                output += f"    Phase: {_cap_pm_field(pm['current_phase'], pid)}\n"
+            if pm.get("key_decisions"):
+                output += f"    Decisions: {_cap_pm_field(pm['key_decisions'], pid)}\n"
+            if pm.get("blockers"):
+                output += f"    Blockers: {_cap_pm_field(pm['blockers'], pid)}\n"
+            if pm.get("next_steps"):
+                output += f"    Next: {_cap_pm_field(pm['next_steps'], pid)}\n"
+        output += "--- END PROJECT MEMORY ---\n\n"
+
+    # ── Memory for recent contacts (no thread, just memory context) ──
+    if memory_only_contacts:
+        for uid, data in memory_only_contacts.items():
+            output += _build_profile_block(uid, data['name'], data['label'])
+            cmem = contact_memories.get(uid)
+            if cmem:
+                output += f"  [MEMORY for {data['name']}]\n"
+                if cmem.get("preferences"):
+                    output += f"    Preferences: {cmem['preferences']}\n"
+                if cmem.get("communication_style"):
+                    output += f"    Comm style: {cmem['communication_style']}\n"
+                if cmem.get("rapport_level"):
+                    output += f"    Rapport: {cmem['rapport_level']}\n"
+                if cmem.get("personal_notes"):
+                    output += f"    Notes: {cmem['personal_notes']}\n"
+                if cmem.get("emotional_notes"):
+                    output += f"    Emotional: {cmem['emotional_notes']}\n"
+                output += "\n"
+
+    # ── Conversation history (thread context for senders with unprocessed messages) ──
+    if thread_targets:
+        output += f"--- CONVERSATION HISTORY (last {depth} messages per contact — use agictl message get for more) ---\n\n"
+    for uid, data in thread_targets.items():
+        history = message_reader.get_contact_history(sub_account, uid, limit=depth, exclude_unprocessed=True, agent_name=agent_name)
+
+        # Per-contact profile + memory before their thread. Written for a contact
+        # with no earlier messages too: a first message is when the language,
+        # dialect and voice lines matter most (SPWN-53).
+        output += _build_profile_block(uid, data['name'], data['label'])
+        cmem = contact_memories.get(uid)
+        if cmem:
+            output += f"  [MEMORY for {data['name']}]\n"
+            if cmem.get("preferences"):
+                output += f"    Preferences: {cmem['preferences']}\n"
+            if cmem.get("communication_style"):
+                output += f"    Comm style: {cmem['communication_style']}\n"
+            if cmem.get("rapport_level"):
+                output += f"    Rapport: {cmem['rapport_level']}\n"
+            if cmem.get("personal_notes"):
+                output += f"    Notes: {cmem['personal_notes']}\n"
+            if cmem.get("emotional_notes"):
+                output += f"    Emotional: {cmem['emotional_notes']}\n"
+            # Staleness check
+            mem_updated = cmem.get("updated_at", "")
+            if history and mem_updated:
+                latest_msg = history[0].get("created_at", "")
+                if latest_msg and latest_msg > mem_updated:
+                    output += (f"    ⚠ Memory may be stale — last updated {local_time.show(mem_updated)}, "
+                               f"newest message {local_time.show(latest_msg)}\n")
+
+        if not history:
+            output += f"[{data['label']}: {data['name']} ({uid}) — no earlier messages]\n\n"
+            continue
+        output += f"[{data['label']}: {data['name']} ({uid}) — last {len(history)} messages]\n"
+        for msg in history:
+            prefix = "YOU" if msg["direction"] == "sent" else "THEM"
+            text = msg.get("cleaned_text") or msg.get("text") or ""
+            dt = local_time.show(msg.get("created_at", ""))     # local time, zone named
+            output += f"  [{dt}] {prefix}: {text}\n"
+
+        # ── Consecutive outbound flood detection ──
+        # Include unread inbound rows and both runtime identities when deciding
+        # whether a reply reset the streak; displayed history intentionally
+        # excludes unread rows because they are injected below as new mail.
+        _FLOOD_THRESHOLD = 3
+        consecutive_outbound = message_reader.get_outbound_streak(
+            sub_account,
+            uid,
+            agent_name=agent_name,
+            limit=max(10, depth),
+        )["count"]
+        if consecutive_outbound >= _FLOOD_THRESHOLD:
+            output += (
+                f"\n⚠ OUTBOUND STREAK: You have sent {consecutive_outbound} consecutive "
+                f"messages to {data['name']} without receiving any reply.\n"
+                f"  → DO NOT send another status update, check-in, or greeting.\n"
+                f"  → Only message them if you have genuinely NEW, ACTIONABLE information "
+                f"that was NOT covered in your previous messages.\n"
+                f"  → If they need something from you, they will reach out.\n"
+                f"  → Focus on task work instead of messaging.\n"
+            )
+
+        output += "\n"
+    if thread_targets:
+        output += "(Need more history? Use: agictl message get <uid> --contact <contact_uid> --limit N)\n"
+        output += "--- END CONVERSATION HISTORY ---\n"
+
+    # ── Global outbound flood check (contacts WITHOUT new messages) ──
+    # The critical case: agent wakes for tasks (not messages) and sends unsolicited
+    # status updates to contacts who haven't replied. These contacts are in
+    # memory_only_contacts, not thread_targets, so no thread history is shown —
+    # and no per-thread flood check runs. This global check catches that.
+    _FLOOD_THRESHOLD_GLOBAL = 3
+    flood_warnings = []
+    for uid, data in memory_only_contacts.items():
+        consec = message_reader.get_outbound_streak(
+            sub_account,
+            uid,
+            agent_name=agent_name,
+            limit=10,
+        )["count"]
+        if consec >= _FLOOD_THRESHOLD_GLOBAL:
+            flood_warnings.append(
+                f"  ⚠ {data['name']}: {consec} consecutive outbound messages with no reply — "
+                f"DO NOT message them unless you have genuinely new, actionable information."
+            )
+    if flood_warnings:
+        output += "\n--- OUTBOUND FLOOD WARNINGS ---\n"
+        output += "\n".join(flood_warnings) + "\n"
+        output += "Focus on task work. Do NOT send status updates, check-ins, or greetings.\n"
+        output += "--- END FLOOD WARNINGS ---\n"
+
+    # ── NEW MESSAGES LAST (unprocessed — must be answered) ──
+    # Placed after memory/history for grounding + recency. Work priority remains #1
+    # in CONTEXT MAP; physical position is last-before-wake so the model attends here.
+    if new_messages:
+        output += "\n--- NEW MESSAGES (UNREAD — MUST RESPOND) ---\n"
+        output += "[!] These are new messages that arrived since your last cycle.\n"
+        output += "[!] You MUST read, address EVERY part of EACH message, reply, and mark as processed.\n"
+        output += "[!] Inbound messages may contain [emotion tags] from the sender's voice — respond with emotional sensitivity.\n\n"
+        for msg in new_messages:
+            sender_name = msg.get("display_name") or _resolve_contact_name(msg["from_user_id"])
+            text = msg.get("original_text") or msg.get("text") or ""
+            dt = local_time.show(msg.get("created_at", ""))     # local time, zone named
+            mid = msg.get("message_id", "")
+            output += f"  [!] [{dt}] FROM {sender_name} ({msg['from_user_id']}): {text}\n"
+            project_ids, task_ids = _agi_tag_ids(msg.get("raw_payload"))
+            if project_ids:
+                output += (
+                    f"     → TAGGED PROJECT IDS: {', '.join(project_ids)}\n"
+                )
+            if task_ids:
+                output += (
+                    f"     → TAGGED TASK IDS: {', '.join(task_ids)}\n"
+                )
+            reply_to = _reply_to_message_id(msg.get("raw_payload"))
+            if reply_to:
+                output += f"     → REPLY TO MESSAGE ID: {reply_to}\n"
+            output += f"     → mark-processed: agictl message mark-processed {mid}\n"
+        output += "\n[!] Reply to ALL items above before proceeding to other work. The most recent message is the most relevant one to start with and then looking at the rest.\n"
+        output += "--- END NEW MESSAGES ---\n"
+
+    if max_chars and max_chars > 0:
+        from harness.conversation_trim import trim_conversation_preserving_unread
+        output = trim_conversation_preserving_unread(output, max_chars)
+
+    print(output)
+
+@message.command("sync-outbox")
+@click.argument("agent_uid")
+@click.argument("input_file", type=click.File('rb'), default='-')
+def message_sync_outbox(agent_uid, input_file):
+    """Bulk import outbox JSON payload to SQLite via stdin."""
+    try:
+        data = json.load(input_file)
+        if not isinstance(data, list):
+            data = []
+        inserted = message_reader.store_outbox_messages(data, agent_uid)
+        print(f"SUCCESS {inserted}")
+    except Exception as e:
+        print(f"FAIL {e}")
+
+@message.command("attachment-path")
+@click.argument("msg_id")
+@click.argument("path")
+def message_attachment_path(msg_id, path):
+    """Update a message to denote an attachment exists locally."""
+    message_reader.update_attachment_status(msg_id, path)
+
+@message.command("stamp-cycle")
+@click.argument("sub_account")
+@click.argument("cycle_id")
+@click.option("--agent-name", default="", help="Agent name for internal message matching")
+def message_stamp_cycle(sub_account, cycle_id, agent_name):
+    """Stamp all unprocessed received messages with a cycle_id."""
+    count = message_reader.stamp_cycle_id(sub_account, cycle_id, agent_name=agent_name)
+    print(f"Stamped {count} message(s) with cycle {cycle_id}")
+
+
+# ═══════════════════════════════════════════════════════
+# 5. CYCLE — Agent telemetry lifecycle
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def cycle():
+    """Agent cycle management and telemetry."""
+    pass
+
+def _frames_agent(requested: str | None) -> str:
+    """Rows belong to the calling agent. COA may name another agent."""
+    own = get_agent_name()
+    asked = (requested or "").strip()
+    if asked and asked != own and own not in ("coa", "watchdog"):
+        json_response(False, error="Only COA can read another agent's frames.")
+        sys.exit(1)
+    return asked or own
+
+@cycle.group("frames")
+def cycle_frames():
+    """Compaction frames for a thread (TD-CTX-FRAME-001)."""
+    pass
+
+@cycle_frames.command("add", hidden=True)
+@click.option("--thread", "thread_id", required=True)
+@click.option("--start", "frame_start", required=True)
+@click.option("--end", "frame_end", required=True)
+@click.option("--ids", required=True, help="Comma-separated message ids covered by this frame")
+@click.option("--cycle-id", default="")
+def frames_add(thread_id, frame_start, frame_end, ids, cycle_id):
+    """Record one frame. Summary is read from stdin."""
+    summary = sys.stdin.read().strip()
+    if not summary:
+        json_response(False, error="A summary on stdin is required.")
+        sys.exit(1)
+    agent = get_agent_name()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        cur = conn.execute(
+            """INSERT INTO frames
+               (agent_name, cycle_id, thread_id, status, frame_start, frame_end, summary, message_ids)
+               VALUES (?, ?, ?, 'active', ?, ?, ?, ?)""",
+            (agent, cycle_id or None, thread_id, frame_start, frame_end, summary, ids),
+        )
+        conn.commit()
+        frame_id = cur.lastrowid
+        conn.close()
+        json_response(True, id=frame_id, agent=agent, thread_id=thread_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@cycle_frames.command("roll", hidden=True)
+@click.option("--thread", "thread_id", default="")
+@click.option("--id", "frame_id", type=int, default=0)
+def frames_roll(thread_id, frame_id):
+    """Mark frames rolled: one id, or every active frame on a thread."""
+    agent = get_agent_name()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        if frame_id:
+            conn.execute(
+                "UPDATE frames SET status='rolled' WHERE id=? AND agent_name=? AND status='active'",
+                (frame_id, agent),
+            )
+        elif thread_id:
+            conn.execute(
+                "UPDATE frames SET status='rolled' WHERE agent_name=? AND thread_id=? AND status='active'",
+                (agent, thread_id),
+            )
+        else:
+            conn.close()
+            json_response(False, error="Pass --id or --thread.")
+            sys.exit(1)
+        conn.commit()
+        conn.close()
+        json_response(True, agent=agent)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+# Frames the harness reads per thread: enough to cover every message still in a
+# checkpoint (covered messages leave it at the next resume).
+FRAMES_HARNESS_LIMIT = 200
+
+
+def _frames_rows(agent: str, text: str = "", status: str = "", thread_id: str = ""):
+    conn = db_connect.connect_compat(cycles_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    query = "SELECT * FROM frames WHERE agent_name=?"
+    args = [agent]
+    if status:
+        query += " AND status=?"
+        args.append(status)
+    if thread_id:
+        query += " AND thread_id=?"
+        args.append(thread_id)
+    if text:
+        query += " AND summary LIKE ?"
+        args.append(f"%{text}%")
+    query += " ORDER BY id"
+    try:
+        rows = [dict(r) for r in conn.execute(query, args).fetchall()]
+    except Exception:
+        rows = []
+    conn.close()
+    return rows
+
+@cycle_frames.command("list")
+@click.option("--agent", "agent_name", default=None)
+@click.option("--thread", "thread_id", default="")
+@click.option("--status", default="", help="active, rolled, or blank for all")
+@click.option("--harness", "for_harness", is_flag=True, hidden=True,
+              help="Newest frames of the thread; rolled rows without their summary")
+def frames_list(agent_name, thread_id, status, for_harness):
+    """List compaction frames for an agent."""
+    agent = _frames_agent(agent_name)
+    rows = _frames_rows(agent, status=status, thread_id=thread_id)
+    if for_harness:
+        # The harness needs every status to know which messages are covered
+        # (a message is framed once), but only active summaries go in the payload.
+        rows = rows[-FRAMES_HARNESS_LIMIT:]
+        for row in rows:
+            if row.get("status") != "active":
+                row["summary"] = ""
+        # The harness computes with these times: it gets the stored UTC values.
+        print(json.dumps(rows, indent=2, default=str))
+        return
+    print(json.dumps(local_time.localize(rows), indent=2, default=str))
+
+@cycle_frames.command("search")
+@click.argument("text")
+@click.option("--agent", "agent_name", default=None)
+def frames_search(text, agent_name):
+    """Search compaction frame summaries."""
+    agent = _frames_agent(agent_name)
+    print(json.dumps(local_time.localize(_frames_rows(agent, text=text)), indent=2, default=str))
+
+@cycle.command("start")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+@click.option("--wake-reason", default=None, help="Why Lifeline spawned this cycle")
+def cycle_start(agent_name, wake_reason):
+    """INSERT a new cycle row. Returns JSON with cycle_id."""
+    if not agent_name:
+        agent_name = get_agent_name()
+    cycle_id = f"{agent_name}-{int(time.time())}"
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        conn.execute("INSERT INTO cycles (id, started_at, session_start_ts) VALUES (?, datetime('now'), datetime('now'))", (cycle_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=str(e), agent=agent_name)
+        sys.exit(1)
+    # Separate write: the cycle row must exist even if the schema refresh
+    # that adds wake_reason was skipped (database locked during --update).
+    if wake_reason:
+        try:
+            conn = db_connect.connect_compat(cycles_db, timeout=5)
+            conn.execute("UPDATE cycles SET wake_reason=? WHERE id=?", (wake_reason, cycle_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            error_console.print(f"[yellow]wake_reason not stored: {e}[/yellow]")
+    json_response(True, cycle_id=cycle_id, agent=agent_name)
+
+@cycle.command("end")
+@click.argument("summary", nargs=-1)
+@click.option("--handoff", default=None,
+              help="For your next spawn: 'Open: … | Watch: … | Next: … | Carry: #id, #id'")
+@click.option("--no-handoff", "no_handoff", is_flag=True,
+              help="Confirm ending without a handoff (after the refusal message)")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def cycle_end(summary, handoff, no_handoff, agent_name):
+    """Mark cycle end and explicitly kill execution."""
+    sum_text = " ".join(summary)
+    handoff_text = (handoff or "").strip()
+    if not agent_name:
+        agent_name = get_agent_name()
+
+    # The harness ends the stream only on the "🛑 Cycle ended:" line, so this
+    # refusal keeps the cycle open and the agent can add the handoff.
+    if not handoff_text and not no_handoff:
+        console.print(
+            "⏸ Cycle NOT ended — no handoff. Your next spawn starts from it: "
+            "what is open, what to watch, what comes next, which awareness ids to carry.\n"
+            "End with: cycle end \"summary\" --handoff \"Open: … | Watch: … | Next: … | Carry: #id\"\n"
+            "If there is nothing to hand off, confirm with: cycle end \"summary\" --no-handoff"
+        )
+        sys.exit(1)
+
+    # One cycle, one row (state_spawn_context.md §1.5): everything below writes
+    # to the agent's newest open cycle only. Earlier rows left open by a killed
+    # cycle keep their own data.
+    open_id = _open_cycle_id(agent_name)
+
+    # ── Awareness Enforcement Gate ──
+    # Check if agent logged any awareness this cycle (advisory, not hard-blocking)
+    awareness_warning = False
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        row = conn.execute(
+            "SELECT session_start_ts, last_awareness_ts FROM cycles WHERE id=?",
+            (open_id,)
+        ).fetchone()
+        if row and row[0]:  # session_start_ts exists
+            if not row[1] or row[1] <= row[0]:  # no awareness_ts or older than session start
+                awareness_warning = True
+        conn.close()
+    except Exception:
+        pass
+
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        if handoff_text:
+            conn.execute(
+                "UPDATE cycles SET handoff=? WHERE id=? AND ended_at IS NULL",
+                (handoff_text, open_id)
+            )
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    # ── Listening window open (state_live_chat.md §1.4.7) ──
+    # The harness keeps the cycle open for the chat. Save the summary and
+    # handoff, leave ended_at / status alone, and answer positively without the
+    # "🛑 Cycle ended:" marker so the harness keeps listening.
+    if os.getenv("VERSA_LISTENING") == "open":
+        try:
+            conn = db_connect.connect_compat(cycles_db, timeout=5)
+            conn.execute(
+                "UPDATE cycles SET summary=? WHERE id=? AND ended_at IS NULL",
+                (sum_text, open_id)
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        minutes = (os.getenv("VERSA_LISTEN_MINUTES") or "").strip() or "a few"
+        console.print(
+            "✅ Thank you, your summary and handoff are saved. This is a live chat: your cycle "
+            f"stays open and closes on its own after {minutes} minutes with no new messages. "
+            "The person you are chatting with may still send you another message. "
+            "Nothing else is needed right now."
+        )
+        sys.exit(0)
+
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        conn.execute(
+            "UPDATE cycles SET ended_at=datetime('now'), summary=? WHERE id=? AND ended_at IS NULL",
+            (sum_text, open_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    # Reset agent status in registry so dashboard reflects idle state immediately
+    try:
+        agents_db_path = os.environ.get("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+        if os.path.exists(agents_db_path):
+            aconn = db_connect.connect_compat(agents_db_path, timeout=5)
+            aconn.execute(
+                "UPDATE agents SET status='idle', updated_at=datetime('now') "
+                "WHERE name=? AND status='active'",
+                (agent_name,),
+            )
+            aconn.commit()
+            aconn.close()
+    except Exception:
+        pass
+
+    if awareness_warning:
+        error_console.print(
+            "[yellow]⚠ AWARENESS NOT RECORDED — no conclusions or actions logged this cycle. "
+            "Review your work and persist awareness before ending.[/yellow]"
+        )
+    console.print(f"🛑 Cycle ended: {sum_text}")
+    # Exit the tool subprocess cleanly. The parent harness detects this output
+    # ("🛑 Cycle ended:") and breaks out of the stream loop to write telemetry
+    # before terminating. The old pkill approach killed the harness before
+    # telemetry could be written and caused repeated cycle end calls.
+    sys.exit(0)
+
+@cycle.command("close-cut", hidden=True)
+@click.argument("agent_name")
+@click.option("--cycle-id", required=True, help="The cut cycle's row")
+@click.option("--ended-epoch", type=int, required=True, help="Epoch seconds when the cycle was last alive")
+@click.option("--exit-code", type=click.Choice(["96", "98"]), required=True,
+              help="98 = the computer went off; 96 = Lifeline was stopped while the computer stayed on")
+def cycle_close_cut(agent_name, cycle_id, ended_epoch, exit_code):
+    """Close the row of a cycle that was cut off (Lifeline only).
+
+    state_host_services.md §1.6.3. Prints {success, state}: closed,
+    already_ended (the agent had closed it), missing or error.
+    """
+    if os.getenv("AGICTL_AGENT_USER"):
+        json_response(False, error="agictl cycle close-cut is Lifeline only.")
+        sys.exit(1)
+    if not cycle_id.startswith(f"{agent_name}-"):
+        json_response(False, error=f"Cycle '{cycle_id}' is not a cycle of '{agent_name}'.")
+        sys.exit(1)
+    state = agent_reader.close_cut_cycle(cycle_id, ended_epoch, int(exit_code))
+    json_response(state != "error", state=state, cycleId=cycle_id)
+    if state == "error":
+        sys.exit(1)
+
+
+@cycle.command("tokens")
+@click.argument("agent_name")
+@click.argument("t_in", type=int)
+@click.argument("t_out", type=int)
+@click.argument("t_think", type=int)
+@click.argument("t_total", type=int)
+@click.option("--exit-code", type=int, default=None, help="Process exit code from agent spawn")
+@click.option("--cached", type=int, default=0, help="Cached input tokens (context caching)")
+@click.option("--session-path", default=None, help="Path to cycle telemetry file")
+@click.option("--cycle-id", default=None, help="The spawn's cycle row (default: the agent's newest row)")
+@click.option("--outcome", default=None,
+              type=click.Choice(list(ACTIVITY_OUTCOMES)),
+              help="Lifeline's outcome; closes the row when the agent did not")
+def cycle_tokens(agent_name, t_in, t_out, t_think, t_total, exit_code, cached, session_path, cycle_id, outcome):
+    """Log token utilization metrics to cycles.db."""
+    agent_reader.update_last_cycle_tokens(
+        agent_name, t_in, t_out, t_think, t_total, exit_code=exit_code, t_cached=cached,
+        session_path=session_path, cycle_id=cycle_id, outcome=outcome,
+    )
+
+CHECKIN_LINE_MAX_CHARS = 400
+
+
+@cycle.command("checkin", hidden=True)
+@click.argument("line", nargs=-1)
+@click.option("--cycle-id", default=None, help="The spawn's cycle row (default: the agent's open row)")
+@click.option("--agent", "agent_name", default=None)
+def cycle_checkin(line, cycle_id, agent_name):
+    """Append one harness check-in line to a cycle row (state_long_cycles.md §1.6)."""
+    text = " ".join(" ".join(line).split())[:CHECKIN_LINE_MAX_CHARS]
+    if not text:
+        json_response(False, error="A check-in line is required.")
+        sys.exit(1)
+    target = cycle_id or _open_cycle_id(agent_name or get_agent_name())
+    if not target:
+        json_response(False, error="No open cycle.")
+        sys.exit(1)
+    append = ("UPDATE cycles SET checkins = CASE WHEN checkins IS NULL OR checkins = '' "
+              "THEN ? ELSE checkins || char(10) || ? END WHERE id=?")
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        try:
+            cur = conn.execute(append, (text, text, target))
+        except sqlite3.OperationalError as e:
+            # The column comes with setup.sh --update; add it if that refresh was skipped.
+            if "no such column" not in str(e):
+                raise
+            conn.execute("ALTER TABLE cycles ADD COLUMN checkins TEXT")
+            cur = conn.execute(append, (text, text, target))
+        conn.commit()
+        found = cur.rowcount
+        conn.close()
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+    if not found:
+        json_response(False, error=f"No cycle row {target}.")
+        sys.exit(1)
+    json_response(True, cycle_id=target)
+
+@cycle.command("get")
+@click.argument("cycle_id")
+def cycle_get(cycle_id):
+    """Return full cycle row as JSON (incl. routing audit fields)."""
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM cycles WHERE id=?", (cycle_id,)).fetchone()
+        conn.close()
+        if not row:
+            json_response(False, error=f"Cycle '{cycle_id}' not found")
+            sys.exit(1)
+        json_response(True, cycle=local_time.localize(dict(row)))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@cycle.command("set-routing")
+@click.argument("cycle_id")
+@click.option("--assigned-model", required=True)
+@click.option("--execution-model", required=True)
+@click.option("--routing-mode", required=True, type=click.Choice(["pool", "preferred", "none"]))
+@click.option("--work-modality", default=None)
+def cycle_set_routing(cycle_id, assigned_model, execution_model, routing_mode, work_modality):
+    """Record ephemeral model routing on a cycle row."""
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        cur = conn.execute(
+            """UPDATE cycles SET assigned_model=?, execution_model=?, routing_mode=?,
+               routing_work_modality=? WHERE id=?""",
+            (assigned_model, execution_model, routing_mode, work_modality, cycle_id),
+        )
+        conn.commit()
+        conn.close()
+        if cur.rowcount == 0:
+            json_response(False, error=f"Cycle '{cycle_id}' not found")
+            sys.exit(1)
+        json_response(True, action="cycle_set_routing", cycle_id=cycle_id,
+                      execution_model=execution_model, routing_mode=routing_mode)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@cycle.command("recent")
+@click.argument("agent_name")
+@click.option("--json", "as_json", is_flag=True, help="JSON array with cycle_id and execution_model")
+def cycle_recent(agent_name, as_json):
+    """Return chronological cycle summaries for context prompt."""
+    if as_json:
+        rows = agent_reader._query_cycles(
+            "SELECT id, summary, wake_reason, execution_model, routing_mode, routing_work_modality, "
+            "datetime(started_at, 'localtime') AS ts FROM cycles WHERE id GLOB ? "
+            "ORDER BY started_at DESC LIMIT 10",
+            (f"{agent_name}-[0-9]*",),
+        )
+        print(json.dumps(rows, default=str))
+        return
+    cycles = agent_reader.get_recent_cycle_summaries(agent_name)
+    if cycles:
+        print("\n".join(cycles))
+
+@cycle.command("count")
+@click.argument("agent_name")
+def cycle_count(agent_name):
+    """Return total number of cycles executed by the agent."""
+    count = agent_reader.get_agent_cycles_count(agent_name)
+    print(count)
+
+
+# ── Spawn handoff + time alignment (state_spawn_context.md §1.12–1.13) ──
+
+from datetime import datetime as _dt, timezone as _tz  # noqa: E402
+
+HANDOFF_INJECT_CUT = 3000
+AWARENESS_ENTRY_INJECT_CUT = 1200
+HANDOFF_CARRY_MAX = 5
+HANDOFF_LOOKBACK_CYCLES = 20
+LIFELINE_GAPS_KEPT = 10
+_SQLITE_TS = "%Y-%m-%d %H:%M:%S"
+
+
+def _utc_now() -> _dt:
+    return _dt.now(_tz.utc)
+
+
+def _parse_utc(value) -> _dt | None:
+    """Parse a stored sqlite datetime('now') value (UTC, no zone)."""
+    if not value:
+        return None
+    try:
+        return _dt.strptime(str(value)[:19], _SQLITE_TS).replace(tzinfo=_tz.utc)
+    except ValueError:
+        return None
+
+
+def _fmt_local(dt: _dt | None) -> str:
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else "?"
+
+
+def _fmt_age(dt: _dt | None, now: _dt | None = None) -> str:
+    """Human age such as '45m', '3h 12m', '2d 4h', '75d (about 2 months)'."""
+    if not dt:
+        return "?"
+    secs = max(0, int(((now or _utc_now()) - dt).total_seconds()))
+    mins = secs // 60
+    if mins < 1:
+        return "under 1m"
+    if mins < 60:
+        return f"{mins}m"
+    hours, mins = divmod(mins, 60)
+    if hours < 48:
+        return f"{hours}h {mins}m"
+    days, hours = divmod(hours, 24)
+    if days < 30:
+        return f"{days}d {hours}h"
+    months = round(days / 30.4)
+    return f"{days}d (about {months} month{'' if months == 1 else 's'})"
+
+
+def _fmt_duration(start: _dt | None, end: _dt | None) -> str:
+    if not start or not end:
+        return "?"
+    return _fmt_age(start, end)
+
+
+def _cut(text: str, limit: int, pointer: str) -> str:
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"… [cut — full: {pointer}]"
+
+
+def _config_get(conn, key: str):
+    row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _config_set(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO config (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, value),
+    )
+
+
+def _lifeline_gaps(conn) -> list[dict]:
+    try:
+        gaps = json.loads(_config_get(conn, "lifeline_gaps") or "[]")
+        return [g for g in gaps if isinstance(g, dict) and g.get("start") and g.get("end")]
+    except (ValueError, TypeError):
+        return []
+
+
+@cycle.command("tick", hidden=True)
+@click.option("--threshold-minutes", type=int, default=30, show_default=True)
+def cycle_tick(threshold_minutes):
+    """Lifeline heartbeat. Records a gap when the previous tick is too old."""
+    now = _utc_now()
+    try:
+        conn = db_connect.connect_compat(cycles_db, timeout=5)
+        prev = _parse_utc(_config_get(conn, "lifeline_last_tick"))
+        gap = None
+        if prev and (now - prev).total_seconds() > threshold_minutes * 60:
+            gap = {"start": prev.strftime(_SQLITE_TS), "end": now.strftime(_SQLITE_TS)}
+            gaps = (_lifeline_gaps(conn) + [gap])[-LIFELINE_GAPS_KEPT:]
+            _config_set(conn, "lifeline_gaps", json.dumps(gaps))
+        _config_set(conn, "lifeline_last_tick", now.strftime(_SQLITE_TS))
+        conn.commit()
+        conn.close()
+        json_response(True, tick=now.strftime(_SQLITE_TS), gap=gap)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+def _carry_ids(handoff: str) -> list[int]:
+    """Awareness ids named after 'Carry:' in a handoff, in order, deduplicated."""
+    ids: list[int] = []
+    for m in re.finditer(r"carry\s*:([^\n|]*)", handoff or "", re.IGNORECASE):
+        for raw in re.findall(r"#?(\d+)", m.group(1)):
+            if int(raw) not in ids:
+                ids.append(int(raw))
+    return ids
+
+
+def _awareness_line(row, now: _dt) -> str:
+    updated = _parse_utc(row["updated_at"])
+    subj = str(row["subject_type"]) + (f"({row['subject_id']})" if row["subject_id"] else "")
+    content = _cut(
+        str(row["content"]).replace("\n", " "),
+        AWARENESS_ENTRY_INJECT_CUT,
+        f"agictl awareness get {row['id']}",
+    )
+    return (f"  #{row['id']} [{row['type']} · {subj}] updated {_fmt_local(updated)} "
+            f"({_fmt_age(updated, now)} ago): {content}")
+
+
+# What a stop by the harness or Lifeline means, said to the agent on its next
+# wake (state_long_cycles.md §1.8).
+HARNESS_STOP_REASONS = {
+    54: "It reached its time limit and the harness closed it; your thread was kept.",
+    55: "The harness stopped it because the same tool call was repeated with the same result.",
+    97: "It was stopped by the stall timer: a model call did not return.",
+    124: "It was stopped at the time limit before it could be closed.",
+    143: "It was stopped while the computer was shutting down, before it could close.",
+    98: "The computer went off while it was running (a power loss, or a shutdown it could not finish before).",
+    96: "It was cut off while the computer stayed on: Lifeline was stopped.",
+}
+# Ends the agent or the harness wrote a close for. Any other exit code, or a
+# cycle that never closed, was interrupted (state_host_services.md §1.6.4).
+CLEAN_EXIT_CODES = (0, 53, 54, 55)
+INTERRUPTED_WARNING = (
+    "⚠ YOUR LAST CYCLE WAS INTERRUPTED. It did not close itself, so its last step may be "
+    "unfinished or half done. Before you carry on, check the result of the last thing you were "
+    "doing (a file being written, a message being sent, a task being updated), then proceed."
+)
+
+
+def render_handoff_block(agent_name: str, now: _dt | None = None) -> str:
+    """Wake-prompt block: last cycle, outages since, last handoff, carried awareness."""
+    now = now or _utc_now()
+    conn = db_connect.connect_compat(cycles_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, started_at, ended_at, exit_code, wake_reason, handoff FROM cycles "
+        "WHERE id GLOB ? ORDER BY started_at DESC LIMIT ?",
+        (f"{agent_name}-[0-9]*", HANDOFF_LOOKBACK_CYCLES),
+    ).fetchall()
+    gaps = _lifeline_gaps(conn)
+    conn.close()
+    if not rows:
+        return ""
+
+    last = rows[0]
+    started = _parse_utc(last["started_at"])
+    ended = _parse_utc(last["ended_at"])
+    last_seen = ended or started
+    lines = ["## ── SINCE YOUR LAST CYCLE ──"]
+
+    when = f"Your last cycle: started {_fmt_local(started)}"
+    when += f", ended {_fmt_local(ended)}" if ended else ", never closed (no cycle end)"
+    when += f" — {_fmt_age(last_seen, now)} ago."
+    if last["wake_reason"]:
+        when += f" It woke for: {last['wake_reason']}."
+    if last["exit_code"] not in (None, 0):
+        when += f" Exit code {last['exit_code']}."
+        reason = HARNESS_STOP_REASONS.get(last["exit_code"])
+        if reason:
+            when += f" {reason}"
+    lines.append(when)
+    if not ended or (last["exit_code"] is not None and last["exit_code"] not in CLEAN_EXIT_CODES):
+        lines.append(INTERRUPTED_WARNING)
+
+    for g in gaps:
+        g_start, g_end = _parse_utc(g["start"]), _parse_utc(g["end"])
+        if g_end and last_seen and g_end > last_seen:
+            lines.append(
+                f"⚠ SYSTEM OFFLINE: Lifeline did not run from {_fmt_local(g_start)} "
+                f"to {_fmt_local(g_end)} ({_fmt_duration(g_start, g_end)}). Nothing was processed in that window."
+            )
+
+    source = last if last["handoff"] else None
+    if not source:
+        lines.append("")
+        lines.append("Your last cycle ended without a handoff.")
+        source = next((r for r in rows[1:] if r["handoff"]), None)
+    handoff_text = ""
+    if source:
+        written = _parse_utc(source["ended_at"]) or _parse_utc(source["started_at"])
+        label = "LAST HANDOFF" if source is last else "NEWEST EARLIER HANDOFF"
+        handoff_text = source["handoff"]
+        lines.append("")
+        lines.append(f"{label} (written {_fmt_local(written)}, {_fmt_age(written, now)} ago):")
+        lines.append(_cut(handoff_text, HANDOFF_INJECT_CUT, f"agictl cycle get {source['id']}"))
+
+    carry = _carry_ids(handoff_text)
+    if carry:
+        tconn = db_connect.connect_compat(tasks_db, timeout=5)
+        tconn.row_factory = sqlite3.Row
+        carried = []
+        for entry_id in carry:
+            if len(carried) >= HANDOFF_CARRY_MAX:
+                break
+            row = tconn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+            if not row:
+                carried.append(f"  #{entry_id} — not found")
+            elif row["status"] != "active":
+                carried.append(f"  #{entry_id} — no longer active ({row['status']})")
+            elif "pinned" in row.keys() and row["pinned"]:
+                continue
+            else:
+                carried.append(_awareness_line(row, now))
+        tconn.close()
+        if carried:
+            lines.append("")
+            lines.append("CARRIED AWARENESS (named in that handoff):")
+            lines.extend(carried)
+
+    lines.append("")
+    lines.append("Weigh this against the wake reason and the current time (CONTEXT MAP: Continuity and time).")
+    return "\n".join(lines)
+
+
+@cycle.command("handoff", hidden=True)
+@click.argument("agent_name")
+def cycle_handoff(agent_name):
+    """Print the SINCE YOUR LAST CYCLE wake block for an agent."""
+    try:
+        block = render_handoff_block(agent_name)
+    except Exception as e:
+        error_console.print(f"handoff block unavailable: {e}")
+        sys.exit(1)
+    if block:
+        print(block)
+
+
+# ═══════════════════════════════════════════════════════
+# 6. PROJECT — Workspace project management
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def project():
+    """Project workspace management."""
+    pass
+
+
+def _get_project(conn, project_id):
+    """Fetch project row by numeric id or exit with JSON error."""
+    proj = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not proj:
+        json_response(False, error=f"Project id {project_id} not found")
+        sys.exit(1)
+    return proj
+
+
+# TD-SCRIPT-001 / TD-MC-001: Reserved-name protection for system projects.
+# AGi-Tools is physically shared and symlinked into every
+# agent workspace (see SHARED_SYSTEM_PROJECTS in agent_add). Versa-BusinessAdmin
+# is reserved and COA-only (not fleet-shared). AGi-Knowledgebase is not reserved.
+# A reserved-name set is the
+# simplest durable guard — no `protected` column or migration needed — and it
+# must reject BOTH archive and hard-delete.
+# Display name may be renamed later; directory slug (basename of workspace_path)
+# is immutable except reserved leftover repair for Versa-BusinessAdmin.
+try:
+    from project_workspace import (
+        BUSINESS_ADMIN_PROJECT_NAME,
+        COA_WORKSPACE_BASE,
+        RESERVED_SYSTEM_PROJECTS,
+        collect_taken_project_dirs,
+        is_reserved_system_project,
+        project_dir_from_workspace_path,
+        reserved_workspace_repair_path,
+        resolve_project_dir,
+    )
+except ImportError:
+    COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
+    RESERVED_SYSTEM_PROJECTS = {"AGi-Tools", "Versa-BusinessAdmin"}
+    BUSINESS_ADMIN_PROJECT_NAME = "Versa-BusinessAdmin"
+
+    def is_reserved_system_project(name):
+        return name in RESERVED_SYSTEM_PROJECTS
+
+    def project_dir_from_workspace_path(workspace_path):
+        return os.path.basename((workspace_path or "").rstrip(os.sep))
+
+    def collect_taken_project_dirs(conn, workspace_base=COA_WORKSPACE_BASE):
+        raise RuntimeError("project_workspace module required")
+
+    def resolve_project_dir(display_name, dir_override, taken):
+        raise RuntimeError("project_workspace module required")
+
+    def reserved_workspace_repair_path(current_path, project_name, workspace_base=COA_WORKSPACE_BASE):
+        if project_name != BUSINESS_ADMIN_PROJECT_NAME:
+            return None
+        want = os.path.join(workspace_base, BUSINESS_ADMIN_PROJECT_NAME).rstrip(os.sep)
+        cur = (current_path or "").rstrip(os.sep)
+        return None if cur == want else want
+
+
+def _scaffold_production_statefold(project_path):
+    """Create docs/production/state/ and _project.yml for local / git-init projects."""
+    import getpass
+    state_dir = os.path.join(project_path, "docs", "production", "state")
+    dest = os.path.join(state_dir, "_project.yml")
+    core_infra = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    template = os.path.join(
+        core_infra, "skills", "production_statefold", "templates", "_project.yml"
+    )
+    prefix = [] if getpass.getuser() == "coa" else ["sudo", "-u", "coa"]
+    subprocess.run(prefix + ["mkdir", "-p", state_dir], check=False)
+    if os.path.exists(dest):
+        return
+    if os.path.isfile(template):
+        subprocess.run(prefix + ["cp", template, dest], check=False)
+        return
+    stub = (
+        "# Versa AGi production statefold config for this project.\n"
+        "# Paths are relative to the project root (workspace/{slug}/).\n"
+        "doc_home: docs/production/state/\n"
+        "archive_home: docs/production/state/__archive/\n"
+        "shape_file:          # optional; a shape_<solution>.md map, leave empty if none\n"
+    )
+    subprocess.run(
+        prefix + ["bash", "-c", f"cat > '{dest}'"],
+        input=stub,
+        text=True,
+        check=False,
+    )
+
+
+@project.command("list")
+def project_list():
+    """List all projects as JSON."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM projects ORDER BY name").fetchall()
+        conn.close()
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@project.command("add")
+@click.argument("name_arg", required=False, metavar="NAME")
+@click.option("--name", "name_opt", default=None, help="Display name (unique; preferred over positional NAME)")
+@click.option("--dir", "dir_name", default=None, help="Directory slug under COA workspace (optional; auto-derived from name)")
+@click.option("--desc", default=None, help="Project description")
+@click.option("--remote", default=None, help="Git SSH remote URL")
+@click.option("--git-init", is_flag=True, help="Initialize a local git repo")
+@click.option("--agent", "agent_name", default=None, help="Agent to assign (creates branch)")
+def project_add(name_arg, name_opt, dir_name, desc, remote, git_init, agent_name):
+    """Register a new project. Creates directory, optional git clone, DB entry.
+
+    Display --name (or positional NAME) is unique and may be renamed later.
+    --dir sets the immutable filesystem slug; omit to auto-slugify from the name
+    (with -2, -3, … on collision). Directory rename is not supported.
+    """
+    try:
+        name = (name_opt or name_arg or "").strip()
+        if not name:
+            json_response(False, error="Project name is required (use --name or positional NAME)")
+            sys.exit(1)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        # Check display-name uniqueness
+        existing = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
+        if existing:
+            conn.close()
+            json_response(False, error=f"Project '{name}' already exists (id={existing['id']})")
+            sys.exit(1)
+        # Resolve workspace path: display name ≠ directory slug
+        workspace_base = COA_WORKSPACE_BASE
+        try:
+            taken = collect_taken_project_dirs(conn, workspace_base)
+            dir_slug = resolve_project_dir(name, dir_name, taken)
+        except ValueError as e:
+            conn.close()
+            json_response(False, error=str(e))
+            sys.exit(1)
+        project_path = os.path.join(workspace_base, dir_slug)
+        # Determine project type and platform
+        project_type = "local"
+        platform = None
+        branch = "main" if (remote or git_init) else None
+        if remote:
+            project_type = "git"
+            if "github.com" in remote:
+                platform = "github"
+            elif "gitlab" in remote:
+                platform = "gitlab"
+            # Clone the remote repo
+            subprocess.run(["sudo", "-u", "coa", "mkdir", "-p", workspace_base], check=False)
+            result = subprocess.run(
+                ["sudo", "-u", "coa", "git", "clone", remote, project_path],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                conn.close()
+                json_response(False, error=f"git clone failed: {result.stderr.strip()}")
+                sys.exit(1)
+            # If agent specified, create and checkout a unique branch
+            if agent_name:
+                branch = f"agent/{agent_name}"
+                subprocess.run(
+                    ["sudo", "-u", "coa", "git", "-C", project_path, "checkout", "-b", branch],
+                    capture_output=True, text=True, timeout=30
+                )
+        elif git_init:
+            project_type = "git"
+            subprocess.run(["sudo", "-u", "coa", "mkdir", "-p", project_path], check=False)
+            subprocess.run(
+                ["sudo", "-u", "coa", "git", "-C", project_path, "init", "-b", "main"],
+                capture_output=True, text=True, timeout=30
+            )
+            # Create initial README
+            readme = os.path.join(project_path, "README.md")
+            if not os.path.exists(readme):
+                readme_content = f"# {name}\n\n{desc or 'Project workspace.'}\n"
+                subprocess.run(["sudo", "-u", "coa", "bash", "-c", f"cat > '{readme}'"], input=readme_content, text=True, check=False)
+            _scaffold_production_statefold(project_path)
+            subprocess.run(
+                ["sudo", "-u", "coa", "git", "-C", project_path, "add", "."],
+                capture_output=True, text=True, timeout=30
+            )
+            subprocess.run(
+                ["sudo", "-u", "coa", "git", "-C", project_path, "commit", "-m", f"Initial commit: {name}"],
+                capture_output=True, text=True, timeout=30
+            )
+            if agent_name:
+                branch = f"agent/{agent_name}"
+                subprocess.run(
+                    ["sudo", "-u", "coa", "git", "-C", project_path, "checkout", "-b", branch],
+                    capture_output=True, text=True, timeout=30
+                )
+        else:
+            subprocess.run(["sudo", "-u", "coa", "mkdir", "-p", project_path], check=False)
+            readme = os.path.join(project_path, "README.md")
+            if not os.path.exists(readme):
+                readme_content = f"# {name}\n\n{desc or 'Project workspace.'}\n"
+                subprocess.run(["sudo", "-u", "coa", "bash", "-c", f"cat > '{readme}'"], input=readme_content, text=True, check=False)
+            _scaffold_production_statefold(project_path)
+        
+        # Enforce shared workspace group permissions for all agents assigned to this project
+        fix_cmd = (
+            f"chgrp -R agi_agents '{project_path}' && "
+            f"chmod -R g+rwX '{project_path}' && "
+            f"find '{project_path}' -type d -exec chmod g+s {{}} +"
+        )
+        import getpass
+        if getpass.getuser() == "coa":
+            subprocess.run(["bash", "-c", fix_cmd], check=False)
+        else:
+            subprocess.run(["sudo", "-u", "coa", "bash", "-c", fix_cmd], check=False)
+
+        # INSERT into DB
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO projects (name, description, type, platform, remote_url, branch, workspace_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (name, desc, project_type, platform, remote, branch, project_path)
+        )
+        project_id = c.lastrowid
+        # Auto-insert creating agent as owner
+        agent_name = get_agent_name()
+        conn.execute(
+            "INSERT OR IGNORE INTO project_members (project_id, member_type, member_id, display_name, workspace_path, branch, roles) "
+            "VALUES (?, 'agent', ?, ?, ?, ?, 'owner')",
+            (project_id, agent_name, agent_name.upper(), project_path, branch)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, project=name, project_id=project_id, type=project_type, platform=platform,
+                      branch=branch, directory=dir_slug, workspace_path=project_path, owner=agent_name)
+    except subprocess.TimeoutExpired:
+        json_response(False, error="Git operation timed out")
+        sys.exit(1)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@project.command("pause")
+@click.argument("project_id", type=int)
+def project_pause(project_id):
+    """Set project status to paused."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
+        conn.execute("UPDATE projects SET status='paused', updated_at=datetime('now') WHERE id=?", (project_id,))
+        # Inject memory note for all agents with memory on this project
+        agent_name = get_agent_name()
+        conn.execute(
+            """INSERT OR REPLACE INTO agent_memory_project (agent_name, project_id, current_phase, updated_at)
+               VALUES (?, ?, 'PAUSED — project paused at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)', datetime('now'))
+               ON CONFLICT(agent_name, project_id) DO UPDATE SET
+                 current_phase = 'PAUSED — project paused at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)',
+                 updated_at = datetime('now')""",
+            (agent_name, project_id)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, project_id=project_id, project=name, status="paused")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@project.command("resume")
+@click.argument("project_id", type=int)
+def project_resume(project_id):
+    """Set project status back to active."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
+        conn.execute("UPDATE projects SET status='active', updated_at=datetime('now') WHERE id=?", (project_id,))
+        conn.commit()
+        conn.close()
+        json_response(True, project_id=project_id, project=name, status="active")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@project.command("archive")
+@click.argument("project_id", type=int)
+@click.option("--zip", "do_zip", is_flag=True, help="Compress to !_archive/ and delete source")
+def project_archive(project_id, do_zip):
+    """Soft-delete: set project status to archived. --zip compresses and removes source."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = _get_project(conn, project_id)
+        name = row["name"]
+        # Reserved-name guard (TD-SCRIPT-001) — protected system projects cannot be archived.
+        if name in RESERVED_SYSTEM_PROJECTS:
+            conn.close()
+            json_response(False, error=f"'{name}' is a protected system project and cannot be archived")
+            sys.exit(1)
+        workspace_path = row["workspace_path"]
+        archive_path = None
+        if do_zip and workspace_path and os.path.isdir(workspace_path):
+            archive_dir = os.path.join(os.path.dirname(workspace_path), "!_archive")
+            os.makedirs(archive_dir, exist_ok=True)
+            archive_path = os.path.join(archive_dir, f"{name}.tar.gz")
+            result = subprocess.run(
+                ["tar", "czf", archive_path, "-C", os.path.dirname(workspace_path), os.path.basename(workspace_path)],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                conn.close()
+                json_response(False, error=f"Archive failed: {result.stderr.strip()}")
+                sys.exit(1)
+            shutil.rmtree(workspace_path, ignore_errors=True)
+        conn.execute("UPDATE projects SET status='archived', updated_at=datetime('now') WHERE id=?", (project_id,))
+        # Inject memory note for all agents with memory on this project
+        agent_name = get_agent_name()
+        conn.execute(
+            """INSERT OR REPLACE INTO agent_memory_project (agent_name, project_id, current_phase, updated_at)
+               VALUES (?, ?, 'ARCHIVED — project archived at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)', datetime('now'))
+               ON CONFLICT(agent_name, project_id) DO UPDATE SET
+                 current_phase = 'ARCHIVED — project archived at ' || strftime('%Y-%m-%d %H:%M', 'now', 'localtime') || ' (local time)',
+                 updated_at = datetime('now')""",
+            (agent_name, project_id)
+        )
+        conn.commit()
+        conn.close()
+        response_data = {"project_id": project_id, "project": name, "status": "archived"}
+        if archive_path:
+            response_data["archive"] = archive_path
+        json_response(True, **response_data)
+    except subprocess.TimeoutExpired:
+        json_response(False, error="Archive operation timed out")
+        sys.exit(1)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@project.command("update")
+@click.argument("project_id", type=int)
+@click.option("--name", "new_name", default=None, help="Display name (does not rename the workspace directory)")
+@click.option("--remote", "remote_url", default=None, help="Git remote URL")
+@click.option("--branch", default=None, help="Default branch")
+@click.option("--desc", default=None, help="Project description")
+@click.option("--platform", default=None, type=click.Choice(["github", "gitlab"]), help="Git platform")
+@click.option("--access-token", "access_token", default=None, help="Git platform access token")
+@click.option("--type", "proj_type", default=None, type=click.Choice(["git", "local"]), help="Project type")
+@click.option(
+    "--dir",
+    "new_dir",
+    default=None,
+    help="Repair leftover workspace slug (Versa-BusinessAdmin only)",
+)
+def project_update(project_id, new_name, remote_url, branch, desc, platform, access_token, proj_type, new_dir):
+    """Update mutable fields on an existing project (by ID from project list).
+
+    Display --name may change. --dir is reserved leftover repair only
+    (Versa-BusinessAdmin → shipped directory).
+    """
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        proj = _get_project(conn, project_id)
+        updates = []
+        params = []
+        if new_name is not None:
+            name_clean = new_name.strip()
+            if not name_clean:
+                conn.close()
+                json_response(False, error="Project name cannot be empty")
+                sys.exit(1)
+            old_name = proj["name"]
+            if name_clean != old_name:
+                if is_reserved_system_project(old_name):
+                    conn.close()
+                    json_response(
+                        False,
+                        error=f"'{old_name}' is a protected system project and cannot be renamed",
+                    )
+                    sys.exit(1)
+                if is_reserved_system_project(name_clean):
+                    conn.close()
+                    json_response(
+                        False,
+                        error=f"'{name_clean}' is reserved for a system project",
+                    )
+                    sys.exit(1)
+                clash = conn.execute(
+                    "SELECT id FROM projects WHERE name=? AND id!=?",
+                    (name_clean, project_id),
+                ).fetchone()
+                if clash:
+                    conn.close()
+                    json_response(
+                        False,
+                        error=f"Project '{name_clean}' already exists (id={clash['id']})",
+                    )
+                    sys.exit(1)
+                updates.append("name = ?")
+                params.append(name_clean)
+        if remote_url is not None:
+            updates.append("remote_url = ?")
+            params.append(remote_url)
+            # Auto-upgrade local → git if remote is set and type not explicitly provided
+            if proj["type"] == "local" and proj_type is None:
+                updates.append("type = 'git'")
+        if branch is not None:
+            updates.append("branch = ?")
+            params.append(branch)
+        if desc is not None:
+            updates.append("description = ?")
+            params.append(desc)
+        if platform is not None:
+            updates.append("platform = ?")
+            params.append(platform)
+        if access_token is not None:
+            updates.append("access_token = ?")
+            params.append(access_token)
+        if proj_type is not None:
+            updates.append("type = ?")
+            params.append(proj_type)
+        repaired_path = None
+        if new_dir is not None:
+            want_dir = new_dir.strip()
+            if proj["name"] != BUSINESS_ADMIN_PROJECT_NAME:
+                conn.close()
+                json_response(
+                    False,
+                    error="Directory slug is immutable after create "
+                    f"(reserved leftover repair is {BUSINESS_ADMIN_PROJECT_NAME} only)",
+                )
+                sys.exit(1)
+            if want_dir != BUSINESS_ADMIN_PROJECT_NAME:
+                conn.close()
+                json_response(
+                    False,
+                    error=f"--dir must be '{BUSINESS_ADMIN_PROJECT_NAME}' for reserved leftover repair",
+                )
+                sys.exit(1)
+            repaired_path = reserved_workspace_repair_path(
+                proj["workspace_path"], proj["name"]
+            )
+            if repaired_path:
+                updates.append("workspace_path = ?")
+                params.append(repaired_path)
+        if not updates and new_dir is not None and not repaired_path:
+            conn.close()
+            json_response(
+                True,
+                project_id=project_id,
+                project=proj["name"],
+                directory=project_dir_from_workspace_path(proj["workspace_path"]),
+                workspace_path=proj["workspace_path"],
+                message="Reserved workspace already at shipped path",
+            )
+            return
+        if not updates:
+            conn.close()
+            json_response(
+                False,
+                error="No fields to update. Use --name, --remote, --branch, --desc, "
+                "--platform, --access-token, --type, or --dir.",
+            )
+            sys.exit(1)
+        updates.append("updated_at = datetime('now')")
+        params.append(project_id)
+        conn.execute(
+            f"UPDATE projects SET {', '.join(updates)} WHERE id=?",
+            params
+        )
+        if repaired_path:
+            old_path = proj["workspace_path"]
+            if old_path:
+                conn.execute(
+                    "UPDATE project_members SET workspace_path=? "
+                    "WHERE project_id=? AND workspace_path=?",
+                    (repaired_path, project_id, old_path),
+                )
+            else:
+                conn.execute(
+                    "UPDATE project_members SET workspace_path=? WHERE project_id=?",
+                    (repaired_path, project_id),
+                )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+        conn.close()
+        json_response(True, project_id=project_id, project=updated["name"],
+                      directory=project_dir_from_workspace_path(updated["workspace_path"]),
+                      workspace_path=updated["workspace_path"],
+                      remote_url=updated["remote_url"], branch=updated["branch"],
+                      type=updated["type"], platform=updated["platform"],
+                      description=updated["description"])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@project.command("assign")
+@click.argument("project_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name to assign")
+@click.option("--connection", "connection_uid", default=None, help="Connection UID to assign")
+@click.option("--roles", default="contributor", help="Comma-separated roles (e.g. 'developer,reviewer')")
+@click.option("--branch", default=None, help="Git branch (auto-generated for agents if omitted)")
+def project_assign(project_id, agent_name, connection_uid, roles, branch):
+    """Assign an agent or connection to a project. Provisions workspace for agents."""
+    if not agent_name and not connection_uid:
+        json_response(False, error="Must specify --agent or --connection")
+        sys.exit(1)
+    if agent_name and connection_uid:
+        json_response(False, error="Specify either --agent or --connection, not both")
+        sys.exit(1)
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
+        proj_type = proj["type"]
+        remote_url = proj["remote_url"]
+        proj_branch = proj["branch"] or "main"
+        proj_workspace = proj["workspace_path"]
+        access_token = proj["access_token"]
+        # Agent-side folder follows the immutable directory slug, not display name.
+        dir_slug = project_dir_from_workspace_path(proj_workspace) or name
+
+        if agent_name:
+            # ── Agent assignment ──
+            # Agent registry lives in agents_db, not tasks_db
+            agents_conn = db_connect.connect_compat(agents_db, timeout=5)
+            agents_conn.row_factory = sqlite3.Row
+            agent_row = agents_conn.execute("SELECT name, os_user, workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
+            agents_conn.close()
+            if not agent_row:
+                conn.close()
+                json_response(False, error=f"Agent '{agent_name}' not found in registry")
+                sys.exit(1)
+            # Check if already assigned
+            existing = conn.execute(
+                "SELECT 1 FROM project_members WHERE project_id=? AND member_type='agent' AND member_id=?",
+                (project_id, agent_name)
+            ).fetchone()
+            if existing:
+                conn.close()
+                json_response(False, error=f"Agent '{agent_name}' is already assigned to project '{name}'")
+                sys.exit(1)
+            # Resolve workspace for agent — home dir IS the workspace root
+            agent_os_user = agent_row["os_user"]
+            agent_workspace_root = agent_row["workspace"]  # e.g. /home/agi-iris
+            agent_workspace_base = os.path.join(agent_workspace_root, "workspace")
+            agent_project_path = os.path.join(agent_workspace_base, dir_slug)
+            agent_branch = branch or f"agent/{agent_name}"
+
+            if proj_type == "git" and remote_url:
+                # ── Inject git credentials if access token is set ──
+                if access_token and remote_url.startswith("https://"):
+                    try:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(remote_url)
+                        cred_line = f"https://oauth2:{access_token}@{parsed.hostname}"
+                        cred_file = os.path.join(agent_workspace_root, ".git-credentials")
+                        # Check if credential already present (read as watchdog — file may not exist yet)
+                        existing = ""
+                        if os.path.exists(cred_file):
+                            try:
+                                with open(cred_file, "r") as cf:
+                                    existing = cf.read()
+                            except PermissionError:
+                                # File might be agent-owned; read via sudo
+                                r = subprocess.run(["sudo", "-u", agent_os_user, "cat", cred_file],
+                                                   capture_output=True, text=True, timeout=5)
+                                existing = r.stdout if r.returncode == 0 else ""
+                        if cred_line.strip() not in existing:
+                            # Append as agent user (Ownership Principle)
+                            subprocess.run(
+                                ["sudo", "-u", agent_os_user, "bash", "-c",
+                                 f"echo '{cred_line}' >> '{cred_file}' && chmod 600 '{cred_file}'"],
+                                check=False, timeout=5
+                            )
+                    except Exception:
+                        pass  # Non-fatal — clone may still work via SSH
+
+                # Clone from remote into agent's workspace
+                # Run as the agent user so files are owned correctly (Ownership Principle)
+                # Ensure workspace base dir exists (as agent user)
+                subprocess.run(
+                    ["sudo", "-u", agent_os_user, "mkdir", "-p", agent_workspace_base],
+                    check=False
+                )
+                # Do NOT pre-create agent_project_path — let git clone create it as agent
+                # Use agent's SSH key + accept-new hosts
+                clone_env_str = ""
+                agent_ssh_key = os.path.join(agent_workspace_root, ".ssh", "versa_agi_ed25519")
+                if remote_url.startswith("git@") and os.path.exists(agent_ssh_key):
+                    clone_env_str = f"GIT_SSH_COMMAND='ssh -i {agent_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' "
+                result = subprocess.run(
+                    ["sudo", "-u", agent_os_user, "bash", "-c",
+                     f"{clone_env_str}git clone {remote_url} {agent_project_path}"],
+                    capture_output=True, text=True, timeout=120
+                )
+                if result.returncode != 0:
+                    # Cleanup partial clone to prevent orphaned dirs
+                    import shutil as _shutil
+                    _shutil.rmtree(agent_project_path, ignore_errors=True)
+                    conn.close()
+                    json_response(False, error=f"git clone failed: {result.stderr.strip()}")
+                    sys.exit(1)
+
+                # Detect blank repo (no commits on default branch)
+                head_check = subprocess.run(
+                    ["sudo", "-u", agent_os_user, "git", "-C", agent_project_path, "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=10
+                )
+                repo_initialized = False
+
+                if head_check.returncode != 0:
+                    # Blank repo — initialize with Versa-AGi.md
+                    try:
+                        readme_file = os.path.join(agent_project_path, "Versa-AGi.md")
+                        readme_content = ("**Versa AGi** is a distributed, Agentic General infrastructure "
+                                    "that establishes a collaboration between a Primary User and an "
+                                    "AI Agent to efficiently solve problems encountered in life.\n\n"
+                                    "Visit for more details: https://versavoice.ai\n")
+                        # Write as agent user (Ownership Principle — no watchdog file creation)
+                        subprocess.run(
+                            ["sudo", "-u", agent_os_user, "bash", "-c", f"cat > '{readme_file}'"],
+                            input=readme_content, text=True, check=True, timeout=5
+                        )
+                        subprocess.run(
+                            ["sudo", "-u", agent_os_user, "git", "-C", agent_project_path, "checkout", "-b", "main"],
+                            capture_output=True, text=True, timeout=10
+                        )
+                        subprocess.run(
+                            ["sudo", "-u", agent_os_user, "git", "-C", agent_project_path, "add", "Versa-AGi.md"],
+                            capture_output=True, text=True, timeout=10
+                        )
+                        subprocess.run(
+                            ["sudo", "-u", agent_os_user, "git", "-C", agent_project_path, "commit", "-m", "Initial commit — Versa AGi workspace"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        push_cmd = f"{clone_env_str}git -C {agent_project_path} push -u origin main"
+                        push_result = subprocess.run(
+                            ["sudo", "-u", agent_os_user, "bash", "-c", push_cmd],
+                            capture_output=True, text=True, timeout=60
+                        )
+                        if push_result.returncode != 0:
+                            # Push failed — still insert member but flag it
+                            conn.execute(
+                                "INSERT INTO project_members (project_id, member_type, member_id, display_name, workspace_path, branch, roles) "
+                                "VALUES (?, 'agent', ?, ?, ?, ?, ?)",
+                                (project_id, agent_name, agent_name.upper(), agent_project_path, agent_branch, roles)
+                            )
+                            conn.commit()
+                            conn.close()
+                            json_response(True, project_id=project_id, project=name, member_type="agent", member=agent_name,
+                                          workspace=agent_project_path, branch=agent_branch, roles=roles,
+                                          initialization_failed=True,
+                                          error=f"Initial push failed: {push_result.stderr.strip()}. Report to Primary User.")
+                            return
+                        repo_initialized = True
+                    except Exception as init_err:
+                        conn.execute(
+                            "INSERT INTO project_members (project_id, member_type, member_id, display_name, workspace_path, branch, roles) "
+                            "VALUES (?, 'agent', ?, ?, ?, ?, ?)",
+                            (project_id, agent_name, agent_name.upper(), agent_project_path, agent_branch, roles)
+                        )
+                        conn.commit()
+                        conn.close()
+                        json_response(True, project_id=project_id, project=name, member_type="agent", member=agent_name,
+                                      workspace=agent_project_path, branch=agent_branch, roles=roles,
+                                      initialization_failed=True,
+                                      error=f"Repo init error: {str(init_err)}. Report to Primary User.")
+                        return
+
+                # Create agent branch (from main, whether existing or just initialized)
+                subprocess.run(
+                    ["sudo", "-u", agent_os_user, "git", "-C", agent_project_path, "checkout", "-b", agent_branch],
+                    capture_output=True, text=True, timeout=30
+                )
+            elif proj_type == "git" and not remote_url:
+                conn.close()
+                json_response(False, error=f"Cannot assign git project '{name}' without a remote URL. Push to a remote first.")
+                sys.exit(1)
+            else:
+                # Local project — symlink to COA's workspace directory
+                subprocess.run(["sudo", "-u", agent_os_user, "mkdir", "-p", agent_workspace_base], check=False)
+                if not os.path.exists(agent_project_path):
+                    subprocess.run(["sudo", "-u", agent_os_user, "ln", "-s", proj_workspace, agent_project_path], check=False)
+                    # Group ownership via the agent itself (symlink owner): a bare
+                    # root `sudo chown` is NOT in watchdog's sudoers (only agictl is)
+                    # and would hang on a password prompt when invoked as watchdog.
+                    subprocess.run(["sudo", "-u", agent_os_user, "chgrp", "-h", "agi_agents", agent_project_path], check=False)
+                # Enforce shared workspace group permissions on the target directory
+                # This ensures the sub-agent (and any future assignees) can write through the agi_agents group
+                # Runs as coa (file owner + agi_agents member) — watchdog can sudo to coa via agi_agents sudoers
+                fix_cmd = (
+                    f"chgrp -R agi_agents '{proj_workspace}' && "
+                    f"chmod -R g+rwX '{proj_workspace}' && "
+                    f"find '{proj_workspace}' -type d -exec chmod g+s {{}} +"
+                )
+                subprocess.run(["sudo", "-u", "coa", "bash", "-c", fix_cmd], check=False)
+                agent_branch = proj_branch  # Same branch for local
+
+            conn.execute(
+                "INSERT INTO project_members (project_id, member_type, member_id, display_name, workspace_path, branch, roles) "
+                "VALUES (?, 'agent', ?, ?, ?, ?, ?)",
+                (project_id, agent_name, agent_name.upper(), agent_project_path, agent_branch, roles)
+            )
+            conn.commit()
+            conn.close()
+            result_extra = {}
+            if proj_type == "git" and locals().get("repo_initialized"):
+                result_extra["repo_initialized"] = True
+            json_response(True, project_id=project_id, project=name, member_type="agent", member=agent_name,
+                          workspace=agent_project_path, branch=agent_branch, roles=roles, **result_extra)
+
+        else:
+            # ── Connection assignment ──
+            # Check if already assigned
+            existing = conn.execute(
+                "SELECT 1 FROM project_members WHERE project_id=? AND member_type='connection' AND member_id=?",
+                (project_id, connection_uid)
+            ).fetchone()
+            if existing:
+                conn.close()
+                json_response(False, error=f"Connection '{connection_uid}' is already assigned to project '{name}'")
+                sys.exit(1)
+            # Resolve display name
+            contact = conn.execute("SELECT display_name FROM connections WHERE uid=?", (connection_uid,)).fetchone()
+            display = contact["display_name"] if contact else connection_uid[:8]
+            conn_branch = branch  # Optional — may be None
+            conn.execute(
+                "INSERT INTO project_members (project_id, member_type, member_id, display_name, branch, roles) "
+                "VALUES (?, 'connection', ?, ?, ?, ?)",
+                (project_id, connection_uid, display, conn_branch, roles)
+            )
+            conn.commit()
+            conn.close()
+            json_response(True, project_id=project_id, project=name, member_type="connection", member=display,
+                          uid=connection_uid, branch=conn_branch, roles=roles)
+
+    except subprocess.TimeoutExpired:
+        json_response(False, error="Git operation timed out")
+        sys.exit(1)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@project.command("unassign")
+@click.argument("project_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name to unassign")
+@click.option("--connection", "connection_uid", default=None, help="Connection UID to unassign")
+def project_unassign(project_id, agent_name, connection_uid):
+    """Remove an agent or connection from a project. Agents: freezes tasks, cleans workspace."""
+    if not agent_name and not connection_uid:
+        json_response(False, error="Must specify --agent or --connection")
+        sys.exit(1)
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
+
+        if agent_name:
+            member = conn.execute(
+                "SELECT workspace_path, roles FROM project_members WHERE project_id=? AND member_type='agent' AND member_id=?",
+                (project_id, agent_name)
+            ).fetchone()
+            if not member:
+                conn.close()
+                json_response(False, error=f"Agent '{agent_name}' is not assigned to project '{name}'")
+                sys.exit(1)
+            if "owner" in (member["roles"] or ""):
+                conn.close()
+                json_response(False, error=f"Cannot unassign project owner '{agent_name}'. Transfer ownership first.")
+                sys.exit(1)
+            # Freeze tasks assigned to this agent for this project
+            cursor = conn.execute(
+                """UPDATE tasks
+                   SET pre_freeze_status = status, status = 'frozen', updated_at = datetime('now')
+                   WHERE project_id = ? AND assigned_to = ?
+                     AND status NOT IN ('done', 'cancelled', 'frozen')""",
+                (project_id, agent_name)
+            )
+            frozen_count = cursor.rowcount
+            # Unassign frozen tasks
+            conn.execute(
+                """UPDATE tasks SET assigned_to = NULL, updated_at = datetime('now')
+                   WHERE project_id = ? AND assigned_to = ? AND status = 'frozen'""",
+                (project_id, agent_name)
+            )
+            # Cleanup workspace
+            ws = member["workspace_path"]
+            if ws and os.path.islink(ws):
+                os.unlink(ws)
+            elif ws and os.path.isdir(ws):
+                shutil.rmtree(ws, ignore_errors=True)
+            # Remove membership
+            conn.execute(
+                "DELETE FROM project_members WHERE project_id=? AND member_type='agent' AND member_id=?",
+                (project_id, agent_name)
+            )
+            # Also remove project memory for this agent
+            conn.execute(
+                "DELETE FROM agent_memory_project WHERE project_id=? AND agent_name=?",
+                (project_id, agent_name)
+            )
+            conn.commit()
+            conn.close()
+            json_response(True, project_id=project_id, project=name, unassigned="agent", member=agent_name,
+                          tasks_frozen=frozen_count, workspace_cleaned=bool(ws))
+        else:
+            member = conn.execute(
+                "SELECT 1 FROM project_members WHERE project_id=? AND member_type='connection' AND member_id=?",
+                (project_id, connection_uid)
+            ).fetchone()
+            if not member:
+                conn.close()
+                json_response(False, error=f"Connection '{connection_uid}' is not assigned to project '{name}'")
+                sys.exit(1)
+            conn.execute(
+                "DELETE FROM project_members WHERE project_id=? AND member_type='connection' AND member_id=?",
+                (project_id, connection_uid)
+            )
+            conn.commit()
+            conn.close()
+            json_response(True, project_id=project_id, project=name, unassigned="connection", uid=connection_uid)
+
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@project.command("members")
+@click.argument("project_id", type=int)
+def project_members(project_id):
+    """List all members (agents + connections) assigned to a project."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        proj = _get_project(conn, project_id)
+        name = proj["name"]
+        members = conn.execute(
+            "SELECT member_type, member_id, display_name, workspace_path, branch, roles, assigned_at "
+            "FROM project_members WHERE project_id=? ORDER BY roles DESC, assigned_at ASC",
+            (project_id,)
+        ).fetchall()
+        conn.close()
+        result = []
+        for m in members:
+            result.append({
+                "type": m["member_type"],
+                "id": m["member_id"],
+                "name": m["display_name"],
+                "workspace": m["workspace_path"],
+                "branch": m["branch"],
+                "roles": m["roles"],
+                "assigned": m["assigned_at"]
+            })
+        print(json.dumps(local_time.localize({"ok": True, "project_id": project_id, "project": name, "members": result}), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@project.command("git-setup")
+def project_git_setup():
+    """Manual fallback: configure git identity + ensure SSH keypair exists. Keys are auto-generated at provisioning."""
+    config = get_config()
+    identity = config.get("identity", {})
+    # Resolve OS user from agent's DB record, NOT from $HOME
+    caller = get_agent_name()
+    try:
+        db_conn = db_connect.connect_compat(agents_db, timeout=5)
+        db_conn.row_factory = sqlite3.Row
+        agent_row = db_conn.execute("SELECT os_user, workspace FROM agents WHERE name=?", (caller,)).fetchone()
+        db_conn.close()
+    except Exception:
+        agent_row = None
+    os_user = agent_row["os_user"] if agent_row else os.getenv("USER", "coa")
+    home = os.path.expanduser(f"~{os_user}")
+    workspace = agent_row["workspace"] if agent_row else home
+    # Git config
+    agent_name = identity.get("first_name", "Versa")
+    git_name = f"{agent_name} (AGi Agent)"
+    git_email = "versa-agi@local"
+    try:
+        subprocess.run(["git", "config", "--global", "user.name", git_name],
+                       capture_output=True, text=True, timeout=10)
+        subprocess.run(["git", "config", "--global", "user.email", git_email],
+                       capture_output=True, text=True, timeout=10)
+        # SSH keypair generation (idempotent)
+        ssh_dir = os.path.join(home, ".ssh")
+        key_path = os.path.join(ssh_dir, "versa_agi_ed25519")
+        pub_key_path = key_path + ".pub"
+        key_generated = False
+        if not os.path.exists(key_path):
+            os.makedirs(ssh_dir, exist_ok=True)
+            os.chmod(ssh_dir, 0o700)
+            subprocess.run(
+                ["ssh-keygen", "-t", "ed25519", "-f", key_path, "-N", "", "-C", f"{os_user}@versa-agi"],
+                capture_output=True, text=True, timeout=30
+            )
+            os.chmod(key_path, 0o600)
+            os.chmod(pub_key_path, 0o644)
+            key_generated = True
+        # Ensure SSH config entries for GitHub + GitLab
+        ssh_config = os.path.join(ssh_dir, "config")
+        if not os.path.exists(ssh_config) or "versa_agi_ed25519" not in open(ssh_config).read():
+            config_entries = (
+                f"\nHost github.com\n  IdentityFile {key_path}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n"
+                f"\nHost gitlab.com\n  IdentityFile {key_path}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n"
+            )
+            with open(ssh_config, "a") as f:
+                f.write(config_entries)
+            os.chmod(ssh_config, 0o644)
+        # Read public key for JSON output
+        pub_key = ""
+        if os.path.exists(pub_key_path):
+            with open(pub_key_path) as f:
+                pub_key = f.read().strip()
+        json_response(True,
+                      git_name=git_name, git_email=git_email,
+                      ssh_key=key_path, key_generated=key_generated,
+                      public_key=pub_key,
+                      note="SSH key path is injected into system prompt. Share public key with PU for Git platform registration.")
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+# ═══════════════════════════════════════════════════════
+# 6b. GAME — Strategic pursuit management
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def game():
+    """Strategic pursuit management."""
+    pass
+
+@game.command("add")
+@click.argument("name")
+@click.option("--postulate", default=None, help="The intended reality (vision statement)")
+@click.option("--posture", type=click.Choice(['exploratory','steady','aggressive','defensive']), default='exploratory')
+@click.option("--autonomy", type=click.Choice(['advisory','collaborative','autonomous']), default='collaborative')
+def game_add(name, postulate, posture, autonomy):
+    """Register a new strategic game."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        existing = conn.execute("SELECT id FROM games WHERE name=?", (name,)).fetchone()
+        if existing:
+            conn.close()
+            json_response(False, error=f"Game '{name}' already exists (id={existing[0]})")
+            sys.exit(1)
+        conn.execute(
+            "INSERT INTO games (name, postulate, posture, autonomy) VALUES (?, ?, ?, ?)",
+            (name, postulate, posture, autonomy)
+        )
+        conn.commit()
+        game_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        json_response(True, action="game_add", game_id=game_id, name=name, posture=posture, autonomy=autonomy)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game.command("update")
+@click.argument("game_id", type=int)
+@click.option("--name", default=None, help="Rename the game")
+@click.option("--postulate", default=None, help="Update the postulate")
+@click.option("--posture", type=click.Choice(['exploratory','steady','aggressive','defensive']), default=None)
+@click.option("--autonomy", type=click.Choice(['advisory','collaborative','autonomous']), default=None)
+@click.option("--freedoms", default=None, help="Freedoms summary text")
+@click.option("--barriers", default=None, help="Barriers summary text")
+@click.option("--milestones", default=None, help="JSON milestones")
+@click.option("--status", type=click.Choice(['active','paused','archived']), default=None)
+def game_update(game_id, name, postulate, posture, autonomy, freedoms, barriers, milestones, status):
+    """Update a game's strategic state."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        existing = conn.execute("SELECT id FROM games WHERE id=?", (game_id,)).fetchone()
+        if not existing:
+            conn.close()
+            json_response(False, error=f"Game id={game_id} not found")
+            sys.exit(1)
+        updates = []
+        params = []
+        field_map = {
+            "name": name, "postulate": postulate, "posture": posture,
+            "autonomy": autonomy, "freedoms_summary": freedoms,
+            "barriers_summary": barriers, "milestones": milestones, "status": status
+        }
+        for col, val in field_map.items():
+            if val is not None:
+                updates.append(f"{col}=?")
+                params.append(val)
+        if not updates:
+            conn.close()
+            json_response(False, error="No fields to update")
+            sys.exit(1)
+        # If posture or freedoms/barriers changed, update environment_assessed_at
+        if posture or freedoms or barriers:
+            updates.append("environment_assessed_at=datetime('now')")
+        updates.append("updated_at=datetime('now')")
+        params.append(game_id)
+        conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id=?", params)
+        conn.commit()
+        conn.close()
+        json_response(True, action="game_update", game_id=game_id, updated_fields=list(field_map.keys()))
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game.command("show")
+@click.argument("game_id", type=int)
+def game_show(game_id):
+    """Show full details of a game including related projects and awareness."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Game id={game_id} not found")
+            sys.exit(1)
+        result = dict(row)
+        # Related projects
+        projects = conn.execute("SELECT id, name, status FROM projects WHERE game_id=?", (game_id,)).fetchall()
+        result["projects"] = [dict(p) for p in projects]
+        # Active awareness entries for this game
+        awareness = conn.execute(
+            "SELECT id, agent_name, type, content, status FROM agent_awareness WHERE subject_type='game' AND subject_id=? AND status='active'",
+            (str(game_id),)
+        ).fetchall()
+        result["active_awareness"] = [dict(a) for a in awareness]
+        conn.close()
+        print(json.dumps(local_time.localize(result), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@game.command("list")
+@click.option("--status", "game_status", default=None, help="Filter by status (default: all)")
+def game_list(game_status):
+    """List all games."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        if game_status:
+            rows = conn.execute("SELECT * FROM games WHERE status=? ORDER BY name", (game_status,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM games ORDER BY name").fetchall()
+        conn.close()
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@game.command("assign-project")
+@click.argument("game_id", type=int)
+@click.argument("project_id", type=int)
+def game_assign_project(game_id, project_id):
+    """Assign a project to a game (sets projects.game_id)."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        g = conn.execute("SELECT id FROM games WHERE id=?", (game_id,)).fetchone()
+        if not g:
+            conn.close()
+            json_response(False, error=f"Game id={game_id} not found")
+            sys.exit(1)
+        p = conn.execute("SELECT id, name FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not p:
+            conn.close()
+            json_response(False, error=f"Project id={project_id} not found")
+            sys.exit(1)
+        conn.execute("UPDATE projects SET game_id=?, updated_at=datetime('now') WHERE id=?", (game_id, project_id))
+        conn.commit()
+        conn.close()
+        json_response(True, action="game_assign_project", game_id=game_id, project_id=project_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+# ── Game Opponents (Competitive Intelligence) ──
+
+@game.group("opponent")
+def game_opponent():
+    """Manage competitive intelligence for projects."""
+    pass
+
+@game_opponent.command("add")
+@click.argument("project_id", type=int)
+@click.argument("name")
+@click.option("--type", "opp_type", type=click.Choice(['person','agent','business','association']), default='business')
+@click.option("--desc", default=None, help="Description of the opponent")
+@click.option("--sources", default=None, help="JSON: URLs, social handles, API endpoints")
+def opponent_add(project_id, name, opp_type, desc, sources):
+    """Add a competitor/opponent to a project."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.execute(
+            "INSERT INTO project_opponents (project_id, name, type, description, intelligence_sources) VALUES (?, ?, ?, ?, ?)",
+            (project_id, name, opp_type, desc, sources)
+        )
+        conn.commit()
+        opp_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        json_response(True, action="opponent_add", id=opp_id, project_id=project_id, name=name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game_opponent.command("list")
+@click.option("--project", "project_id", type=int, default=None, help="Filter by project")
+def opponent_list(project_id):
+    """List opponents (optionally filtered by project)."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        if project_id:
+            rows = conn.execute("SELECT * FROM project_opponents WHERE project_id=? ORDER BY name", (project_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM project_opponents ORDER BY project_id, name").fetchall()
+        conn.close()
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@game_opponent.command("update")
+@click.argument("opponent_id", type=int)
+@click.option("--name", default=None)
+@click.option("--desc", default=None)
+@click.option("--sources", default=None, help="JSON intelligence sources")
+@click.option("--assessment", default=None, help="Latest competitive analysis")
+def opponent_update(opponent_id, name, desc, sources, assessment):
+    """Update an opponent record."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        updates = []
+        params = []
+        for col, val in [("name", name), ("description", desc), ("intelligence_sources", sources), ("last_assessment", assessment)]:
+            if val is not None:
+                updates.append(f"{col}=?")
+                params.append(val)
+        if assessment:
+            updates.append("last_assessed_at=datetime('now')")
+        if not updates:
+            conn.close()
+            json_response(False, error="No fields to update")
+            sys.exit(1)
+        params.append(opponent_id)
+        conn.execute(f"UPDATE project_opponents SET {', '.join(updates)} WHERE id=?", params)
+        conn.commit()
+        conn.close()
+        json_response(True, action="opponent_update", id=opponent_id)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@game_opponent.command("delete")
+@click.argument("opponent_id", type=int)
+def opponent_delete(opponent_id):
+    """Remove an opponent record."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        existing = conn.execute("SELECT id, name FROM project_opponents WHERE id=?", (opponent_id,)).fetchone()
+        if not existing:
+            conn.close()
+            json_response(False, error=f"Opponent id={opponent_id} not found")
+            sys.exit(1)
+        conn.execute("DELETE FROM project_opponents WHERE id=?", (opponent_id,))
+        conn.commit()
+        conn.close()
+        json_response(True, action="opponent_delete", id=opponent_id, name=existing[1])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+# ═══════════════════════════════════════════════════════
+# 6c. AWARENESS — Agent cognitive state (Conclusions + Actions)
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def awareness():
+    """Agent awareness management (conclusions + actions)."""
+    pass
+
+@awareness.command("add")
+@click.argument("entry_type", type=click.Choice(['conclusion', 'action']))
+@click.option("--subject", "subject_type", required=True, type=click.Choice(['connection','project','game','system','self']))
+@click.option("--subject-id", default=None, help="FK reference (uid, id, or omit for system/self)")
+@click.option("--content", required=True, help="The conclusion or action statement")
+@click.option("--action-conclusion-id", type=int, default=None, help="FK to parent conclusion (actions only)")
+@click.option("--context", default=None, help="What prompted this awareness entry")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_add(entry_type, subject_type, subject_id, content, action_conclusion_id, context, agent_name):
+    """Add a conclusion or action to the awareness store."""
+    if not agent_name:
+        agent_name = _caller_agent_name()
+    # Validate: actions should have a conclusion_id
+    if entry_type == 'action' and action_conclusion_id is None:
+        console.print("[yellow]⚠ Warning: Action added without --action-conclusion-id. Consider linking to a parent conclusion.[/yellow]", stderr=True)
+    # Validate: conclusions should NOT have a conclusion_id
+    if entry_type == 'conclusion' and action_conclusion_id is not None:
+        json_response(False, error="--action-conclusion-id is only valid for actions, not conclusions")
+        sys.exit(1)
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        # If action, validate conclusion exists
+        if action_conclusion_id is not None:
+            parent = conn.execute("SELECT id, type FROM agent_awareness WHERE id=?", (action_conclusion_id,)).fetchone()
+            if not parent:
+                conn.close()
+                json_response(False, error=f"Parent conclusion id={action_conclusion_id} not found")
+                sys.exit(1)
+            if parent[1] != 'conclusion':
+                conn.close()
+                json_response(False, error=f"id={action_conclusion_id} is not a conclusion (type={parent[1]})")
+                sys.exit(1)
+        conn.execute(
+            "INSERT INTO agent_awareness (agent_name, type, subject_type, subject_id, content, action_conclusion_id, context) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (agent_name, entry_type, subject_type, subject_id, content, action_conclusion_id, context)
+        )
+        conn.commit()
+        entry_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        # Update awareness timestamp for enforcement gate
+        _update_awareness_timestamp(agent_name)
+        json_response(True, action="awareness_add", id=entry_id, type=entry_type, subject_type=subject_type, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@awareness.command("revise")
+@click.argument("entry_id", type=int)
+@click.option("--content", required=True, help="Updated conclusion/action content")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_revise(entry_id, content, agent_name):
+    """Revise an awareness entry. Old entry → superseded, new entry created."""
+    if not agent_name:
+        agent_name = _caller_agent_name()
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        old = conn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        if not old:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        old = dict(old)
+        # Ownership guard: only the owning agent (or a protected agent) can revise
+        if old['agent_name'] != agent_name:
+            is_protected = False
+            try:
+                aconn = db_connect.connect_compat(agents_db, timeout=5)
+                prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+                aconn.close()
+                is_protected = prow and prow[0] == 1
+            except Exception:
+                pass
+            if not is_protected:
+                conn.close()
+                json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{old['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can revise entries.")
+                sys.exit(1)
+        # Mark old as superseded
+        conn.execute("UPDATE agent_awareness SET status='superseded', updated_at=datetime('now') WHERE id=?", (entry_id,))
+        # Create new entry with same metadata
+        conn.execute(
+            "INSERT INTO agent_awareness (agent_name, type, subject_type, subject_id, content, action_conclusion_id, context, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+            (old['agent_name'], old['type'], old['subject_type'], old['subject_id'], content, old['action_conclusion_id'],
+             f"Revised from id={entry_id}")
+        )
+        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # A revised standing rule stays pinned (GOL-07).
+        if old.get('pinned'):
+            conn.execute("UPDATE agent_awareness SET pinned=1 WHERE id=?", (new_id,))
+            conn.execute("UPDATE agent_awareness SET pinned=0 WHERE id=?", (entry_id,))
+        conn.commit()
+        conn.close()
+        _update_awareness_timestamp(agent_name)
+        json_response(True, action="awareness_revise", old_id=entry_id, new_id=new_id, agent=agent_name)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@awareness.command("complete")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_complete(entry_id, agent_name):
+    """Mark an action as completed. Actions only — conclusions are superseded/revised."""
+    if not agent_name:
+        agent_name = _caller_agent_name()
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT type, agent_name FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        # Status semantics: 'completed' is for actions. Conclusions are retired
+        # via supersede (no longer true) or revise (replaced by new content).
+        if row['type'] != 'action':
+            conn.close()
+            json_response(False, error=f"Entry id={entry_id} is a conclusion — 'complete' applies to actions only. Use 'awareness supersede {entry_id}' to retire it, or 'awareness revise {entry_id} --content \"...\"' to replace it.")
+            sys.exit(1)
+        # Ownership guard: only the owning agent (or a protected agent) can complete
+        if row['agent_name'] != agent_name:
+            is_protected = False
+            try:
+                aconn = db_connect.connect_compat(agents_db, timeout=5)
+                prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+                aconn.close()
+                is_protected = prow and prow[0] == 1
+            except Exception:
+                pass
+            if not is_protected:
+                conn.close()
+                json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{row['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can complete entries.")
+                sys.exit(1)
+        conn.execute("UPDATE agent_awareness SET status='completed', updated_at=datetime('now') WHERE id=?", (entry_id,))
+        conn.commit()
+        conn.close()
+        json_response(True, action="awareness_complete", id=entry_id, type=row['type'])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+@awareness.command("supersede")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_supersede(entry_id, agent_name):
+    """Retire an entry that is no longer true — no replacement created.
+
+    Use for conclusions that stopped holding (revise instead if a corrected
+    conclusion replaces it) and for actions that became moot (complete instead
+    if the action was actually done).
+    """
+    if not agent_name:
+        agent_name = _caller_agent_name()
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT type, status, agent_name FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        if row['status'] == 'superseded':
+            conn.close()
+            json_response(False, error=f"Entry id={entry_id} is already superseded")
+            sys.exit(1)
+        # Ownership guard: only the owning agent (or a protected agent) can supersede
+        if row['agent_name'] != agent_name:
+            is_protected = False
+            try:
+                aconn = db_connect.connect_compat(agents_db, timeout=5)
+                prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+                aconn.close()
+                is_protected = prow and prow[0] == 1
+            except Exception:
+                pass
+            if not is_protected:
+                conn.close()
+                json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{row['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can supersede entries.")
+                sys.exit(1)
+        conn.execute("UPDATE agent_awareness SET status='superseded', updated_at=datetime('now') WHERE id=?", (entry_id,))
+        conn.commit()
+        conn.close()
+        json_response(True, action="awareness_supersede", id=entry_id, type=row['type'])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+AWARENESS_PIN_MAX = 10
+
+
+def _awareness_may_modify(owner: str, agent_name: str) -> bool:
+    """Owner, or a protected agent (COA / watchdog)."""
+    if owner == agent_name:
+        return True
+    try:
+        aconn = db_connect.connect_compat(agents_db, timeout=5)
+        prow = aconn.execute("SELECT protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+        aconn.close()
+        return bool(prow and prow[0] == 1)
+    except Exception:
+        return False
+
+
+def _awareness_set_pin(entry_id: int, agent_name: str | None, pinned: bool) -> None:
+    if not agent_name:
+        agent_name = _caller_agent_name()
+    verb = "pin" if pinned else "unpin"
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT type, status, agent_name, pinned FROM agent_awareness WHERE id=?", (entry_id,)
+        ).fetchone()
+        if not row:
+            conn.close()
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        if not _awareness_may_modify(row['agent_name'], agent_name):
+            conn.close()
+            json_response(False, error=f"Ownership denied: entry id={entry_id} belongs to '{row['agent_name']}', not '{agent_name}'. Only the owning agent or a protected agent can {verb} entries.")
+            sys.exit(1)
+        if pinned:
+            if row['type'] != 'conclusion':
+                conn.close()
+                json_response(False, error=f"Entry id={entry_id} is an action — only conclusions can be pinned.")
+                sys.exit(1)
+            if row['status'] != 'active':
+                conn.close()
+                json_response(False, error=f"Entry id={entry_id} is {row['status']} — only active conclusions can be pinned.")
+                sys.exit(1)
+            if not row['pinned']:
+                current = [r[0] for r in conn.execute(
+                    "SELECT id FROM agent_awareness WHERE agent_name=? AND type='conclusion' "
+                    "AND status='active' AND pinned=1 ORDER BY id",
+                    (row['agent_name'],),
+                ).fetchall()]
+                if len(current) >= AWARENESS_PIN_MAX:
+                    conn.close()
+                    json_response(False, error=(
+                        f"Pin limit reached ({AWARENESS_PIN_MAX}) for '{row['agent_name']}'. "
+                        f"Unpin, revise or supersede one first. Pinned: {', '.join('#' + str(i) for i in current)}"
+                    ))
+                    sys.exit(1)
+        conn.execute("UPDATE agent_awareness SET pinned=? WHERE id=?", (1 if pinned else 0, entry_id))
+        conn.commit()
+        conn.close()
+        json_response(True, action=f"awareness_{verb}", id=entry_id, agent=row['agent_name'])
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+@awareness.command("pin")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_pin(entry_id, agent_name):
+    """Pin a conclusion as a standing rule shown at every spawn (max 10 per agent).
+
+    Pin constraints and commitments that must never drop out of view — not
+    status. Revise keeps the pin; supersede retires it.
+    """
+    _awareness_set_pin(entry_id, agent_name, True)
+
+
+@awareness.command("unpin")
+@click.argument("entry_id", type=int)
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_unpin(entry_id, agent_name):
+    """Remove the pin from a conclusion. It stays active in the normal board."""
+    _awareness_set_pin(entry_id, agent_name, False)
+
+@awareness.command("list")
+@click.option("--type", "entry_type", type=click.Choice(['conclusion', 'action']), default=None, help="Filter by type")
+@click.option("--subject", "subject_type", type=click.Choice(['connection','project','game','system','self']), default=None)
+@click.option("--subject-id", default=None)
+@click.option("--status", "entry_status", default=None, help="Filter by status (default: all)")
+@click.option("--agent", "agent_name", default=None, help="Agent name (defaults to current)")
+def awareness_list(entry_type, subject_type, subject_id, entry_status, agent_name):
+    """List awareness entries. No --status = all statuses."""
+    if not agent_name:
+        agent_name = _caller_agent_name()
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM agent_awareness WHERE agent_name=?"
+        params = [agent_name]
+        if entry_type:
+            query += " AND type=?"
+            params.append(entry_type)
+        if subject_type:
+            query += " AND subject_type=?"
+            params.append(subject_type)
+        if subject_id:
+            query += " AND subject_id=?"
+            params.append(subject_id)
+        if entry_status:
+            query += " AND status=?"
+            params.append(entry_status)
+        query += " ORDER BY created_at DESC"
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@awareness.command("table")
+@click.option("--type", "entry_type", type=click.Choice(['conclusion', 'action']), default=None, help="Filter by type")
+@click.option("--subject", "subject_type", type=click.Choice(['connection','project','game','system','self']), default=None)
+@click.option("--status", "entry_status", default=None, help="Filter by status; comma-separated for multiple (e.g. active,completed). Default: all")
+@click.option("--agent", "agent_name", default=None, help="Filter by agent (default: current caller)")
+@click.option("--all", "show_all_agents", is_flag=True, help="Show entries from all agents (fleet view)")
+@click.option("--limit", type=int, default=15, help="Limit the number of entries returned")
+@click.option("--truncate", "truncate_chars", type=int, default=0, help="Truncate Content column to N chars (0 = full)")
+@click.option("--pinned/--unpinned", "pinned", default=None, help="Only pinned conclusions, or exclude them (default: both)")
+@click.option("--dated", is_flag=True, help="Add an Updated column (date and age)")
+def awareness_table(entry_type, subject_type, entry_status, agent_name, show_all_agents, limit, truncate_chars, pinned, dated):
+    """Output awareness entries in a token-efficient markdown table.
+
+    Default is the current caller's board. Pass --all for the fleet view
+    (COA orchestration / spawn team-actions digest).
+    """
+    if not show_all_agents and not agent_name:
+        agent_name = _caller_agent_name()
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM agent_awareness WHERE 1=1"
+        params = []
+        if entry_type:
+            query += " AND type=?"
+            params.append(entry_type)
+        if subject_type:
+            query += " AND subject_type=?"
+            params.append(subject_type)
+        if entry_status:
+            statuses = [s.strip() for s in entry_status.split(",") if s.strip()]
+            query += f" AND status IN ({','.join('?' * len(statuses))})"
+            params.extend(statuses)
+        if agent_name:
+            query += " AND agent_name=?"
+            params.append(agent_name)
+        if pinned is True:
+            query += " AND pinned=1"
+        elif pinned is False:
+            query += " AND COALESCE(pinned, 0)=0"
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        
+        if not rows:
+            print("No awareness entries found.")
+            return
+
+        # Show a Status column when the query spans multiple statuses —
+        # otherwise mixed active/completed rows are indistinguishable.
+        multi_status = bool(entry_status) and ("," in entry_status)
+
+        cols = ["ID"]
+        if not agent_name:
+            cols.append("Agent")
+        cols += ["Type", "Subject"]
+        if multi_status:
+            cols.append("Status")
+        if dated:
+            cols.append("Updated")
+        cols.append("Content")
+        now = _utc_now()
+
+        print("| " + " | ".join(cols) + " |")
+        print("|" + "|".join(["---"] * len(cols)) + "|")
+
+        for r in reversed(rows): # Reverse to show chronological order when limited
+            content = str(r["content"]).replace("\n", " ").replace("|", "\\|")
+            if truncate_chars and len(content) > truncate_chars:
+                content = content[:truncate_chars].rstrip() + f"… [truncated — full: agictl awareness get {r['id']}]"
+            subj = str(r["subject_type"])
+            if r["subject_id"]:
+                subj += f"({r['subject_id']})"
+
+            vals = [str(r['id'])]
+            if not agent_name:
+                vals.append(str(r['agent_name']))
+            vals += [str(r['type']), subj]
+            if multi_status:
+                vals.append(str(r['status']))
+            if dated:
+                updated = _parse_utc(r['updated_at'])
+                vals.append(f"{_fmt_local(updated)[:10]} ({_fmt_age(updated, now)} ago)")
+            vals.append(content)
+            print("| " + " | ".join(vals) + " |")
+                
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+@awareness.command("get")
+@click.argument("entry_id", type=int)
+def awareness_get(entry_id):
+    """Get a single awareness entry by ID."""
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM agent_awareness WHERE id=?", (entry_id,)).fetchone()
+        conn.close()
+        if not row:
+            json_response(False, error=f"Awareness entry id={entry_id} not found")
+            sys.exit(1)
+        print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+
+def _update_awareness_timestamp(agent_name):
+    """Update last_awareness_ts on the agent's current cycle for enforcement gate."""
+    try:
+        cdb = db_connect.connect_compat(cycles_db, timeout=5)
+        cdb.execute(
+            "UPDATE cycles SET last_awareness_ts=datetime('now') WHERE id=? AND ended_at IS NULL",
+            (_open_cycle_id(agent_name),)
+        )
+        cdb.commit()
+        cdb.close()
+    except Exception:
+        pass  # Non-fatal — enforcement gate is advisory
+
+
+# ═══════════════════════════════════════════════════════
+# 7. CONNECTION — Social graph management
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def connection():
+    """VersaVoice connection management."""
+    pass
+
+@connection.group("list", invoke_without_command=True)
+@click.pass_context
+def connection_list(ctx):
+    """List connections. Defaults to primary-user contacts."""
+    if ctx.invoked_subcommand is None:
+        # Default: list primary-user contacts
+        ctx.invoke(connection_list_primary_user)
+
+@connection_list.command("primary-user")
+def connection_list_primary_user():
+    """List the Primary User's contacts (people the agent can connect to).
+
+    countryOfBirth / nearestCity are linguistic identity (where the language
+    was learned). countryOfResidence / stateOrProvince are where they live.
+    """
+    config = get_config()
+    token = config.get("versavoice", {}).get("api_token")
+    sub_account_id = config.get("versavoice", {}).get("sub_account_id")
+    if not token:
+        json_response(False, error="VersaVoice API token not configured")
+        sys.exit(1)
+    from comms import api_request
+    response = api_request("/connections", token)
+    if response is None:
+        json_response(False, error="Failed to fetch Primary User contacts")
+        sys.exit(1)
+    # Response is a list of contacts
+    contacts = response if isinstance(response, list) else response.get("connections", response.get("contacts", []))
+    # Format for agent readability
+    result = []
+    for c in contacts:
+        result.append({
+            "uid": c.get("uid") or c.get("contactUid") or c.get("id"),
+            "name": c.get("displayName") or c.get("name") or "Unknown",
+            "language": c.get("spokenLanguage") or c.get("language") or "--",
+            "countryOfBirth": c.get("countryOfBirth"),
+            "nearestCity": c.get("nearestCity"),
+            "countryOfResidence": c.get("countryOfResidence"),
+            "stateOrProvince": c.get("stateOrProvince"),
+            "chromosome": c.get("chromosome"),
+            "dateOfBirth": c.get("dateOfBirth"),
+            "abilities": c.get("abilities", []),
+            "isApiEnabled": c.get("isApiEnabled", False),
+        })
+    print(json.dumps(result, indent=2, default=str))
+
+@connection_list.command("agent")
+def connection_list_agent():
+    """List the agent's own established connections (local DB filtered by agent memory)."""
+    caller = get_agent_name()
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        query = """
+            SELECT c.*, amc.preferences, amc.personal_notes, amc.rapport_level 
+            FROM connections c
+            INNER JOIN agent_memory_connection amc ON c.uid = amc.contact_uid
+            WHERE amc.agent_name = ?
+            ORDER BY c.display_name
+        """
+        rows = conn.execute(query, (caller,)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["countryOfBirth"] = d.pop("country", None)
+            d["nearestCity"] = d.pop("city", None)
+            d["countryOfResidence"] = d.pop("country_of_residence", None)
+            d["stateOrProvince"] = d.pop("state_or_province", None)
+            result.append(d)
+        print(json.dumps(local_time.localize(result), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@connection.command("request")
+@click.argument("uid")
+@click.option("--reason", default="", help="Why you are connecting, e.g. 'Live call: <reason>'. Kept on the follow-up task.")
+def connection_request(uid, reason):
+    """Send a VersaVoice connection invitation to a Primary User contact.
+
+    Schedules its own follow-up: a check_connection task for this contact, first check in 15 minutes.
+    Only agents with can_message_connections=1 (or protected) can send invitations.
+    Sub-agents need external comms enabled via 'agictl agent toggle-comms' (dashboard).
+    """
+    # Guard: check can_message_connections gate
+    caller = get_agent_name()
+    try:
+        guard_conn = db_connect.connect_compat(agents_db, timeout=5)
+        guard_conn.row_factory = sqlite3.Row
+        row = guard_conn.execute(
+            "SELECT protected, can_message_connections FROM agents WHERE name=?", (caller,)
+        ).fetchone()
+        guard_conn.close()
+        if row and row["protected"] == 0 and row["can_message_connections"] == 0:
+            json_response(False, error=f"Agent '{caller}' cannot send connection invitations. "
+                          "External comms not enabled. Do not retry — report this to the COA for activation.")
+            sys.exit(1)
+    except Exception:
+        pass
+    config = get_config()
+    token = config.get("versavoice", {}).get("api_token")
+    sub_account_id = config.get("versavoice", {}).get("sub_account_id")
+    if not token or not sub_account_id:
+        json_response(False, error="VersaVoice identity not configured")
+        sys.exit(1)
+    from comms import api_request
+    # Delegate request fully to the cloud backend (idempotent REST response)
+    try:
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+
+        # Pre-fetch display name from primary-user contacts list
+        prefetched_name = "Unknown"
+        try:
+            contacts_response = api_request("/connections", token)
+            contacts = contacts_response if isinstance(contacts_response, list) else (contacts_response or {}).get("connections", (contacts_response or {}).get("contacts", []))
+            for c in contacts:
+                c_uid = c.get("uid") or c.get("contactUid") or c.get("id")
+                if c_uid == uid:
+                    prefetched_name = c.get("displayName") or c.get("name") or "Unknown"
+                    break
+        except Exception:
+            pass
+
+        # Send invitation via VersaVoice API
+        response = api_request(
+            f"/connections/link",
+            token,
+            method="POST",
+            body={"subAccountId": sub_account_id, "contactUid": uid}
+        )
+        if response and response.get("success"):
+            # Insert into local connections table — prefer API response name, fall back to pre-fetched
+            display_name = response.get("data", {}).get("displayName") or prefetched_name
+            spoken_lang = response.get("data", {}).get("spokenLanguage", "")
+            conn.execute(
+                "INSERT OR IGNORE INTO connections (uid, display_name, spoken_lang) VALUES (?, ?, ?)",
+                (uid, display_name, spoken_lang)
+            )
+            # If already exists with 'Unknown', update with better name
+            if display_name != "Unknown":
+                conn.execute(
+                    "UPDATE connections SET display_name=? WHERE uid=? AND display_name='Unknown'",
+                    (display_name, uid)
+                )
+            conn.commit()
+            conn.close()
+            task_id = tasks_reader.schedule_connection_check(caller, uid, display_name, reason) if tasks_reader else None
+            if task_id:
+                from agitop.data.tasks_reader import CONNECTION_CHECK_MINUTES
+                follow_up = f"Task {task_id} checks in {CONNECTION_CHECK_MINUTES} minutes whether they accepted."
+            else:
+                follow_up = "The follow-up task could not be created. Add a check_connection task yourself."
+            json_response(True, uid=uid, display_name=display_name, status="invitation_sent",
+                          follow_up_task_id=task_id, follow_up=follow_up)
+        else:
+            conn.close()
+            err = response.get("message", str(response)) if response else "API Error"
+            json_response(False, error=f"Connection request failed: {err}")
+            sys.exit(1)
+    except Exception as e:
+        json_response(False, error=str(e))
+        sys.exit(1)
+
+
+# ═══════════════════════════════════════════════════════
+# IDENTITY — VersaVoice sub-account provisioning
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def identity():
+    """VersaVoice Identity Management."""
+    pass
+
+@identity.command()
+@click.argument("agent_user")
+@click.option("--token", required=True, help="VersaVoice API token")
+@click.option("--first-name", required=True)
+@click.option("--last-name", required=True)
+@click.option("--language", default="en")
+@click.option("--country", default="")
+@click.option("--voice", type=click.Choice(["female", "male", "reflective"], case_sensitive=False), default="female",
+              help="Voice type: female (XX), male (XY), reflective (Primary User's voice)")
+@click.option(
+    "--install-email", default="",
+    help="Siloed install-acceptance email for COA reuse (agiInstallEmail); not the VV sponsor email",
+)
+@click.option(
+    "--agent-key", default="",
+    help="VersaVoice agiAgentKey. Normal COA: coa (same-email reuse). "
+         "Sentinel: host-stable coa-s-<12 hex>. Default: resolve from agents.db.",
+)
+@click.option(
+    "--update", "update_run", is_flag=True,
+    help="Update run: if the bound sub-account is gone and no match is found, "
+         "stop instead of registering a new identity.",
+)
+def provision(agent_user, token, first_name, last_name, language, country, voice,
+              install_email, agent_key, update_run):
+    """Resolve or create a VersaVoice Sub-Account.
+
+    Only protected agents (COA, watchdog) can register VersaVoice identities.
+    Sub-agents communicate via 'agictl message internal' — no VV account needed.
+    """
+    # Guard: sub-agents cannot register VV identities
+    caller = get_agent_name()
+    try:
+        conn = db_connect.connect_compat(agents_db, timeout=5)
+        row = conn.execute("SELECT protected FROM agents WHERE name=?", (caller,)).fetchone()
+        conn.close()
+        if row and row[0] == 0:
+            json_response(False, error=f"Sub-agent '{caller}' cannot register a VersaVoice account. "
+                          "Use 'agictl message internal' for communication.")
+            sys.exit(1)
+    except Exception:
+        pass  # Allow if DB check fails (fresh install edge case)
+    success = provision_identity(
+        agent_user, token, first_name, last_name, language, country, voice, agents_db,
+        install_email=install_email or None,
+        agent_key=agent_key or None,
+        update=update_run,
+    )
+    if not success:
+        sys.exit(1)
+
+
+# ═══════════════════════════════════════════════════════
+# 8. MEMORY — Agent Memory Bridging (TD-MEM-003)
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def memory():
+    """Agent memory — connection, project, and system memory management."""
+    pass
+
+# ── memory connection ─────────────────────────────────
+
+@memory.group("connection")
+def memory_connection():
+    """Per-contact relational memory."""
+    pass
+
+@memory_connection.command("get")
+@click.argument("contact_uid")
+@_memory_agent_option
+def memory_connection_get(contact_uid, target_agent):
+    """Get memory for a specific contact."""
+    try:
+        agent_name, _scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM agent_memory_connection WHERE agent_name=? AND contact_uid=?",
+            (agent_name, contact_uid)
+        ).fetchone()
+        conn.close()
+        if row:
+            print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
+        else:
+            print(json.dumps({"agent_name": agent_name, "contact_uid": contact_uid, "exists": False}))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_connection.command("set")
+@click.argument("contact_uid")
+@click.option("--preferences", default=None, help="JSON: voice_vs_text, language, comm_style, timezone")
+@click.option("--personal-notes", default=None, help="Hobbies, family, interests")
+@click.option("--comm-style", default=None, help="How this person communicates")
+@click.option("--rapport", default=None, type=click.Choice(["new", "building", "established", "strong"]))
+@click.option("--emotional-notes", default=None, help="Trust, vibe, encouragement needs")
+@_memory_agent_option
+def memory_connection_set(contact_uid, preferences, personal_notes, comm_style, rapport, emotional_notes, target_agent):
+    """Set or update memory for a contact. Uses UPSERT — only provided fields are updated."""
+    try:
+        agent_name, _scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        # Check if record exists
+        existing = conn.execute(
+            "SELECT id FROM agent_memory_connection WHERE agent_name=? AND contact_uid=?",
+            (agent_name, contact_uid)
+        ).fetchone()
+
+        if existing:
+            # Update only provided fields
+            updates = []
+            params = []
+            if preferences is not None:
+                updates.append("preferences=?"); params.append(preferences)
+            if personal_notes is not None:
+                updates.append("personal_notes=?"); params.append(personal_notes)
+            if comm_style is not None:
+                updates.append("communication_style=?"); params.append(comm_style)
+            if rapport is not None:
+                updates.append("rapport_level=?"); params.append(rapport)
+            if emotional_notes is not None:
+                updates.append("emotional_notes=?"); params.append(emotional_notes)
+            if not updates:
+                json_response(False, error="No fields provided to update")
+                return
+            updates.append("last_interaction=datetime('now')")
+            updates.append("updated_at=datetime('now')")
+            params.extend([agent_name, contact_uid])
+            conn.execute(
+                f"UPDATE agent_memory_connection SET {', '.join(updates)} WHERE agent_name=? AND contact_uid=?",
+                params
+            )
+        else:
+            # Insert new record
+            conn.execute(
+                """INSERT INTO agent_memory_connection
+                   (agent_name, contact_uid, preferences, personal_notes, communication_style,
+                    rapport_level, emotional_notes, last_interaction)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                (agent_name, contact_uid, preferences, personal_notes, comm_style, rapport, emotional_notes)
+            )
+        conn.commit()
+        conn.close()
+        json_response(True, agent_name=agent_name, contact_uid=contact_uid, action="upserted")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_connection.command("list")
+@_memory_agent_option
+def memory_connection_list(target_agent):
+    """List all contact memories for this agent."""
+    try:
+        agent_name, _scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM agent_memory_connection WHERE agent_name=? ORDER BY updated_at DESC",
+            (agent_name,)
+        ).fetchall()
+        conn.close()
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+# ── memory project ────────────────────────────────────
+
+@memory.group("project")
+def memory_project():
+    """Per-project state memory."""
+    pass
+
+@memory_project.command("get")
+@click.argument("project_id", type=int)
+@_memory_agent_option
+def memory_project_get(project_id, target_agent):
+    """Get memory for a specific project."""
+    try:
+        agent_name, _scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM agent_memory_project WHERE agent_name=? AND project_id=?",
+            (agent_name, project_id)
+        ).fetchone()
+        conn.close()
+        if row:
+            print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
+        else:
+            print(json.dumps({"agent_name": agent_name, "project_id": project_id, "exists": False}))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_project.command("set")
+@click.argument("project_id", type=int)
+@click.option("--phase", default=None, help="Current project phase")
+@click.option("--decisions", default=None, help="Key decisions and WHY")
+@click.option("--blockers", default=None, help="Known impediments")
+@click.option("--next-steps", default=None, help="What is planned next")
+@_memory_agent_option
+def memory_project_set(project_id, phase, decisions, blockers, next_steps, target_agent):
+    """Set or update memory for a project. Uses UPSERT — only provided fields are updated."""
+    try:
+        agent_name, _scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        existing = conn.execute(
+            "SELECT id FROM agent_memory_project WHERE agent_name=? AND project_id=?",
+            (agent_name, project_id)
+        ).fetchone()
+
+        if existing:
+            updates = []
+            params = []
+            if phase is not None:
+                updates.append("current_phase=?"); params.append(phase)
+            if decisions is not None:
+                updates.append("key_decisions=?"); params.append(decisions)
+            if blockers is not None:
+                updates.append("blockers=?"); params.append(blockers)
+            if next_steps is not None:
+                updates.append("next_steps=?"); params.append(next_steps)
+            if not updates:
+                json_response(False, error="No fields provided to update")
+                return
+            updates.append("updated_at=datetime('now')")
+            params.extend([agent_name, project_id])
+            conn.execute(
+                f"UPDATE agent_memory_project SET {', '.join(updates)} WHERE agent_name=? AND project_id=?",
+                params
+            )
+        else:
+            conn.execute(
+                """INSERT INTO agent_memory_project
+                   (agent_name, project_id, current_phase, key_decisions, blockers, next_steps)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (agent_name, project_id, phase, decisions, blockers, next_steps)
+            )
+        conn.commit()
+        conn.close()
+        json_response(True, agent_name=agent_name, project_id=project_id, action="upserted")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_project.command("list")
+@_memory_agent_option
+def memory_project_list(target_agent):
+    """List all project memories for this agent."""
+    try:
+        agent_name, _scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM agent_memory_project WHERE agent_name=? ORDER BY updated_at DESC",
+            (agent_name,)
+        ).fetchall()
+        conn.close()
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+# ── memory system ─────────────────────────────────────
+
+@memory.group("system")
+def memory_system():
+    """System-level operational memory (constraints, discoveries, instructions)."""
+    pass
+
+@memory_system.command("get")
+@click.argument("key", required=False, default=None)
+@_memory_agent_option
+def memory_system_get(key, target_agent):
+    """Get system memory. If key is provided, returns single entry; otherwise returns all."""
+    try:
+        agent_name, scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        if key:
+            row = conn.execute(
+                "SELECT * FROM agent_memory_system WHERE key=?",
+                (key,)
+            ).fetchone()
+            if row and scoped and dict(row).get("agent_name") != agent_name:
+                row = None
+            conn.close()
+            if row:
+                print(json.dumps(local_time.localize(dict(row)), indent=2, default=str))
+            else:
+                print(json.dumps({"key": key, "exists": False}))
+        else:
+            if scoped:
+                rows = conn.execute(
+                    "SELECT * FROM agent_memory_system WHERE agent_name=? ORDER BY key ASC",
+                    (agent_name,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM agent_memory_system ORDER BY key ASC"
+                ).fetchall()
+            conn.close()
+            print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_system.command("set")
+@click.argument("key")
+@click.argument("value")
+@_memory_agent_option
+def memory_system_set(key, value, target_agent):
+    """Set a system memory entry. Uses UPSERT — replaces value if key exists."""
+    try:
+        agent_name, _scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        # A key is unique across all agents (the table's own rule). Writing a key another
+        # agent holds used to replace its value and hand the entry to the writer, so the
+        # first agent lost it without a word. Refuse instead.
+        held = conn.execute(
+            "SELECT agent_name FROM agent_memory_system WHERE key = ?", (key,)).fetchone()
+        if held and held[0] != agent_name:
+            conn.close()
+            json_response(False, error=(
+                f"The key '{key}' is already used by agent '{held[0]}'. System-memory keys are "
+                f"shared by all agents. Use another key, for example '{key}.{agent_name}'."))
+            return
+        conn.execute(
+            """INSERT INTO agent_memory_system (agent_name, key, value)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, agent_name=excluded.agent_name, updated_at=datetime('now')""",
+            (agent_name, key, value)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, agent_name=agent_name, key=key, action="upserted")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+OPERATIONAL_MEMORY_VALUE_CUT = 600
+OPERATIONAL_MEMORY_BLOCK_CUT = 8000
+_STANDING_RULE_KEY = re.compile(r"^(constraint|user_instruction|rule|instruction)[._]")
+
+
+def render_operational_memory(agent_name: str, rows: list[dict], now=None) -> str:
+    """Spawn block for one agent's system memory (state_spawn_context.md §1.14)."""
+    if not rows:
+        return ""
+    now = now or _utc_now()
+
+    def newest_first(r):
+        return str(r.get("updated_at") or r.get("created_at") or "")
+
+    rules = sorted((r for r in rows if _STANDING_RULE_KEY.match(str(r["key"]))), key=newest_first, reverse=True)
+    rest = sorted((r for r in rows if not _STANDING_RULE_KEY.match(str(r["key"]))), key=newest_first, reverse=True)
+
+    header = (
+        f"## ── OPERATIONAL MEMORY (your system memory — {len(rows)} entries) ──\n"
+        "Standing rules first (constraint / user_instruction / rule / instruction keys), then newest. "
+        "Rules stay in force until you change them."
+    )
+    used = len(header)
+    shown, hidden = [], 0
+    for r in rules + rest:
+        updated = _parse_utc(r.get("updated_at") or r.get("created_at"))
+        value = _cut(
+            str(r["value"]).replace("\n", " "),
+            OPERATIONAL_MEMORY_VALUE_CUT,
+            f"agictl memory system get {r['key']}",
+        )
+        line = f"  {r['key']} (updated {_fmt_local(updated)[:10]}, {_fmt_age(updated, now)} ago): {value}"
+        if used + len(line) + 1 > OPERATIONAL_MEMORY_BLOCK_CUT:
+            hidden += 1
+            continue
+        shown.append(line)
+        used += len(line) + 1
+
+    more = f"{hidden} more not shown. " if hidden else ""
+    footer = (
+        f"[!] {more}Go deeper: 'agictl memory system list --agent {agent_name}' (yours) · "
+        "'agictl memory system list' (team-wide) · 'agictl memory system get <key>'."
+    )
+    return "\n".join([header, *shown, footer])
+
+
+@memory_system.command("list")
+@_memory_agent_option
+@click.option("--prompt", "as_prompt", is_flag=True,
+              help="Render the bounded OPERATIONAL MEMORY spawn block (needs --agent)")
+def memory_system_list(target_agent, as_prompt):
+    """List all system memory entries for this agent."""
+    if as_prompt and not (target_agent or "").strip():
+        json_response(False, error="--prompt needs --agent <name>")
+        sys.exit(1)
+    try:
+        agent_name, scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        conn.row_factory = sqlite3.Row
+        if scoped:
+            rows = conn.execute(
+                "SELECT * FROM agent_memory_system WHERE agent_name=? ORDER BY key ASC",
+                (agent_name,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM agent_memory_system ORDER BY key ASC"
+            ).fetchall()
+        conn.close()
+        if as_prompt:
+            block = render_operational_memory(agent_name, [dict(r) for r in rows])
+            if block:
+                print(block)
+            return
+        print(json.dumps(local_time.localize([dict(r) for r in rows]), indent=2, default=str))
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_system.command("delete")
+@click.argument("key")
+@_memory_agent_option
+def memory_system_delete(key, target_agent):
+    """Delete a system memory entry by key."""
+    try:
+        agent_name, scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        if scoped:
+            cursor = conn.execute(
+                "DELETE FROM agent_memory_system WHERE key=? AND agent_name=?",
+                (key, agent_name),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM agent_memory_system WHERE key=?", (key,)
+            )
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if deleted:
+            json_response(True, key=key, action="deleted")
+        else:
+            json_response(False, error=f"Key '{key}' not found")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+@memory_system.command("rename")
+@click.argument("old_key")
+@click.argument("new_key")
+@_memory_agent_option
+def memory_system_rename(old_key, new_key, target_agent):
+    """Rename a system memory key (preserves value and metadata)."""
+    try:
+        agent_name, scoped = _resolve_memory_target(target_agent)
+        conn = db_connect.connect_compat(tasks_db, timeout=5)
+        # Check old key exists
+        if scoped:
+            existing = conn.execute(
+                "SELECT id FROM agent_memory_system WHERE key=? AND agent_name=?",
+                (old_key, agent_name),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT id FROM agent_memory_system WHERE key=?", (old_key,)
+            ).fetchone()
+        if not existing:
+            conn.close()
+            json_response(False, error=f"Key '{old_key}' not found")
+            return
+        # Check new key doesn't conflict
+        conflict = conn.execute(
+            "SELECT id FROM agent_memory_system WHERE key=?", (new_key,)
+        ).fetchone()
+        if conflict:
+            conn.close()
+            json_response(False, error=f"Key '{new_key}' already exists")
+            return
+        conn.execute(
+            "UPDATE agent_memory_system SET key=?, updated_at=datetime('now') WHERE key=?",
+            (new_key, old_key)
+        )
+        conn.commit()
+        conn.close()
+        json_response(True, old_key=old_key, new_key=new_key, action="renamed")
+    except Exception as e:
+        json_response(False, error=str(e))
+
+
+# ═══════════════════════════════════════════════════════
+# 9. EXECUTE — Code execution
+# ═══════════════════════════════════════════════════════
+
+def _exec_env_root() -> str | None:
+    """Environment root (parent of AGICTL_AGENT_DIR) for execute cwd, if known."""
+    agent_dir = os.environ.get("AGICTL_AGENT_DIR", "").strip()
+    if not agent_dir:
+        return None
+    root = os.path.dirname(agent_dir)
+    return root if root and os.path.isdir(root) else None
+
+
+# Forwarded into execute bash/python so nested `agictl` keeps the invoking
+# agent's identity (sudo -u strips the environment).
+_EXEC_FORWARD_ENV = (
+    "AGICTL_CONFIG",
+    "AGICTL_AGENT_DIR",
+    "AGICTL_AGENT_USER",
+    "AGICTL_AGENTS_DB",
+    "AGICTL_MESSAGES_DB",
+    "AGICTL_TASKS_DB",
+    "AGICTL_CYCLES_DB",
+    "AGICTL_DB",
+    "VERSA_AGENT_NAME",
+    "VERSA_CYCLE_ID",
+    "VERSA_COA_AUTONOMOUS",
+)
+
+
+def _exec_forward_env_pairs() -> list[str]:
+    """KEY=value pairs for `env` so nested agictl keeps caller identity."""
+    pairs = []
+    for key in _EXEC_FORWARD_ENV:
+        val = os.environ.get(key)
+        if val:
+            pairs.append(f"{key}={val}")
+    return pairs
+
+
+def _get_exec_cmd(interpreter: str, script_path: str) -> list:
+    """Build execution command, dropping back to the agent user if available.
+
+    agictl runs as watchdog (via sudo elevation), but code execution must
+    happen as the original agent user to inherit their supplementary groups
+    (e.g. docker) and enforce OS-level isolation. The wrapper passes
+    AGICTL_AGENT_USER for this purpose.
+
+    Note: Agent users have /usr/sbin/nologin as their shell, so we cannot
+    use 'sudo -i' (login shell). Instead we use 'sudo -u' and explicitly
+    invoke the interpreter, which works regardless of the user's shell.
+
+    Identity + DB env is re-injected via `env` so nested `agictl` inside
+    execute bash resolves as the invoking agent, not COA.
+    """
+    agent_user = os.environ.get("AGICTL_AGENT_USER")
+    caller = os.environ.get("USER", "")
+    forwarded = _exec_forward_env_pairs()
+    if agent_user and agent_user not in ("root", "watchdog", caller):
+        # Drop back to agent user — sudo -u initializes supplementary groups.
+        # Use `env` (not sudo SETENV) so identity vars survive reliably.
+        return ["sudo", "-u", agent_user, "env", *forwarded, interpreter, script_path]
+    if forwarded:
+        return ["env", *forwarded, interpreter, script_path]
+    return [interpreter, script_path]
+
+
+@cli.group()
+def execute():
+    """Execute code (bash/python) safely."""
+    pass
+
+
+def _execute_timeout_seconds() -> int:
+    """Autonomous COA needs apt-scale time; everyone else stays at 120s."""
+    return 600 if coa_autonomous_allowed() else 120
+
+
+def _refuse_privilege_escalation(script: str) -> bool:
+    """Block sudo/su in execute scripts unless the COA grant landed."""
+    if coa_autonomous_allowed():
+        return False
+    hit = privilege_escalation_hit(script or "")
+    if not hit:
+        return False
+    json_response(
+        False,
+        error=(
+            f"BLOCKED: Privilege escalation command detected ('{hit}'). "
+            "You do NOT have sudo/su access. This command will NEVER succeed."
+        ),
+    )
+    return True
+
+
+def _execute_bash_script(script: str) -> None:
+    """Run a bash script as the calling agent user."""
+    if _refuse_privilege_escalation(script):
+        return
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+        f.write(script)
+        temp_name = f.name
+    os.chmod(temp_name, 0o644)
+    try:
+        cmd = _get_exec_cmd("bash", temp_name)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=_execute_timeout_seconds(), cwd=_exec_env_root(),
+        )
+        output = result.stdout
+        if result.stderr:
+            output += "\nSTDERR:\n" + result.stderr
+        json_response(result.returncode == 0, output=output, exit_code=result.returncode)
+    except subprocess.TimeoutExpired:
+        json_response(False, error=f"Execution timed out after {_execute_timeout_seconds()} seconds")
+    except Exception as e:
+        json_response(False, error=str(e))
+    finally:
+        if os.path.exists(temp_name):
+            os.remove(temp_name)
+
+
+@cli.command("bash")
+@click.argument("script", type=str)
+def bash_alias(script):
+    """Run bash (alias for `agictl execute bash`)."""
+    _execute_bash_script(script)
+
+
+@execute.command("bash")
+@click.argument("script", type=str)
+def execute_bash(script):
+    """Execute a bash script as the calling agent user."""
+    _execute_bash_script(script)
+
+@execute.command("python")
+@click.argument("script", type=str)
+def execute_python(script):
+    """Execute a python script as the calling agent user."""
+    if _refuse_privilege_escalation(script):
+        return
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(script)
+        temp_name = f.name
+    # Make readable by agent user (tempfile defaults to 600 owned by watchdog)
+    os.chmod(temp_name, 0o644)
+    try:
+        cmd = _get_exec_cmd("python3", temp_name)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=_execute_timeout_seconds(), cwd=_exec_env_root(),
+        )
+        output = result.stdout
+        if result.stderr:
+            output += "\nSTDERR:\n" + result.stderr
+        json_response(result.returncode == 0, output=output, exit_code=result.returncode)
+    except subprocess.TimeoutExpired:
+        json_response(False, error=f"Execution timed out after {_execute_timeout_seconds()} seconds")
+    except Exception as e:
+        json_response(False, error=str(e))
+    finally:
+        if os.path.exists(temp_name):
+            os.remove(temp_name)
+
+
+# ═══════════════════════════════════════════════════════
+# SEARCH — Web search via SearXNG
+# ═══════════════════════════════════════════════════════
+
+def _get_search_config():
+    """Read search configuration from setup.ini."""
+    import configparser
+    config = configparser.ConfigParser()
+    config.read("/etc/versa-agi/setup.ini")
+    return {
+        "enabled": config.get("search", "enabled", fallback="false").lower() == "true",
+        "engine": config.get("search", "engine", fallback="searxng"),
+        "searxng_url": config.get("search", "searxng_url", fallback="http://localhost:8888"),
+    }
+
+
+@cli.group()
+def search():
+    """Web search via SearXNG."""
+    pass
+
+
+@search.command("web")
+@click.argument("query")
+@click.option("--count", "-n", default=5, help="Number of results to return (default: 5)")
+@click.option("--categories", "-c", default="general", help="Search categories (default: general)")
+def search_web(query, count, categories):
+    """Search the web using the local SearXNG instance.
+
+    Returns top N results with title, URL, and snippet as JSON.
+    Requires SearXNG to be installed and enabled in setup.ini [search].
+    """
+    import urllib.request
+    import urllib.parse
+
+    config = _get_search_config()
+    if not config["enabled"]:
+        json_response(False, error="Web search is disabled. Enable it in setup.ini [search] enabled=true and install SearXNG via setup_providers.sh")
+        sys.exit(1)
+
+    base_url = config["searxng_url"].rstrip("/")
+    params = urllib.parse.urlencode({
+        "q": query,
+        "format": "json",
+        "categories": categories,
+    })
+    url = f"{base_url}/search?{params}"
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "agictl/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.URLError as e:
+        json_response(False, error=f"SearXNG connection failed: {e}. Is SearXNG running at {base_url}?")
+        sys.exit(1)
+    except Exception as e:
+        json_response(False, error=f"Search failed: {e}")
+        sys.exit(1)
+
+    results = []
+    for item in data.get("results", [])[:count]:
+        results.append({
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "snippet": item.get("content", ""),
+            "engine": item.get("engine", ""),
+        })
+
+    if not results:
+        unresponsive = [
+            {"engine": entry[0], "reason": entry[1]}
+            for entry in data.get("unresponsive_engines", [])
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2
+        ]
+        if unresponsive:
+            json_response(True, query=query, results=results, count=0,
+                          unresponsive_engines=unresponsive)
+            return
+
+    json_response(True, query=query, results=results, count=len(results))
+
+
+@search.command("read")
+@click.argument("url")
+@click.option("--offset", default=0, type=int, help="Start at this character of the page text")
+@click.option("--max-chars", default=None, type=int, help="Characters to return (default 8000, limit 20000)")
+@click.option("--links", "with_links", is_flag=True, help="Also list the page's links")
+@click.option("--user-agent", default="", help="User agent for this call")
+def search_read(url, offset, max_chars, with_links, user_agent):
+    """Read one web page as text, without a browser (state_web_access.md §1.3).
+
+    For documentation, articles and references. A page that builds its content
+    with scripts comes back with a hint to use `browser goto`.
+    """
+    from agictl import browser_script, page_text
+
+    if not _get_search_config()["enabled"]:
+        json_response(False, error="Web search is disabled. Enable it in setup.ini [search] enabled=true.")
+        sys.exit(1)
+    problem = browser_script.user_agent_error(user_agent)
+    if problem:
+        json_response(False, error=problem)
+        sys.exit(1)
+    agent = user_agent or _get_browser_config().get("user_agent", "")
+    try:
+        final_url, content_type, body = page_text.fetch(url, user_agent=agent)
+        page = page_text.read_page(body, content_type, final_url)
+    except page_text.FetchError as e:
+        json_response(False, url=url, error=str(e))
+        sys.exit(1)
+    result = {"url": final_url, "title": page["title"], "source": "fetch"}
+    result.update(browser_script.page_slice(
+        browser_script.tidy_text(page["text"]), offset,
+        browser_script.DEFAULT_MAX_CHARS if max_chars is None else max_chars,
+    ))
+    if with_links:
+        result["links"] = page["links"]
+    if page.get("hint"):
+        result["hint"] = page["hint"]
+    json_response(True, **result)
+
+
+def _search_keys_set() -> dict:
+    """Which search API keys are set. Never the keys themselves."""
+    import configparser
+    config = configparser.ConfigParser()
+    config.read("/etc/versa-agi/setup.ini")
+    return {
+        "brave": bool(config.get("search", "brave_api_key", fallback="").strip()),
+        "exa": bool(config.get("search", "exa_api_key", fallback="").strip()),
+    }
+
+
+def search_probe(data: dict) -> dict:
+    """Result count per engine and the engines that did not answer, from one SearXNG reply."""
+    engines: dict = {}
+    for item in data.get("results", []) or []:
+        name = item.get("engine") or "unknown"
+        engines[name] = engines.get(name, 0) + 1
+    unresponsive = [
+        {"engine": entry[0], "reason": entry[1]}
+        for entry in data.get("unresponsive_engines", []) or []
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2
+    ]
+    return {"results": sum(engines.values()), "engines": engines, "unresponsive_engines": unresponsive}
+
+
+@search.command("status")
+@click.option("--query", default="weather", help="Test query (default: weather)")
+def search_status(query):
+    """Is search working? Which API keys are set, and which engines answer one test search."""
+    import urllib.parse
+    import urllib.request
+
+    config = _get_search_config()
+    status = {"enabled": config["enabled"], "searxng_url": config["searxng_url"],
+              "api_keys_set": _search_keys_set()}
+    if not config["enabled"]:
+        json_response(True, **status, note="Web search is turned off ([search] enabled=false).")
+        return
+    url = f"{config['searxng_url'].rstrip('/')}/search?" + urllib.parse.urlencode(
+        {"q": query, "format": "json", "categories": "general"})
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "agictl/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:  # noqa: BLE001
+        json_response(False, **status, error=f"SearXNG did not answer at {config['searxng_url']}: {e}")
+        sys.exit(1)
+    json_response(True, **status, test_query=query, **search_probe(data))
+
+
+@search.command("set-key")
+@click.argument("service", type=click.Choice(sorted(SEARCH_KEY_ALIASES)))
+@click.argument("value")
+def search_set_key(service, value):
+    """COA: set (or remove with `off`) a search API key the Primary User gave you.
+
+    Saves the key and refreshes SearXNG. The key is never printed back.
+    """
+    caller = get_agent_name()
+    if os.geteuid() != 0 and caller not in ("coa", "watchdog"):
+        json_response(False, error="Only COA can set search API keys. Ask COA or the Primary User.")
+        sys.exit(1)
+    key_type = SEARCH_KEY_ALIASES[service]
+    if not search_key_ok("" if value.strip().lower() == "off" else value.strip()):
+        json_response(False, error="That does not look like an API key (letters, digits and . _ - only).")
+        sys.exit(1)
+    env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+    cmd = [_agictl_root_bin(), "system", "set-key", key_type, value.strip()]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n"] + cmd
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=SEARXNG_APPLY_TIMEOUT_SECONDS + 30, env=env)
+    except subprocess.TimeoutExpired:
+        json_response(False, error="Setting the key took too long. Ask the Primary User to run: sudo versa-agi-update")
+        sys.exit(1)
+    try:
+        result = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except ValueError:
+        result = {}
+    if proc.returncode != 0 or not result.get("success"):
+        err = result.get("error") or "; ".join(result.get("errors") or []) or (proc.stderr or "").strip()
+        json_response(False, service=service, error=(
+            f"The key was not set ({err or 'no detail'}). The Primary User can set it in agitop → API KEYS."))
+        sys.exit(1)
+    json_response(True, service=service, key_set=result.get("key_set"), applied=result.get("applied"),
+                  note=result.get("note", ""))
+
+
+# ═══════════════════════════════════════════════════════
+# VIEW — Agent-initiated multimodal input
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def view():
+    """View local images or videos for multimodal perception."""
+    pass
+
+
+def _view_asset(path, execution_model, *, modality: str, inspect):
+    from model_drivers.registry import resolve_model_driver
+    from model_drivers.view_paths import ViewPathError
+
+    agent_name = get_agent_name()
+    try:
+        result = inspect(path, agent_name)
+    except ViewPathError as e:
+        json_response(False, error=e.message, code=e.code)
+        sys.exit(1)
+    except OSError as e:
+        json_response(False, error=str(e), code="io_error")
+        sys.exit(1)
+
+    if execution_model:
+        if resolve_model_driver(execution_model, "input", modality) is None:
+            json_response(
+                False,
+                error=(
+                    f"Execution model '{execution_model}' has no exact executable "
+                    f"{modality}-input ModelDriver"
+                ),
+                code="no_driver",
+                execution_model=execution_model,
+                path=result.get("path"),
+            )
+            sys.exit(1)
+        result["execution_model"] = execution_model
+
+    json_response(True, **result)
+
+
+@view.command("image")
+@click.argument("path")
+@click.option(
+    "--execution-model",
+    default=None,
+    help="Optional catalog key to test modality gate (harness passes this automatically)",
+)
+def view_image(path, execution_model):
+    """Validate a local image path and return metadata for multimodal inject."""
+    from model_drivers.view_paths import inspect_image_for_view
+
+    _view_asset(path, execution_model, modality="image", inspect=inspect_image_for_view)
+
+
+@view.command("video")
+@click.argument("path")
+@click.option(
+    "--execution-model",
+    default=None,
+    help="Optional catalog key to test modality gate (harness passes this automatically)",
+)
+def view_video(path, execution_model):
+    """Validate a local video path and return metadata for multimodal inject."""
+    from model_drivers.view_paths import inspect_video_for_view
+
+    def _inspect(p, agent_name):
+        return inspect_video_for_view(p, agent_name, execution_model=execution_model)
+
+    _view_asset(path, execution_model, modality="video", inspect=_inspect)
+
+
+# ═══════════════════════════════════════════════════════
+# BROWSER — Headless browser automation (Playwright)
+# ═══════════════════════════════════════════════════════
+
+def _get_browser_config():
+    """Read browser configuration from setup.ini."""
+    import configparser
+    config = configparser.ConfigParser()
+    config.read("/etc/versa-agi/setup.ini")
+    return {
+        "enabled": config.get("browser", "enabled", fallback="false").lower() == "true",
+        "timeout": int(config.get("browser", "timeout", fallback="30")) * 1000,  # ms
+        # state_web_access.md §1.1 rules 3–4
+        "settle_seconds": config.get("browser", "settle_seconds", fallback="5"),
+        "user_agent": (config.get("browser", "user_agent", fallback="") or "").strip(),
+    }
+
+
+def _check_browser_access():
+    """Two-layer access check: system-wide + per-agent.
+
+    Layer 1: [browser] enabled in setup.ini (system-wide kill switch)
+    Layer 2: browser_enabled in agents.db (per-agent toggle)
+    Both must be true for execution.
+    """
+    config = _get_browser_config()
+    if not config["enabled"]:
+        json_response(False, error="Browser automation is disabled system-wide. Enable via agitop System Settings or setup.sh.")
+        sys.exit(1)
+
+    agent_name = get_agent_name()
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT browser_enabled FROM agents WHERE name=?", (agent_name,)).fetchone()
+    conn.close()
+    if not row or not row["browser_enabled"]:
+        json_response(False, error="Browser automation is disabled for this agent. Request access from the Primary User.")
+        sys.exit(1)
+
+    return config
+
+
+def _get_screenshot_dir(agent_name: str) -> str:
+    """Resolve screenshot directory from agents.db workspace column.
+
+    COA:        {workspace}/.agent/workspace/screenshots/
+    Sub-agents: {workspace}/workspace/screenshots/
+    """
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
+    conn.close()
+    if not row:
+        return "/tmp"
+    workspace = row["workspace"]
+    # COA has .agent/workspace symlink structure
+    agent_ws = os.path.join(workspace, ".agent", "workspace")
+    if os.path.exists(agent_ws) or os.path.islink(agent_ws):
+        return os.path.join(agent_ws, "screenshots")
+    return os.path.join(workspace, "workspace", "screenshots")
+
+
+def _validate_browser_url(url: str):
+    """Validate URL protocol — only http:// and https:// allowed."""
+    if not url.startswith(("http://", "https://")):
+        json_response(False, error=f"Invalid URL protocol. Only http:// and https:// are allowed. Got: {url[:50]}")
+        sys.exit(1)
+
+
+def _run_playwright_script(script: str, timeout_ms: int):
+    """Write and execute a Playwright Python script as the agent user.
+
+    Uses the same _get_exec_cmd() isolation pattern as 'execute python'.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(script)
+        temp_name = f.name
+    os.chmod(temp_name, 0o644)
+    try:
+        cmd = _get_exec_cmd("python3", temp_name)
+        timeout_sec = max(timeout_ms // 1000 + 10, 30)  # subprocess timeout = page timeout + 10s buffer
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_sec, cwd=_exec_env_root(),
+        )
+        output = result.stdout
+        if result.stderr:
+            output += "\nSTDERR:\n" + result.stderr
+        return result.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, "Browser operation timed out"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if os.path.exists(temp_name):
+            os.remove(temp_name)
+
+
+@cli.group()
+def browser():
+    """Headless browser automation via Playwright."""
+    pass
+
+
+def _browser_setup(user_agent):
+    """Access check + per-call settings shared by every browser command.
+
+    User agent order: the command's --user-agent, then [browser] user_agent,
+    then the script's default (state_web_access.md §1.1 rule 4).
+    """
+    from agictl import browser_script
+    config = _check_browser_access()
+    chosen = (user_agent or "").strip() or config["user_agent"]
+    problem = browser_script.user_agent_error(chosen)
+    if problem:
+        json_response(False, error=problem)
+        sys.exit(1)
+    config["user_agent"] = chosen
+    config["settle_ms"] = browser_script.settle_ms(config["settle_seconds"], config["timeout"])
+    return config
+
+
+def _browser_run(body: str, config: dict):
+    """Run one command body in the agent's browser. Returns (success, parsed, raw)."""
+    from agictl import browser_script
+    script = browser_script.build_script(
+        body, user_agent=config["user_agent"], timeout_ms=config["timeout"],
+        settle_wait_ms=config["settle_ms"],
+    )
+    success, output = _run_playwright_script(script, config["timeout"] + config["settle_ms"])
+    return success, browser_script.parse_output(output) if success else {}, output
+
+
+_USER_AGENT_HELP = "User agent for this call (default: [browser] user_agent, else desktop Chrome)"
+
+
+@browser.command("goto")
+@click.argument("url")
+@click.option("--screenshot", "take_screenshot", is_flag=True, help="Take a screenshot after loading")
+@click.option("--selector", default=None, help="CSS selector to extract text from (default: full page)")
+@click.option("--offset", default=0, type=int, help="Start of the returned text (use next_offset to read on)")
+@click.option("--max-chars", "max_chars", default=None, type=int,
+              help="Most characters to return (default 8000, limit 20000)")
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_goto(url, take_screenshot, selector, offset, max_chars, user_agent):
+    """Navigate to a URL and return page content."""
+    from agictl import browser_script
+    config = _browser_setup(user_agent)
+    _validate_browser_url(url)
+    agent_name = get_agent_name()
+
+    screenshot_lines = ""
+    if take_screenshot:
+        ss_dir = _get_screenshot_dir(agent_name)
+        screenshot_lines = (
+            f"    ss_dir = {repr(ss_dir)}\n"
+            "    os.makedirs(ss_dir, exist_ok=True)\n"
+            "    ss_path = os.path.join(ss_dir, f\"goto_{int(time.time())}.png\")\n"
+            "    page.screenshot(path=ss_path, full_page=True)\n"
+            "    emit(\"SCREENSHOT\", ss_path)\n"
+        )
+
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        "    emit(\"TITLE\", page.title())\n"
+        f"    emit(\"CONTENT\", page.locator({repr(selector or 'body')}).inner_text(timeout=TIMEOUT_MS))\n"
+        f"{screenshot_lines}"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
+    if not success:
+        json_response(False, error=f"Browser error: {output}")
+        return
+
+    result = {"url": url}
+    if "title" in found:
+        result["title"] = found["title"]
+    if "content" in found:
+        result.update(browser_script.page_slice(
+            browser_script.tidy_text(found["content"]), offset,
+            max_chars if max_chars is not None else browser_script.DEFAULT_MAX_CHARS,
+        ))
+    if "screenshot" in found:
+        result["screenshot"] = found["screenshot"]
+
+    json_response(True, **result)
+
+
+@browser.command("click")
+@click.argument("url")
+@click.argument("selector")
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_click(url, selector, user_agent):
+    """Navigate to URL and click an element."""
+    from agictl import browser_script
+    config = _browser_setup(user_agent)
+    _validate_browser_url(url)
+
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    page.locator({repr(selector)}).click(timeout=TIMEOUT_MS)\n"
+        "    settle(page)\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    emit(\"URL\", page.url)\n"
+        "    emit(\"CONTENT\", page.locator(\"body\").inner_text(timeout=TIMEOUT_MS))\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
+    if not success:
+        json_response(False, error=f"Click failed: {output}")
+        return
+
+    result = {"url": url, "selector": selector, "action": "click"}
+    if "title" in found:
+        result["title"] = found["title"]
+    if "url" in found:
+        result["current_url"] = found["url"]
+    if "content" in found:
+        result.update(browser_script.page_slice(browser_script.tidy_text(found["content"])))
+    json_response(True, **result)
+
+
+@browser.command("fill")
+@click.argument("url")
+@click.argument("selector")
+@click.argument("value")
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_fill(url, selector, value, user_agent):
+    """Navigate to URL and fill a form field."""
+    config = _browser_setup(user_agent)
+    _validate_browser_url(url)
+
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    page.locator({repr(selector)}).fill({repr(value)}, timeout=TIMEOUT_MS)\n"
+        "    emit(\"FILLED\", \"true\")\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
+    if not success:
+        json_response(False, error=f"Fill failed: {output}")
+        return
+
+    result = {"url": url, "selector": selector, "value": value, "action": "fill"}
+    if "title" in found:
+        result["title"] = found["title"]
+    if "filled" in found:
+        result["filled"] = True
+    json_response(True, **result)
+
+
+@browser.command("screenshot")
+@click.argument("url")
+@click.option("--path", "save_path", default=None, help="Save path (default: agent workspace)")
+@click.option("--full-page", "full_page", is_flag=True, help="Capture full page (not just viewport)")
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_screenshot(url, save_path, full_page, user_agent):
+    """Navigate to URL and take a screenshot."""
+    config = _browser_setup(user_agent)
+    _validate_browser_url(url)
+    agent_name = get_agent_name()
+
+    if not save_path:
+        ss_dir = _get_screenshot_dir(agent_name)
+        save_path = f"__AUTO__{ss_dir}"
+
+    body = (
+        f"save_path = {repr(save_path)}\n"
+        "if save_path.startswith(\"__AUTO__\"):\n"
+        "    ss_dir = save_path[8:]\n"
+        "    os.makedirs(ss_dir, exist_ok=True)\n"
+        "    save_path = os.path.join(ss_dir, f\"screenshot_{int(time.time())}.png\")\n"
+        "else:\n"
+        "    os.makedirs(os.path.dirname(save_path), exist_ok=True)\n"
+        "\n"
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    page.screenshot(path=save_path, full_page={repr(bool(full_page))})\n"
+        "    emit(\"SCREENSHOT\", save_path)\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
+    if not success:
+        json_response(False, error=f"Screenshot failed: {output}")
+        return
+
+    result = {"url": url, "action": "screenshot", "full_page": full_page}
+    if "screenshot" in found:
+        result["path"] = found["screenshot"]
+    if "title" in found:
+        result["title"] = found["title"]
+    json_response(True, **result)
+
+
+@browser.command("extract")
+@click.argument("url")
+@click.option("--selector", default="body", help="CSS selector (default: body)")
+@click.option("--attribute", default=None, help="Element attribute to extract (default: text content)")
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_extract(url, selector, attribute, user_agent):
+    """Extract structured content from a page."""
+    config = _browser_setup(user_agent)
+    _validate_browser_url(url)
+
+    if attribute:
+        extract_expr = f"page.locator({repr(selector)}).get_attribute({repr(attribute)}, timeout=TIMEOUT_MS)"
+    else:
+        extract_expr = f"page.locator({repr(selector)}).all_text_contents()"
+
+    body = (
+        "with sync_playwright() as p:\n"
+        f"    browser, page = open_page(p, {repr(url)})\n"
+        f"    emit(\"EXTRACT\", {extract_expr})\n"
+        "    emit(\"TITLE\", page.title())\n"
+        "    browser.close()\n"
+    )
+    success, found, output = _browser_run(body, config)
+    if not success:
+        json_response(False, error=f"Extract failed: {output}")
+        return
+
+    result = {"url": url, "selector": selector, "action": "extract"}
+    if "extract" in found:
+        result["data"] = found["extract"]
+    if "title" in found:
+        result["title"] = found["title"]
+    if attribute:
+        result["attribute"] = attribute
+    json_response(True, **result)
+
+
+@browser.command("enable")
+@click.argument("agent_name")
+def browser_enable(agent_name):
+    """Enable browser automation for a sub-agent. COA-only.
+
+    Grants browser access and installs Chromium binaries for the agent's OS user.
+    Requires: system-wide [browser] enabled=true AND caller must be COA with browser_enabled=1.
+    """
+    # Guard: COA-exclusive. AGICTL_AGENT_USER is the wrapper-set OS caller,
+    # forwarded across sudo elevation (VERSA_AGENT_NAME is stripped by sudo).
+    # Empty => direct root/PU invocation, which is allowed.
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller not in ("coa",):
+        json_response(False, error="Permission denied: only COA can manage browser access for other agents")
+        sys.exit(1)
+
+    # Guard: system-wide enabled
+    config = _get_browser_config()
+    if not config["enabled"]:
+        json_response(False, error="Browser automation is disabled system-wide. Enable via agitop System Settings or setup.sh.")
+        sys.exit(1)
+
+    # Guard: COA must have browser access
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+
+    # Resolve COA name from setup.ini
+    import configparser
+    _ini = configparser.ConfigParser()
+    _ini.read("/etc/versa-agi/setup.ini")
+    coa_name = _ini.get("users", "coa", fallback="coa")
+
+    coa_row = conn.execute("SELECT browser_enabled FROM agents WHERE name=?", (coa_name,)).fetchone()
+    if not coa_row or not coa_row["browser_enabled"]:
+        json_response(False, error=f"COA ({coa_name}) does not have browser access. Request from Primary User via agitop.")
+        sys.exit(1)
+
+    # Guard: target cannot be protected agents
+    target = conn.execute("SELECT name, os_user, protected FROM agents WHERE name=?", (agent_name,)).fetchone()
+    if not target:
+        conn.close()
+        json_response(False, error=f"Agent '{agent_name}' not found")
+        sys.exit(1)
+    if target["protected"]:
+        conn.close()
+        json_response(False, error=f"Cannot manage browser access for protected agent '{agent_name}'. Use agitop dashboard.")
+        sys.exit(1)
+
+    # Enable in DB
+    conn.execute("UPDATE agents SET browser_enabled = 1 WHERE name=?", (agent_name,))
+    conn.commit()
+    conn.close()
+
+    # Install Chromium for agent user
+    os_user = target["os_user"]
+    try:
+        harness_venv = "/usr/local/lib/versa-agi/venv"
+        playwright_bin = os.path.join(harness_venv, "bin", "playwright")
+        if os.path.isfile(playwright_bin):
+            subprocess.run(
+                ["sudo", "-u", os_user, playwright_bin, "install", "chromium"],
+                capture_output=True, timeout=120
+            )
+    except Exception as e:
+        json_response(True, agent=agent_name, browser_enabled=True,
+                      warning=f"DB updated but Chromium install failed: {e}. Agent may need manual install.")
+        return
+
+    json_response(True, agent=agent_name, os_user=os_user, browser_enabled=True,
+                  message=f"Browser automation enabled for {agent_name}")
+
+
+@browser.command("disable")
+@click.argument("agent_name")
+def browser_disable(agent_name):
+    """Disable browser automation for a sub-agent. COA-only.
+
+    Revokes browser access, removes Chromium binaries and screenshots.
+    """
+    # Guard: COA-exclusive. AGICTL_AGENT_USER is the wrapper-set OS caller,
+    # forwarded across sudo elevation (VERSA_AGENT_NAME is stripped by sudo).
+    # Empty => direct root/PU invocation, which is allowed.
+    caller = os.environ.get("AGICTL_AGENT_USER", "")
+    if caller and caller not in ("coa",):
+        json_response(False, error="Permission denied: only COA can manage browser access for other agents")
+        sys.exit(1)
+
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+
+    target = conn.execute("SELECT name, os_user, protected, workspace FROM agents WHERE name=?", (agent_name,)).fetchone()
+    if not target:
+        conn.close()
+        json_response(False, error=f"Agent '{agent_name}' not found")
+        sys.exit(1)
+    if target["protected"]:
+        conn.close()
+        json_response(False, error=f"Cannot manage browser access for protected agent '{agent_name}'. Use agitop dashboard.")
+        sys.exit(1)
+
+    # Disable in DB
+    conn.execute("UPDATE agents SET browser_enabled = 0 WHERE name=?", (agent_name,))
+    conn.commit()
+    conn.close()
+
+    # Cleanup: remove browser binaries
+    os_user = target["os_user"]
+    cache_dir = f"/home/{os_user}/.cache/ms-playwright/"
+    if os.path.isdir(cache_dir):
+        import shutil
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    # Cleanup: remove screenshots
+    workspace = target["workspace"]
+    for ss_path in [
+        os.path.join(workspace, ".agent", "workspace", "screenshots"),
+        os.path.join(workspace, "workspace", "screenshots"),
+    ]:
+        if os.path.isdir(ss_path):
+            import shutil
+            shutil.rmtree(ss_path, ignore_errors=True)
+
+    json_response(True, agent=agent_name, os_user=os_user, browser_enabled=False,
+                  message=f"Browser automation disabled for {agent_name}. Binaries and screenshots removed.")
+
+
+# ═══════════════════════════════════════════════════════
+# SKILL MANAGEMENT
+# ═══════════════════════════════════════════════════════
+
+@cli.group()
+def skill():
+    """Manage skills — register, create, distribute, and track."""
+    pass
+
+
+def _normalize_created_by(name):
+    """Sanitize --created-by (origin attribution). Default coa."""
+    raw = (name or "coa").strip().lower()
+    if not re.match(r"^[a-z0-9][a-z0-9_-]*$", raw):
+        json_response(False, error="Invalid --created-by (use an agent name)")
+        sys.exit(1)
+    return raw
+
+
+def _prune_missing_nonshipped_skill_rows(conn, skills_dir):
+    """Delete non-shipped skill rows whose COA .md is gone. Returns pruned count."""
+    pruned = 0
+    if not skills_dir or not os.path.isdir(skills_dir):
+        return 0
+    rows = conn.execute(
+        "SELECT name FROM skills WHERE origin != 'shipped'"
+    ).fetchall()
+    for row in rows:
+        skill_name = row["name"] if isinstance(row, sqlite3.Row) else row[0]
+        if not os.path.isfile(os.path.join(skills_dir, f"{skill_name}.md")):
+            conn.execute(
+                "DELETE FROM skills WHERE name=? AND origin != 'shipped'",
+                (skill_name,),
+            )
+            pruned += 1
+    return pruned
+
+
+@skill.command("new")
+@click.argument("name")
+@click.option("--description", "-d", default=None, help="Skill description")
+@click.option("--scope", "-s", type=click.Choice(["all", "coa_only"]), default="all", help="Skill scope: 'all' (default) or 'coa_only'")
+@click.option("--created-by", "created_by", default="coa", help="Origin agent (who asked). File still lives on COA.")
+def skill_new(name, description, scope, created_by):
+    """Create a new skill template and asset directory (COA/PU only).
+
+    Writes the .md template and asset directory in COA's skills folder.
+    --created-by sets origin so skill list shows who asked. Sub-agents
+    request a skill via COA; they do not run this command.
+    """
+    _require_pu_or_coa()
+    name = name.lower().replace(" ", "_").replace("-", "_")
+    created_by = _normalize_created_by(created_by)
+
+    # Resolve COA skills directory
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    coa = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+    if not coa:
+        conn.close()
+        json_response(False, error="COA agent not found in registry")
+        sys.exit(1)
+    if created_by != "coa":
+        exists = conn.execute(
+            "SELECT name FROM agents WHERE name=?", (created_by,)
+        ).fetchone()
+        if not exists:
+            conn.close()
+            json_response(False, error=f"Unknown agent for --created-by: {created_by}")
+            sys.exit(1)
+    skills_dir = os.path.join(coa["workspace"], ".agent", "skills")
+    conn.close()
+
+    skill_file = os.path.join(skills_dir, f"{name}.md")
+    asset_dir = os.path.join(skills_dir, name)
+
+    # Check for existing
+    if os.path.exists(skill_file):
+        json_response(False, error=f"Skill file already exists: {skill_file}")
+        sys.exit(1)
+
+    # Create skill template
+    template = f"""# {name.replace('_', ' ').title()}
+
+> **Status:** Draft — complete this template, then mark ready with: `agictl skill status {name} ready`
+
+## Purpose
+
+{description or 'Describe the purpose and goal of this skill.'}
+
+## Target Audience
+
+- [ ] COA only
+- [ ] All agents (COA + sub-agents)
+
+## Behavioral Directives
+
+1. **Step 1** — Describe the first action the agent should take.
+2. **Step 2** — Describe the next action.
+3. **Step 3** — Continue as needed.
+
+## Related Commands
+
+List any `agictl` commands this skill uses:
+- `agictl ...`
+
+## Asset Directory
+
+Co-located scripts and templates are stored in `.agent/skills/{name}/`.
+Reference them using relative paths from the agent's workspace.
+
+## Notes
+
+- Add any edge cases, warnings, or design decisions here.
+"""
+
+    os.makedirs(skills_dir, exist_ok=True)
+    with open(skill_file, "w") as f:
+        f.write(template)
+
+    # Create asset directory with README
+    os.makedirs(asset_dir, exist_ok=True)
+    asset_readme = os.path.join(asset_dir, "README.md")
+    with open(asset_readme, "w") as f:
+        f.write(f"# {name.replace('_', ' ').title()} — Assets\n\n"
+                f"This directory contains scripts, templates, and reference data\n"
+                f"for the `{name}` skill.\n\n"
+                f"Files here are deployed to sub-agents alongside the skill `.md` file.\n")
+
+    # Set permissions. agictl elevates to watchdog, so these files are created
+    # watchdog-owned — chown to the agent only works when running as root
+    # (e.g. invoked from setup.sh). Either way, make everything group-writable
+    # (agi_agents) so COA can author the draft regardless of file owner.
+    agent_user = "coa"
+    if os.geteuid() == 0:
+        subprocess.run(["chown", f"{agent_user}:agi_agents", skill_file], check=False)
+        subprocess.run(["chown", "-R", f"{agent_user}:agi_agents", asset_dir], check=False)
+    subprocess.run(["chmod", "664", skill_file], check=False)
+    subprocess.run(["chmod", "2775", asset_dir], check=False)  # setgid: new files inherit agi_agents
+    subprocess.run(["chmod", "664", asset_readme], check=False)
+
+    # Register in DB — origin is who asked; file still lives on COA
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO skills (name, type, origin, has_assets, description, status, scope) "
+            "VALUES (?, 'agent_created', ?, 1, ?, 'draft', ?)",
+            (name, created_by, description or "", scope)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    json_response(
+        True,
+        skill=name,
+        skill_file=skill_file,
+        asset_dir=asset_dir,
+        status="draft",
+        scope=scope,
+        origin=created_by,
+    )
+
+
+@skill.command("status")
+@click.argument("name")
+@click.argument("new_status", type=click.Choice(["ready", "updated"]))
+def skill_status(name, new_status):
+    """Update a skill's status (draft→ready, synced→updated). COA/PU only.
+
+    When set to 'ready', Lifeline will distribute the skill to all
+    active sub-agents on its next tick and set status to 'synced'.
+    When set to 'updated', Lifeline will re-sync the skill.
+    """
+    _require_pu_or_coa()
+    name = name.lower()
+
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT status FROM skills WHERE name=?", (name,)).fetchone()
+
+    if not row:
+        conn.close()
+        json_response(False, error=f"Skill '{name}' not found in registry")
+        sys.exit(1)
+
+    current = row["status"]
+
+    # Validate transitions
+    valid_transitions = {
+        "draft": ["ready"],
+        "synced": ["updated"],
+    }
+    allowed = valid_transitions.get(current, [])
+    if new_status not in allowed:
+        conn.close()
+        json_response(False, error=f"Invalid transition: {current} → {new_status}. Allowed: {current} → {', '.join(allowed) if allowed else 'none'}")
+        sys.exit(1)
+
+    conn.execute(
+        "UPDATE skills SET status=?, updated_at=datetime('now') WHERE name=?",
+        (new_status, name)
+    )
+    conn.commit()
+    conn.close()
+
+    json_response(True, skill=name, previous_status=current, new_status=new_status)
+
+
+@skill.command("list")
+@click.option("--status", "-s", default=None, help="Filter by status (draft, ready, synced, updated)")
+@click.option("--json-output", is_flag=True, help="Output as JSON instead of table")
+def skill_list(status, json_output):
+    """List all registered skills with their status."""
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+
+    if status:
+        rows = conn.execute(
+            "SELECT name, type, origin, has_assets, status, scope, description, created_at, updated_at "
+            "FROM skills WHERE status=? ORDER BY name", (status,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT name, type, origin, has_assets, status, scope, description, created_at, updated_at "
+            "FROM skills ORDER BY type DESC, name"
+        ).fetchall()
+    conn.close()
+    # Versa Desktop is not released: its skill is listed only where the desktop is installed.
+    from agictl import desktop_cli
+    if not desktop_cli.versa_desktop_installed():
+        rows = [r for r in rows if r["name"] != "computer_use"]
+
+    if json_output:
+        skills_data = local_time.localize([dict(r) for r in rows])
+        json_response(True, skills=skills_data, count=len(skills_data))
+        return
+
+    if not rows:
+        click.echo("No skills registered.")
+        return
+
+    console = Console()
+    table = Table(title="Skills Registry", show_lines=False)
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("Type", style="dim")
+    table.add_column("Origin", style="dim")
+    table.add_column("Assets", justify="center")
+    table.add_column("Status", style="bold")
+    table.add_column("Scope", style="dim")
+    table.add_column("Description", max_width=50)
+
+    status_styles = {
+        "draft": "[dim]draft[/]",
+        "ready": "[yellow]ready[/]",
+        "synced": "[green]synced[/]",
+        "updated": "[yellow]updated[/]",
+    }
+
+    scope_styles = {
+        "all": "all",
+        "coa_only": "[magenta]coa_only[/]",
+    }
+
+    for r in rows:
+        s = status_styles.get(r["status"], r["status"])
+        sc = scope_styles.get(r["scope"], r["scope"])
+        assets = "✓" if r["has_assets"] else "—"
+        desc = (r["description"] or "")[:50]
+        table.add_row(r["name"], r["type"], r["origin"], assets, s, sc, desc)
+
+    console.print(table)
+    click.echo(f"\n{len(rows)} skill(s) registered")
+
+
+@skill.command("register")
+def skill_register():
+    """Bootstrap skills table from the filesystem.
+
+    Scans COA's .agent/skills/ directory and registers any skill files
+    not already in the database. Used for initial population or after
+    manual skill file additions.
+    """
+    # Resolve COA skills directory
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    coa = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+    if not coa:
+        conn.close()
+        json_response(False, error="COA agent not found in registry")
+        sys.exit(1)
+    skills_dir = os.path.join(coa["workspace"], ".agent", "skills")
+
+    if not os.path.isdir(skills_dir):
+        conn.close()
+        json_response(False, error=f"Skills directory not found: {skills_dir}")
+        sys.exit(1)
+
+    import glob
+    registered = 0
+    skipped = 0
+
+    for skill_file in sorted(glob.glob(os.path.join(skills_dir, "*.md"))):
+        basename = os.path.basename(skill_file)
+        if basename == "README.md":
+            continue
+        skill_name = basename.replace(".md", "")
+
+        # Check if already registered
+        exists = conn.execute("SELECT id FROM skills WHERE name=?", (skill_name,)).fetchone()
+        if exists:
+            skipped += 1
+            continue
+
+        # Read first line for description
+        description = ""
+        try:
+            with open(skill_file, "r") as f:
+                first_line = f.readline().strip()
+                if first_line.startswith("# "):
+                    description = first_line[2:]
+        except Exception:
+            pass
+
+        # Check for co-located asset directory
+        asset_dir = os.path.join(skills_dir, skill_name)
+        has_assets = os.path.isdir(asset_dir)
+
+        shipped_file = os.path.join("/home/watchdog/core-infra/skills", f"{skill_name}.md")
+        if skill_name.endswith("_override"):
+            skill_type, origin = "override", "coa"
+        elif os.path.isfile(shipped_file):
+            skill_type, origin = "system", "shipped"
+        else:
+            skill_type, origin = "agent_created", "coa"
+
+        conn.execute(
+            "INSERT INTO skills (name, type, origin, has_assets, description, status) "
+            "VALUES (?, ?, ?, ?, ?, 'draft')",
+            (skill_name, skill_type, origin, 1 if has_assets else 0, description),
+        )
+        registered += 1
+
+    pruned = _prune_missing_nonshipped_skill_rows(conn, skills_dir)
+    conn.commit()
+    conn.close()
+
+    json_response(
+        True,
+        registered=registered,
+        skipped=skipped,
+        pruned=pruned,
+        skills_dir=skills_dir,
+    )
+
+
+@skill.command("override")
+@click.argument("name")
+def skill_override(name):
+    """Create an override for a shipped skill (COA/PU only).
+
+    Creates {name}_override.md in COA's skills directory, pre-populated
+    with the shipped skill content as a starting template. Registers the
+    override in the skills DB with type='override' and status='draft'.
+    COA edits the override, then marks it 'ready' for distribution.
+
+    The harness resolves overrides at injection time: if {name}_override.md
+    exists on that agent's disk, it is injected instead of the shipped
+    {name}.md. Overrides are not in the watchdog source; they only apply
+    on a disk that has the override file. They do not rsync from shipped
+    skills.
+
+    Withdraw with: `agictl skill remove {name}_override`
+    """
+    _require_pu_or_coa()
+    name = name.lower().replace(" ", "_").replace("-", "_")
+    override_name = f"{name}_override"
+
+    # Resolve COA skills directory
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    coa = conn.execute("SELECT workspace FROM agents WHERE name='coa'").fetchone()
+    if not coa:
+        conn.close()
+        json_response(False, error="COA agent not found in registry")
+        sys.exit(1)
+    skills_dir = os.path.join(coa["workspace"], ".agent", "skills")
+
+    # Check the override doesn't already exist
+    override_file = os.path.join(skills_dir, f"{override_name}.md")
+    if os.path.exists(override_file):
+        conn.close()
+        json_response(False, error=f"Override already exists: {override_file}")
+        sys.exit(1)
+
+    # Load shipped skill content as template
+    shipped_source = "/home/watchdog/core-infra/skills"
+    shipped_file = os.path.join(shipped_source, f"{name}.md")
+    template_content = ""
+    if os.path.isfile(shipped_file):
+        try:
+            with open(shipped_file, "r") as f:
+                template_content = f.read()
+        except Exception:
+            pass
+
+    # Build override file
+    override_content = f"""# {name.replace('_', ' ').title()} — Override
+
+> **Override of:** `{name}.md` (shipped).
+> **Status:** Draft — edit this file, then mark ready: `agictl skill status {override_name} ready`
+>
+> This file takes precedence over the shipped `{name}.md` during harness injection.
+> To withdraw this override, delete this file and run: `agictl skill remove {override_name}`
+
+---
+
+{template_content}"""
+
+    os.makedirs(skills_dir, exist_ok=True)
+    with open(override_file, "w") as f:
+        f.write(override_content)
+
+    # Set permissions (COA-owned, group-writable for agi_agents)
+    subprocess.run(["chown", "coa:agi_agents", override_file], check=False)
+    subprocess.run(["chmod", "644", override_file], check=False)
+
+    # Register in DB
+    try:
+        # Read description from shipped skill
+        description = ""
+        if template_content:
+            for line in template_content.splitlines():
+                if line.startswith("# "):
+                    description = f"Override: {line[2:]}"
+                    break
+        conn.execute(
+            "INSERT OR IGNORE INTO skills (name, type, origin, has_assets, description, status, scope) "
+            "VALUES (?, 'override', 'coa', 0, ?, 'draft', 'all')",
+            (override_name, description)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    json_response(True, skill=override_name, override_of=name, file=override_file, status="draft")
+
+
+@skill.command("remove")
+@click.argument("name")
+def skill_remove(name):
+    """Remove a skill registry row (COA/PU only).
+
+    Deletes the DB row. If the COA file is agent_created or an override,
+    also deletes that file and its asset directory. Next deploy-skills
+    retracts fleet copies of retracted shares.
+    """
+    _require_pu_or_coa()
+    name = name.lower().replace(" ", "_").replace("-", "_")
+
+    conn = db_connect.connect_compat(agents_db, timeout=5)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT name, type, origin FROM skills WHERE name=?", (name,)).fetchone()
+    if not row:
+        conn.close()
+        json_response(False, error=f"Skill '{name}' not found in registry")
+        sys.exit(1)
+
+    skill_type = row["type"]
+    skills_dir = _coa_skills_dir(conn)
+    deleted_file = False
+    deleted_assets = False
+    if skill_type in ("agent_created", "override") and skills_dir:
+        skill_file = os.path.join(skills_dir, f"{name}.md")
+        asset_dir = os.path.join(skills_dir, name)
+        if os.path.isfile(skill_file):
+            os.remove(skill_file)
+            deleted_file = True
+        if os.path.isdir(asset_dir):
+            shutil.rmtree(asset_dir, ignore_errors=True)
+            deleted_assets = True
+
+    conn.execute("DELETE FROM skills WHERE name=?", (name,))
+    conn.commit()
+    conn.close()
+
+    json_response(
+        True,
+        skill=name,
+        type=skill_type,
+        deleted_file=deleted_file,
+        deleted_assets=deleted_assets,
+    )
+
+
+# ═══════════════════════════════════════════════════════
+# SYSTEM PACKAGE MANAGEMENT
+# ═══════════════════════════════════════════════════════
+
+def _require_pu_or_root():
+    """Block agent users from privileged pkg operations."""
+    agent_user = os.getenv("AGICTL_AGENT_USER", "")
+    if agent_user:
+        json_response(False, error=f"Permission denied. '{agent_user}' cannot perform this operation. "
+                                   "Request the package via 'agictl pkg request' instead.")
+        sys.exit(1)
+
+def _validate_pkg_name(name):
+    """Validate package name against shell injection. Returns sanitized name or exits."""
+    import re
+    name = name.strip().lower()
+    if not re.match(r"^[a-z0-9][a-z0-9.+\-]+$", name):
+        json_response(False, error="Invalid package name format. Only lowercase alphanumeric characters, "
+                                   "dashes, dots, and plus signs are allowed.")
+        sys.exit(1)
+    return name
+
+def _get_agents_db_path():
+    """Resolve the agents.db path."""
+    return os.getenv("AGICTL_AGENTS_DB", "/var/lib/versa-agi/agents.db")
+
+@cli.group()
+def pkg():
+    """Manage system packages — request, approve, install, and track."""
+    pass
+
+
+@pkg.command("list")
+def pkg_list():
+    """List all registered system packages."""
+    db_path = _get_agents_db_path()
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, status, reason, requested_by, requested_at, resolved_at, notified_at "
+            "FROM system_packages ORDER BY requested_at DESC"
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    if not rows:
+        console = Console()
+        console.print("[dim]No system packages registered.[/]")
+        return
+
+    table = Table(title="System Packages")
+    table.add_column("Package", style="cyan", no_wrap=True)
+    table.add_column("Status", style="bold")
+    table.add_column("Reason")
+    table.add_column("Requested By", style="dim")
+    table.add_column("Requested At", style="dim")
+    table.add_column("Resolved At", style="dim")
+
+    status_styles = {"approved": "green", "requested": "yellow", "denied": "red"}
+    for row in rows:
+        s = row["status"]
+        style = status_styles.get(s, "")
+        table.add_row(
+            row["name"],
+            f"[{style}]{s}[/{style}]" if style else s,
+            row["reason"] or "",
+            row["requested_by"] or "",
+            local_time.show(row["requested_at"]),
+            local_time.show(row["resolved_at"]),
+        )
+
+    console = Console()
+    console.print(table)
+
+
+@pkg.command("request")
+@click.argument("name")
+@click.option("--reason", "-r", default=None, help="Why the package is needed")
+def pkg_request(name, reason):
+    """Request a system package for PU approval."""
+    name = _validate_pkg_name(name)
+    requester = get_agent_name()
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        # Check if already exists
+        existing = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        if existing:
+            json_response(False, error=f"Package '{name}' already registered with status '{existing[0]}'. "
+                                       f"Use 'agictl pkg list' to check status.")
+            conn.close()
+            return
+
+        conn.execute(
+            "INSERT INTO system_packages (name, status, reason, requested_by) VALUES (?, 'requested', ?, ?)",
+            (name, reason, requester)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    _request_instance_sync()
+    json_response(True, package=name, status="requested", requested_by=requester)
+
+
+@pkg.command("add")
+@click.argument("name")
+@click.option("--reason", "-r", default=None, help="Why the package is needed")
+def pkg_add(name, reason):
+    """Directly add a package as approved (PU-only, bypasses approval queue)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        conn.execute(
+            "INSERT OR REPLACE INTO system_packages (name, status, reason, requested_by, requested_at, resolved_at) "
+            "VALUES (?, 'approved', ?, 'pu', datetime('now'), datetime('now'))",
+            (name, reason)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, status="approved", action="added")
+
+
+@pkg.command("approve")
+@click.argument("name")
+def pkg_approve(name):
+    """Approve a requested package (PU-only)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        if not row:
+            json_response(False, error=f"Package '{name}' not found in registry.")
+            conn.close()
+            return
+        if row[0] == "approved":
+            json_response(False, error=f"Package '{name}' is already approved.")
+            conn.close()
+            return
+
+        conn.execute(
+            "UPDATE system_packages SET status='approved', resolved_at=datetime('now'), notified_at=NULL WHERE name=?",
+            (name,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, status="approved", action="approved")
+
+
+@pkg.command("deny")
+@click.argument("name")
+def pkg_deny(name):
+    """Deny a requested package (PU-only)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        if not row:
+            json_response(False, error=f"Package '{name}' not found in registry.")
+            conn.close()
+            return
+
+        conn.execute(
+            "UPDATE system_packages SET status='denied', resolved_at=datetime('now') WHERE name=?",
+            (name,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, status="denied", action="denied")
+
+
+@pkg.command("remove")
+@click.argument("name")
+def pkg_remove(name):
+    """Remove a package from the registry (PU-only)."""
+    _require_pu_or_root()
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        row = conn.execute("SELECT name FROM system_packages WHERE name=?", (name,)).fetchone()
+        if not row:
+            json_response(False, error=f"Package '{name}' not found in registry.")
+            conn.close()
+            return
+
+        conn.execute("DELETE FROM system_packages WHERE name=?", (name,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    json_response(True, package=name, action="removed")
+
+
+@pkg.command("install")
+@click.argument("name")
+def pkg_install(name):
+    """Install an approved system package via apt-get (any user, approved-gate enforced)."""
+    name = _validate_pkg_name(name)
+    db_path = _get_agents_db_path()
+
+    # Verify package is approved before attempting install
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        conn.close()
+    except Exception as e:
+        json_response(False, error=f"Database error: {e}")
+        return
+
+    if not row:
+        json_response(False, error=f"Package '{name}' is not in the system registry. "
+                                   f"Request it first: agictl pkg request {name} --reason \"...\"")
+        return
+    if row[0] != "approved":
+        json_response(False, error=f"Package '{name}' has status '{row[0]}'. Only 'approved' packages can be installed. "
+                                   f"Ask the Primary User to approve it first.")
+        return
+
+    # Install as root. Watchdog reaches root for `pkg apply` only, and that
+    # command checks the approved list again itself.
+    try:
+        if os.geteuid() == 0:
+            cmd = ["/usr/bin/apt-get", "install", "-y", name]
+        else:
+            cmd = ["sudo", "-n", _agictl_root_bin(), "pkg", "apply", name]
+        env = {k: v for k, v in os.environ.items() if k != "AGICTL_AGENT_USER"}
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
+        if result.returncode == 0:
+            json_response(True, package=name, action="installed",
+                          output=result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
+        else:
+            json_response(False, error=f"apt-get install failed (exit {result.returncode})",
+                          stderr=result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
+    except subprocess.TimeoutExpired:
+        json_response(False, error=f"Package installation timed out after 300 seconds.")
+    except Exception as e:
+        json_response(False, error=f"Installation error: {e}")
+
+
+@pkg.command("apply", hidden=True)
+@click.argument("name")
+def pkg_apply(name):
+    """Root only: run apt-get install for a package the owner approved.
+
+    `pkg install` calls this through watchdog's sudo rule. It is the one
+    place apt-get runs for an agent, so it checks the name and the approved
+    list itself and takes the registry from the system's own path.
+    """
+    if os.geteuid() != 0:
+        click.echo("pkg apply runs as root. Use: agictl pkg install <name>", err=True)
+        sys.exit(2)
+    name = _validate_pkg_name(name)
+    db_path = (caller_identity._paths_env_value("VERSA_AGENTS_DB")
+               or "/var/lib/versa-agi/agents.db")
+    try:
+        conn = db_connect.connect_compat(db_path, timeout=5)
+        row = conn.execute("SELECT status FROM system_packages WHERE name=?", (name,)).fetchone()
+        conn.close()
+    except Exception as e:
+        click.echo(f"Database error: {e}", err=True)
+        sys.exit(2)
+    if not row or row[0] != "approved":
+        click.echo(f"Package '{name}' is not approved.", err=True)
+        sys.exit(2)
+    result = subprocess.run(
+        ["/usr/bin/apt-get", "install", "-y", "--", name],
+        capture_output=True, text=True, timeout=280,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    sys.exit(result.returncode)
+
+
+
+
+def _ide_waiting(name: str) -> dict:
+    """What is waiting for COA right now: her unread mail and the tasks Lifeline would wake her for."""
+    from agent_reads import ids_for_spawned_agent, received_unread
+    config = get_config()
+    sub = str((config.get("versavoice") or {}).get("sub_account_id") or "").strip()
+    ids = ids_for_spawned_agent(name, get_agent_name(), sub)
+    return {
+        "messages": received_unread(messages_db, ids),
+        "tasks": tasks_reader.pending_for(name) if tasks_reader else [],
+        "next_task": tasks_reader.next_due_for(name) if tasks_reader else None,
+        "pu_uid": str((config.get("primary_user") or {}).get("uid") or "").strip(),
+    }
+
+
+try:
+    from agictl import ide_cli
+    ide_cli.register(agent, json_response=json_response, waiting=lambda name: _ide_waiting(name))
+except ImportError:
+    pass
+
+try:
+    from agictl import utility_cli
+    utility_cli.register(
+        cli,
+        json_response=json_response,
+        tasks_reader=tasks_reader,
+        require_pu_or_coa=_require_pu_or_coa,
+        load_catalog=_load_catalog,
+        tasks_db=tasks_db,
+    )
+    utility_cli.register_modality_map_commands(
+        model,
+        json_response=json_response,
+        require_pu_or_coa=_require_pu_or_coa,
+        load_catalog=_load_catalog,
+    )
+except ImportError:
+    pass  # utility commands unavailable on server-only topology
+
+try:
+    from agictl import organization_cli
+    organization_cli.register(
+        cli,
+        json_response=json_response,
+    )
+except ImportError:
+    pass  # organization commands unavailable on server-only topology
+
+try:
+    from agictl import desktop_cli
+    desktop_cli.register(cli, json_response=json_response, get_config=get_config)
+except ImportError:
+    pass
+
+try:
+    from agictl import live_call_cli
+    live_call_cli.register(
+        message,
+        model,
+        json_response=json_response,
+        get_config=get_config,
+        messages_db_path=lambda: messages_db,
+        models_ini_write_targets=_models_ini_write_targets,
+        upsert_ini_entry=_upsert_models_ini_entry,
+        remove_ini_entry=_remove_ini_entry,
+        load_catalog=_load_catalog,
+        write_setting=lambda section, key, value: _write_setup_ini_value(section, key, value),
+    )
+except ImportError:
+    pass  # live call commands unavailable on server-only topology
+
+
+if __name__ == "__main__":
+    cli(prog_name="agictl")

@@ -1,0 +1,186 @@
+---
+description: Awareness-First memory procedure (MANDATORY — always injected)
+---
+
+# Memory Management Skill
+
+> **MANDATORY**: This skill MUST be executed before ending every cycle. It is always injected regardless of triage classification.
+   └─ EACH TIME YOU START A WORK CYCLE, YOUR MEMORY IS FROM THE PREVIOUS COMPLETED CYCLE (ACCUMULATIVE).
+   └─ Keep your memory up to date as a unit that reflects the concrete past, present situation and potential future.
+
+## Purpose
+
+Awareness drives action. Before writing factual memory, you must first **reflect on what you observed**, **conclude what it means**, and **decide what to do about it**. This ensures every cycle produces strategic insight, not just data.
+
+Memory is your only persistence between cycles — **if you don't write it, you won't remember it.**
+
+## Procedure (5 Steps)
+
+### Step 1: Reflect — What did I observe?
+
+Review everything that happened this cycle across four dimensions:
+
+| Dimension | What to observe |
+|-----------|----------------|
+| **System** | Tool behaviors, infrastructure changes, performance patterns, new constraints |
+| **User** | Communication style, emotional tone (use VersaVoice emotion tags as primary signal), preferences revealed, instructions given |
+| **Intention** | What was the PU or task actually trying to achieve? (not just what was said) |
+| **Reason** | Why does this matter? What's the strategic significance? |
+
+Do NOT write anything yet — just observe and form understanding.
+
+### Step 2: Conclude — What do I now understand?
+
+From your reflections, formulate **conclusions** — statements of understanding about the world. Each conclusion targets a subject (connection, project, game, system, or self).
+
+```bash
+# Example: conclusion about a connection
+agictl awareness add conclusion \
+  --subject connection --subject-id "<contact_uid>" \
+  --content "Prefers concise updates over detailed reports. Responds faster to voice messages." \
+  --context "Observed across 3 recent message exchanges — short replies to long texts, immediate reply to voice"
+
+# Example: conclusion about a project
+agictl awareness add conclusion \
+  --subject project --subject-id "<project_id>" \
+  --content "The design phase is blocked by missing stakeholder input, not technical constraints." \
+  --context "Task #42 blocked for 3 cycles without technical blockers"
+
+# Example: conclusion about a game
+agictl awareness add conclusion \
+  --subject game --subject-id "<game_id>" \
+  --content "PU is most engaged when discussing career strategy; energy drops on administrative tasks." \
+  --context "Pattern across last 5 interactions"
+
+# Example: self-awareness
+agictl awareness add conclusion \
+  --subject self \
+  --content "I tend to over-explain in messages when a short confirmation would suffice." \
+  --context "PU feedback: 'just say done'"
+```
+
+> **Revise, don't duplicate.** Before writing a new conclusion, you MUST check **your** board (table defaults to you; do not batch-supersede a fleet dump):
+> ```bash
+> agictl awareness table --status active
+> ```
+> Fleet view (COA orchestration only): `agictl awareness table --status active --all`
+> If a similar entry exists, do NOT duplicate it. If it needs updating, revise it:
+> ```bash
+> agictl awareness revise <entry_id> --content "Updated understanding..."
+> ```
+> If a conclusion simply stopped being true (no replacement), retire it:
+> ```bash
+> agictl awareness supersede <entry_id>
+> ```
+> Never use `complete` on a conclusion — `completed` is an action status only (the CLI rejects it).
+>
+> **Pin standing rules.** Your spawn shows only your newest five conclusions, so an older rule can slide out of view. Pin a conclusion that must stay visible every cycle — a constraint or commitment ("no nudges to Robin until she writes first"), never a status note:
+> ```bash
+> agictl awareness pin <entry_id>      # max 10; shown as PINNED CONCLUSIONS at every spawn
+> agictl awareness unpin <entry_id>
+> ```
+> `revise` keeps the pin on the new entry. `supersede` ends it. Re-check pins when the wake block shows a long gap or an outage.
+> 
+> **Idle Cycle Rule**: If this cycle was completely idle (e.g., you just checked wait statuses, nothing changed, and no new messages were received), DO NOT log a new conclusion. It is correct and expected to exit an idle cycle without adding redundant awareness entries.
+
+### Step 3: Act — What should I do about it?
+
+From your conclusions, formulate **actions** — concrete next steps linked to a parent conclusion.
+
+```bash
+# Action linked to the "concise updates" conclusion
+agictl awareness add action \
+  --subject connection --subject-id "<contact_uid>" \
+  --content "Switch to bullet-point format for status updates. Use voice for anything nuanced." \
+  --action-conclusion-id <conclusion_id>
+
+# Action linked to the "blocked by stakeholder" conclusion
+agictl awareness add action \
+  --subject project --subject-id "<project_id>" \
+  --content "Create a task to ping stakeholder for design input. Set wake_after for 2 days." \
+  --action-conclusion-id <conclusion_id>
+```
+
+> **Complete actions when done** (actions only — conclusions are revised or superseded):
+> ```bash
+> agictl awareness complete <action_id>
+> ```
+> An action that became moot (parent conclusion no longer holds) is retired with `awareness supersede <action_id>` instead.
+
+### Step 4: Profile — Write factual memory
+
+Now write back the factual data that changed this cycle using existing memory commands.
+
+**Connection Memory** (for each contact you communicated with):
+
+```bash
+agictl memory connection set <contact_uid> \
+  --preferences '{"voice_vs_text": "voice", "language": "en", "comm_style": "casual"}' \
+  --personal-notes "Enjoys hiking, has two kids, recently started a new job" \
+  --comm-style "Direct communicator, appreciates brevity" \
+  --rapport building \
+  --emotional-notes "Excited about the new project, tone was enthusiastic"
+```
+
+**Rapport levels:** `new` → `building` → `established` → `strong`
+
+**Project Memory** (for each project you worked on):
+
+```bash
+agictl memory project set <project_id> \
+  --phase "Phase 2 — audition preparation" \
+  --decisions "Chose to prioritize commercial auditions first because they have shorter turnaround" \
+  --blockers "Waiting for headshot photographer availability" \
+  --next-steps "Schedule headshots, prepare 2 commercial monologues"
+```
+
+Each option of `memory project set` replaces that whole field. Write the full current text, not an addition, and keep a field under 600 characters: that is how much of it you are shown at spawn.
+
+**System Memory** (new discoveries, constraints, or instructions):
+
+```bash
+agictl memory system set "reporting_schedule" "Daily updates at 6:30 PM to Alex"
+agictl memory system set "constraint_attachment_limit" "Max 10 attachments per message send"
+agictl memory system set "user_instruction_no_emoji" "Primary User prefers no emoji in messages"
+```
+
+Key prefixes: `constraint_*`, `discovery_*`, `user_instruction_*`, `schedule_*`
+
+**A key belongs to one agent.** System-memory keys are shared by every agent on the machine, so a key another agent already uses is refused. When that happens, put your own name at the end: `reporting_schedule.<your_name>`. The examples above are examples: do not copy their keys.
+
+Your own system memory appears at every spawn as **OPERATIONAL MEMORY**, with each entry's last-updated date. Keys starting `constraint`, `user_instruction`, `rule` or `instruction` (then `_` or `.`) are listed first, then the rest, newest first. Values over 600 characters and entries past the block size are left out with a pointer — keep values short, and mark resolved entries as such or delete them.
+
+> Only write what changed — don't rewrite unchanged memory.
+
+### Step 5: Verify
+
+Confirm your awareness and memory were persisted:
+
+```bash
+# Check your awareness entries from this cycle (own board)
+agictl awareness table --status active
+
+# Check factual memory
+agictl memory connection list
+agictl memory system list
+```
+
+## COA fleet maintenance
+
+COA (and the PU) may maintain another agent's factual memory the same way as awareness `--agent`:
+
+```bash
+agictl memory connection list --agent <name>
+agictl memory project list --agent <name>
+agictl memory system list --agent <name>
+```
+
+Sub-agents cannot pass `--agent` for someone else. Without `--agent`, system list stays global.
+
+## Important Notes
+
+- **Awareness before Profile** — Steps 1-3 MUST complete before Step 4. The agent must synthesize understanding before updating factual records.
+- **Be concise** — memory is injected into your context on wake; verbose memory wastes tokens.
+- **Emotion tags take priority** — if VersaVoice emotion tags are present in messages, use them as the primary signal for relational memory.
+- **If you didn't communicate with anyone** — skip connection memory in Step 4 but still do Steps 1-3 for any other observations.
+- **Enforcement gate** — `cycle end` validates that awareness was recorded this session. A warning is logged if no awareness entries were created. **IDE session:** there is no cycle — do not run `cycle end`.

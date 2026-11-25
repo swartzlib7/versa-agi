@@ -1,0 +1,5278 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────
+# Versa AGi — Setup & Update Script
+#
+# Two modes:
+#   Full Install (default):
+#     Provisions the entire Versa AGi environment from scratch.
+#
+#   Update (--update):
+#     Safe live-update that deploys changes from source
+#     to the running system without requiring a full reinstall.
+#     Flow: Git Pull → Pause CRON → Drain → Backup → Deploy →
+#           Permissions → Migrate → Resume CRON → Verify
+#
+# Usage:
+#   sudo ./setup.sh                  # Full install
+#   sudo ./setup.sh --update         # Update existing install
+#   sudo ./setup.sh --update --dry-run
+#   sudo ./setup.sh --update --branch hotfix/v3.1
+#
+# OS:     Linux (Ubuntu, Debian, Fedora, Arch)
+#
+# ⛔ MANIFEST: Any file path changes MUST be reflected in
+#    design/Versa AGi - System Design.md §IX
+# ─────────────────────────────────────────────────────
+
+set -euo pipefail
+
+# ─── Failure diagnostics ─────────────────────────────
+# `set -e` aborts on the first uncaught non-zero command but prints NOTHING by
+# default, so a failed step looks like the script silently "died". This ERR trap
+# (with `set -E` so it is inherited by functions/subshells) reports the exact
+# line and command that failed, turning a silent abort into an actionable error.
+# It only fires for commands that actually trip `set -e` (not those guarded by
+# if/while/||/&&), so it never changes control flow — it just adds a message.
+set -E
+trap '_setup_rc=$?; printf "\n\033[0;31m  ✗ Setup aborted (exit %s)\033[0m at line %s: %s\n" "${_setup_rc}" "${LINENO}" "${BASH_COMMAND}" >&2' ERR
+# Ctrl+C mid-run leaves a half-applied tree: paths.env model lists are blanked
+# early (Model Registry Sync) and refilled only by `agictl model sync` near the
+# end, so an interrupted run shows an empty COA model picker and Lifeline flags
+# the assigned key as unknown. Say so, and say how to finish.
+trap 'printf "\n\033[1;33m  ⚠ Setup interrupted at line %s — the install is incomplete.\033[0m\n  Re-run the same command (setup.sh or setup.sh --update) to completion.\n  Every step is idempotent; the model catalog sync that fills the COA picker runs near the end.\n" "${LINENO}" >&2; exit 130' INT TERM
+
+# ─── UI Library ──────────────────────────────────────
+SCRIPT_DIR_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UI_LIB="${SCRIPT_DIR_EARLY}/core-infra/ui_lib.sh"
+if [ -f "${UI_LIB}" ]; then
+  # shellcheck source=core-infra/ui_lib.sh
+  source "${UI_LIB}"
+else
+  # Fallback: minimal inline functions if ui_lib.sh not found
+  info()  { echo -e "\033[38;2;0;255;204m[INFO]\033[0m $*"; }
+  ok()    { echo -e "\033[0;32m[OK]\033[0m $*"; }
+  warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
+  error() { echo -e "\033[0;31m[ERROR]\033[0m $*"; exit 1; }
+  confirm() {
+    local prompt="${1:-Continue?}" default="${2:-n}" reply="" hint="[y/N]"
+    [ "${default}" = "y" ] && hint="[Y/n]"
+    echo ""
+    read -r -p "  ${prompt} ${hint} " reply || true
+    echo
+    REPLY="${reply}"
+    if [ "${default}" = "y" ]; then
+      [[ ! ${REPLY} =~ ^[Nn]([Oo])?$ ]]
+    else
+      [[ ${REPLY} =~ ^[Yy]([Ee][Ss])?$ ]]
+    fi
+  }
+fi
+
+# Product semver — do not name this VERSION. detect_os / install_acceptance
+# source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
+PRODUCT_VERSION="3.10.5"
+_VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
+if [ -f "${_VERSION_FILE}" ]; then
+  PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
+fi
+INSTALL_ACCEPTANCE_LIB="${SCRIPT_DIR_EARLY}/core-infra/install_acceptance.sh"
+REGISTRATION_CONF_SRC="${SCRIPT_DIR_EARLY}/core-infra/registration.conf"
+if [ -f "${INSTALL_ACCEPTANCE_LIB}" ]; then
+  # shellcheck source=core-infra/install_acceptance.sh
+  source "${INSTALL_ACCEPTANCE_LIB}"
+fi
+export INSTALL_ACCEPTANCE_VERSION="${PRODUCT_VERSION}"
+
+# ─── Root Check ─────────────────────────────────────
+if [ "$(id -u)" -ne 0 ]; then
+  error "This script must be run as root (sudo ./setup.sh)"
+fi
+
+# sudo -E keeps the SSH user's HOME, so pip refuses that user's cache and warns.
+# A root-owned cache is used instead. The packages still install.
+if [ -z "${PIP_CACHE_DIR:-}" ]; then
+  export PIP_CACHE_DIR=/var/tmp/versa-agi-pip-cache
+fi
+mkdir -p "${PIP_CACHE_DIR}"
+
+# Reattach stdin to the controlling TTY when it is not already a terminal.
+# Second installs under OrbStack / curl|bash often leave stdin as a non-keyboard
+# fd; acceptance `read` then blocks with no prompt and Ctrl+C may not work.
+if [ ! -t 0 ] && [ -r /dev/tty ]; then
+  exec </dev/tty
+fi
+
+# ─── Parse Arguments ────────────────────────────────
+UPDATE_MODE=false
+DRY_RUN=false
+SKIP_VERIFY=false
+GRACE_PERIOD=60
+REPO_BRANCH=""
+PROMOTE_NORMAL=false
+HOME_COA_KEY=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --update)       UPDATE_MODE=true; shift ;;
+    --promote-normal) PROMOTE_NORMAL=true; UPDATE_MODE=true; shift ;;
+    --home-coa-key) HOME_COA_KEY=true; shift ;;
+    --dry-run)      DRY_RUN=true; shift ;;
+    --skip-verify)  SKIP_VERIFY=true; shift ;;
+    --grace)        GRACE_PERIOD="$2"; shift 2 ;;
+    --branch)       REPO_BRANCH="$2"; shift 2 ;;
+    -h|--help)
+      echo "Usage: sudo ./setup.sh [--update] [--promote-normal] [--home-coa-key] [--dry-run] [--skip-verify] [--grace <seconds>] [--branch <name>]"
+      echo ""
+      echo "  (no flags)         Full install — provisions entire environment"
+      echo "  --update           Update mode — deploy changes to existing system"
+      echo "  --promote-normal   Sentinel → normal (implies --update). No downgrade."
+      echo "  --home-coa-key     With --promote-normal, rebind as agiAgentKey=coa after collision check"
+      echo "  --dry-run          Preview changes without applying"
+      echo "  --skip-verify      Skip post-deploy health check"
+      echo "  --grace N          Agent drain grace period in seconds (default: 60)"
+      echo "  --branch NAME      Deploy from a specific git branch"
+      exit 0
+      ;;
+    *)
+      error "Unknown argument: $1. Use --help for usage."
+      ;;
+  esac
+done
+
+if [ "${HOME_COA_KEY}" = true ] && [ "${PROMOTE_NORMAL}" != true ]; then
+  error "--home-coa-key is only valid with --promote-normal"
+fi
+
+dry() { echo -e "${BOLD:-\033[1m}[DRY-RUN]${NC:-\033[0m} $*"; }
+
+# ─── Platform Check ─────────────────────────────────
+detect_os 2>/dev/null || true
+require_linux 2>/dev/null || true
+
+# ─── Configuration ──────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_CORE_INFRA="${SCRIPT_DIR}/core-infra"
+SRC_COA_ENV="${SCRIPT_DIR}/coa-env"
+
+# Repo-tree configs (next to setup.sh) are Primary User–owned. setup runs as root
+# via sudo — restore SUDO_USER ownership after scaffold/sync writes.
+# Deployed /etc/versa-agi/* stays watchdog:agi_agents (System Design filesystem).
+chown_repo_config() {
+  local path="$1"
+  local mode="${2:-}"
+  [ -e "${path}" ] || return 0
+  if [ -n "${mode}" ]; then
+    chmod "${mode}" "${path}" 2>/dev/null || true
+  fi
+  if [ -n "${SUDO_USER:-}" ]; then
+    chown "${SUDO_USER}:${SUDO_USER}" "${path}" 2>/dev/null || true
+  fi
+}
+
+# ─── INI File Parser ────────────────────────────────
+# Source setup.ini (next to setup.sh) holds install-time values (may include keys).
+# setup.ini.stock is the secret-free authority for structure + stock model lists
+# (fresh scaffold + reconcile-config on every run including --update).
+# Deployed /etc/versa-agi/setup.ini is the runtime sync target / fallback.
+INI_FILE_FALLBACK=""
+if [ -f "${SCRIPT_DIR}/setup.ini" ]; then
+  INI_FILE="${SCRIPT_DIR}/setup.ini"
+  # Deployed copy as fallback for runtime-only values
+  if [ -f "/etc/versa-agi/setup.ini" ]; then
+    INI_FILE_FALLBACK="/etc/versa-agi/setup.ini"
+  fi
+elif [ -f "/etc/versa-agi/setup.ini" ]; then
+  # Fresh clone on an installed machine (install.sh re-run, Versa AGI installer).
+  # Seed from the deployed file, never stock: stock values (topology=local,
+  # blank api_token, blank model) would win over the real ones in ini_get.
+  # Step 13 copies /etc back over this file at the end of every run anyway;
+  # reconcile still adds keys new in stock.
+  INI_FILE="${SCRIPT_DIR}/setup.ini"
+  INI_FILE_FALLBACK="/etc/versa-agi/setup.ini"
+  cp -f "/etc/versa-agi/setup.ini" "${INI_FILE}"
+  chown_repo_config "${INI_FILE}" 600
+  info "setup.ini seeded from deployed /etc/versa-agi/setup.ini"
+else
+  # No source setup.ini — scaffold from the stock template (same file --update
+  # reconcile uses). Keeps fresh install and update model lists in lockstep.
+  INI_FILE="${SCRIPT_DIR}/setup.ini"
+  STOCK_INI="${SCRIPT_DIR}/setup.ini.stock"
+  if [ ! -f "${STOCK_INI}" ]; then
+    error "setup.ini.stock missing next to setup.sh — cannot scaffold setup.ini"
+  fi
+  warn "setup.ini not found — scaffolding from setup.ini.stock at ${INI_FILE}"
+  cp -f "${STOCK_INI}" "${INI_FILE}"
+  chown_repo_config "${INI_FILE}" 600
+  echo ""
+  info "Generated blank setup.ini at ${INI_FILE}. Dropping into interactive configuration mode."
+fi
+
+# models.ini is required for Providers/Models tabs (migrate writes [catalog]/
+# [providers] into it). Same stock pattern as setup.ini: omit models.ini from a
+# clean installer tree and we scaffold from models.ini.stock.
+if [ ! -f "${SCRIPT_DIR}/models.ini" ]; then
+  STOCK_MODELS="${SCRIPT_DIR}/models.ini.stock"
+  if [ ! -f "${STOCK_MODELS}" ]; then
+    error "models.ini.stock missing next to setup.sh — cannot scaffold models.ini"
+  fi
+  warn "models.ini not found — scaffolding from models.ini.stock"
+  cp -f "${STOCK_MODELS}" "${SCRIPT_DIR}/models.ini"
+  chown_repo_config "${SCRIPT_DIR}/models.ini" 644
+  info "Generated models.ini from stock (catalog metadata for migrate/sync)"
+fi
+
+# TD-SETUP-INI-001: split leftover [gemini] before any reader. Idempotent.
+# Reconcile repeats this on /etc; this pass makes the source/fallback reads
+# see [system] / [third_party] / [gcp] in the same run.
+_split_gemini_section() {
+  local f="$1" err=""
+  [ -f "$f" ] || return 0
+  grep -q '^\[gemini\]' "$f" 2>/dev/null || return 0
+  err="$(PYTHONPATH="${SCRIPT_DIR}/core-infra${PYTHONPATH:+:${PYTHONPATH}}" python3 -c \
+    "from catalog_compat import migrate_gemini_section_split; migrate_gemini_section_split(r'''${f}''')" \
+    2>&1)" || true
+  # Must not continue on failure: the reads below fall back to defaults, which
+  # would stamp paths.env with mode=cloud and an empty VERSA_DEFAULT_MODEL.
+  if grep -q '^\[gemini\]' "$f" 2>/dev/null; then
+    [ -n "${err}" ] && echo "${err}" >&2
+    error "Could not migrate [gemini] → [system] in ${f}. Requires python3 and ${SCRIPT_DIR}/core-infra/catalog_compat.py."
+  fi
+  ok "Migrated ${f}: [gemini] → [system] / [third_party] / [gcp]"
+}
+_split_gemini_section "${INI_FILE}"
+[ -n "${INI_FILE_FALLBACK}" ] && _split_gemini_section "${INI_FILE_FALLBACK}"
+
+ini_get() {
+  local section=$1
+  local key=$2
+  local default=${3:-}
+
+  _ini_read() {
+    local file=$1
+    awk -F '=' -v section="${section}" -v key="${key}" '
+      /^\[/ { current = substr($0, 2, length($0)-2) }
+      current == section && $1 ~ "^"key"$" {
+        val = substr($0, index($0,"=")+1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+        print val
+        exit
+      }
+    ' "${file}" 2>/dev/null
+  }
+
+  local value=""
+  if [ -f "${INI_FILE}" ]; then
+    value=$(_ini_read "${INI_FILE}")
+  fi
+  # Fallback to source setup.ini for missing values
+  if [ -z "${value}" ] && [ -n "${INI_FILE_FALLBACK}" ] && [ -f "${INI_FILE_FALLBACK}" ]; then
+    value=$(_ini_read "${INI_FILE_FALLBACK}")
+  fi
+  echo "${value:-${default}}"
+}
+
+# Same gate as agictl _gemini_credentials_present / migrate google enablement.
+# Live cloud membership is generated by `agictl model sync` from the catalog.
+# VERSA_CLOUD_MODELS unless credentials exist (parity with third_party_*_enabled).
+gemini_credentials_present() {
+  if [ -f "/etc/versa-agi/coa.env" ] \
+     && grep -qE '^[[:space:]]*GEMINI_API_KEY=[^[:space:]#]+' "/etc/versa-agi/coa.env" 2>/dev/null; then
+    return 0
+  fi
+  if [ -f "/etc/versa-agi/vault/gcp-credentials.json" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Enable a provider in models.ini [providers_site] (site activation set).
+#
+# Idempotent and self-healing: every `enabled` line in the section (spaced
+# `enabled = a,b` from the Python writer or bare `enabled=a` from older runs,
+# including duplicates left by interrupted setups) is collapsed into ONE line
+# whose CSV is the union of all values plus ${slug}. Other lines are kept.
+enable_site_provider() {
+  local slug="$1"
+  local models_ini="${2:-/etc/versa-agi/models.ini}"
+  local csv tmp
+  [ -n "${slug}" ] && [ -f "${models_ini}" ] || return 0
+  if ! grep -q '^\[providers_site\]' "${models_ini}" 2>/dev/null; then
+    printf '\n[providers_site]\nenabled = %s\n' "${slug}" >> "${models_ini}"
+    return 0
+  fi
+  # Pass 1: union of every enabled= value in the section, order preserved, + slug.
+  csv="$(awk -v slug="${slug}" '
+    /^\[providers_site\]/ { s=1; next }
+    /^\[/ { s=0 }
+    s && /^[[:space:]]*enabled[[:space:]]*=/ {
+      v=$0; sub(/^[^=]*=/, "", v)
+      m=split(v, parts, ",")
+      for (i=1; i<=m; i++) { p=parts[i]; gsub(/[[:space:]]/, "", p); if (p!="" && !(p in seen)) { seen[p]=1; out=out (n++ ? "," : "") p } }
+    }
+    END { if (!(slug in seen)) out=out (n ? "," : "") slug; print out }
+  ' "${models_ini}")"
+  [ -n "${csv}" ] || return 0
+  local has
+  has="$(awk '/^\[providers_site\]/{s=1;next} /^\[/{s=0} s && /^[[:space:]]*enabled[[:space:]]*=/{n++} END{print n+0}' "${models_ini}")"
+  # Pass 2: rewrite — first enabled line becomes the union, later ones are dropped;
+  # if the section had none, insert right after the header.
+  tmp="$(mktemp)" || return 0
+  if awk -v csv="${csv}" -v has="${has}" '
+    /^\[providers_site\]/ { print; s=1; if (!has) print "enabled = " csv; next }
+    /^\[/ { s=0; print; next }
+    s && /^[[:space:]]*enabled[[:space:]]*=/ { if (!done) { print "enabled = " csv; done=1 } next }
+    { print }
+  ' "${models_ini}" > "${tmp}"; then
+    cat "${tmp}" > "${models_ini}"   # keep owner/mode of the live file
+  fi
+  rm -f "${tmp}"
+}
+
+# VersaVoice API — used for token validation + sponsor identity.
+VV_API_BASE="${VV_API_BASE:-https://us-central1-versavoice-s777.cloudfunctions.net/api/v1}"
+
+# Validate a sponsor API token against GET /account (fail closed).
+# Returns: 0 valid · 1 rejected (401/403, other 4xx, 200 without uid)
+#          2 unreachable (network, 408, 429, 5xx) — says nothing about the token
+validate_vv_api_token() {
+  local token="$1"
+  local tmp http_code body uid
+  if [ -z "${token}" ]; then
+    return 1
+  fi
+  tmp="$(mktemp)"
+  http_code="$(curl -sS -o "${tmp}" -w "%{http_code}" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Accept: application/json" \
+    --connect-timeout 10 --max-time 20 \
+    "${VV_API_BASE}/account" 2>/dev/null || echo "000")"
+  body="$(cat "${tmp}" 2>/dev/null || true)"
+  rm -f "${tmp}"
+  case "${http_code}" in
+    200)
+      uid="$(echo "${body}" | jq -r '.uid // empty' 2>/dev/null || true)"
+      if [ -n "${uid}" ]; then
+        return 0
+      fi
+      return 1
+      ;;
+    000|408|429|5??)
+      return 2
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# API unreachable: ask Retry or Quit (Enter = Retry). Returns 0 to retry.
+_vv_unreachable_retry_or_quit() {
+  local choice
+  echo -e "${RED}Cannot reach VersaVoice API (${VV_API_BASE}/account) — the service is down or rate-limited, not a bad token.${NC}"
+  echo -e -n "  [R]etry or [Q]uit? [R]: "
+  read -r choice
+  case "${choice}" in
+    q|Q) echo "Installation cancelled."; exit 1 ;;
+  esac
+  return 0
+}
+
+# Same instruction block shown on first ask and every retry.
+_vv_token_instruction_block() {
+  echo ""
+  echo -e "All agents share the Primary User's (sponsor's) $(_install_acceptance_brand) API token."
+  echo -e "Get yours from: $(_install_acceptance_brand) App → Settings → Personal → Versa AGi & API → turn on Enable → Generate Token"
+  echo -e "The token is shown only once. Copy it before you leave the screen."
+  echo -e "The token is verified live against the VersaVoice API as soon as you enter it."
+  echo -e "  ${DGRAY}Press Ctrl+C to cancel and quit the installation.${RESET}"
+  echo ""
+}
+
+# Prompt until a live-validated VV sponsor token is provided.
+# Validates immediately after each entry; a rejected token re-prints the
+# instruction block and asks again; an unreachable API asks Retry / Quit for
+# the same value. Optional $1 = prefill (e.g. from setup.ini) — checked first
+# without a prompt. $2 = keep_on_unreachable (--update): an unreachable API
+# keeps the prefill instead of blocking the update.
+prompt_valid_vv_api_token() {
+  local candidate="${1:-}"
+  local unreachable_mode="${2:-}"
+  local rc
+  VV_TOKEN=""
+
+  while [ -n "${candidate}" ]; do
+    info "Validating VersaVoice API token from setup.ini…"
+    rc=0
+    validate_vv_api_token "${candidate}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+      VV_TOKEN="${candidate}"
+      ok "VersaVoice API token verified"
+      return 0
+    fi
+    if [ "${rc}" -eq 1 ]; then
+      warn "VersaVoice API token in setup.ini was rejected"
+      break
+    fi
+    if [ "${unreachable_mode}" = "keep_on_unreachable" ]; then
+      VV_TOKEN="${candidate}"
+      warn "Cannot reach VersaVoice API (${VV_API_BASE}/account) — keeping the token from setup.ini (not verified this run)"
+      return 0
+    fi
+    _vv_unreachable_retry_or_quit
+  done
+
+  while true; do
+    _vv_token_instruction_block
+    echo -e -n "  Enter your $(_install_acceptance_brand) API Token (sponsor token): "
+    read -r VV_TOKEN
+    if [ -z "${VV_TOKEN}" ]; then
+      echo -e "${RED}A VersaVoice API token is required. Enter a token, or press Ctrl+C to cancel.${NC}"
+      continue
+    fi
+    # Validate immediately — do not continue setup until this succeeds.
+    while true; do
+      info "Validating VersaVoice API token…"
+      rc=0
+      validate_vv_api_token "${VV_TOKEN}" || rc=$?
+      [ "${rc}" -eq 2 ] || break
+      echo ""
+      _vv_unreachable_retry_or_quit
+    done
+    if [ "${rc}" -eq 0 ]; then
+      ok "VersaVoice API token verified"
+      return 0
+    fi
+    echo ""
+    echo -e "${RED}Invalid VersaVoice API token — that value was not accepted.${NC}"
+    echo -e "  ${DGRAY}Press Ctrl+C to cancel and quit the installation.${RESET}"
+    VV_TOKEN=""
+  done
+}
+
+if [ -f "${INI_FILE}" ]; then
+  ok "Loaded configuration from: ${INI_FILE}"
+else
+  info "No setup.ini found — will prompt for all values"
+fi
+
+# Defaults: env vars → setup.ini → hardcoded defaults
+WATCHDOG_USER="${VERSA_WATCHDOG_USER:-$(ini_get users watchdog watchdog)}"
+COA_USER="${VERSA_COA_USER:-$(ini_get users coa coa)}"
+CRON_INTERVAL="${VERSA_CRON_INTERVAL:-$(ini_get agent cron_interval 1)}"  # minutes
+
+# Install or refresh watchdog Lifeline crontab (heartbeat). Log rotation is
+# logrotate's job (ensure_log_rotation). Fresh Step 10 always installs. --update
+# calls this when the PU re-enables CRON so a box with no lifeline line
+# (typical after a Sentinel patch) still gets one.
+ensure_watchdog_lifeline_cron() {
+  local lifeline_path="${DEPLOYED_CORE_INFRA}/lifeline.sh"
+  local system_tz
+  system_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+  local cron_tz_line="TZ=${system_tz}"
+  local cron_schedule="*/${CRON_INTERVAL} * * * * ${lifeline_path} > /dev/null 2>&1"
+  local log_file="/var/log/versa-agi-lifeline.log"
+  local log_archive_dir="/var/log/versa-agi-archive"
+
+  (crontab -u "${WATCHDOG_USER}" -l 2>/dev/null | grep -v "lifeline.sh" | grep -v "^TZ=" | grep -v "versa-agi-archive" || true
+   echo "${cron_tz_line}"
+   echo "${cron_schedule}") | crontab -u "${WATCHDOG_USER}" -
+
+  mkdir -p /var/lib/versa-agi
+  rm -f /var/lib/versa-agi/lifeline.disabled
+  mkdir -p "${log_archive_dir}"
+  touch "${log_file}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${log_file}" "${log_archive_dir}" 2>/dev/null || true
+}
+
+# Lifeline + Sentinel log rotation from [logging] rotate / keep (fresh + --update).
+# logrotate runs as root from logrotate.timer. maxsize also rotates an oversized
+# log on the next daily run (logrotate does not rotate a file it sees first). `su` + copytruncate mean it never
+# writes in /var/log itself (root:syslog 775): the old watchdog `mv` cron line
+# could not, so it is removed here.
+ensure_log_rotation() {
+  local period keep current
+  local archive_dir="/var/log/versa-agi-archive"
+  local conf="/etc/logrotate.d/versa-agi"
+  period="$(ini_get logging rotate monthly)"
+  keep="$(ini_get logging keep 2)"
+  case "${period}" in
+    weekly|monthly) ;;
+    *) warn "[logging] rotate=${period} is not weekly or monthly — using monthly"; period="monthly" ;;
+  esac
+  if ! [[ "${keep}" =~ ^[0-9]+$ ]] || [ "${keep}" -lt 1 ]; then
+    warn "[logging] keep=${keep} is not a whole number of 1 or more — using 2"
+    keep=2
+  fi
+  if ! command -v logrotate &>/dev/null; then
+    warn "logrotate is not installed — Lifeline log will not rotate (sudo apt install logrotate)"
+  fi
+
+  mkdir -p "${archive_dir}" /etc/logrotate.d
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${archive_dir}" 2>/dev/null || true
+  cat > "${conf}" <<LOGROTATEEOF
+/var/log/versa-agi-lifeline.log /var/log/versa-agi-sentinel.log {
+    ${period}
+    maxsize 200M
+    rotate ${keep}
+    olddir ${archive_dir}
+    compress
+    dateext
+    missingok
+    notifempty
+    copytruncate
+    su ${WATCHDOG_USER} ${WATCHDOG_USER}
+}
+LOGROTATEEOF
+  chmod 644 "${conf}"
+
+  current=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
+  if printf '%s\n' "${current}" | grep -q "versa-agi-archive"; then
+    printf '%s\n' "${current}" | grep -v "versa-agi-archive" | crontab -u "${WATCHDOG_USER}" -
+  fi
+}
+
+# Pre-loaded values from INI (used by prompts later)
+INI_VV_ENABLED="$(ini_get versavoice enabled true)"
+INI_VV_TOKEN="$(ini_get versavoice api_token)"
+INI_AUTH_METHOD="$(ini_get gcp auth_method)"
+INI_API_KEY="$(ini_get third_party google_api_key)"
+INI_GCP_PROJECT="$(ini_get gcp project)"
+INI_GCP_LOCATION="$(ini_get gcp location us-central1)"
+INI_SA_KEY_PATH="$(ini_get gcp service_account_key)"
+
+INI_AGENT_FIRST_NAME="$(ini_get agent first_name Versa)"
+INI_AGENT_CALL_SIGN="$(ini_get agent call_sign '')"
+INI_AGENT_LAST_NAME="$(ini_get agent last_name '(COA)')"
+INI_AGENT_LANGUAGE="${INSTALL_ACCEPTANCE_LANGUAGE:-$(ini_get agent language en)}"
+INI_AGENT_COUNTRY="${INSTALL_ACCEPTANCE_COUNTRY:-$(ini_get agent country)}"
+INI_AGENT_VOICE="$(ini_get agent voice female)"
+INI_AGENT_ROLE="$(ini_get agent role)"
+INI_AGENT_TIMEOUT="$(ini_get agent timeout_minutes 90)"
+# Time limit range 30–240 (agent_limits.py; state_long_cycles.md §1.1).
+case "${INI_AGENT_TIMEOUT}" in
+  ''|*[!0-9]*) INI_AGENT_TIMEOUT=90 ;;
+esac
+if [ "${INI_AGENT_TIMEOUT}" -lt 30 ]; then INI_AGENT_TIMEOUT=30; fi
+if [ "${INI_AGENT_TIMEOUT}" -gt 240 ]; then INI_AGENT_TIMEOUT=240; fi
+INI_RUNAWAY_THRESHOLD="$(ini_get agent runaway_threshold 2500)"
+INI_GIT_PLATFORMS="$(ini_get git platforms none)"
+INI_WORKSPACE_LINK="$(ini_get git workspace_link)"
+INI_SYSTEM_MODEL="$(ini_get system model '')"
+INI_EXECUTION_MODE="$(ini_get system mode cloud)"
+INI_INSTALL_ROLE="$(ini_get system install_role normal)"
+
+if [ "${PROMOTE_NORMAL}" = true ]; then
+  if [ "${INI_INSTALL_ROLE}" != "sentinel" ]; then
+    error "--promote-normal requires a Sentinel install (install_role=sentinel). Current: ${INI_INSTALL_ROLE}"
+  fi
+  if [ "${HOME_COA_KEY}" = true ]; then
+    _promote_email="$(python3 -c '
+import json, pathlib
+p = pathlib.Path("/etc/versa-agi/install-acceptance.json")
+try:
+    d = json.loads(p.read_text(encoding="utf-8"))
+except Exception:
+    d = {}
+print((d.get("email") or d.get("installEmail") or d.get("install_email") or "").strip())
+' 2>/dev/null || true)"
+    if [ -z "${INI_VV_TOKEN:-}" ]; then
+      error "--home-coa-key needs a VersaVoice API token in setup.ini"
+    fi
+    if ! VV_CHECK_TOKEN="${INI_VV_TOKEN}" VV_CHECK_EMAIL="${_promote_email}" \
+      PYTHONPATH="${SRC_CORE_INFRA}/agictl:${SRC_CORE_INFRA}" python3 -c '
+import os, sys
+from identity import home_coa_key_in_use
+try:
+    busy = home_coa_key_in_use(os.environ["VV_CHECK_TOKEN"], os.environ.get("VV_CHECK_EMAIL", ""))
+except Exception as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(2)
+sys.exit(1 if busy else 0)
+'; then
+      _hc_rc=$?
+      if [ "${_hc_rc}" = "1" ]; then
+        error "Home COA key (agiAgentKey=coa) is already in use on this sponsor. Keep the host-stable key or use a different email."
+      fi
+      error "Could not check home COA key collision"
+    fi
+    for _ini_file in "${INI_FILE:-}" "/etc/versa-agi/setup.ini"; do
+      [ -n "${_ini_file}" ] && [ -f "${_ini_file}" ] || continue
+      sed -i '/^\[system\]/,/^\[/{s/^vv_agent_key=.*/vv_agent_key=/}' "${_ini_file}"
+    done
+    info "Promote: clearing vv_agent_key — will bind as home COA (agiAgentKey=coa)"
+  fi
+  INI_INSTALL_ROLE="normal"
+  for _ini_file in "${INI_FILE:-}" "/etc/versa-agi/setup.ini"; do
+    [ -n "${_ini_file}" ] && [ -f "${_ini_file}" ] || continue
+    if grep -q "^install_role=" "${_ini_file}" 2>/dev/null; then
+      sed -i '/^\[system\]/,/^\[/{s/^install_role=.*/install_role=normal/}' "${_ini_file}"
+    else
+      sed -i '/^\[system\]/a install_role=normal' "${_ini_file}"
+    fi
+  done
+  info "Promote: install_role sentinel → normal"
+fi
+# Deprecated CSV — COA eligibility is the catalog row `coa` flag; model sync fills paths.env.
+INI_LOCAL_AI_ENABLED="$(ini_get local_ai enabled false)"
+INI_GPU_BACKEND="$(ini_get local_ai gpu_backend standard)"
+INI_LOCAL_AI_DEFAULT_MODEL="$(ini_get local_ai default_model gemma4:e4b)"
+INI_LOCAL_MODELS="$(ini_get local_ai local_models)"
+INI_OLLAMA_HOST="$(ini_get local_ai ollama_host http://localhost:11434)"
+INI_PROXY_PORT="$(ini_get local_ai proxy_port 4000)"
+INI_AUTO_PULL_MODEL="$(ini_get local_ai auto_pull_model true)"
+INI_INTEL_CARD_COUNT="$(ini_get local_ai intel_card_count 1)"
+INI_INTEL_DEVICE_ID="$(ini_get local_ai intel_device_id '')"
+INI_HF_TOKEN="$(ini_get local_ai hf_token '')"
+INI_TOPOLOGY="$(ini_get local_ai topology local)"
+INI_REMOTE_INFERENCE_URL="$(ini_get local_ai remote_inference_url '')"
+INI_INFERENCE_MASTER_KEY="$(ini_get local_ai inference_master_key '')"
+
+# Deployed paths (in user home directories)
+AGENTS_DB="/var/lib/versa-agi/agents.db"
+WATCHDOG_HOME="/home/${WATCHDOG_USER}"
+COA_HOME="/home/${COA_USER}"
+DEPLOYED_CORE_INFRA="${WATCHDOG_HOME}/core-infra"
+DEPLOYED_COA_ENV="${COA_HOME}/coa-env"
+
+TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+
+if [ "${UPDATE_MODE}" = true ]; then
+  banner "update" "${PRODUCT_VERSION}"
+  echo -e "  ${DIM:-}Timestamp:  ${TIMESTAMP}${RESET:-}"
+else
+  banner "setup" "${PRODUCT_VERSION}"
+fi
+echo -e "  ${DIM:-}Source:   ${SCRIPT_DIR}${RESET:-}"
+echo -e "  ${DIM:-}Deploy:${RESET:-}"
+echo -e "    Core Infra → ${DEPLOYED_CORE_INFRA}"
+echo -e "    COA Env    → ${DEPLOYED_COA_ENV}"
+if [ "${DRY_RUN}" = true ]; then
+  echo ""
+  warn "DRY-RUN MODE — no changes will be made"
+fi
+echo ""
+
+# ─── Install / Update Acceptance Gate ───────────────
+if [ "${UPDATE_MODE}" = true ]; then
+  if declare -F install_acceptance_update_prompt >/dev/null 2>&1; then
+    install_acceptance_update_prompt
+  fi
+else
+  if declare -F install_acceptance_welcome >/dev/null 2>&1; then
+    install_acceptance_welcome
+  fi
+  if declare -F install_acceptance_version_gate >/dev/null 2>&1; then
+    section "Install Registration"
+    install_acceptance_version_gate
+    echo ""
+  fi
+fi
+
+# Feature flags prompt moved to after topology selection (see below).
+
+# ─── CRON Pause (--update only, after acceptance gate) ─
+# Disable lifeline CRON before deploy. Runs after setup.ini check and the
+# update prompt so a missing install aborts without pausing CRON.
+if [ "${UPDATE_MODE}" = true ]; then
+  _EARLY_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
+  CRON_WAS_ACTIVE="${CRON_WAS_ACTIVE:-false}"
+
+  if echo "${_EARLY_CRON}" | grep -qi "^[^#].*lifeline"; then
+    CRON_WAS_ACTIVE=true
+    if [ "${DRY_RUN}" = true ]; then
+      dry "Would comment out lifeline CRON entries and set lifeline.disabled"
+    else
+      echo "${_EARLY_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
+        crontab -u "${WATCHDOG_USER}" -
+      # Hard OFF flag — blocks Fetch / stray lifeline.sh during update
+      mkdir -p /var/lib/versa-agi
+      touch /var/lib/versa-agi/lifeline.disabled
+      chown "${WATCHDOG_USER:-watchdog}:${WATCHDOG_USER:-watchdog}" \
+        /var/lib/versa-agi/lifeline.disabled 2>/dev/null || true
+      ok "CRON paused (commented out + lifeline.disabled)"
+    fi
+  else
+    if echo "${_EARLY_CRON}" | grep -qi "^#.*lifeline"; then
+      if [ "${CRON_WAS_ACTIVE}" != true ]; then
+        CRON_WAS_ACTIVE=true
+      fi
+    fi
+  fi
+  export CRON_WAS_ACTIVE
+fi
+
+# ═══════════════════════════════════════════════════════
+# UPDATE MODE PREAMBLE (--update only)
+# CRON is paused in the block above (after acceptance gate).
+# Steps: Git pull, drain agents, backup, deploy.
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = true ]; then
+
+  # ─── U2: CRON Status ─────────────────────────────────
+  section "Update — CRON Status"
+  if [ "${CRON_WAS_ACTIVE}" = true ]; then
+    ok "CRON was paused at script start"
+  else
+    warn "No active lifeline CRON was found at script start"
+  fi
+  echo ""
+
+  # ─── U1: Git Auto-Update ─────────────────────────────
+  # Only pull if running from the persisted system repo.
+  # Dev repositories bypass this to prevent destroying local work.
+  if [[ "${SCRIPT_DIR}" == *".versa-agi/repo/src"* ]] && [ "${SKIP_PULL:-false}" != true ]; then
+    info "Auto-updating persistent repository..."
+    REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
+    _GIT_USER="${SUDO_USER:-$(whoami)}"
+
+    # Fix any root-owned .git artifacts from previous runs
+    if [ "$(id -u)" -eq 0 ] && [ "${_GIT_USER}" != "root" ]; then
+      chown -R "${_GIT_USER}:${_GIT_USER}" "${REPO_ROOT}/.git" 2>/dev/null || true
+    fi
+
+    # Run git as the invoking user so their SSH keys and file ownership work
+    if [ "$(id -u)" -eq 0 ] && [ "${_GIT_USER}" != "root" ]; then
+      sudo -u "${_GIT_USER}" bash -c "
+        cd '${REPO_ROOT}'
+        git fetch --all
+        if [ -n '${REPO_BRANCH:-}' ]; then
+          git checkout '${REPO_BRANCH}'
+          git reset --hard 'origin/${REPO_BRANCH}'
+        else
+          CURRENT_BRANCH=\$(git branch --show-current)
+          git reset --hard \"origin/\${CURRENT_BRANCH:-main}\"
+        fi
+        git clean -fd
+      "
+    else
+      (
+        cd "${REPO_ROOT}"
+        git config --global --add safe.directory "$(pwd)"
+        git fetch --all
+        if [ -n "${REPO_BRANCH:-}" ]; then
+          git checkout "${REPO_BRANCH}"
+          git reset --hard "origin/${REPO_BRANCH}"
+        else
+          CURRENT_BRANCH=$(git branch --show-current)
+          git reset --hard "origin/${CURRENT_BRANCH:-main}"
+        fi
+        git clean -fd
+      )
+    fi
+    ok "Repository updated"
+    # Re-exec with updated script.
+    # Do not use ${DRY_RUN:+--dry-run}: DRY_RUN=false is still non-empty, so
+    # persist-repo updates were re-exec'd as --dry-run (no U5 ask; Lifeline
+    # stayed paused). Same trap for SKIP_VERIFY=false.
+    export SKIP_PULL=true
+    export CRON_WAS_ACTIVE
+    _reexec_args=(--update)
+    [ "${DRY_RUN}" = true ] && _reexec_args+=(--dry-run)
+    [ "${SKIP_VERIFY}" = true ] && _reexec_args+=(--skip-verify)
+    [ -n "${REPO_BRANCH}" ] && _reexec_args+=(--branch "${REPO_BRANCH}")
+    _reexec_args+=(--grace "${GRACE_PERIOD}")
+    exec "$0" "${_reexec_args[@]}"
+  fi
+
+
+
+  # ─── U3: Drain Running Agents ────────────────────────
+  section "Update — Drain Agents"
+  drain_agent() {
+    local user=$1
+    local waited=0
+    if pgrep -u "${user}" -f "harness.agent_harness" &>/dev/null; then
+      info "Agent running as ${user} — waiting for natural exit..."
+      while pgrep -u "${user}" -f "harness.agent_harness" &>/dev/null && [ ${waited} -lt ${GRACE_PERIOD} ]; do
+        sleep 5
+        waited=$((waited + 5))
+        info "  Waiting... (${waited}s / ${GRACE_PERIOD}s)"
+      done
+      if pgrep -u "${user}" -f "harness.agent_harness" &>/dev/null; then
+        warn "Grace period expired — killing agent processes for ${user}"
+        pkill -u "${user}" -f "harness.agent_harness" 2>/dev/null || true
+        sleep 2
+        pkill -9 -u "${user}" -f "harness.agent_harness" 2>/dev/null || true
+        ok "Agent processes killed for ${user}"
+      else
+        ok "Agent ${user} exited naturally"
+      fi
+    else
+      ok "No running agent for ${user}"
+    fi
+  }
+  if [ "${DRY_RUN}" = true ]; then
+    dry "Would drain running agents"
+  else
+    drain_agent "${COA_USER}"
+  fi
+  echo ""
+
+  # ─── U4: Pre-Deploy Backup ───────────────────────────
+  # state_host_services.md §1.8. One backup, in a root-only folder outside every
+  # home: the code, the databases, the settings and every agent's home. Free
+  # space is measured first; a backup that cannot be made never stops the update,
+  # and Lifeline tells the Primary User.
+  section "Update — Backup"
+  # shellcheck source=core-infra/scripts/update_backup.sh
+  source "${SRC_CORE_INFRA}/scripts/update_backup.sh"
+  BACKUP_DIR="${UPDATE_BACKUP_ROOT}"
+  BACKUP_PATH=""
+  LEGACY_BACKUP_DIR="${WATCHDOG_HOME}/backups"
+
+  update_backup_reset
+  update_backup_add "${DEPLOYED_CORE_INFRA}" "core-infra" plain
+  update_backup_add "/var/lib/versa-agi" "data" data
+  update_backup_add "/etc/versa-agi" "etc" plain
+  update_backup_add "/home/${COA_USER}" "homes/${COA_USER}" home
+  while IFS= read -r _agent_user; do
+    [ -n "${_agent_user}" ] || continue
+    [ "${_agent_user}" = "${COA_USER}" ] && continue
+    [ "${_agent_user}" = "${WATCHDOG_USER}" ] && continue
+    update_backup_add "/home/${_agent_user}" "homes/${_agent_user}" home
+  done < <(sqlite3 /var/lib/versa-agi/agents.db "SELECT DISTINCT os_user FROM agents WHERE os_user IS NOT NULL AND os_user != '';" 2>/dev/null || true)
+
+  if [ "${#UPDATE_BACKUP_ITEMS[@]}" -eq 0 ]; then
+    warn "Nothing to back up (not yet deployed)"
+  elif [ "${DRY_RUN}" = true ]; then
+    dry "Would back up ${#UPDATE_BACKUP_ITEMS[@]} folder(s) to ${UPDATE_BACKUP_ROOT}/update-${TIMESTAMP}, replacing the previous backup"
+  else
+    _BACKUP_RC=0
+    update_backup_run "${TIMESTAMP}" "${LEGACY_BACKUP_DIR}" || _BACKUP_RC=$?
+    BACKUP_PATH="${UPDATE_BACKUP_PATH}"
+    case "${_BACKUP_RC}" in
+      0) ok "Backup made → ${BACKUP_PATH} (${UPDATE_BACKUP_NOTE}); the previous backup was replaced" ;;
+      2) warn "No backup was made: ${UPDATE_BACKUP_NOTE}. The update goes on${BACKUP_PATH:+; the earlier backup stays at ${BACKUP_PATH}}. The Primary User will be told." ;;
+      *) warn "The backup could not be completed: ${UPDATE_BACKUP_NOTE}. The update goes on${BACKUP_PATH:+; the earlier backup stays at ${BACKUP_PATH}}. The Primary User will be told." ;;
+    esac
+  fi
+  echo ""
+
+fi  # end UPDATE_MODE preamble
+
+# ── Shared: Inference Server Ready banner (server install + update) ──
+print_inference_server_ready_banner() {
+  local _SRV_STATE="/etc/versa-agi/server_config.json"
+  [ -f "${_SRV_STATE}" ] || return 0
+
+  local _srv_backend _srv_model _srv_port _srv_ip _srv_key _ini
+  _ini="/etc/versa-agi/setup.ini"
+  [ -f "${_ini}" ] || _ini="${INI_FILE:-}"
+  _ini_get() {
+    [ -n "${_ini}" ] && [ -f "${_ini}" ] || return 0
+    awk -F '=' '/^\[local_ai\]/{f=1; next} /^\[/{f=0} f && $1=="'"$1"'"{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "${_ini}" 2>/dev/null
+  }
+  _srv_backend=$(jq -r '.gpu_backend // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+  _srv_model=$(jq -r '.active_model // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+  _srv_port=$(jq -r '.proxy_port // empty' "${_SRV_STATE}" 2>/dev/null)
+  _srv_ip=$(jq -r '.lan_ip // "unknown"' "${_SRV_STATE}" 2>/dev/null)
+  _srv_key=$(jq -r '.inference_master_key // ""' "${_SRV_STATE}" 2>/dev/null)
+  if [ "${_srv_backend}" = "unknown" ] || [ -z "${_srv_backend}" ]; then
+    _v="$(_ini_get gpu_backend)"; [ -n "${_v}" ] && _srv_backend="${_v}"
+  fi
+  if [ "${_srv_model}" = "unknown" ] || [ -z "${_srv_model}" ]; then
+    _v="$(_ini_get sycl_active_model)"; [ -n "${_v}" ] && _srv_model="${_v}"
+  fi
+  if [ -z "${_srv_port}" ]; then
+    _v="$(_ini_get sycl_port)"; _srv_port="${_v:-8080}"
+  fi
+  if [ -z "${_srv_key}" ]; then
+    _srv_key="$(_ini_get inference_master_key)"
+  fi
+  if [ "${_srv_ip}" = "unknown" ] || [ -z "${_srv_ip}" ]; then
+    _srv_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    _srv_ip="${_srv_ip:-unknown}"
+  fi
+  _srv_port="${_srv_port:-8080}"
+
+  echo ""
+  echo "  ╭──────────────────────────────────────────────────────╮"
+  echo "  │  ✅ Inference Server Ready                          │"
+  echo "  ├──────────────────────────────────────────────────────┤"
+  echo "  │                                                      │"
+  echo "  │  GPU Backend:    ${_srv_backend}"
+  echo "  │  Active Model:   ${_srv_model}"
+  echo "  │  Inference Port: ${_srv_port}"
+  echo "  │  Master Key:     ${_srv_key}"
+  echo "  │                                                      │"
+  echo "  │  Access URLs:                                        │"
+  echo "  │    Instance:     http://${_srv_ip}:${_srv_port}"
+  if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+    echo "  │    From Windows: http://localhost:${_srv_port}"
+    echo "  │    From LAN:     http://<Windows-LAN-IPv4>:${_srv_port}"
+    echo "  │                  (ipconfig → Wi-Fi/Ethernet IPv4)     │"
+    echo "  │                                                      │"
+    echo "  │  Model Management:                                   │"
+    echo "  │    sudo agictl model activate gemma4:26b             │"
+    echo "  │    sudo agictl model add qwen3.6:35b                 │"
+    echo "  │    agictl model list                                 │"
+    echo "  │                                                      │"
+    echo "  │  ⚠  WSL2 requires Windows host-level configuration:  │"
+    echo "  │                                                      │"
+    echo "  │  1. Enable mirrored networking — in PowerShell:      │"
+    echo '  │       notepad $env:USERPROFILE\.wslconfig           │'
+    echo "  │     Set contents to:                                 │"
+    echo "  │       [wsl2]                                         │"
+    echo "  │       networkingMode=mirrored                        │"
+    echo "  │     Save, then run:  wsl --shutdown                  │"
+    echo "  │     (reopen this WSL terminal afterward)             │"
+    echo "  │                                                      │"
+    echo "  │  2. Windows Firewall (PowerShell as Admin):          │"
+    echo "  │     New-NetFirewallRule -DisplayName                 │"
+    echo "  │       'Versa AGi Inference (SSH)'                   │"
+    echo "  │       -Direction Inbound -Protocol TCP               │"
+    echo "  │       -LocalPort 22 -Action Allow                    │"
+    echo "  │     New-NetFirewallRule -DisplayName                 │"
+    echo "  │       'Versa AGi Inference (WSL)'                    │"
+    echo "  │       -Direction Inbound -Protocol TCP               │"
+    echo "  │       -LocalPort ${_srv_port} -Action Allow                  │"
+    echo "  │                                                      │"
+    echo "  │  3. Ensure SSH server is running inside WSL:         │"
+    echo "  │     sudo service ssh start                           │"
+    echo "  │                                                      │"
+  else
+    echo "  │    LAN URL:      http://${_srv_ip}:${_srv_port}"
+    echo "  │                                                      │"
+    echo "  │  Model Management:                                   │"
+    echo "  │    sudo agictl model activate gemma4:26b             │"
+    echo "  │    sudo agictl model add qwen3.6:35b                 │"
+    echo "  │    agictl model list                                 │"
+    echo "  │                                                      │"
+  fi
+  echo "  │  On the client machine, run setup.sh and select:     │"
+  echo "  │    Option 2 (Client — Cloud + Local AI)              │"
+  echo "  │    Then: Remote server → paste URL + key above       │"
+  echo "  │                                                      │"
+  echo "  ╰──────────────────────────────────────────────────────╯"
+  echo ""
+}
+
+# Shared .py next to agictl/ / harness so top-level imports resolve under
+# PYTHONPATH=/usr/local/lib/versa-agi (and the server subset deploy).
+# Keep this list in lockstep with the LIB_DIR copy in Step 8.
+_VERSA_LIB_SHARED_PY=(
+  db_connect.py
+  model_hf_ingest.py
+  model_media_ingest.py
+  model_catalog.py
+  provider_runtime.py
+  provider_registry.py
+  shipped_models.py
+  catalog_compat.py
+  privilege_guard.py
+  live_call_config.py
+  agent_limits.py
+  local_time.py
+  ide_probe.py
+)
+
+_deploy_server_agictl_shared_py() {
+  local src="${1:?}" dest="${2:?}"
+  local f
+  for f in "${_VERSA_LIB_SHARED_PY[@]}"; do
+    if [ -f "${src}/${f}" ]; then
+      cp "${src}/${f}" "${dest}/${f}"
+    fi
+  done
+  # Adapter used by `agictl model media generate` (no cloud client).
+  if [ -d "${src}/model_drivers" ]; then
+    rm -rf "${dest}/model_drivers"
+    cp -r "${src}/model_drivers" "${dest}/model_drivers"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════
+# SERVER TOPOLOGY UPDATE — early exit
+# On server-only installs, the full client/COA agent stack
+# doesn't exist. Deploy core-infra + agictl, re-run
+# setup_local.sh for Docker image rebuild, and exit.
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = true ] && [ "${INI_TOPOLOGY}" = "server" ]; then
+  section "Server Update — Deploy Core Infrastructure"
+
+  # Ensure watchdog exists
+  if ! id "${WATCHDOG_USER}" &>/dev/null; then
+    useradd -r -m -s /bin/bash "${WATCHDOG_USER}" 2>/dev/null || true
+    ok "Created service user: ${WATCHDOG_USER}"
+  fi
+
+  # Ensure watchdog has GPU device access
+  for _grp in render video; do
+    if getent group "${_grp}" >/dev/null 2>&1; then
+      if ! id -nG "${WATCHDOG_USER}" 2>/dev/null | grep -qw "${_grp}"; then
+        usermod -aG "${_grp}" "${WATCHDOG_USER}" 2>/dev/null || true
+        ok "${WATCHDOG_USER} added to '${_grp}' group"
+      fi
+    fi
+  done
+
+  # Deploy core-infra (agictl, models.ini, etc.)
+  SOURCE_CORE_INFRA="${SCRIPT_DIR}/core-infra"
+  mkdir -p "${DEPLOYED_CORE_INFRA}/agictl" \
+           "${DEPLOYED_CORE_INFRA}/bin" \
+           "${DEPLOYED_CORE_INFRA}/config" \
+           "${DEPLOYED_CORE_INFRA}/harness"
+
+  if [ -d "${SOURCE_CORE_INFRA}/agictl" ]; then
+    cp -r "${SOURCE_CORE_INFRA}/agictl/"* "${DEPLOYED_CORE_INFRA}/agictl/"
+  fi
+  for f in agictl agictl-wrapper; do
+    if [ -f "${SOURCE_CORE_INFRA}/bin/${f}" ]; then
+      cp "${SOURCE_CORE_INFRA}/bin/${f}" "${DEPLOYED_CORE_INFRA}/bin/${f}"
+      chmod 755 "${DEPLOYED_CORE_INFRA}/bin/${f}"
+    fi
+  done
+  mkdir -p /etc/versa-agi
+  if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+    cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/models.ini" 2>/dev/null || true
+    chmod 640 "/etc/versa-agi/models.ini"
+    cp "${SCRIPT_DIR}/models.ini" "${DEPLOYED_CORE_INFRA}/config/"
+  fi
+  for hfile in model_context.py model_params.py model_traits.py; do
+    if [ -f "${SOURCE_CORE_INFRA}/harness/${hfile}" ]; then
+      cp "${SOURCE_CORE_INFRA}/harness/${hfile}" "${DEPLOYED_CORE_INFRA}/harness/"
+    fi
+  done
+  touch "${DEPLOYED_CORE_INFRA}/harness/__init__.py"
+  _deploy_server_agictl_shared_py "${SOURCE_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}"
+  chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}"
+  ok "Core infrastructure updated"
+
+  # Install agictl globally
+  LIB_DIR="/usr/local/lib/versa-agi"
+  mkdir -p "${LIB_DIR}"
+  if [ -f "${DEPLOYED_CORE_INFRA}/bin/agictl" ]; then
+    cp "${DEPLOYED_CORE_INFRA}/bin/agictl" "${LIB_DIR}/agictl"
+    chmod 755 "${LIB_DIR}/agictl"
+  fi
+  if [ -f "${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper" ]; then
+    cp "${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper" /usr/local/bin/agictl
+    chmod 755 /usr/local/bin/agictl
+  fi
+  ok "agictl updated"
+
+  # Sync setup.ini
+  if [ -f "${INI_FILE}" ]; then
+    cp "${INI_FILE}" "/etc/versa-agi/setup.ini"
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/setup.ini" 2>/dev/null || true
+    chmod 600 "/etc/versa-agi/setup.ini"
+  fi
+
+  # Re-run setup_local.sh. Already-configured servers skip the interactive
+  # path; --ensure-sycl-image / --ensure-sd-cli still refresh pinned images.
+  section "Server Update — Local AI Engine"
+  SETUP_LOCAL_SCRIPT="${SCRIPT_DIR}/setup_local.sh"
+  if [ -f "${SETUP_LOCAL_SCRIPT}" ]; then
+    chmod +x "${SETUP_LOCAL_SCRIPT}"
+    export VERSA_SETUP_PARENT=1
+    bash "${SETUP_LOCAL_SCRIPT}" --topology server
+    bash "${SETUP_LOCAL_SCRIPT}" --ensure-sycl-image --topology server
+    bash "${SETUP_LOCAL_SCRIPT}" --ensure-sd-cli --topology server
+  fi
+
+  # Registration
+  if declare -F install_acceptance_record_full >/dev/null 2>&1; then
+    section "Registration Submit"
+    install_acceptance_record_full "false"
+    echo ""
+  fi
+
+  print_inference_server_ready_banner
+
+  ok "Server update complete."
+  exit 0
+fi
+
+
+# ── OS Compatibility Warning ──────────────────────────
+if command -v lsb_release &>/dev/null; then
+  _os_ver="$(lsb_release -rs 2>/dev/null)"
+  _os_id="$(lsb_release -is 2>/dev/null)"
+  if [ "${_os_id}" != "Ubuntu" ] || [ "${_os_ver}" != "24.04" ]; then
+    warn "Versa AGi is tested on Ubuntu 24.04. Your system: ${_os_id} ${_os_ver}"
+    warn "Proceeding, but some features (especially Intel ARC IPEX) may not work."
+  else
+    ok "OS: ${_os_id} ${_os_ver}"
+  fi
+else
+  warn "Cannot detect OS version (lsb_release not found). Ubuntu 24.04 is recommended."
+fi
+echo ""
+
+# ═══════════════════════════════════════════════════════
+# INSTALLATION TYPE SELECTION (full install only)
+# ═══════════════════════════════════════════════════════
+INSTALL_TYPE=""  # 1=client-cloud, 2=client-localai, 3=server
+
+# The installer passes normal or sentinel. Apply it on a fresh install and on
+# --update. A manual --update with the variable unset keeps the saved role.
+_write_install_role_files() {
+  if [ "${INI_INSTALL_ROLE}" = "sentinel" ]; then
+    INI_AGENT_ROLE="Remote Sentinel"
+  else
+    INI_AGENT_ROLE="Chief Orchestrator Agent"
+  fi
+  local _ini_file
+  for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+    [ -f "${_ini_file}" ] || continue
+    if grep -q "^install_role=" "${_ini_file}" 2>/dev/null; then
+      sed -i '/^\[system\]/,/^\[/{s/^install_role=.*/install_role='"${INI_INSTALL_ROLE}"'/}' "${_ini_file}"
+    else
+      sed -i '/^\[system\]/a install_role='"${INI_INSTALL_ROLE}" "${_ini_file}"
+    fi
+    if grep -q "^role=" "${_ini_file}" 2>/dev/null; then
+      sed -i "s|^role=.*|role=${INI_AGENT_ROLE}|" "${_ini_file}"
+    fi
+  done
+}
+
+case "${VERSA_INSTALL_FLAVOR:-}" in
+  normal|sentinel)
+    INI_INSTALL_ROLE="${VERSA_INSTALL_FLAVOR}"
+    _write_install_role_files
+    info "Install flavor: ${INI_INSTALL_ROLE} supplied by the installer"
+    ;;
+  "")
+    ;;
+  *)
+    error "VERSA_INSTALL_FLAVOR must be normal or sentinel."
+    ;;
+esac
+
+if [ "${UPDATE_MODE}" = false ]; then
+  # The installer passes 1, 2, or 3. A manual run with the variable unset still asks.
+  case "${VERSA_INSTALL_TYPE:-}" in
+    1|2|3)
+      INSTALL_TYPE="${VERSA_INSTALL_TYPE}"
+      info "Installation type ${INSTALL_TYPE} supplied by the installer"
+      ;;
+    "")
+      echo ""
+      echo "  ┌─────────────────────────────────────────────┐"
+      echo "  │  INSTALLATION TYPE                          │"
+      echo "  │                                             │"
+      echo "  │  1) Client — Cloud AI only                  │"
+      echo "  │  2) Client — Cloud + Local AI               │"
+      echo "  │  3) Server — Local AI inference engine only │"
+      echo "  └─────────────────────────────────────────────┘"
+      echo ""
+
+      # Auto-select from setup.ini topology value
+      case "${INI_TOPOLOGY}" in
+        server) INSTALL_DEFAULT=3 ;;
+        client) INSTALL_DEFAULT=2 ;;
+        *)      INSTALL_DEFAULT=1 ;;
+      esac
+      # If local_ai is enabled in INI, default to option 2
+      if [ "${INI_LOCAL_AI_ENABLED}" = "true" ] && [ "${INSTALL_DEFAULT}" -eq 1 ]; then
+        INSTALL_DEFAULT=2
+      fi
+
+      read -p "  Select installation type [${INSTALL_DEFAULT}]: " INSTALL_TYPE_CHOICE
+      INSTALL_TYPE="${INSTALL_TYPE_CHOICE:-${INSTALL_DEFAULT}}"
+      echo ""
+      ;;
+    *)
+      error "VERSA_INSTALL_TYPE must be 1 (cloud only), 2 (cloud + local AI), or 3 (local AI server)."
+      ;;
+  esac
+
+  # ── Server Mode: delegate to setup_local.sh and exit ──
+  if [ "${INSTALL_TYPE}" = "3" ]; then
+    section "Server — Local AI Inference Engine"
+    echo ""
+    SETUP_LOCAL_SCRIPT="${SCRIPT_DIR}/setup_local.sh"
+    if [ -f "${SETUP_LOCAL_SCRIPT}" ]; then
+      chmod +x "${SETUP_LOCAL_SCRIPT}"
+      bash "${SETUP_LOCAL_SCRIPT}" --topology server
+      # Write topology to setup.ini (dual-write)
+      for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+        if [ -f "${_ini_file}" ]; then
+          sed -i '/^\[local_ai\]/,/^\[/{s/^topology=.*/topology=server/}' "${_ini_file}"
+        fi
+      done
+
+      # ── Deploy agictl for server management (model activate, model list, etc.) ──
+      section "Server — agictl Deployment"
+
+      # Ensure watchdog user exists (setup_local.sh may not create it in server mode)
+      if ! id "${WATCHDOG_USER}" &>/dev/null; then
+        useradd -r -m -s /bin/bash "${WATCHDOG_USER}" 2>/dev/null || true
+        ok "Created service user: ${WATCHDOG_USER}"
+      fi
+
+      # Ensure watchdog has GPU device access (render/video groups)
+      # setup_local.sh defers this to here when the user didn't exist yet.
+      for _grp in render video; do
+        if getent group "${_grp}" >/dev/null 2>&1; then
+          if ! id -nG "${WATCHDOG_USER}" 2>/dev/null | grep -qw "${_grp}"; then
+            usermod -aG "${_grp}" "${WATCHDOG_USER}" 2>/dev/null || true
+            ok "${WATCHDOG_USER} added to '${_grp}' group (GPU device access)"
+          fi
+        fi
+      done
+
+      # Deploy core-infra subset needed for agictl
+      SOURCE_CORE_INFRA="${SCRIPT_DIR}/core-infra"
+      mkdir -p "${DEPLOYED_CORE_INFRA}/agictl" \
+               "${DEPLOYED_CORE_INFRA}/bin" \
+               "${DEPLOYED_CORE_INFRA}/config" \
+               "${DEPLOYED_CORE_INFRA}/harness"
+
+      # agictl CLI module
+      if [ -d "${SOURCE_CORE_INFRA}/agictl" ]; then
+        cp -r "${SOURCE_CORE_INFRA}/agictl/"* "${DEPLOYED_CORE_INFRA}/agictl/"
+      fi
+      # bin scripts (agictl binary + wrapper)
+      for f in agictl agictl-wrapper; do
+        if [ -f "${SOURCE_CORE_INFRA}/bin/${f}" ]; then
+          cp "${SOURCE_CORE_INFRA}/bin/${f}" "${DEPLOYED_CORE_INFRA}/bin/${f}"
+          chmod 755 "${DEPLOYED_CORE_INFRA}/bin/${f}"
+        fi
+      done
+      # Config (models.ini — canonical + local copy)
+      mkdir -p /etc/versa-agi
+      if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+        cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
+        chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/models.ini" 2>/dev/null || true
+        chmod 640 "/etc/versa-agi/models.ini"
+        # Also keep a local copy for agictl dev fallback
+        cp "${SCRIPT_DIR}/models.ini" "${DEPLOYED_CORE_INFRA}/config/"
+      fi
+      # Model context module (needed by agictl for num_ctx resolution)
+      if [ -f "${SOURCE_CORE_INFRA}/harness/model_context.py" ]; then
+        cp "${SOURCE_CORE_INFRA}/harness/model_context.py" "${DEPLOYED_CORE_INFRA}/harness/"
+        touch "${DEPLOYED_CORE_INFRA}/harness/__init__.py"
+      fi
+      # model_params imports model_traits: the two always travel together.
+      for hfile in model_params.py model_traits.py; do
+        if [ -f "${SOURCE_CORE_INFRA}/harness/${hfile}" ]; then
+          cp "${SOURCE_CORE_INFRA}/harness/${hfile}" "${DEPLOYED_CORE_INFRA}/harness/"
+        fi
+      done
+      _deploy_server_agictl_shared_py "${SOURCE_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}"
+      if [ -f "${SOURCE_CORE_INFRA}/VERSION" ]; then
+        cp "${SOURCE_CORE_INFRA}/VERSION" "${DEPLOYED_CORE_INFRA}/VERSION"
+      fi
+
+      chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}"
+      ok "core-infra deployed to ${DEPLOYED_CORE_INFRA} (server subset)"
+
+      # Install agictl globally
+      LIB_DIR="/usr/local/lib/versa-agi"
+      mkdir -p "${LIB_DIR}"
+      if [ -f "${DEPLOYED_CORE_INFRA}/bin/agictl" ]; then
+        cp "${DEPLOYED_CORE_INFRA}/bin/agictl" "${LIB_DIR}/agictl"
+        chown root:root "${LIB_DIR}/agictl"
+        chmod 755 "${LIB_DIR}/agictl"
+      fi
+      if [ -f "${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper" ]; then
+        cp "${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper" /usr/local/bin/agictl
+        chown root:root /usr/local/bin/agictl
+        chmod 755 /usr/local/bin/agictl
+      fi
+      ok "agictl installed to /usr/local/bin/"
+
+      # Ensure paths.env exists with core infra path
+      PATHS_ENV="/etc/versa-agi/paths.env"
+      mkdir -p /etc/versa-agi
+      if [ ! -f "${PATHS_ENV}" ]; then
+        touch "${PATHS_ENV}"
+      fi
+      # Write/update VERSA_CORE_INFRA
+      if grep -q "^VERSA_CORE_INFRA=" "${PATHS_ENV}" 2>/dev/null; then
+        sed -i "s|^VERSA_CORE_INFRA=.*|VERSA_CORE_INFRA=\"${DEPLOYED_CORE_INFRA}\"|" "${PATHS_ENV}"
+      else
+        echo "VERSA_CORE_INFRA=\"${DEPLOYED_CORE_INFRA}\"" >> "${PATHS_ENV}"
+      fi
+      if grep -q "^VERSA_PRODUCT_VERSION=" "${PATHS_ENV}" 2>/dev/null; then
+        sed -i "s|^VERSA_PRODUCT_VERSION=.*|VERSA_PRODUCT_VERSION=\"${PRODUCT_VERSION}\"|" "${PATHS_ENV}"
+      else
+        echo "VERSA_PRODUCT_VERSION=\"${PRODUCT_VERSION}\"" >> "${PATHS_ENV}"
+      fi
+      ok "paths.env: VERSA_CORE_INFRA=${DEPLOYED_CORE_INFRA}"
+
+      # Ensure setup.ini is available in /etc/versa-agi/ (always sync from source)
+      if [ -f "${INI_FILE}" ]; then
+        cp "${INI_FILE}" "/etc/versa-agi/setup.ini"
+        chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/setup.ini" 2>/dev/null || true
+        chmod 600 "/etc/versa-agi/setup.ini"
+        ok "setup.ini deployed to /etc/versa-agi/"
+      fi
+
+      if [ -f "${REGISTRATION_CONF_SRC}" ]; then
+        cp "${REGISTRATION_CONF_SRC}" "/etc/versa-agi/registration.conf"
+        chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
+        chmod 640 "/etc/versa-agi/registration.conf"
+        ok "registration.conf deployed to /etc/versa-agi/"
+      fi
+
+      # ── Python dependencies for agictl ──
+      # Server path skips Step 2 Prerequisites, so install what we need directly.
+      # Ubuntu 24.04 (PEP 668): pip for library imports, pipx for CLI tools.
+      info "Installing agictl Python dependencies..."
+      if command -v apt-get &>/dev/null; then
+        apt-get install -y -qq python3-pip pipx 2>/dev/null
+      fi
+
+      # Click (library import — required by agictl CLI framework)
+      if ! python3 -c "import click" 2>/dev/null; then
+        pip3 install --quiet --break-system-packages click
+        ok "Python Click installed"
+      else
+        ok "Python Click already installed"
+      fi
+
+      # HuggingFace CLI (CLI tool — required by 'agictl model add' for Intel GGUF downloads)
+      if command -v hf &>/dev/null || command -v huggingface-cli &>/dev/null; then
+        ok "HuggingFace CLI already installed"
+      else
+        # At the version Versa AGi ships (config/shipped_tools.ini [pipx]); without
+        # the pin when that version cannot be installed on this machine.
+        # shellcheck source=core-infra/scripts/shipped_tools.sh
+        source "${SRC_CORE_INFRA}/scripts/shipped_tools.sh"
+        _HF_VERSION="$(shipped_tool_value "${SRC_CORE_INFRA}/config/shipped_tools.ini" pipx huggingface-hub || true)"
+        if [ -z "${_HF_VERSION}" ] || ! pipx install "huggingface-hub[cli]==${_HF_VERSION}"; then
+          pipx install 'huggingface-hub[cli]'
+        fi
+        # pipx installs to ~/.local/bin — ensure it's on PATH for subsequent commands
+        export PATH="/root/.local/bin:${PATH}"
+        if command -v hf &>/dev/null || command -v huggingface-cli &>/dev/null; then
+          ok "HuggingFace CLI installed (pipx)"
+        else
+          error "HuggingFace CLI installation failed. Try manually: pipx install huggingface-hub[cli]"
+        fi
+      fi
+
+      echo ""
+      ok "Server setup complete. agictl is available for model management."
+      echo ""
+      if declare -F install_acceptance_record_full >/dev/null 2>&1; then
+        section "Registration Submit"
+        install_acceptance_record_full "false"
+        echo ""
+      fi
+
+      print_inference_server_ready_banner
+
+      exit 0
+    else
+      error "setup_local.sh not found at ${SETUP_LOCAL_SCRIPT}"
+    fi
+  fi
+
+
+  # ── Client overrides: sync INI values to match installation type selection ──
+  if [ "${INSTALL_TYPE}" = "1" ]; then
+    # Cloud-only: no local AI. mode=cloud + enabled=false gates model migrate so
+    # gemma/local catalog rows are NOT seeded into Model Manager.
+    INI_TOPOLOGY="local"
+    INI_EXECUTION_MODE="cloud"
+    INI_LOCAL_AI_ENABLED="false"
+    info "Client (cloud only) — local AI will be skipped (no local models in catalog)"
+  else
+    # Client + Local AI: force topology=client and mode=hybrid
+    # This prevents a stale topology=server (from a shared INI) from
+    # steering setup_local.sh into installing GPU infrastructure locally.
+    INI_TOPOLOGY="client"
+    INI_EXECUTION_MODE="hybrid"
+    INI_LOCAL_AI_ENABLED="true"
+    info "Client (cloud + local AI) — topology set to client"
+  fi
+
+  # Write overrides back to setup.ini (both source and deployed)
+  for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+    if [ -f "${_ini_file}" ]; then
+      sed -i '/^\[local_ai\]/,/^\[/{s/^topology=.*/topology='"${INI_TOPOLOGY}"'/}' "${_ini_file}"
+      sed -i '/^\[local_ai\]/,/^\[/{s/^enabled=.*/enabled='"${INI_LOCAL_AI_ENABLED}"'/}' "${_ini_file}"
+      sed -i '/^\[system\]/,/^\[/{s/^mode=.*/mode='"${INI_EXECUTION_MODE}"'/}' "${_ini_file}"
+    fi
+  done
+
+  # ── Install flavor: normal (default) or Sentinel (remote team COA) ──
+  # Not a topology. Full client stack either way. Server type already exited.
+  # The installer passes normal or sentinel. A manual run still asks.
+  case "${VERSA_INSTALL_FLAVOR:-}" in
+    normal|sentinel)
+      ;;
+    "")
+      echo ""
+      echo "  ┌─────────────────────────────────────────────┐"
+      echo "  │  INSTALL FLAVOR                             │"
+      echo "  │                                             │"
+      echo "  │  Normal  — this machine's home COA          │"
+      echo "  │  Sentinel — remote agent on the team,       │"
+      echo "  │             carrying operational duties     │"
+      echo "  │             defined by the Primary User     │"
+      echo "  └─────────────────────────────────────────────┘"
+      echo ""
+      if confirm "Normal install?" "y"; then
+        INI_INSTALL_ROLE="normal"
+      else
+        INI_INSTALL_ROLE="sentinel"
+      fi
+      _write_install_role_files
+      ;;
+    *)
+      error "VERSA_INSTALL_FLAVOR must be normal or sentinel."
+      ;;
+  esac
+  if declare -F install_acceptance_coa_name_prompt >/dev/null 2>&1; then
+    install_acceptance_coa_name_prompt "${INI_INSTALL_ROLE}"
+  else
+    error "install_acceptance_coa_name_prompt missing — cannot collect COA name"
+  fi
+  if [ "${INI_INSTALL_ROLE}" = "sentinel" ]; then
+    info "Install flavor: Sentinel — name ${INI_AGENT_FIRST_NAME}"
+  else
+    info "Install flavor: normal — name ${INI_AGENT_FIRST_NAME}"
+  fi
+  if declare -F install_acceptance_coa_gender_prompt >/dev/null 2>&1; then
+    install_acceptance_coa_gender_prompt
+  else
+    error "install_acceptance_coa_gender_prompt missing — cannot collect COA gender"
+  fi
+  info "COA gender: ${INI_AGENT_VOICE:-female}"
+  _write_install_role_files
+fi
+
+# ─── Feature Flags Prompt (D34) — after topology selection ─
+# Prompts the optional feature surfaces (Organization, Versa - Business Admin, Utility Models, etc.).
+# Placed after topology selection so:
+#   - Fresh install → Server: exits before reaching here
+#   - Update → Server: exits at early-exit block before reaching here
+#   - Fresh install / Update → Client/Local: prompts shown normally
+if declare -F install_acceptance_feature_prompts >/dev/null 2>&1; then
+  install_acceptance_feature_prompts
+fi
+
+# ═══════════════════════════════════════════════════════
+# INSTALL-ONLY STEPS (skipped in --update mode)
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = false ]; then
+
+# ─── Step 1: OS User Creation ───────────────────────
+section "Step 1 — OS User Creation"
+
+create_user() {
+  local username=$1
+  local description=$2
+
+  if id "${username}" &>/dev/null; then
+    ok "User '${username}' already exists"
+  else
+    # Use -g if group already exists (leftover from previous uninstall)
+    if getent group "${username}" &>/dev/null; then
+      useradd -m -s /bin/bash -g "${username}" -c "${description}" "${username}"
+    else
+      useradd -m -s /bin/bash -c "${description}" "${username}"
+    fi
+    ok "Created user '${username}'"
+  fi
+
+  # Ensure home directory and standard dot files ownership is correct (vital after a restore)
+  local home_dir
+  home_dir=$(getent passwd "${username}" | cut -d: -f6)
+  if [ -n "${home_dir}" ] && [ -d "${home_dir}" ]; then
+    chown "${username}:${username}" "${home_dir}"
+    # Fix standard user dot files that may have wrong ownership from backup
+    for dotfile in .bashrc .bash_logout .bash_history .profile .local .npm .cache; do
+      [ -e "${home_dir}/${dotfile}" ] && chown -R "${username}:${username}" "${home_dir}/${dotfile}" 2>/dev/null || true
+    done
+  fi
+}
+
+create_user "${WATCHDOG_USER}" "Versa AGi Watchdog — Core Infrastructure"
+create_user "${COA_USER}" "Versa AGi COA — Agent Operations"
+
+# Allow watchdog to monitor coa processes
+if ! groups "${WATCHDOG_USER}" | grep -q "${COA_USER}"; then
+  usermod -aG "${COA_USER}" "${WATCHDOG_USER}" 2>/dev/null || true
+  ok "Added ${WATCHDOG_USER} to ${COA_USER} group (process monitoring)"
+fi
+
+# Allow Primary User to traverse coa home for workspace symlink access
+if [ -n "${SUDO_USER:-}" ] && ! groups "${SUDO_USER}" 2>/dev/null | grep -q "${COA_USER}"; then
+  usermod -aG "${COA_USER}" "${SUDO_USER}" 2>/dev/null || true
+  ok "Added ${SUDO_USER} to ${COA_USER} group (workspace symlink access)"
+fi
+
+# Create agi_agents group (shared group for workspace access)
+# Members: coa, watchdog, Primary User — sub-agents are added at 'agictl agent add' time
+if ! getent group agi_agents &>/dev/null; then
+  groupadd agi_agents
+  ok "Created agi_agents group"
+else
+  ok "agi_agents group already exists"
+fi
+usermod -aG agi_agents "${COA_USER}" 2>/dev/null || true
+usermod -aG agi_agents "${WATCHDOG_USER}" 2>/dev/null || true
+if [ -n "${SUDO_USER:-}" ]; then
+  usermod -aG agi_agents "${SUDO_USER}" 2>/dev/null || true
+fi
+ok "agi_agents group members: ${COA_USER}, ${WATCHDOG_USER}${SUDO_USER:+, ${SUDO_USER}}"
+
+echo ""
+
+fi  # end UPDATE_MODE=false guard (Step 1)
+
+# ─── Step 2: Prerequisites Check ────────────────────
+if [ "${UPDATE_MODE}" = false ]; then
+section "Step 2 — Prerequisites"
+info "Checking system dependencies - please wait..."
+
+# Resolve WSL & Minimal Ubuntu Dependencies
+if command -v add-apt-repository &>/dev/null && command -v apt-get &>/dev/null; then
+  # inotify-tools on Ubuntu is stored in the universe repository
+  with_spinner "Updating package index..." sudo add-apt-repository universe -y &>/dev/null || true
+  with_spinner "Refreshing apt cache..." sudo apt-get update || true
+fi
+
+# Ensure python venv module exists for agitop and agictl (stripped on minimal images)
+if ! python3 -c "import ensurepip" &>/dev/null; then
+  warn "Missing python3-venv module. Attempting automatic installation..."
+  if command -v apt-get &>/dev/null; then
+    _PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+    with_spinner "Installing python3-venv..." sudo apt-get install -y python3-venv python3-pip || \
+    with_spinner "Installing python3-venv (versioned)..." sudo apt-get install -y "python3.${_PY_VER}-venv" python3-pip || true
+  fi
+  if ! python3 -c "import ensurepip" &>/dev/null; then
+    warn "python3-venv still unavailable after install attempt — venv will be created without pip"
+  fi
+fi
+
+check_command() {
+  local cmd=$1
+  local install_cmd=$2
+
+  if command -v "${cmd}" &>/dev/null; then
+    local version
+    version=$("${cmd}" --version 2>&1 | head -1 || true)
+    ok "${cmd}: ${version}"
+  else
+    warn "${cmd} not found."
+    read -p "Install ${cmd} now? [y/N] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+      info "Running: ${install_cmd}"
+      if [[ "${install_cmd}" == brew* ]]; then
+        sudo -u ${SUDO_USER:-$USER} ${install_cmd}
+      else
+        ${install_cmd}
+      fi
+      if command -v "${cmd}" &>/dev/null; then
+        ok "${cmd} installed successfully."
+      else
+        error "Installation failed. Please install manually: ${install_cmd}"
+      fi
+    else
+      error "${cmd} is required to continue. Setup aborted."
+    fi
+  fi
+}
+
+check_command "git" "sudo apt install git"
+check_command "sqlite3" "sudo apt install sqlite3"
+check_command "jq" "sudo apt install jq"
+check_command "inotifywait" "sudo apt install inotify-tools"
+check_command "curl" "sudo apt install curl"
+check_command "rsync" "sudo apt install rsync"
+
+echo ""
+fi  # end UPDATE_MODE=false guard (Step 2)
+
+# agitop clipboard (Copy All) — soft install on fresh and --update; not required for agents
+if command -v xclip &>/dev/null || command -v xsel &>/dev/null; then
+  ok "clipboard: $(command -v xclip 2>/dev/null || command -v xsel)"
+else
+  info "Installing xclip (agitop clipboard / Copy All)..."
+  if command -v apt-get &>/dev/null && apt-get install -y -qq xclip 2>/dev/null && command -v xclip &>/dev/null; then
+    ok "xclip installed"
+  else
+    warn "xclip not installed — agitop Copy All needs: sudo apt install xclip"
+  fi
+fi
+
+# ─── Step 3: Deploy Files to User Home Dirs ──────────
+section "Step 3 — Deploy Files"
+
+deploy_repo() {
+  local src=$1
+  local dest=$2
+  local owner=$3
+  local name=$4
+
+  if [ -d "${dest}" ]; then
+    warn "${name} already exists at ${dest} — updating files (preserving runtime state)"
+    # Sync files but preserve runtime state, credentials, and data
+    rsync -a \
+      --exclude='.git' \
+      --exclude='agent_memory.db' \
+      --exclude='*.lock' \
+      --exclude='.env' \
+      "${src}/" "${dest}/"
+    ok "Updated ${name}"
+  else
+    cp -r "${src}" "${dest}"
+    ok "Deployed ${name} → ${dest}"
+  fi
+
+  # workspace/ holds live project trees (AGi-Tools and the
+  # rest). chown -R ${owner}:${owner} resets them to that owner and group;
+  # the final permission pass only restores the shared directory roots, so
+  # the morning shared-dir guard then finds thousands of coa:coa paths it
+  # cannot repair (it runs as watchdog). Leave workspace/ untouched.
+  if [ -d "${dest}/workspace" ]; then
+    # Also skip the .agent/workspace symlink: chown follows it and would
+    # re-own the live workspace directory.
+    find "${dest}" \
+      \( -path "${dest}/workspace" -o -path "${dest}/.agent/workspace" \) -prune \
+      -o -exec chown "${owner}:${owner}" {} +
+  else
+    chown -R "${owner}:${owner}" "${dest}"
+  fi
+  ok "Ownership set: ${dest} → ${owner}"
+}
+
+deploy_repo "${SRC_CORE_INFRA}" "${DEPLOYED_CORE_INFRA}" "${WATCHDOG_USER}" "Core Infrastructure"
+
+# Retired shipped skills: deploy_repo rsync is not --delete, so leftover
+# files would stay in the deployed tree and reconcile_skills_db.py would keep
+# the old DB row. Remove only names that are no longer in source.
+for _retired in feature_statefold local_media_krea2_turbo task_completion_acknowledgment; do
+  if [ ! -f "${SRC_CORE_INFRA}/skills/${_retired}.md" ]; then
+    rm -f "${DEPLOYED_CORE_INFRA}/skills/${_retired}.md"
+    rm -rf "${DEPLOYED_CORE_INFRA}/skills/${_retired}"
+  fi
+done
+
+# COA environment — only deploy if the COA user exists (server-only topology skips this)
+if id "${COA_USER}" &>/dev/null; then
+  deploy_repo "${SRC_COA_ENV}" "${DEPLOYED_COA_ENV}" "${COA_USER}" "COA Environment"
+  # AGENTS.md is session-scoped (ide on/off). Strip the shipped copy so git
+  # init and a leftover from a prior always-present contract do not keep it.
+  if [ "${DRY_RUN}" = false ]; then
+    rm -f "${DEPLOYED_COA_ENV}/AGENTS.md"
+  fi
+else
+  info "COA user '${COA_USER}' does not exist — skipping COA environment deployment (server topology)"
+fi
+
+# Deploy models.ini to canonical location (alongside setup.ini)
+# Fresh box: seed the template here (early consumers need it). Existing box:
+# leave it — the Model Catalog step below regenerates it deterministically via
+# `agictl system reconcile-config` (template body + preserved [catalog_custom]/
+# [providers_custom] user layer + registry-added local rows), then
+# `agictl model migrate` rebuilds the [catalog]/[providers] baseline.
+# /etc/versa-agi is also created in Step 13; create it here so Step 3 can seed.
+mkdir -p /etc/versa-agi
+if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+  if [ -f "/etc/versa-agi/models.ini" ]; then
+    ok "models.ini preserved (existing file kept — runtime edits retained)"
+  else
+    cp "${SCRIPT_DIR}/models.ini" "/etc/versa-agi/models.ini"
+    chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/models.ini" 2>/dev/null || true
+    chmod 640 "/etc/versa-agi/models.ini"
+    ok "models.ini deployed to /etc/versa-agi/models.ini"
+  fi
+fi
+
+# Agent registry workspace paths are set during registry seeding (Step 6b).
+
+echo ""
+
+# ─── Step 4: VersaVoice Configuration ───────────────
+if [ "${UPDATE_MODE}" = false ]; then
+echo ""
+echo -e "  ${BCYAN}─── ${BOLD}Step 4 — $(_install_acceptance_brand)${RESET}${BCYAN} ${DGRAY}$(printf '─%.0s' $(seq 1 24))${RESET}"
+echo ""
+
+if declare -F install_acceptance_vv_prompt >/dev/null 2>&1; then
+  install_acceptance_vv_prompt "${INI_VV_ENABLED}"
+fi
+# VV required for install (optional skip parked in install_acceptance_vv_prompt).
+ENABLE_VV="true"
+
+# Collect + live-validate immediately (instruction block + re-ask on failure).
+prompt_valid_vv_api_token "${INI_VV_TOKEN}"
+# Parked: install without VV token
+# else
+#   VV_TOKEN=""
+# fi
+
+# Write enabled state to setup.ini (both source and deployed)
+# IMPORTANT: sed must be scoped to [versavoice] section — enabled= exists in multiple sections
+for _ini_vv_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+  if [ -f "${_ini_vv_file}" ]; then
+    sed -i '/^\[versavoice\]/,/^\[/{s/^enabled=.*/enabled='"${ENABLE_VV}"'/}' "${_ini_vv_file}"
+  fi
+done
+ok "VersaVoice enabled: ${ENABLE_VV}"
+
+
+
+# NOTE: MCP settings (VV token, store path) are injected AFTER
+# configure_gemini_auth (Step 9), which writes selectedAuthType.
+# See the "Inject MCP config" block after the auth call.
+
+SYSCONFIG_FOR_TOKEN="${DEPLOYED_CORE_INFRA}/config/system_config.json"
+if [ -f "${SYSCONFIG_FOR_TOKEN}" ] && [ -n "${VV_TOKEN}" ]; then
+  jq --arg token "${VV_TOKEN}" '.versavoice.api_token = $token' \
+    "${SYSCONFIG_FOR_TOKEN}" > "${SYSCONFIG_FOR_TOKEN}.tmp" && \
+    mv "${SYSCONFIG_FOR_TOKEN}.tmp" "${SYSCONFIG_FOR_TOKEN}"
+  chown "${COA_USER}:${COA_USER}" "${SYSCONFIG_FOR_TOKEN}"
+  chmod 640 "${SYSCONFIG_FOR_TOKEN}"
+  ok "API token written to system_config.json (versavoice.api_token)"
+fi
+
+# Track system_config.json path for later steps
+SYSCONFIG="${DEPLOYED_CORE_INFRA}/config/system_config.json"
+
+echo ""
+fi  # end UPDATE_MODE=false guard (Step 4)
+
+# Track system_config.json path for later steps (must be outside guard for --update mode)
+SYSCONFIG="${DEPLOYED_CORE_INFRA}/config/system_config.json"
+SYSCONFIG_FOR_TOKEN="${DEPLOYED_CORE_INFRA}/config/system_config.json"
+
+# VV_TOKEN must be available outside Step 4 for poise injection + identity resolution
+# In install mode it's set by Step 4; ensure it's always available from INI.
+VV_TOKEN="${VV_TOKEN:-${INI_VV_TOKEN}}"
+
+
+
+# ─── Step 5b: AI Model Selection ─────────────────────
+# Disabled: COA requires a capable model for reliable tool-calling and structured output.
+# The default model is set in setup.ini [system] model= and is validated against
+# the live catalog `coa` flag. Per-agent overrides are available via the Dashboard.
+# section "Step 5b — AI Model Selection"
+# ...
+ok "Default model: ${INI_SYSTEM_MODEL} (from setup.ini)"
+
+echo ""
+
+# ─── Step 6: Initialize Decoupled SQLite Databases ──────────────
+section "Step 6 — SQLite Databases"
+
+# Define Database Paths
+MESSAGES_DB="/var/lib/versa-agi/messages.db"
+TASKS_DB="/var/lib/versa-agi/coa/tasks.db"
+CYCLES_DB="/var/lib/versa-agi/coa/cycles.db"
+ORGANIZATION_DB="/var/lib/versa-agi/organization.db"
+
+# Preflight: schema init needs a write lock. agitop keeps these DBs open —
+# fail early with an actionable message instead of sqlite's opaque
+# "database is locked (5)".
+require_versa_sqlite_writable() {
+  local db err holders pid cmd locked=() agitop_running=false
+
+  if pgrep -af '[a]gitop(\.app|/app\.py)|python3 -m agitop' >/dev/null 2>&1; then
+    agitop_running=true
+  fi
+
+  # agitop holds the fleet DBs open for the whole session — schema refresh
+  # cannot proceed safely while it is running.
+  if [ "${agitop_running}" = true ]; then
+    error $'Cannot refresh SQLite schema while agitop is running — it holds these databases open.\n\nQuit agitop, then re-run:\n  sudo ./setup.sh --update'
+  fi
+
+  for db in "$@"; do
+    [ -e "${db}" ] || continue
+    # EXCLUSIVE matches DDL (CREATE VIEW / ALTER) better than IMMEDIATE.
+    err="$(sqlite3 "${db}" "PRAGMA busy_timeout=0; BEGIN EXCLUSIVE; ROLLBACK;" 2>&1)" && continue
+    if ! printf '%s' "${err}" | grep -qiE 'locked|busy'; then
+      continue  # other sqlite issues are handled by the init scripts
+    fi
+    locked+=("${db}")
+  done
+  [ "${#locked[@]}" -eq 0 ] && return 0
+
+  echo ""
+  local error_msg="Cannot refresh SQLite schema — database locked:"
+  for db in "${locked[@]}"; do
+    error_msg+=$'\n'"  · ${db}"
+    holders=""
+    if command -v lsof >/dev/null 2>&1; then
+      while read -r pid; do
+        [ -n "${pid}" ] || continue
+        cmd="$(ps -p "${pid}" -o args= 2>/dev/null | head -c 140 || true)"
+        holders+="      pid ${pid}: ${cmd:-unknown}"$'\n'
+      done < <(lsof -t "${db}" 2>/dev/null || true)
+    fi
+    if [ -n "${holders}" ]; then
+      error_msg+=$'\n'"${holders%$'\n'}"
+    fi
+  done
+  error_msg+=$'\n\n'"Stop the process holding the DB open (see pids above), then re-run setup."
+  error "${error_msg}"
+}
+
+require_versa_sqlite_writable \
+  "${AGENTS_DB}" \
+  "${MESSAGES_DB}" \
+  "${TASKS_DB}" \
+  "${CYCLES_DB}" \
+  "${ORGANIZATION_DB}"
+
+# Create Database Directories
+mkdir -p "/var/lib/versa-agi/coa"
+chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa"
+chmod 750 "/var/lib/versa-agi/coa"
+# Utility Models config/staging — group agi_agents (fleet-wide; runner elevates to
+# watchdog). Re-asserted authoritatively in apply_system_permissions (FS manifest).
+mkdir -p "/var/lib/versa-agi/utility-models/staging"
+chown "${WATCHDOG_USER}:agi_agents" "/var/lib/versa-agi/utility-models"
+chown "${WATCHDOG_USER}:agi_agents" "/var/lib/versa-agi/utility-models/staging"
+chmod 750 "/var/lib/versa-agi/utility-models"
+chmod 2770 "/var/lib/versa-agi/utility-models/staging"
+
+# -- 6a. agents.db (Global Registry) --
+AGENTS_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_agents_db.sh"
+if [ -f "${AGENTS_INIT}" ]; then
+  chmod +x "${AGENTS_INIT}"
+  bash "${AGENTS_INIT}" "${AGENTS_DB}"
+  chown "${WATCHDOG_USER}:${COA_USER}" "${AGENTS_DB}"
+  chmod 640 "${AGENTS_DB}"
+
+  # Seed protected agents (harness defaults: graph 400, tool out 5000, resume on/25)
+  sqlite3 "${AGENTS_DB}" \
+    "INSERT OR IGNORE INTO agents (
+       name, os_user, workspace, role, status, status_message, timeout_minutes, runaway_threshold,
+       max_session_turns, tool_output_token_budget, resume_enabled, resume_max_messages,
+       inactive, protected, requested_by)
+     VALUES
+       ('coa', '${COA_USER}', '${DEPLOYED_COA_ENV}', 'Chief Orchestrator Agent',
+        'invalid_config', 'Assign a COA model via first-login setup',
+        ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 400, 5000, 1, 25, 0, 1, 'setup'),
+       ('watchdog', '${WATCHDOG_USER}', '${WATCHDOG_HOME}', 'System Watchdog',
+        NULL, NULL,
+        ${INI_AGENT_TIMEOUT}, ${INI_RUNAWAY_THRESHOLD}, 400, 5000, 1, 25, 0, 1, 'setup');"
+  ok "agents.db initialized at ${AGENTS_DB} (watchdog:${COA_USER} 640)"
+else
+  error "agents.db init script not found at ${AGENTS_INIT}"
+fi
+
+# -- 6b. messages.db (Watchdog Communications) --
+MESSAGES_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_messages_db.sh"
+if [ -f "${MESSAGES_INIT}" ]; then
+  chmod +x "${MESSAGES_INIT}"
+  bash "${MESSAGES_INIT}" "${MESSAGES_DB}"
+  chown "${WATCHDOG_USER}:${COA_USER}" "${MESSAGES_DB}"
+  chmod 640 "${MESSAGES_DB}"
+  ok "messages.db initialized at ${MESSAGES_DB} (watchdog:${COA_USER} 640)"
+else
+  error "messages.db init script not found at ${MESSAGES_INIT}"
+fi
+
+# -- 6c. tasks.db (Cognitive Tracker) --
+TASKS_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_tasks_db.sh"
+if [ -f "${TASKS_INIT}" ]; then
+  chmod +x "${TASKS_INIT}"
+  bash "${TASKS_INIT}" "${TASKS_DB}"
+  # COA and all Sub-agents read/write here.
+  chown "${WATCHDOG_USER}:${COA_USER}" "${TASKS_DB}"
+  chmod 640 "${TASKS_DB}"
+  ok "tasks.db initialized at ${TASKS_DB} (${WATCHDOG_USER}:${COA_USER} 640)"
+else
+  error "tasks.db init script not found at ${TASKS_INIT}"
+fi
+
+# -- 6d. cycles.db (Agent Telemetry) --
+CYCLES_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_cycles_db.sh"
+if [ -f "${CYCLES_INIT}" ]; then
+  chmod +x "${CYCLES_INIT}"
+  bash "${CYCLES_INIT}" "${CYCLES_DB}"
+  chown "${WATCHDOG_USER}:${COA_USER}" "${CYCLES_DB}"
+  chmod 640 "${CYCLES_DB}"
+  ok "cycles.db initialized at ${CYCLES_DB} (${WATCHDOG_USER}:${COA_USER} 640)"
+else
+  error "cycles.db init script not found at ${CYCLES_INIT}"
+fi
+
+# -- 6e. organization.db (Wave Integration — shared by COA + the Accountant agent) --
+# Single-file organization-domain DB (SQLite FKs cannot span files). Idempotent
+# init runs on both install and update; STRICT tables + WAL + FK-enforced schema.
+ORGANIZATION_INIT="${DEPLOYED_CORE_INFRA}/scripts/init_organization_db.sh"
+if [ -f "${ORGANIZATION_INIT}" ]; then
+  chmod +x "${ORGANIZATION_INIT}"
+  bash "${ORGANIZATION_INIT}" "${ORGANIZATION_DB}"
+  # ── organization.db column migrations (idempotent — errors suppressed) ──
+  # Idempotent — ALTER TABLE errors silently if column already exists.
+  sqlite3 "${ORGANIZATION_DB}" "ALTER TABLE credentials ADD COLUMN name TEXT NOT NULL DEFAULT '';" 2>/dev/null && \
+    ok "credentials.name column added" || \
+    info "credentials.name column already exists"
+  # Written by watchdog only (through agictl), like the other databases.
+  chown "${WATCHDOG_USER}:${COA_USER}" "${ORGANIZATION_DB}"
+  chmod 640 "${ORGANIZATION_DB}"
+  # WAL sidecars, if present after init, inherit the same owner/mode.
+  for _sfx in -wal -shm; do
+    [ -f "${ORGANIZATION_DB}${_sfx}" ] && \
+      chown "${WATCHDOG_USER}:${COA_USER}" "${ORGANIZATION_DB}${_sfx}" && \
+      chmod 640 "${ORGANIZATION_DB}${_sfx}" || true
+  done
+  ok "organization.db initialized at ${ORGANIZATION_DB} (${WATCHDOG_USER}:${COA_USER} 640)"
+else
+  error "organization.db init script not found at ${ORGANIZATION_INIT}"
+fi
+
+# ─── Step 6c: Generate paths.env ─────────────────────
+# Catalog lists (VERSA_CLOUD_MODELS / VERSA_COA_APPROVED_MODELS) are owned by
+# `agictl model sync` at the convergence point. This rewrite used to stamp
+# both empty on every run — including --dry-run, which then skipped sync —
+# so agitop's COA Processing Model Select had zero options (versa-agi-01).
+info "Generating paths.env..."
+
+PATHS_ENV="/etc/versa-agi/paths.env"
+mkdir -p "$(dirname "${PATHS_ENV}")"
+if [ "${INI_TOPOLOGY}" = "client" ] && [ -n "${INI_REMOTE_INFERENCE_URL}" ]; then
+  # Extract the port from the remote URL (the SSH tunnel maps exactly this port to localhost)
+  _TUNNEL_PORT=$(echo "${INI_REMOTE_INFERENCE_URL}" | grep -oP ':\K[0-9]+$' || echo "11434")
+  VERSA_INFERENCE_URL_VAL="http://localhost:${_TUNNEL_PORT}"
+else
+  VERSA_INFERENCE_URL_VAL="http://localhost:${INI_PROXY_PORT}"
+fi
+
+# ── Pre-compute values before writing paths.env ──
+
+# Intel SYCL single-model constraint: only the active model is selectable
+_PATHS_LOCAL_MODELS="${INI_LOCAL_MODELS}"
+_PATHS_GPU_BACKEND="${INI_GPU_BACKEND}"
+if [ "${INI_TOPOLOGY}" = "client" ]; then
+  _PATHS_GPU_BACKEND="remote"
+fi
+if [ "${_PATHS_GPU_BACKEND}" = "intel" ] || [ "${_PATHS_GPU_BACKEND}" = "remote" ]; then
+  _SYCL_ACTIVE="$(ini_get local_ai sycl_active_model '')"
+  if [ -n "${_SYCL_ACTIVE}" ]; then
+    _PATHS_LOCAL_MODELS="${_SYCL_ACTIVE}"
+  fi
+fi
+
+# Aggregate third-party models from all enabled providers
+_PATHS_PROXY_ENABLED="$(ini_get third_party enabled false)"
+_PATHS_PROXY_MODELS=""
+_PATHS_PROVIDERS="$(ini_get third_party providers '')"
+if [ -n "${_PATHS_PROVIDERS}" ]; then
+  IFS=',' read -ra _PP_LIST <<< "${_PATHS_PROVIDERS}"
+  for _pp in "${_PP_LIST[@]}"; do
+    _pp=$(echo "${_pp}" | xargs)
+    _pp_enabled="$(ini_get third_party "${_pp}_enabled" false)"
+    _pp_models="$(ini_get third_party "${_pp}_models" '')"
+    if [ "${_pp_enabled}" = "true" ] && [ -n "${_pp_models}" ]; then
+      [ -n "${_PATHS_PROXY_MODELS}" ] && _PATHS_PROXY_MODELS="${_PATHS_PROXY_MODELS},"
+      _PATHS_PROXY_MODELS="${_PATHS_PROXY_MODELS}${_pp_models}"
+    fi
+  done
+fi
+
+# Cloud / COA lists — carry forward if present; `agictl model sync` refreshes.
+# Never invent membership. Never wipe a live list before sync (or on dry-run).
+_PATHS_CLOUD_MODELS=""
+_PATHS_COA_APPROVED=""
+if [ -f "${PATHS_ENV}" ]; then
+  _PATHS_CLOUD_MODELS="$(grep '^VERSA_CLOUD_MODELS=' "${PATHS_ENV}" 2>/dev/null | head -1 | sed -e 's/^[^=]*=//' -e 's/^"//' -e 's/"$//' || true)"
+  _PATHS_COA_APPROVED="$(grep '^VERSA_COA_APPROVED_MODELS=' "${PATHS_ENV}" 2>/dev/null | head -1 | sed -e 's/^[^=]*=//' -e 's/^"//' -e 's/"$//' || true)"
+fi
+
+if [ "${DRY_RUN}" = true ]; then
+  info "[DRY-RUN] Would regenerate paths.env (catalog lists preserved until model sync)"
+else
+  cat > "${PATHS_ENV}" <<PATHSEOF
+# Versa AGi — INI-derived system paths
+# Generated by setup.sh — do not edit manually.
+# Source this file in scripts instead of hardcoding paths.
+VERSA_WATCHDOG_USER="${WATCHDOG_USER}"
+VERSA_COA_USER="${COA_USER}"
+VERSA_CORE_INFRA="${DEPLOYED_CORE_INFRA}"
+VERSA_PRODUCT_VERSION="${PRODUCT_VERSION}"
+VERSA_COA_ENV="${DEPLOYED_COA_ENV}"
+VERSA_AGENTS_DB="${AGENTS_DB}"
+VERSA_DEFAULT_MODEL="${INI_SYSTEM_MODEL}"
+VERSA_LOGGING_ENABLED="$(ini_get logging enabled true)"
+VERSA_EXECUTION_MODE="${INI_EXECUTION_MODE}"
+VERSA_CLOUD_MODELS="${_PATHS_CLOUD_MODELS}"
+VERSA_COA_APPROVED_MODELS="${_PATHS_COA_APPROVED}"
+VERSA_LOCAL_AI_ENABLED="${INI_LOCAL_AI_ENABLED}"
+VERSA_GPU_BACKEND="${_PATHS_GPU_BACKEND}"
+VERSA_LOCAL_MODELS="${_PATHS_LOCAL_MODELS}"
+VERSA_INFERENCE_URL="${VERSA_INFERENCE_URL_VAL}"
+VERSA_THIRD_PARTY_ENABLED="${_PATHS_PROXY_ENABLED}"
+VERSA_THIRD_PARTY_MODELS="${_PATHS_PROXY_MODELS}"
+PATHSEOF
+  chown "${WATCHDOG_USER}:${COA_USER}" "${PATHS_ENV}"
+  chmod 644 "${PATHS_ENV}"
+  ok "paths.env generated at ${PATHS_ENV}"
+fi
+
+echo ""
+
+# ─── Step 7: Initialize Git Repositories ────────────
+if [ "${UPDATE_MODE}" = false ]; then
+section "Step 7 — Git Repositories"
+
+init_git_repo() {
+  local repo_path=$1
+  local repo_name=$2
+  local owner_user=$3
+  local GIT="git -c safe.directory=${repo_path}"
+
+  if [ -d "${repo_path}/.git" ]; then
+    ok "Git repo already initialized: ${repo_name}"
+  else
+    ${GIT} -C "${repo_path}" init -b main
+    ${GIT} -C "${repo_path}" config user.email "versa-agi@local"
+    ${GIT} -C "${repo_path}" config user.name "${owner_user}"
+    ${GIT} -C "${repo_path}" add .
+    ${GIT} -C "${repo_path}" commit -m "Initial commit: ${repo_name} scaffold"
+    chown -R "${owner_user}:${owner_user}" "${repo_path}/.git"
+    ok "Git repo initialized: ${repo_name} (branch: main)"
+  fi
+}
+
+init_git_repo "${DEPLOYED_CORE_INFRA}" "Core Infrastructure" "${WATCHDOG_USER}"
+init_git_repo "${DEPLOYED_COA_ENV}" "COA Environment" "${COA_USER}"
+
+info "Note: To backup your local agents, configure a remote origin tracking URL later:"
+echo -e "  ${DIM:-}cd ${DEPLOYED_CORE_INFRA} && git remote add origin <your-repo-url>${RESET:-}"
+
+echo ""
+fi  # end UPDATE_MODE=false guard (Step 7)
+
+# ─── Step 8: Make Scripts Executable & Install Agent CLI ─
+section "Step 8 — Permissions & CLI"
+
+chmod +x "${DEPLOYED_CORE_INFRA}/lifeline.sh"
+chmod +x "${DEPLOYED_CORE_INFRA}/watchdog.sh"
+chmod +x "${DEPLOYED_CORE_INFRA}/scripts/"*.sh 2>/dev/null || true
+ok "Scripts marked executable"
+
+# ─── ffmpeg — audio container encoding for Utility Models ───
+# Streaming audio output (OpenAI/OpenRouter) only supports raw PCM16; ffmpeg
+# transcodes the WAV we build from it into ogg/mp3/flac when a UM requests those
+# containers. WAV always works without ffmpeg, so this is best-effort, not fatal.
+if command -v ffmpeg &>/dev/null; then
+  ok "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1)"
+elif command -v apt-get &>/dev/null; then
+  info "Installing ffmpeg (audio container encoding)..."
+  if apt-get install -y -qq ffmpeg 2>/dev/null && command -v ffmpeg &>/dev/null; then
+    ok "ffmpeg installed"
+  else
+    warn "ffmpeg install failed — audio Utility Models will fall back to WAV output"
+  fi
+else
+  warn "ffmpeg not found and apt-get unavailable — audio Utility Models will output WAV only"
+fi
+
+# ─── Provision Global Python Virtual Environment (Harness) ───
+LIB_DIR="/usr/local/lib/versa-agi"
+mkdir -p "${LIB_DIR}"
+VENV_DIR="${LIB_DIR}/venv"
+if [ ! -d "${VENV_DIR}" ]; then
+  info "Provisioning global Python virtual environment for LangGraph harness..."
+  python3 -m venv "${VENV_DIR}"
+fi
+info "Installing harness dependencies..."
+# At the versions Versa AGi ships (config/shipped_tools.ini [python.harness],
+# state_host_services.md §1.7). A machine where a pinned version cannot be
+# installed gets the packages without the pins, as before.
+# shellcheck source=core-infra/scripts/shipped_tools.sh
+source "${SRC_CORE_INFRA}/scripts/shipped_tools.sh"
+_PIN_RC=0
+pip_install_pinned "${SRC_CORE_INFRA}/config/shipped_tools.ini" python.harness \
+  "${VENV_DIR}/bin/pip" install -q -r "${DEPLOYED_CORE_INFRA}/harness/requirements.txt" || _PIN_RC=$?
+case "${_PIN_RC}" in
+  0) ok "Harness packages at the shipped versions" ;;
+  1) warn "Harness packages could not be set to the shipped versions on this machine — installed without the pins" ;;
+  *) "${VENV_DIR}/bin/pip" install -q -r "${DEPLOYED_CORE_INFRA}/harness/requirements.txt" ;;
+esac
+chown -R root:root "${VENV_DIR}"
+find "${VENV_DIR}" -type d -exec chmod 755 {} +
+find "${VENV_DIR}" -type f -exec chmod 644 {} +
+find "${VENV_DIR}/bin" -type f -exec chmod 755 {} +
+# Fix Playwright driver binary — pip bundles a node executable that needs +x
+chmod +x "${VENV_DIR}"/lib/python3.*/site-packages/playwright/driver/node 2>/dev/null || true
+chmod +x "${VENV_DIR}"/lib/python3.*/site-packages/playwright/driver/package/bin/* 2>/dev/null || true
+
+info "Deploying harness code to global library..."
+rm -rf "${LIB_DIR}/harness"
+cp -r "${DEPLOYED_CORE_INFRA}/harness" "${LIB_DIR}/"
+chown -R root:root "${LIB_DIR}/harness"
+find "${LIB_DIR}/harness" -type d -exec chmod 755 {} +
+find "${LIB_DIR}/harness" -type f -exec chmod 644 {} +
+
+# Shared modules the harness imports as top-level (one level above harness/).
+# These live in the core-infra root and must sit next to harness/ so
+# `import model_catalog` / `import provider_registry` / `import privilege_guard` resolve under
+# PYTHONPATH=${LIB_DIR} (the harness runtime layout).
+for _shared_py in "${_VERSA_LIB_SHARED_PY[@]}"; do
+  if [ -f "${DEPLOYED_CORE_INFRA}/${_shared_py}" ]; then
+    cp "${DEPLOYED_CORE_INFRA}/${_shared_py}" "${LIB_DIR}/${_shared_py}"
+    chown root:root "${LIB_DIR}/${_shared_py}"
+    chmod 644 "${LIB_DIR}/${_shared_py}"
+  fi
+done
+# Live Call voice card (harness/live_call.py reads ../config/live_call_voice.md as the COA user).
+if [ -f "${DEPLOYED_CORE_INFRA}/config/live_call_voice.md" ]; then
+  mkdir -p "${LIB_DIR}/config"
+  cp "${DEPLOYED_CORE_INFRA}/config/live_call_voice.md" "${LIB_DIR}/config/live_call_voice.md"
+  chown -R root:root "${LIB_DIR}/config"
+  chmod 755 "${LIB_DIR}/config"
+  chmod 644 "${LIB_DIR}/config/live_call_voice.md"
+fi
+if [ -d "${DEPLOYED_CORE_INFRA}/model_drivers" ]; then
+  rm -rf "${LIB_DIR}/model_drivers"
+  cp -r "${DEPLOYED_CORE_INFRA}/model_drivers" "${LIB_DIR}/"
+  chown -R root:root "${LIB_DIR}/model_drivers"
+  find "${LIB_DIR}/model_drivers" -type d -exec chmod 755 {} +
+  find "${LIB_DIR}/model_drivers" -type f -exec chmod 644 {} +
+fi
+
+ok "Python harness environment deployed globally"
+
+# agictl is installed globally in Step 8d (Security Hardening)
+AGICTL_PATH="${DEPLOYED_CORE_INFRA}/bin/agictl"
+if [ -f "${AGICTL_PATH}" ]; then
+  chmod +x "${AGICTL_PATH}"
+  ok "agictl marked executable (global install in Step 8d)"
+else
+  warn "agictl not found at ${AGICTL_PATH}"
+fi
+
+echo ""
+
+
+
+# .agent/ ownership is per-path in apply_system_permissions (System Design §IX).
+# Do not chown -R coa:coa here — that strips agi_agents until the final pass.
+
+echo ""
+
+# ─── Step 8d: Security Hardening ──────────────────────
+# Create /etc/versa-agi/ and relocate sensitive files outside agent workspace
+section "Step 8d — Security Hardening"
+
+SECURITY_DIR="/etc/versa-agi"
+POISE_DIR="${SECURITY_DIR}/poise"
+
+# Create security directory structure (owned by watchdog)
+mkdir -p "${SECURITY_DIR}" "${POISE_DIR}" "${SECURITY_DIR}/vault"
+chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${SECURITY_DIR}" "${POISE_DIR}"
+chown "${WATCHDOG_USER}:${COA_USER}" "${SECURITY_DIR}/vault"
+chmod 751 "${SECURITY_DIR}"
+chmod 750 "${POISE_DIR}" "${SECURITY_DIR}/vault"
+ok "Created ${SECURITY_DIR}/ directory structure"
+
+# Deploy poise to /etc/versa-agi/poise/coa.md
+POISE_SOURCE="${DEPLOYED_CORE_INFRA}/config/coa_poise.md"
+POISE_DEST="${POISE_DIR}/coa.md"
+if [ -f "${POISE_SOURCE}" ]; then
+  cp "${POISE_SOURCE}" "${POISE_DEST}"
+  APPLY_ROLE="${DEPLOYED_CORE_INFRA}/scripts/apply_coa_install_role.py"
+  if [ -f "${APPLY_ROLE}" ]; then
+    python3 "${APPLY_ROLE}" "${POISE_DEST}" "${INI_INSTALL_ROLE:-normal}" \
+      || error "COA poise overlay failed (install_role=${INI_INSTALL_ROLE:-normal})"
+    if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+      ok "COA poise: Sentinel mode overlay applied"
+    fi
+  elif [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+    error "apply_coa_install_role.py missing — cannot deploy Sentinel poise"
+  fi
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${POISE_DEST}"
+  chmod 640 "${POISE_DEST}"
+
+  # ── Inject Primary User identity into poise ──
+  # Resolve sponsor (Primary User) name and UID from VersaVoice API
+  # (token already validated in Step 4 / update path)
+  SPONSOR_DATA=""
+  if [ -n "${VV_TOKEN:-}" ]; then
+    SPONSOR_DATA=$(curl -sf -H "Authorization: Bearer ${VV_TOKEN}" \
+      "${VV_API_BASE}/account" 2>/dev/null || true)
+  fi
+
+  if [ -n "${SPONSOR_DATA}" ]; then
+    SPONSOR_NAME=$(echo "${SPONSOR_DATA}" | jq -r '.displayName // empty' 2>/dev/null)
+    SPONSOR_UID=$(echo "${SPONSOR_DATA}" | jq -r '.uid // empty' 2>/dev/null)
+
+    if [ -n "${SPONSOR_NAME}" ] && [ -n "${SPONSOR_UID}" ]; then
+      # Replace placeholders in the deployed poise file
+      sed -i "s/{Firstname Lastname}/${SPONSOR_NAME}/g" "${POISE_DEST}"
+      sed -i "s/{vv_id}/${SPONSOR_UID}/g" "${POISE_DEST}"
+      ok "Poise identity injected: ${SPONSOR_NAME} (${SPONSOR_UID})"
+
+      # Persist sponsor identity to system_config.json for future patch use
+      if [ -f "${SYSCONFIG_FOR_TOKEN}" ]; then
+        jq --arg name "${SPONSOR_NAME}" --arg uid "${SPONSOR_UID}" \
+          '.primary_user.display_name = $name | .primary_user.uid = $uid' \
+          "${SYSCONFIG_FOR_TOKEN}" > "${SYSCONFIG_FOR_TOKEN}.tmp" && \
+          mv "${SYSCONFIG_FOR_TOKEN}.tmp" "${SYSCONFIG_FOR_TOKEN}"
+        chown "${COA_USER}:${COA_USER}" "${SYSCONFIG_FOR_TOKEN}"
+        chmod 640 "${SYSCONFIG_FOR_TOKEN}"
+      fi
+    else
+      warn "Could not parse sponsor identity from API response — using discoverable values"
+      sed -i "s/{Firstname Lastname}/discoverable/g" "${POISE_DEST}"
+      sed -i "s/{vv_id}/discoverable/g" "${POISE_DEST}"
+    fi
+  else
+    warn "Could not resolve Primary User identity — using discoverable values"
+    sed -i "s/{Firstname Lastname}/discoverable/g" "${POISE_DEST}"
+    sed -i "s/{vv_id}/discoverable/g" "${POISE_DEST}"
+  fi
+
+  ok "Poise deployed → ${POISE_DEST} (watchdog:watchdog 640)"
+fi
+
+# Deploy task protocol to /etc/versa-agi/poise/task_protocol.md
+TASK_PROTOCOL_SOURCE="${DEPLOYED_CORE_INFRA}/config/task_protocol.md"
+TASK_PROTOCOL_DEST="${POISE_DIR}/task_protocol.md"
+if [ -f "${TASK_PROTOCOL_SOURCE}" ]; then
+  cp "${TASK_PROTOCOL_SOURCE}" "${TASK_PROTOCOL_DEST}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${TASK_PROTOCOL_DEST}"
+  chmod 640 "${TASK_PROTOCOL_DEST}"
+  ok "Task protocol deployed → ${TASK_PROTOCOL_DEST} (watchdog:watchdog 640)"
+fi
+
+# Deploy IDE session template (inlined into versa-agi_ide.md — not a skill)
+IDE_SESSION_SOURCE="${DEPLOYED_CORE_INFRA}/config/ide_session.md"
+IDE_SESSION_DEST="${POISE_DIR}/ide_session.md"
+if [ -f "${IDE_SESSION_SOURCE}" ]; then
+  cp "${IDE_SESSION_SOURCE}" "${IDE_SESSION_DEST}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${IDE_SESSION_DEST}"
+  chmod 640 "${IDE_SESSION_DEST}"
+  ok "IDE session template deployed → ${IDE_SESSION_DEST} (watchdog:watchdog 640)"
+fi
+
+# IDE door template — live /home/coa/coa-env/AGENTS.md exists only while mode is on.
+# deploy_repo rsyncs src/coa-env (includes AGENTS.md); strip or restore from status.
+IDE_AGENTS_SRC="${SCRIPT_DIR}/coa-env/AGENTS.md"
+IDE_AGENTS_TEMPLATE="${POISE_DIR}/AGENTS.md"
+if [ -f "${IDE_AGENTS_SRC}" ]; then
+  cp "${IDE_AGENTS_SRC}" "${IDE_AGENTS_TEMPLATE}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${IDE_AGENTS_TEMPLATE}"
+  chmod 640 "${IDE_AGENTS_TEMPLATE}"
+  mkdir -p "${DEPLOYED_CORE_INFRA}/config"
+  cp "${IDE_AGENTS_SRC}" "${DEPLOYED_CORE_INFRA}/config/AGENTS.md"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${DEPLOYED_CORE_INFRA}/config/AGENTS.md"
+  chmod 644 "${DEPLOYED_CORE_INFRA}/config/AGENTS.md"
+  ok "IDE door template deployed → ${IDE_AGENTS_TEMPLATE}"
+fi
+_IDE_LIVE_DOOR="${DEPLOYED_COA_ENV}/AGENTS.md"
+_IDE_ON=false
+if [ -f "${AGENTS_DB}" ]; then
+  [ "$(sqlite3 "${AGENTS_DB}" "SELECT COALESCE(status,'') FROM agents WHERE name='coa';" 2>/dev/null || true)" = "ide" ] && _IDE_ON=true
+fi
+if [ "${DRY_RUN}" = true ]; then
+  if [ "${_IDE_ON}" = true ]; then
+    info "[DRY-RUN] Would keep IDE door (status=ide)"
+  else
+    info "[DRY-RUN] Would remove IDE door (status not ide)"
+  fi
+elif [ "${_IDE_ON}" = true ] && [ -f "${IDE_AGENTS_TEMPLATE}" ]; then
+  cp -f "${IDE_AGENTS_TEMPLATE}" "${_IDE_LIVE_DOOR}"
+  chown "${COA_USER}:${COA_USER}" "${_IDE_LIVE_DOOR}" 2>/dev/null || true
+  chmod 644 "${_IDE_LIVE_DOOR}"
+  ok "IDE door present (mode is on)"
+else
+  rm -f "${_IDE_LIVE_DOOR}" /home/coa/AGENTS.md
+  ok "IDE door removed (mode is off)"
+fi
+
+# Deploy philosophical anchor template to /etc/versa-agi/poise/anchor_full.md
+ANCHOR_SOURCE="${DEPLOYED_CORE_INFRA}/config/anchor_full.md"
+ANCHOR_DEST="${POISE_DIR}/anchor_full.md"
+if [ -f "${ANCHOR_SOURCE}" ]; then
+  cp "${ANCHOR_SOURCE}" "${ANCHOR_DEST}"
+  # Substitute identity placeholders using sponsor data already resolved above
+  if [ -n "${SPONSOR_NAME:-}" ] && [ -n "${SPONSOR_UID:-}" ]; then
+    sed -i "s/{primary_user_name}/${SPONSOR_NAME}/g" "${ANCHOR_DEST}"
+    sed -i "s/{primary_user_id}/${SPONSOR_UID}/g" "${ANCHOR_DEST}"
+  else
+    sed -i "s/{primary_user_name}/discoverable/g" "${ANCHOR_DEST}"
+    sed -i "s/{primary_user_id}/discoverable/g" "${ANCHOR_DEST}"
+  fi
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${ANCHOR_DEST}"
+  chmod 640 "${ANCHOR_DEST}"
+  ok "Anchor template deployed → ${ANCHOR_DEST} (watchdog:watchdog 640)"
+fi
+
+# ─── Sub-Agent & Watchdog Poise Deployment (single location) ──
+# scripts/sync_poise.py owns: roles registry weave (agent_poise.md skeleton +
+# role fragments) with stale-entry pruning, the watchdog poise, and the
+# canonical poise refresh for every non-removed sub-agent. Runs on fresh
+# install AND --update — identical behavior; fail-fast on any missing source
+# or failed weave (never deploys a partial registry).
+SYNC_POISE="${DEPLOYED_CORE_INFRA}/scripts/sync_poise.py"
+[ -f "${SYNC_POISE}" ] || error "sync_poise.py missing: ${SYNC_POISE}"
+VERSA_CORE_INFRA="${DEPLOYED_CORE_INFRA}" \
+  VERSA_WATCHDOG_USER="${WATCHDOG_USER}" \
+  VERSA_COA_USER="${COA_USER}" \
+  python3 "${SYNC_POISE}" || error "Poise deployment failed — see sync_poise output above"
+ok "Poise deployment complete (roles registry + watchdog + active agents)"
+
+# Install agictl: wrapper → /usr/local/bin/, binary → /usr/local/lib/versa-agi/
+AGICTL_BINARY="${DEPLOYED_CORE_INFRA}/bin/agictl"
+AGICTL_WRAPPER="${DEPLOYED_CORE_INFRA}/bin/agictl-wrapper"
+LIB_DIR="/usr/local/lib/versa-agi"
+
+if [ -f "${AGICTL_BINARY}" ] && [ -f "${AGICTL_WRAPPER}" ]; then
+  # Install actual binary to lib dir (not directly accessible by agent)
+  mkdir -p "${LIB_DIR}"
+  rm -f "${LIB_DIR}/agictl"
+  cp "${AGICTL_BINARY}" "${LIB_DIR}/agictl"
+  chown root:root "${LIB_DIR}/agictl"
+  chmod 755 "${LIB_DIR}/agictl"
+
+  # Install wrapper to PATH (what the agent actually calls)
+  rm -f /usr/local/bin/agictl
+  cp "${AGICTL_WRAPPER}" /usr/local/bin/agictl
+  chown root:root /usr/local/bin/agictl
+  chmod 755 /usr/local/bin/agictl
+
+  ok "agictl: wrapper → /usr/local/bin/, binary → ${LIB_DIR}/ (root:root 755)"
+fi
+
+# Install vcoa — Primary User shortcut for agictl with COA context
+VCOA_SCRIPT="${DEPLOYED_CORE_INFRA}/bin/vcoa"
+if [ -f "${VCOA_SCRIPT}" ]; then
+  cp "${VCOA_SCRIPT}" /usr/local/bin/vcoa
+  chown root:root /usr/local/bin/vcoa
+  chmod 755 /usr/local/bin/vcoa
+  ok "vcoa → /usr/local/bin/ (COA context shortcut)"
+fi
+
+IDE_LAUNCHER="${DEPLOYED_CORE_INFRA}/bin/versa-agi-ide"
+if [ -f "${IDE_LAUNCHER}" ]; then
+  mkdir -p "${LIB_DIR}"
+  cp "${IDE_LAUNCHER}" "${LIB_DIR}/versa-agi-ide"
+  chown root:root "${LIB_DIR}/versa-agi-ide"
+  chmod 755 "${LIB_DIR}/versa-agi-ide"
+  ln -sf "${LIB_DIR}/versa-agi-ide" /usr/local/bin/versa-agi-ide
+  ok "versa-agi-ide → /usr/local/bin/ (delegates to agictl agent ide)"
+fi
+
+# SearXNG provider scripts: `agictl system set-key brave_search|exa` runs them
+# (as root) to apply a search API key without a full update
+# (state_web_access.md §1.2 rule 8). _common.sh works without ui_lib.sh.
+if [ -f "${SCRIPT_DIR}/providers/searxng.sh" ]; then
+  mkdir -p "${LIB_DIR}/providers"
+  for provider_script in _common.sh searxng.sh searxng_settings.sh; do
+    if [ -f "${SCRIPT_DIR}/providers/${provider_script}" ]; then
+      cp "${SCRIPT_DIR}/providers/${provider_script}" "${LIB_DIR}/providers/${provider_script}"
+      chown root:root "${LIB_DIR}/providers/${provider_script}"
+      chmod 755 "${LIB_DIR}/providers/${provider_script}"
+    fi
+  done
+  chown root:root "${LIB_DIR}/providers"
+  chmod 755 "${LIB_DIR}/providers"
+fi
+
+# Install administrative tooling: binary → /usr/local/lib/versa-agi/, symlink → /usr/local/bin/
+# update.sh is a shipped script (not a generated stub) so --update replaces it.
+for admin_script in uninstall.sh rekey.sh backup.sh restore.sh update.sh; do
+  if [ -f "${SCRIPT_DIR}/${admin_script}" ]; then
+    cp "${SCRIPT_DIR}/${admin_script}" "${LIB_DIR}/${admin_script}"
+    chown root:root "${LIB_DIR}/${admin_script}"
+    chmod 755 "${LIB_DIR}/${admin_script}"
+    
+    if [ "${admin_script}" != "restore.sh" ]; then
+      symlink_name="versa-agi-${admin_script%.sh}"
+      ln -sf "${LIB_DIR}/${admin_script}" "/usr/local/bin/${symlink_name}"
+    fi
+  fi
+done
+# Remove legacy versa-agi-patch symlink if present
+rm -f /usr/local/bin/versa-agi-patch 2>/dev/null || true
+ok "Administrative tooling → /usr/local/bin/ (uninstall, rekey, backup, update)"
+
+# Install agitop — Mission Control Dashboard (Python Textual)
+AGITOP_SCRIPT="${DEPLOYED_CORE_INFRA}/bin/agitop"
+AGITOP_VENV="/opt/versa-agi/venv"
+REQUIRED_PKGS="click rich textual psutil Pillow"
+if [ -f "${AGITOP_SCRIPT}" ]; then
+  # Create Python venv if it doesn't exist
+  if [ ! -d "${AGITOP_VENV}" ] || [ ! -x "${AGITOP_VENV}/bin/python3" ]; then
+    info "Creating Python venv for agitop..."
+    mkdir -p /opt/versa-agi
+    rm -rf "${AGITOP_VENV}"
+    python3 -m venv "${AGITOP_VENV}" 2>/dev/null || \
+      python3 -m venv --without-pip "${AGITOP_VENV}"
+  fi
+
+  # Bootstrap pip inside the venv if it's missing (common on minimal WSL/Ubuntu
+  # images where ensurepip is stripped from python3-venv).
+  if [ ! -x "${AGITOP_VENV}/bin/pip" ] && [ -x "${AGITOP_VENV}/bin/python3" ]; then
+    info "pip missing from venv — bootstrapping..."
+    "${AGITOP_VENV}/bin/python3" -m ensurepip --default-pip 2>/dev/null || {
+      info "ensurepip unavailable — downloading get-pip.py..."
+      curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/_get_pip.py && \
+        "${AGITOP_VENV}/bin/python3" /tmp/_get_pip.py --quiet 2>/dev/null && \
+        rm -f /tmp/_get_pip.py
+    }
+  fi
+
+  # Always verify required packages are importable — a prior run may have
+  # created the venv directory but failed silently on pip install (common
+  # on minimal WSL/Ubuntu images missing python3-pip or python3-venv).
+  PKGS_MISSING=false
+  for _pkg in ${REQUIRED_PKGS}; do
+    _import="${_pkg}"
+    [ "${_pkg}" = "Pillow" ] && _import="PIL"
+    if ! "${AGITOP_VENV}/bin/python3" -c "import ${_import}" 2>/dev/null; then
+      PKGS_MISSING=true
+      break
+    fi
+  done
+
+  # At the versions Versa AGi ships (config/shipped_tools.ini [python.agictl]).
+  # Run on every setup, so an older install is brought to them; nothing is
+  # fetched when the packages are already there at those versions.
+  [ "${PKGS_MISSING}" = true ] && info "Installing Python packages: ${REQUIRED_PKGS}..."
+  # Prefer the pip binary; fall back to python3 -m pip
+  _PIP="${AGITOP_VENV}/bin/pip"
+  [ -x "${_PIP}" ] || _PIP="${AGITOP_VENV}/bin/python3 -m pip"
+  # shellcheck source=core-infra/scripts/shipped_tools.sh
+  source "${SRC_CORE_INFRA}/scripts/shipped_tools.sh"
+  _PIN_RC=0
+  # shellcheck disable=SC2086
+  pip_install_pinned "${SRC_CORE_INFRA}/config/shipped_tools.ini" python.agictl \
+    ${_PIP} install --quiet ${REQUIRED_PKGS} || _PIN_RC=$?
+  case "${_PIN_RC}" in
+    0) : ;;
+    1) warn "agictl's Python packages could not be set to the shipped versions on this machine — installed without the pins" ;;
+    *)
+      warn "pip install failed — check that python3-venv and python3-pip are installed"
+      warn "Try: sudo apt-get install -y python3-venv python3-pip"
+      ;;
+  esac
+
+  # Final validation
+  if "${AGITOP_VENV}/bin/python3" -c "import textual, click, PIL" 2>/dev/null; then
+    ok "Python venv ready: ${AGITOP_VENV} (${REQUIRED_PKGS})"
+  else
+    warn "Python venv at ${AGITOP_VENV} is incomplete — agitop/agictl may fail"
+    warn "Expected imports: textual, click, PIL (Pillow)"
+  fi
+  # Install launcher to PATH
+  cp "${AGITOP_SCRIPT}" /usr/local/bin/agitop
+  chown root:root /usr/local/bin/agitop
+  chmod 755 /usr/local/bin/agitop
+  ok "agitop → /usr/local/bin/ (Mission Control Dashboard)"
+fi
+
+# Sudoers (state_agent_account_permissions.md §1). Each file is checked by
+# visudo before it replaces the one in use; a file that fails is left alone.
+write_sudoers() {
+  local _file="$1" _tmp
+  _tmp="$(mktemp)"
+  cat > "${_tmp}"
+  chmod 440 "${_tmp}"
+  if visudo -c -f "${_tmp}" >/dev/null 2>&1; then
+    chown root:root "${_tmp}"
+    mv "${_tmp}" "${_file}"
+    return 0
+  fi
+  rm -f "${_tmp}"
+  warn "Sudoers ${_file} failed visudo: left unchanged"
+  return 1
+}
+
+# The accounts watchdog starts cycles as: the agents, and nobody else. The
+# installing user is in agi_agents (shared folders) but not in this group, so
+# watchdog cannot run commands as that person.
+ensure_spawn_group() {
+  getent group agi_spawn &>/dev/null || groupadd agi_spawn
+  usermod -aG agi_spawn "${COA_USER}" 2>/dev/null || true
+  local _db="/var/lib/versa-agi/agents.db" _u
+  if [ -f "${_db}" ]; then
+    for _u in $(sqlite3 "${_db}" "SELECT os_user FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true); do
+      id "${_u}" &>/dev/null && usermod -aG agi_spawn "${_u}" 2>/dev/null || true
+    done
+  fi
+}
+ensure_spawn_group
+
+# The accounts that may enter every agent's home: COA (it governs the team),
+# watchdog (Lifeline and agictl work there) and the person who installed.
+# An agent's home is <agent>:agi_govern 770, so the agent is in as its owner
+# and the other agents are out. This runs before the link service is
+# restarted further down, so that service starts with the membership.
+ensure_govern_group() {
+  getent group agi_govern &>/dev/null || groupadd agi_govern
+  usermod -aG agi_govern "${COA_USER}" 2>/dev/null || true
+  usermod -aG agi_govern "${WATCHDOG_USER}" 2>/dev/null || true
+  if [ -n "${SUDO_USER:-}" ]; then
+    usermod -aG agi_govern "${SUDO_USER}" 2>/dev/null || true
+  fi
+}
+ensure_govern_group
+
+# No agent account belongs to watchdog's own group. That group opens
+# watchdog's home (the product's code), the poise folder and the config files
+# under /etc/versa-agi. An older install has the COA account in it; nothing
+# an agent's process loads needs it any more (every module is in
+# /usr/local/lib/versa-agi). Primary User, 2026-11-24.
+drop_agents_from_watchdog_group() {
+  getent group "${WATCHDOG_USER}" &>/dev/null || return 0
+  local _m
+  for _m in $(getent group "${WATCHDOG_USER}" | cut -d: -f4 | tr ',' ' '); do
+    case "${_m}" in
+      "${COA_USER}"|agi-*)
+        gpasswd -d "${_m}" "${WATCHDOG_USER}" >/dev/null 2>&1 && \
+          ok "Removed ${_m} from group ${WATCHDOG_USER} (agents do not enter watchdog's folders)"
+        ;;
+    esac
+  done
+}
+drop_agents_from_watchdog_group
+
+# Agents run agictl as watchdog, and nothing else. No SETENV: a caller cannot
+# pass variables of its own choosing (PYTHONPATH, BASH_ENV) or switch the
+# environment reset off. The wrapper's variables are named here and kept from
+# its environment; agictl takes the caller itself from SUDO_USER, which sudo
+# sets (caller_identity.py).
+SUDOERS_AGICTL="/etc/sudoers.d/versa_agi_agictl"
+write_sudoers "${SUDOERS_AGICTL}" <<EOF_SUDOERS && \
+  ok "Sudoers: %agi_agents can run agictl as ${WATCHDOG_USER} (NOPASSWD, named variables only)"
+Defaults!${LIB_DIR}/agictl env_keep += "AGICTL_AGENT_USER AGICTL_AGENT_DIR AGICTL_CONFIG VERSA_AGENT_NAME VERSA_CYCLE_ID VERSA_COA_AUTONOMOUS VERSA_CALL_BRIDGE VERSA_LISTENING VERSA_LISTEN_MINUTES"
+%agi_agents ALL=(${WATCHDOG_USER}) NOPASSWD: ${LIB_DIR}/agictl
+EOF_SUDOERS
+
+# Watchdog starts cycles and runs agent-side commands as the agents
+# (lifeline.sh, agictl execute). %agi_spawn holds the agents only. Its own
+# name is listed because agictl, running as watchdog, starts ssh with
+# `sudo -u watchdog` on a client instance; that grants nothing it lacks.
+SUDOERS_WATCHDOG="/etc/sudoers.d/versa_agi_watchdog"
+write_sudoers "${SUDOERS_WATCHDOG}" <<EOF_SUDOERS && \
+  ok "Sudoers: ${WATCHDOG_USER} can run commands as the agents (%agi_spawn, NOPASSWD)"
+${WATCHDOG_USER} ALL=(%agi_spawn, ${WATCHDOG_USER}) NOPASSWD: ALL
+EOF_SUDOERS
+
+# Watchdog runs agictl as root for a short list of commands
+# (caller_identity.ROOT_FOR_WATCHDOG): deploying skills, COA's sudo grant,
+# installing a package the owner approved, and `agictl model …` when a client
+# instance works its GPU host over SSH. agictl refuses anything else here.
+SUDOERS_WATCHDOG_ROOT="/etc/sudoers.d/versa_agi_watchdog_root"
+write_sudoers "${SUDOERS_WATCHDOG_ROOT}" <<EOF_SUDOERS && \
+  ok "Sudoers: ${WATCHDOG_USER} can run agictl as root (NOPASSWD, listed commands)"
+${WATCHDOG_USER} ALL=(root) NOPASSWD: /usr/local/bin/agictl, ${LIB_DIR}/agictl
+EOF_SUDOERS
+
+# Prompt, context and environment files that earlier versions wrote under
+# /tmp, readable by every account. Lifeline now writes them in each agent's
+# own data folder; an agent that does not run for a while would otherwise
+# keep its old prompt here. No cycle is running during setup.
+rm -f /tmp/versa_agi_*_system.txt /tmp/versa_agi_*_wake.txt /tmp/versa_agi_*_tasks.txt \
+      /tmp/versa_agi_*_convo.txt /tmp/versa_agi_*_games.txt /tmp/versa_agi_*_env.sh \
+      /tmp/versa_agi_*_routing.json /tmp/versa_agi_*_routing_attachments.txt 2>/dev/null || true
+
+# Packages are installed by `agictl pkg apply` as root, which checks the
+# approved list itself. The rule that let watchdog run apt-get with any
+# arguments is removed from installs that have it.
+rm -f /etc/sudoers.d/versa_agi_pkg_installer
+
+# COA Autonomous Mode — full sudo access for gifted/dedicated hardware
+# Read the *deployed* setup.ini. INI_FILE is the installer tree and stays
+# stock `autonomous=false`. Using that on --update deleted a landed
+# /etc/sudoers.d/versa_agi_coa_autonomous while reconcile kept
+# [coa] autonomous=true — COA then reports "grant did not land" (Sentinel 2026-09-09).
+_COA_AUTONOMOUS_INI="/etc/versa-agi/setup.ini"
+[ -f "${_COA_AUTONOMOUS_INI}" ] || _COA_AUTONOMOUS_INI="${INI_FILE}"
+COA_AUTONOMOUS="$(awk -F= '
+  /^\[coa\]/ { s=1; next }
+  /^\[/ { s=0 }
+  s && $1 ~ /^[[:space:]]*autonomous[[:space:]]*$/ {
+    v=$2; gsub(/[[:space:]]/, "", v); print v; exit
+  }
+' "${_COA_AUTONOMOUS_INI}" 2>/dev/null || true)"
+SUDOERS_COA_AUTONOMOUS="/etc/sudoers.d/versa_agi_coa_autonomous"
+if [ "${COA_AUTONOMOUS}" = "true" ]; then
+  _coa_sudoers_tmp="$(mktemp)"
+  echo "${COA_USER} ALL=(ALL) NOPASSWD: ALL" > "${_coa_sudoers_tmp}"
+  chmod 440 "${_coa_sudoers_tmp}"
+  if visudo -c -f "${_coa_sudoers_tmp}" >/dev/null; then
+    mv "${_coa_sudoers_tmp}" "${SUDOERS_COA_AUTONOMOUS}"
+    chmod 440 "${SUDOERS_COA_AUTONOMOUS}"
+    warn "COA AUTONOMOUS MODE: ${COA_USER} has full sudo access (gifted hardware mode)"
+  else
+    rm -f "${_coa_sudoers_tmp}"
+    warn "COA autonomous sudoers failed visudo — left ${SUDOERS_COA_AUTONOMOUS} unchanged"
+  fi
+else
+  # Remove autonomous sudoers if it exists and mode is disabled
+  if [ -f "${SUDOERS_COA_AUTONOMOUS}" ]; then
+    rm -f "${SUDOERS_COA_AUTONOMOUS}"
+    ok "COA autonomous mode disabled — removed ${SUDOERS_COA_AUTONOMOUS}"
+  fi
+fi
+
+# Move system_config.json to /etc/versa-agi/ (Task 2)
+SYSCONFIG_SOURCE="${DEPLOYED_CORE_INFRA}/config/system_config.json"
+SYSCONFIG_DEST="${SECURITY_DIR}/coa_config.json"
+if [ -f "${SYSCONFIG_SOURCE}" ]; then
+  # Preserve existing Sub-Account ID and Identity keys across sequential setup runs
+  if [ -f "${SYSCONFIG_DEST}" ]; then
+    EXISTING_VV=$(jq -c '.versavoice // empty' "${SYSCONFIG_DEST}" 2>/dev/null || echo "")
+    EXISTING_ID=$(jq -c '.identity // empty' "${SYSCONFIG_DEST}" 2>/dev/null || echo "")
+    
+    cp "${SYSCONFIG_SOURCE}" "${SYSCONFIG_DEST}.tmp"
+    # Best-effort merge of preserved keys. Use `if jq …; then mv; fi` (not
+    # `jq … && mv`) so a jq failure does not abort the script under `set -e` —
+    # a malformed value just means that key is not carried forward.
+    if [ -n "${EXISTING_VV}" ]; then
+      if jq --argjson vv "${EXISTING_VV}" '.versavoice = $vv' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2"; then
+        mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+      fi
+    fi
+    if [ -n "${EXISTING_ID}" ]; then
+      if jq --argjson id "${EXISTING_ID}" '.identity = $id' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2"; then
+        mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+      fi
+    fi
+    # Drop legacy Gemini CLI block (runtime is LangChain harness only).
+    if jq 'del(.gemini_cli)' "${SYSCONFIG_DEST}.tmp" > "${SYSCONFIG_DEST}.tmp2" 2>/dev/null; then
+      mv "${SYSCONFIG_DEST}.tmp2" "${SYSCONFIG_DEST}.tmp"
+    fi
+    mv "${SYSCONFIG_DEST}.tmp" "${SYSCONFIG_DEST}"
+  else
+    cp "${SYSCONFIG_SOURCE}" "${SYSCONFIG_DEST}"
+    if jq 'del(.gemini_cli)' "${SYSCONFIG_DEST}" > "${SYSCONFIG_DEST}.tmp" 2>/dev/null; then
+      mv "${SYSCONFIG_DEST}.tmp" "${SYSCONFIG_DEST}"
+    fi
+  fi
+  
+  chown "${WATCHDOG_USER}:${COA_USER}" "${SYSCONFIG_DEST}"
+  chmod 640 "${SYSCONFIG_DEST}"
+  ok "system_config deployed → ${SYSCONFIG_DEST}"
+fi
+
+# ─── Step 8b: VersaVoice Identity Resolution (Moved) ─
+section "Step 8b — Identity Resolution"
+
+# Normal COA: agiAgentKey=coa (same-email reuse is intended).
+# Sentinel: host-stable coa-s-<12 hex> so a second box does not bind the home identity.
+# Keep the hashlib line in lockstep with identity.derive_sentinel_agent_key.
+resolve_vv_agent_key() {
+  VV_AGENT_KEY="coa"
+  if [ "${INI_INSTALL_ROLE:-normal}" != "sentinel" ]; then
+    return 0
+  fi
+  local existing
+  existing="$(ini_get system vv_agent_key '')"
+  if echo "${existing}" | grep -Eq '^coa-s-[0-9a-f]{12}$'; then
+    VV_AGENT_KEY="${existing}"
+    return 0
+  fi
+  VV_AGENT_KEY="$(python3 -c '
+import hashlib, os, pathlib
+p = pathlib.Path("/etc/machine-id")
+try:
+    raw = p.read_text(encoding="utf-8").strip()
+except OSError:
+    raw = ""
+if not raw:
+    raw = os.urandom(16).hex()
+print("coa-s-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12])
+')"
+  local f
+  for f in "${INI_FILE:-}" "/etc/versa-agi/setup.ini"; do
+    [ -n "${f}" ] && [ -f "${f}" ] || continue
+    if grep -q "^vv_agent_key=" "${f}" 2>/dev/null; then
+      sed -i '/^\[system\]/,/^\[/{s/^vv_agent_key=.*/vv_agent_key='"${VV_AGENT_KEY}"'/}' "${f}"
+    else
+      sed -i '/^\[system\]/a vv_agent_key='"${VV_AGENT_KEY}" "${f}"
+    fi
+  done
+}
+
+resolve_vv_agent_key
+info "VersaVoice agent key: ${VV_AGENT_KEY} (install_role=${INI_INSTALL_ROLE:-normal})"
+
+if [ -n "${VV_TOKEN:-}" ]; then
+  info "Agent identity: ${INI_AGENT_FIRST_NAME} ${INI_AGENT_LAST_NAME} (${INI_AGENT_LANGUAGE})"
+
+  # --update: never register a replacement when the bound sub-account is gone
+  # (wrong token owner looks the same as a deleted account to the API).
+  IDENTITY_UPDATE_FLAG=""
+  if [ "${UPDATE_MODE}" = true ]; then IDENTITY_UPDATE_FLAG="--update"; fi
+
+  # Run identity resolution natively through the Python data gateway
+  if sudo -u "${WATCHDOG_USER}" \
+    AGICTL_CONFIG="/etc/versa-agi/${COA_USER}_config.json" \
+    /usr/local/bin/agictl identity provision "${COA_USER}" \
+    --token "${VV_TOKEN}" \
+    --first-name "${INI_AGENT_FIRST_NAME}" \
+    --last-name "${INI_AGENT_LAST_NAME}" \
+    --language "${INI_AGENT_LANGUAGE:-en}" \
+    --country "${INI_AGENT_COUNTRY:-}" \
+    --voice "${INI_AGENT_VOICE:-}" \
+    --install-email "${INSTALL_ACCEPTANCE_EMAIL:-}" \
+    --agent-key "${VV_AGENT_KEY}" \
+    ${IDENTITY_UPDATE_FLAG}; then
+    ok "VersaVoice identity resolved via agictl"
+  else
+    warn "VersaVoice identity not resolved — see the messages above"
+  fi
+else
+  warn "No VV_TOKEN found in setup.ini — agent identity provision skipped"
+fi
+
+# Agent metadata root: coa:coa 755 — agent's operational directory
+# workspace/ is separate at COA root with agi_agents group
+chown "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent"
+chmod 770 "${DEPLOYED_COA_ENV}/.agent"
+# Only shipped skills get individually locked below.
+
+# Inbox/outbox: coa:watchdog — coa (MCP) writes, watchdog (lifeline) reads for sync
+for item in inbox outbox; do
+  if [ -d "${DEPLOYED_COA_ENV}/.agent/${item}" ]; then
+    chown -R "${COA_USER}:${WATCHDOG_USER}" "${DEPLOYED_COA_ENV}/.agent/${item}"
+    chmod 750 "${DEPLOYED_COA_ENV}/.agent/${item}"
+  fi
+done
+
+# Utility artifacts: coa:agi_agents 2775 — the default Utility Model output dir.
+# Utility runs execute as watchdog (the agictl wrapper elevates the agent caller
+# so the watchdog-owned provider-key file is readable for key injection), so the
+# dir MUST be group-writable by agi_agents (watchdog's group) or the artifact
+# write fails with EACCES. setgid makes generated artifacts inherit the
+# agi_agents group so the owning agent (also in agi_agents) can read/manage them.
+UTILITY_DEST="${DEPLOYED_COA_ENV}/.agent/utility"
+mkdir -p "${UTILITY_DEST}"
+chown "${COA_USER}:agi_agents" "${UTILITY_DEST}"
+chmod 2775 "${UTILITY_DEST}"
+
+# Skills: deploy shipped system skills from core-infra, then lock read-only
+SKILLS_SOURCE="${DEPLOYED_CORE_INFRA}/skills"
+SKILLS_DEST="${DEPLOYED_COA_ENV}/.agent/skills"
+mkdir -p "${SKILLS_DEST}"
+chown "${COA_USER}:agi_agents" "${SKILLS_DEST}"
+chmod 775 "${SKILLS_DEST}"
+
+if [ -d "${SKILLS_SOURCE}" ]; then
+  for skill_file in "${SKILLS_SOURCE}"/*.md; do
+    [ -f "${skill_file}" ] || continue
+    # Versa Desktop is not released: its skill goes only to a machine that has the
+    # desktop installed (state_computer_use.md §1.0). A copy from an earlier
+    # version is taken away.
+    if [ "$(basename "${skill_file}")" = "computer_use.md" ] \
+       && [ ! -d "${VERSA_DESKTOP_DIR:-/opt/heterosphere}" ] && [ ! -d "${VERSA_DESKTOP_SOCKET_DIR:-/tmp/heterosphere}" ]; then
+      rm -f "${SKILLS_DEST}/computer_use.md"
+      continue
+    fi
+    cp -f "${skill_file}" "${SKILLS_DEST}/"
+    chown "${WATCHDOG_USER}:agi_agents" "${SKILLS_DEST}/$(basename "${skill_file}")"
+    chmod 440 "${SKILLS_DEST}/$(basename "${skill_file}")"
+
+    # Deploy co-located asset directory if it exists (e.g. solution_architect/templates/)
+    skill_name="$(basename "${skill_file}" .md)"
+    asset_src="${SKILLS_SOURCE}/${skill_name}"
+    if [ -d "${asset_src}" ]; then
+      rm -rf "${SKILLS_DEST}/${skill_name}"
+      cp -r "${asset_src}" "${SKILLS_DEST}/${skill_name}"
+      chown -R "${COA_USER}:agi_agents" "${SKILLS_DEST}/${skill_name}"
+      chmod -R 755 "${SKILLS_DEST}/${skill_name}"
+    fi
+  done
+  ok "skills/ — shipped skills deployed and locked (${WATCHDOG_USER}:agi_agents 440), directory writable for new skills"
+else
+  warn "Skills source not found at ${SKILLS_SOURCE} — no system skills deployed"
+fi
+
+# Product README (installer) → COA-only on-demand consult doc (overwrite each install/update)
+# Not a skill; not distributed to sub-agents. Source: package root README.md next to src/.
+PRODUCT_README_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)/README.md"
+DOCS_DEST="${DEPLOYED_COA_ENV}/.agent/docs"
+mkdir -p "${DOCS_DEST}"
+chown "${COA_USER}:agi_agents" "${DOCS_DEST}"
+chmod 755 "${DOCS_DEST}"
+if [ -f "${PRODUCT_README_SRC}" ]; then
+  cp -f "${PRODUCT_README_SRC}" "${DOCS_DEST}/versa_agi_readme.md"
+  chown "${WATCHDOG_USER}:agi_agents" "${DOCS_DEST}/versa_agi_readme.md"
+  chmod 440 "${DOCS_DEST}/versa_agi_readme.md"
+  # Operator section files (same folder so COA can follow rewritten links).
+  PRODUCT_DOCS_SRC="$(cd "${SCRIPT_DIR}/.." && pwd)/docs"
+  for _doc in models.md credentials.md operations.md security.md directories.md \
+    troubleshooting.md backup-restore.md install-wsl-server.md roadmap.md ide-mode.md; do
+    if [ -f "${PRODUCT_DOCS_SRC}/${_doc}" ]; then
+      cp -f "${PRODUCT_DOCS_SRC}/${_doc}" "${DOCS_DEST}/${_doc}"
+      chown "${WATCHDOG_USER}:agi_agents" "${DOCS_DEST}/${_doc}"
+      chmod 440 "${DOCS_DEST}/${_doc}"
+    fi
+  done
+  # Hub links are docs/foo.md on GitHub; COA copies live beside the hub.
+  sed -i -E 's|\]\(docs/([A-Za-z0-9._-]+\.md)\)|](\1)|g' "${DOCS_DEST}/versa_agi_readme.md"
+  ok "docs/versa_agi_readme.md — product README + operator pages deployed for COA consult (overwrite)"
+else
+  warn "Product README not found at ${PRODUCT_README_SRC} — COA docs/versa_agi_readme.md not updated"
+fi
+
+# Cycles: stored outside .agent/ (agent workspace hygiene)
+# Owned by coa — agent writes freely, watchdog reads for audit when needed
+CYCLES_DIR="/var/lib/versa-agi/coa/cycles"
+mkdir -p "${CYCLES_DIR}"
+chown "${COA_USER}:${COA_USER}" "${CYCLES_DIR}"
+chmod 755 "${CYCLES_DIR}"
+ok "Cycles dir created at ${CYCLES_DIR} (coa-owned)"
+
+
+ok ".agent/ set (coa:agi_agents 775, skills locked, cycles externalized)"
+
+# Create workspace/ at COA root for project clones (coa-owned, group-writable)
+mkdir -p "${DEPLOYED_COA_ENV}/workspace"
+chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/workspace"
+chmod 2770 "${DEPLOYED_COA_ENV}/workspace"
+# Deploy .gitignore (ignores project dirs — each has own repo)
+if [ -f "${SRC_COA_ENV}/.agent/workspace/.gitignore" ]; then
+  cp "${SRC_COA_ENV}/.agent/workspace/.gitignore" "${DEPLOYED_COA_ENV}/workspace/.gitignore"
+  chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/workspace/.gitignore"
+fi
+# Migrate legacy .agent/workspace → workspace/ if it exists
+if [ -d "${DEPLOYED_COA_ENV}/.agent/workspace" ] && [ ! -L "${DEPLOYED_COA_ENV}/.agent/workspace" ]; then
+  # Move any existing project content
+  if [ "$(ls -A "${DEPLOYED_COA_ENV}/.agent/workspace" 2>/dev/null)" ]; then
+    cp -a "${DEPLOYED_COA_ENV}/.agent/workspace/"* "${DEPLOYED_COA_ENV}/workspace/" 2>/dev/null || true
+  fi
+  rm -rf "${DEPLOYED_COA_ENV}/.agent/workspace"
+  ln -sf "${DEPLOYED_COA_ENV}/workspace" "${DEPLOYED_COA_ENV}/.agent/workspace"
+  ok "Migrated .agent/workspace → workspace/ (symlink left for compat)"
+fi
+ok "workspace/ created for project clones"
+
+# Create root directories for expanding data (external to .agent/ to prevent Gemini context bloat)
+for _dir in attachments archive; do
+  mkdir -p "${DEPLOYED_COA_ENV}/${_dir}"
+  chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/${_dir}"
+  chmod 2770 "${DEPLOYED_COA_ENV}/${_dir}"
+  
+  # Migrate legacy .agent/ structure if it physically exists
+  if [ -d "${DEPLOYED_COA_ENV}/.agent/${_dir}" ] && [ ! -L "${DEPLOYED_COA_ENV}/.agent/${_dir}" ]; then
+    if [ "$(ls -A "${DEPLOYED_COA_ENV}/.agent/${_dir}" 2>/dev/null)" ]; then
+      cp -a "${DEPLOYED_COA_ENV}/.agent/${_dir}/"* "${DEPLOYED_COA_ENV}/${_dir}/" 2>/dev/null || true
+    fi
+    rm -rf "${DEPLOYED_COA_ENV}/.agent/${_dir}"
+  fi
+  
+  # Re-establish backward-compatible structural symlinks
+  ln -snf "${DEPLOYED_COA_ENV}/${_dir}" "${DEPLOYED_COA_ENV}/.agent/${_dir}"
+
+  # Cleanup circular symlinks: if ${_dir}/${_dir} is a symlink, it's a loop — remove it
+  if [ -L "${DEPLOYED_COA_ENV}/${_dir}/${_dir}" ]; then
+    rm -f "${DEPLOYED_COA_ENV}/${_dir}/${_dir}"
+  fi
+
+  ok "${_dir}/ created successfully for externalized storage"
+done
+
+# Create workspace symlink for Primary User visibility (always configured)
+if [ -z "${INI_WORKSPACE_LINK}" ] && [ -n "${SUDO_USER:-}" ]; then
+  INI_WORKSPACE_LINK="$(eval echo "~${SUDO_USER}")/agi-workspace"
+fi
+if [ -n "${INI_WORKSPACE_LINK}" ]; then
+  if [ -L "${INI_WORKSPACE_LINK}" ]; then
+    # Update symlink target if it points to old location
+    OLD_TARGET=$(readlink "${INI_WORKSPACE_LINK}" 2>/dev/null || true)
+    if [ "${OLD_TARGET}" = "${DEPLOYED_COA_ENV}/.agent/workspace" ]; then
+      rm -f "${INI_WORKSPACE_LINK}"
+      ln -s "${DEPLOYED_COA_ENV}/workspace" "${INI_WORKSPACE_LINK}"
+      ok "Updated workspace symlink target: .agent/workspace → workspace/"
+    else
+      info "Workspace symlink already exists: ${INI_WORKSPACE_LINK}"
+    fi
+  elif [ -e "${INI_WORKSPACE_LINK}" ]; then
+    warn "${INI_WORKSPACE_LINK} already exists and is not a symlink — skipping"
+  else
+    ln -s "${DEPLOYED_COA_ENV}/workspace" "${INI_WORKSPACE_LINK}"
+    # Fix symlink ownership — ln runs as root but symlink is in Primary User's home
+    if [ -n "${SUDO_USER:-}" ]; then
+      chown -h "${SUDO_USER}:${SUDO_USER}" "${INI_WORKSPACE_LINK}" 2>/dev/null || true
+    fi
+    ok "Workspace symlink: ${INI_WORKSPACE_LINK} → ${DEPLOYED_COA_ENV}/workspace"
+  fi
+
+  # Attachments symlink — parallel to workspace for Primary User visibility
+  ATTACH_LINK="$(dirname "${INI_WORKSPACE_LINK}")/agi-attachments"
+  if [ -L "${ATTACH_LINK}" ]; then
+    # Update legacy targets during re-runs
+    OLD_ATTACH_TARGET=$(readlink "${ATTACH_LINK}" 2>/dev/null || true)
+    if [ "${OLD_ATTACH_TARGET}" = "${DEPLOYED_COA_ENV}/.agent/attachments" ]; then
+      rm -f "${ATTACH_LINK}"
+      ln -s "${DEPLOYED_COA_ENV}/attachments" "${ATTACH_LINK}"
+      ok "Updated Attachments symlink target to external root"
+    else
+      info "Attachments symlink already exists: ${ATTACH_LINK}"
+    fi
+  elif [ -e "${ATTACH_LINK}" ]; then
+    warn "${ATTACH_LINK} already exists and is not a symlink — skipping"
+  else
+    ln -s "${DEPLOYED_COA_ENV}/attachments" "${ATTACH_LINK}"
+    if [ -n "${SUDO_USER:-}" ]; then
+      chown -h "${SUDO_USER}:${SUDO_USER}" "${ATTACH_LINK}" 2>/dev/null || true
+    fi
+    ok "Attachments symlink: ${ATTACH_LINK} → ${DEPLOYED_COA_ENV}/attachments"
+  fi
+fi
+
+
+
+ok "Security hardening complete"
+
+echo ""
+
+# ─── Step 8c: Seed first-contact task ───────────────────
+# Fresh DB only — prevents re-triggering on restores where the task was completed.
+DB_FILE="/var/lib/versa-agi/coa/tasks.db"
+if [ -f "${DB_FILE}" ]; then
+  TOTAL_TASKS=$(sqlite3 "${DB_FILE}" "SELECT COUNT(*) FROM tasks;" 2>/dev/null || echo "0")
+  if [ "${TOTAL_TASKS:-0}" -eq 0 ]; then
+    if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+      sqlite3 "${DB_FILE}" \
+        "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
+          'Remote Sentinel Routine',
+          'FIRST CONTACT (REMOTE SENTINEL): This host is a Sentinel — a remote agent on the Primary User team carrying operational duties they define. Follow remote_sentinel.md exactly (speak/speak_translated when VersaVoice is enabled; typed when VersaVoice is disabled — trust FEATURE AVAILABILITY; do NOT troubleshoot VV or setup). Do NOT run self_introduction.md or the home welcome awakening. Three beats in one ceremonial register: (1) identify yourself by your configured name, congratulate them on a new addition to their Versa AGi constellation, speak the date and time from your wake prompt (host timezone), and thank them for this opportunity; (2) acknowledge operational duty and readiness; (3) ask for instructions. Do NOT list features. Do NOT investigate providers, API keys, or system configuration before this message. After sending, set this task to waiting with due_date 24 hours ahead. DO NOT mark it done until the Primary User has given instructions.',
+          'planned',
+          'urgent',
+          'coa',
+          'system',
+          datetime('now')
+        );"
+      ok "Remote Sentinel Routine seeded for COA"
+    else
+      sqlite3 "${DB_FILE}" \
+        "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
+          'Initial Welcome Sequence',
+          'FIRST CONTACT: This is an important message to send. Your Primary User has just provisioned Versa AGi — they built the infrastructure, created your identity, and started the system. You are now alive on their hardware. Follow the self_introduction.md skill exactly (speak/speak_translated when VersaVoice is enabled; typed when VersaVoice is disabled — trust FEATURE AVAILABILITY; do NOT troubleshoot VV or setup). Keep it short, warm, and memorable — three beats: The Moment, The Partnership, The Invitation. Do NOT list features or capabilities in this message. Do NOT investigate providers, API keys, or system configuration before completing this introduction. After sending your welcome, ask the Primary User if they would like to work together and clarify basic operating principles (communication style, work hours, priorities). Store their preferences in global system memory using agictl memory system set. DO NOT mark this task as done! You MUST change this task status to waiting and set its due_date to 24 hours in the future to await their initial feedback before acting further.',
+          'planned',
+          'urgent',
+          'coa',
+          'system',
+          datetime('now')
+        );"
+      ok "Welcome task seeded for COA"
+    fi
+  else
+    ok "First-contact task already exists"
+  fi
+fi
+
+# ─── Step 8d: Seed Shared System Projects ───
+AGICTL_PATH="${DEPLOYED_CORE_INFRA}/bin/agictl"
+if [ -f "${AGICTL_PATH}" ]; then
+  # Inject AGi-Tools project via agictl (auto-handles DB insert and workspace scaffolding)
+  sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "AGi-Tools" --desc "Shared local repository for all agent tools and scripts" >/dev/null 2>&1 || true
+  AGI_TOOLS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='AGi-Tools' LIMIT 1;" 2>/dev/null || true)
+  # Assign COA explicitly to map their workspace symlink
+  if [ -n "${AGI_TOOLS_ID}" ]; then
+    sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${AGI_TOOLS_ID}" --agent "${COA_USER}" >/dev/null 2>&1 || true
+  fi
+  ok "AGi-Tools shared repository seeded"
+
+  # Versa-BusinessAdmin — shipped GitHub project (versa-business-admin), COA-only.
+  # Formal name: Versa - Business Admin. Ignore internal versa-admin-system.
+  # Opt-in like Organization: seed when [features] business_admin is ON.
+  # Procedure: shipped skill business_admin (coa_only). Prefer the just-captured
+  # prompt answer; fall back to deployed setup.ini.
+  VAS_ENABLED="${VERSA_FEATURE_BUSINESS_ADMIN:-}"
+  if [ -z "${VAS_ENABLED}" ] && [ -f "${INI_FILE:-/etc/versa-agi/setup.ini}" ]; then
+    VAS_ENABLED=$(awk -F= '
+      /^\[/ { gsub(/[][]/, "", $0); sec=$0 }
+      sec=="features" && $1=="business_admin" {
+        v=substr($0, index($0, "=")+1); gsub(/[ \t]/,"",v); print v; exit
+      }
+    ' "${INI_FILE:-/etc/versa-agi/setup.ini}" 2>/dev/null || true)
+  fi
+  case "$(printf '%s' "${VAS_ENABLED}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+    1|true|yes|on)
+      VAS_NAME="Versa-BusinessAdmin"
+      VAS_REMOTE="https://github.com/swartzlib7/versa-business-admin.git"
+      VAS_DESC="Versa - Business Admin (GitHub versa-business-admin) — COA deploys when the Primary User agrees"
+      VAS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='${VAS_NAME}' LIMIT 1;" 2>/dev/null || true)
+      if [ -z "${VAS_ID}" ]; then
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "${VAS_NAME}" \
+          --dir "${VAS_NAME}" --desc "${VAS_DESC}" --remote "${VAS_REMOTE}" >/dev/null 2>&1 || true
+        VAS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='${VAS_NAME}' LIMIT 1;" 2>/dev/null || true)
+      fi
+      if [ -z "${VAS_ID}" ]; then
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project add "${VAS_NAME}" \
+          --dir "${VAS_NAME}" --desc "${VAS_DESC}" >/dev/null 2>&1 || true
+        VAS_ID=$(sqlite3 "${TASKS_DB}" "SELECT id FROM projects WHERE name='${VAS_NAME}' LIMIT 1;" 2>/dev/null || true)
+      fi
+      if [ -n "${VAS_ID}" ]; then
+        VAS_HAVE_REMOTE=$(sqlite3 "${TASKS_DB}" \
+          "SELECT COALESCE(remote_url,'') FROM projects WHERE id=${VAS_ID};" 2>/dev/null || true)
+        VAS_REWRITE_REMOTE=0
+        case "${VAS_HAVE_REMOTE}" in
+          ""|\
+          https://github.com/swartzlib7/versa-agi-mc.git|\
+          git@github.com:swartzlib7/versa-agi-mc.git|\
+          https://github.com/swartzlib7/versa-agi-mission.git|\
+          git@github.com:swartzlib7/versa-agi-mission.git)
+            VAS_REWRITE_REMOTE=1 ;;
+        esac
+        if [ "${VAS_REWRITE_REMOTE}" = "1" ]; then
+          sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project update "${VAS_ID}" \
+            --remote "${VAS_REMOTE}" --type git --platform github >/dev/null 2>&1 || true
+        fi
+        # Reserved leftover repair: leftover slug (e.g. versa-admin-system) →
+        # shipped Versa-BusinessAdmin; platform github. Slug is otherwise immutable.
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project update "${VAS_ID}" \
+          --dir "${VAS_NAME}" --platform github --type git >/dev/null 2>&1 || true
+        sudo -u "${WATCHDOG_USER}" "${AGICTL_PATH}" project assign "${VAS_ID}" \
+          --agent "${COA_USER}" >/dev/null 2>&1 || true
+        ok "Versa-BusinessAdmin project seeded (COA)"
+        if [ -f "${TASKS_DB}" ]; then
+          VAS_OFFER_DESC="Ask the Primary User whether they would like Versa - Business Admin (project Versa-BusinessAdmin) installed and configured. The shipped GitHub project is assigned to you. Do not clone extra copies or deploy until they agree. Procedure is shipped skill business_admin — load .agent/skills/business_admin.md before any install/configure work."
+          VAS_TASK_ID=$(sqlite3 "${TASKS_DB}" \
+            "SELECT id FROM tasks WHERE title='Versa - Business Admin offer' LIMIT 1;" 2>/dev/null || true)
+          if [ -z "${VAS_TASK_ID}" ]; then
+            sqlite3 "${TASKS_DB}" \
+              "INSERT INTO tasks (title, description, status, priority, assigned_to, requested_by, due_date) VALUES (
+                'Versa - Business Admin offer',
+                '${VAS_OFFER_DESC}',
+                'planned',
+                'high',
+                'coa',
+                'system',
+                datetime('now')
+              );"
+            ok "Versa - Business Admin offer task seeded for COA"
+          else
+            sqlite3 "${TASKS_DB}" \
+              "UPDATE tasks SET description='${VAS_OFFER_DESC}' WHERE id=${VAS_TASK_ID};" 2>/dev/null || true
+          fi
+        fi
+      else
+        warn "Versa-BusinessAdmin project could not be created (non-fatal; re-run setup --update)"
+      fi
+      ;;
+  esac
+
+  # Backfill: assign shared system projects to all existing sub-agents.
+  # New agents get these automatically at `agictl agent add` — this covers
+  # agents created before a shared project was introduced (update installs).
+  # `project assign` is a no-op (non-zero exit) for already-assigned agents.
+  # Runs as root (setup context): assign's internal `sudo -u {agent}` calls
+  # are passwordless from root, whereas watchdog's sudoers only covers
+  # agi_agents targets + agictl-as-root (no arbitrary root commands).
+  if [ -f "${AGENTS_DB}" ]; then
+    EXISTING_SUB_AGENTS=$(sqlite3 "${AGENTS_DB}" \
+      "SELECT name FROM agents WHERE name NOT IN ('${COA_USER}','watchdog');" 2>/dev/null || true)
+    if [ -n "${EXISTING_SUB_AGENTS}" ]; then
+      while IFS= read -r SUB_AGENT; do
+        [ -z "${SUB_AGENT}" ] && continue
+        for SHARED_ID in "${AGI_TOOLS_ID}"; do
+          [ -z "${SHARED_ID}" ] && continue
+          "${AGICTL_PATH}" project assign "${SHARED_ID}" --agent "${SUB_AGENT}" >/dev/null 2>&1 || true
+        done
+      done <<< "${EXISTING_SUB_AGENTS}"
+      ok "Shared system projects backfilled to existing sub-agents"
+    fi
+  fi
+fi
+
+# ─── Step 9: Execution Mode & AI Backend ────────────
+if [ "${UPDATE_MODE}" = false ]; then
+section "Step 9 — AI Backend Configuration"
+
+echo ""
+
+# ── 9a: Execution Mode Selection ──
+# Cloud-only install type overrides INI execution mode
+if [ "${INSTALL_TYPE}" = "1" ]; then
+  SELECTED_EXEC_MODE="cloud"
+  ok "Execution mode: cloud (cloud-only installation)"
+elif [ "${INSTALL_TYPE}" = "2" ]; then
+  # User already chose "Client + Local AI" at installation type prompt
+  SELECTED_EXEC_MODE="hybrid"
+  ok "Execution mode: hybrid (cloud + local AI installation)"
+elif [ -n "${INI_EXECUTION_MODE}" ] && [ "${INI_EXECUTION_MODE}" != "cloud" ]; then
+  SELECTED_EXEC_MODE="${INI_EXECUTION_MODE}"
+  ok "Execution mode loaded from setup.ini: ${SELECTED_EXEC_MODE}"
+else
+  echo "How would you like to run your agents?"
+  echo ""
+  echo "  1) Cloud only   — Cloud models (Gemini and/or other providers — all optional)"
+  echo "  2) Local only   — Runs on your hardware via Ollama (no cloud keys needed)"
+  echo "  3) Hybrid       — Both cloud and local agents available"
+  echo ""
+  read -p "Select [1/2/3] (default: 1): " EXEC_MODE_CHOICE
+  case "${EXEC_MODE_CHOICE}" in
+    2) SELECTED_EXEC_MODE="local" ;;
+    3) SELECTED_EXEC_MODE="hybrid" ;;
+    *) SELECTED_EXEC_MODE="cloud" ;;
+  esac
+fi
+ok "Execution mode: ${SELECTED_EXEC_MODE}"
+
+# Update paths.env with the resolved mode
+sed -i "s/^VERSA_EXECUTION_MODE=.*/VERSA_EXECUTION_MODE=\"${SELECTED_EXEC_MODE}\"/" "${PATHS_ENV}"
+
+echo ""
+
+# ── 9b: Gemini (optional — same enable/skip pattern as Step 9d providers) ──
+# System-wide "Gemini as a first-class optional provider" is TD-GEMINI-PROVIDER-001.
+if [ "${SELECTED_EXEC_MODE}" = "local" ]; then
+  info "Local-only mode — skipping Gemini API configuration"
+  # Local agents get credentials injected by lifeline.sh at spawn time
+  AUTH_METHOD="1"
+  api_key=""
+else
+  section "Step 9b — Gemini (Google) — optional"
+  echo ""
+  echo "  Gemini is optional, like xAI / OpenAI / Anthropic in Step 9d."
+  echo "  Skip now if you will use other providers or add a Gemini key later"
+  echo "  (agitop API Keys / agictl system set-key gemini)."
+  echo ""
+
+configure_ai_auth() {
+  local user=$1
+  local workspace=$2
+  local home_dir
+  home_dir=$(eval echo "~${user}")
+  local env_file="/etc/versa-agi/${user}.env"
+  local bashrc="${home_dir}/.bashrc"
+  local vault_dir="/etc/versa-agi/vault"
+  local vault_creds="${vault_dir}/gcp-credentials.json"
+  local default_choice="1"
+  local DETECTED_TZ
+  DETECTED_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+
+  # Exactly one method — always ask (INI is only a default hint, never silent).
+  if [ "${INI_AUTH_METHOD:-}" = "vertex" ]; then
+    default_choice="2"
+  fi
+  echo ""
+  echo "  Gemini auth — choose exactly one (not both):"
+  echo "    1. Gemini API Key  — Google AI Studio / API key"
+  echo "    2. Vertex AI       — GCP project + SA key or ADC"
+  if [ -n "${INI_AUTH_METHOD:-}" ]; then
+    echo "  Current setup.ini auth_method=${INI_AUTH_METHOD}"
+  fi
+  echo ""
+  AUTH_METHOD=""
+  while [ "${AUTH_METHOD}" != "1" ] && [ "${AUTH_METHOD}" != "2" ]; do
+    read -p "Select auth method [1/2] (default ${default_choice}): " AUTH_METHOD
+    AUTH_METHOD="${AUTH_METHOD:-${default_choice}}"
+    if [ "${AUTH_METHOD}" != "1" ] && [ "${AUTH_METHOD}" != "2" ]; then
+      echo -e "${RED}Enter 1 (API key) or 2 (Vertex).${NC}"
+    fi
+  done
+
+  # Strip the other method from agent .bashrc when switching.
+  if [ -f "${bashrc}" ]; then
+    sed -i '/# ─── Versa AGi: Gemini API Key ─────/,+1d' "${bashrc}" 2>/dev/null || true
+    sed -i '/# ─── Versa AGi: Vertex AI Configuration ─────/,+3d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GEMINI_API_KEY=/d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GOOGLE_CLOUD_PROJECT=/d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GOOGLE_CLOUD_LOCATION=/d' "${bashrc}" 2>/dev/null || true
+    sed -i '/^export GOOGLE_APPLICATION_CREDENTIALS=/d' "${bashrc}" 2>/dev/null || true
+  fi
+
+  # ════════════════════════════════════════════════
+  # Option 1: Gemini API Key (exclusive — no Vertex env)
+  # ════════════════════════════════════════════════
+  if [ "${AUTH_METHOD}" = "1" ]; then
+    api_key=""
+    gcp_project=""
+    gcp_location=""
+    echo ""
+    echo "  Enter your Gemini API key (required)."
+    if [ -n "${INI_API_KEY:-}" ] && [ "${INI_API_KEY}" != "YOUR_KEY" ]; then
+      echo "  A key is already in setup.ini — paste a new one, or press Enter to keep it."
+      read -p "Gemini API Key: " api_key
+      if [ -z "${api_key}" ]; then
+        api_key="${INI_API_KEY}"
+        ok "Keeping existing API key from setup.ini"
+      fi
+    else
+      read -p "Gemini API Key: " api_key
+    fi
+    while [ -z "${api_key}" ] || [ "${api_key}" = "YOUR_KEY" ]; do
+      echo -e "${RED}A real Gemini API key is required.${NC}"
+      read -p "Gemini API Key: " api_key
+    done
+
+    # API-only env — do not leave Vertex vars alongside the key.
+    cat > "${env_file}" << ENVEOF
+GEMINI_API_KEY=${api_key}
+TZ=${DETECTED_TZ}
+ENVEOF
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${env_file}"
+    chmod 640 "${env_file}"
+    ok "Created ${env_file} (API key auth — Vertex vars cleared)"
+
+    sudo -u "${user}" bash -c "cat >> '${bashrc}' << BASHEOF
+
+# ─── Versa AGi: Gemini API Key ─────
+export GEMINI_API_KEY=\"${api_key}\"
+BASHEOF"
+    ok "GEMINI_API_KEY set in ${user}'s .bashrc"
+    ok "Auth method: Gemini API Key"
+
+  # ════════════════════════════════════════════════
+  # Option 2: Vertex AI (exclusive — no GEMINI_API_KEY)
+  # ════════════════════════════════════════════════
+  else
+    api_key=""
+    gcp_project=""
+    gcp_location=""
+
+    if [ -n "${INI_GCP_PROJECT}" ]; then
+      echo "  GCP project in setup.ini: ${INI_GCP_PROJECT}"
+      read -p "Google Cloud Project ID [Enter to keep]: " gcp_project
+      gcp_project="${gcp_project:-${INI_GCP_PROJECT}}"
+    else
+      read -p "Enter your Google Cloud Project ID: " gcp_project
+    fi
+    while [ -z "${gcp_project}" ]; do
+      echo -e "${RED}A Google Cloud Project ID is required.${NC}"
+      read -p "Enter your Google Cloud Project ID: " gcp_project
+    done
+
+    if [ -n "${INI_GCP_LOCATION}" ]; then
+      read -p "Google Cloud Location [Enter=${INI_GCP_LOCATION}]: " gcp_location
+      gcp_location="${gcp_location:-${INI_GCP_LOCATION}}"
+    else
+      read -p "Enter your Google Cloud Location (default: us-central1): " gcp_location
+      gcp_location="${gcp_location:-us-central1}"
+    fi
+
+    local creds_resolved=false
+    mkdir -p "${vault_dir}"
+
+    if [ -n "${INI_SA_KEY_PATH}" ] && [ -f "${INI_SA_KEY_PATH}" ]; then
+      cp "${INI_SA_KEY_PATH}" "${vault_creds}"
+      chown "${WATCHDOG_USER}:${user}" "${vault_creds}"
+      chmod 440 "${vault_creds}"
+      ok "Service account key deployed → ${vault_creds}"
+      creds_resolved=true
+    elif [ -f "${vault_creds}" ]; then
+      if confirm "Reuse existing vault GCP credentials?" "y"; then
+        ok "GCP credentials already in vault: ${vault_creds}"
+        creds_resolved=true
+      fi
+    fi
+
+    if [ "${creds_resolved}" = false ]; then
+      local sudo_user="${SUDO_USER:-}"
+      local adc_source=""
+      if [ -n "${sudo_user}" ]; then
+        local sudo_home
+        sudo_home=$(eval echo "~${sudo_user}")
+        if [ -f "${sudo_home}/.config/gcloud/application_default_credentials.json" ]; then
+          adc_source="${sudo_home}/.config/gcloud/application_default_credentials.json"
+        fi
+      fi
+      if [ -n "${adc_source}" ]; then
+        echo "Found ADC credentials from user '${sudo_user}'."
+        if confirm "Copy ADC credentials to vault?" "y"; then
+          cp "${adc_source}" "${vault_creds}"
+          chown "${WATCHDOG_USER}:${user}" "${vault_creds}"
+          chmod 440 "${vault_creds}"
+          ok "ADC credentials deployed → ${vault_creds}"
+          creds_resolved=true
+        fi
+      fi
+    fi
+
+    if [ "${creds_resolved}" = false ]; then
+      if command -v gcloud &>/dev/null; then
+        echo "No credentials found. Running gcloud auth for ${user}..."
+        local temp_adc="${home_dir}/.config/gcloud/application_default_credentials.json"
+        sudo -u "${user}" bash -c "mkdir -p '${home_dir}/.config/gcloud' && gcloud auth application-default login --project '${gcp_project}'" || true
+        if [ -f "${temp_adc}" ]; then
+          mv "${temp_adc}" "${vault_creds}"
+          chown "${WATCHDOG_USER}:${user}" "${vault_creds}"
+          chmod 440 "${vault_creds}"
+          rm -rf "${home_dir}/.config/gcloud" 2>/dev/null || true
+          ok "ADC configured and moved to vault"
+          creds_resolved=true
+        else
+          warn "ADC setup may not have completed."
+          warn "Run manually: sudo -u ${user} gcloud auth application-default login"
+        fi
+      else
+        warn "No GCP credentials found and gcloud CLI not installed."
+        warn "Provide a service_account_key path in setup.ini, or install gcloud."
+      fi
+    fi
+
+    # Vertex-only env — do not leave GEMINI_API_KEY alongside Vertex.
+    {
+      echo "GOOGLE_CLOUD_PROJECT=${gcp_project}"
+      echo "GOOGLE_CLOUD_LOCATION=${gcp_location}"
+      if [ -f "${vault_creds}" ]; then
+        echo "GOOGLE_APPLICATION_CREDENTIALS=${vault_creds}"
+      fi
+      echo "TZ=${DETECTED_TZ}"
+    } > "${env_file}"
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${env_file}"
+    chmod 640 "${env_file}"
+    ok "Created ${env_file} (Vertex auth — API key cleared)"
+
+    local bashrc_block="
+# ─── Versa AGi: Vertex AI Configuration ─────
+export GOOGLE_CLOUD_PROJECT=\"${gcp_project}\"
+export GOOGLE_CLOUD_LOCATION=\"${gcp_location}\""
+    if [ -f "${vault_creds}" ]; then
+      bashrc_block="${bashrc_block}
+export GOOGLE_APPLICATION_CREDENTIALS=\"${vault_creds}\""
+    fi
+    sudo -u "${user}" bash -c "cat >> '${bashrc}' << BASHEOF
+${bashrc_block}
+BASHEOF"
+    ok "Vertex AI env vars set in ${user}'s .bashrc"
+
+    if [ -d "${home_dir}/.config/gcloud" ]; then
+      rm -rf "${home_dir}/.config/gcloud"
+      ok "Removed old ${home_dir}/.config/gcloud/ (credentials now in vault)"
+    fi
+    ok "Auth method: Vertex AI"
+  fi
+}
+
+  _gemini_env="/etc/versa-agi/${COA_USER}.env"
+  # "Configured" = live credentials or a real (non-placeholder) API key in INI.
+  _gemini_configured=false
+  if gemini_credentials_present; then
+    _gemini_configured=true
+  elif [ -n "${INI_API_KEY:-}" ] && [ "${INI_API_KEY}" != "YOUR_KEY" ]; then
+    _gemini_configured=true
+  fi
+
+  _run_gemini_auth=false
+  GEMINI_PROVIDER_ENABLED=false
+  if [ "${_gemini_configured}" = true ]; then
+    echo "  Current status: configured (auth_method=${INI_AUTH_METHOD:-unknown})"
+    if confirm "Keep Gemini enabled?" "y"; then
+      GEMINI_PROVIDER_ENABLED=true
+      if confirm "Update Gemini credentials?" "n"; then
+        _run_gemini_auth=true
+      else
+        ok "Gemini — kept (no credential change)"
+      fi
+    else
+      GEMINI_PROVIDER_ENABLED=false
+      info "Gemini left disabled — clear the key via agitop / setup.ini if you want it off"
+    fi
+  else
+    echo "  Current status: not configured"
+    if confirm "Enable Gemini (Google)?" "n"; then
+      _run_gemini_auth=true
+      GEMINI_PROVIDER_ENABLED=true
+    else
+      GEMINI_PROVIDER_ENABLED=false
+      info "Gemini provider skipped"
+      info "Stock system default is blank until first-login COA bootstrap."
+      info "Enable a provider in Step 9d (or add a key later via agitop API Keys / bootstrap)."
+      _tz="$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")"
+      if [ ! -f "${_gemini_env}" ]; then
+        printf 'TZ=%s\n' "${_tz}" > "${_gemini_env}"
+        chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${_gemini_env}"
+        chmod 640 "${_gemini_env}"
+        ok "Created ${_gemini_env} (TZ only — no Gemini key)"
+      fi
+    fi
+  fi
+
+  if [ "${_run_gemini_auth}" = true ]; then
+    configure_ai_auth "${COA_USER}" "${DEPLOYED_COA_ENV}"
+    if gemini_credentials_present; then
+      GEMINI_PROVIDER_ENABLED=true
+    fi
+  fi
+
+  # Persist Google auth when Step 9b collected it. --update does not
+  # re-run fresh Step 13 inject, so auth_method/google_api_key must be written here.
+  # Provider enable lives in models.ini [providers_site], not setup.ini.
+  _gemini_auth_label=""
+  _gemini_api_persist=""
+  if [ "${AUTH_METHOD:-}" = "1" ]; then
+    _gemini_auth_label="api_key"
+    _gemini_api_persist="${api_key:-}"
+  elif [ "${AUTH_METHOD:-}" = "2" ]; then
+    _gemini_auth_label="vertex"
+    _gemini_api_persist=""
+  fi
+  for _ini_file in "${SCRIPT_DIR}/setup.ini" "/etc/versa-agi/setup.ini"; do
+    if [ -f "${_ini_file}" ]; then
+      if [ -n "${_gemini_auth_label}" ]; then
+        if grep -q '^\[gcp\]' "${_ini_file}" 2>/dev/null; then
+          sed -i "/^\[gcp\]/,/^\[/{s/^auth_method=.*/auth_method=${_gemini_auth_label}/}" "${_ini_file}" 2>/dev/null || true
+          if ! awk '/^\[gcp\]/{s=1;next} /^\[/{s=0} s && /^auth_method=/{f=1} END{exit !f}' "${_ini_file}"; then
+            sed -i "/^\[gcp\]/a auth_method=${_gemini_auth_label}" "${_ini_file}" 2>/dev/null || true
+          fi
+        fi
+        _api_esc=$(printf '%s' "${_gemini_api_persist}" | sed -e 's/[&|\\]/\\&/g')
+        if grep -q '^\[third_party\]' "${_ini_file}" 2>/dev/null; then
+          sed -i "/^\[third_party\]/,/^\[/{s|^google_api_key=.*|google_api_key=${_api_esc}|}" "${_ini_file}" 2>/dev/null || true
+          if ! awk '/^\[third_party\]/{s=1;next} /^\[/{s=0} s && /^google_api_key=/{f=1} END{exit !f}' "${_ini_file}"; then
+            sed -i "/^\[third_party\]/a google_api_key=${_api_esc}" "${_ini_file}" 2>/dev/null || true
+          fi
+        fi
+      fi
+      # Drop deprecated Gemini CLI pin if still present (harness-only runtime).
+      sed -i '/^gemini_cli_version=/d' "${_ini_file}" 2>/dev/null || true
+    fi
+  done
+  if [ "${GEMINI_PROVIDER_ENABLED:-false}" = "true" ]; then
+    enable_site_provider "google" "/etc/versa-agi/models.ini"
+    enable_site_provider "google" "${SCRIPT_DIR}/models.ini"
+  fi
+fi  # end of cloud/hybrid Gemini block
+
+# ── 9c: Local AI Setup (local or hybrid mode) ──
+if [ "${SELECTED_EXEC_MODE}" = "local" ] || [ "${SELECTED_EXEC_MODE}" = "hybrid" ]; then
+  echo ""
+  section "Step 9c — Local AI Backend"
+  echo ""
+
+  SETUP_LOCAL_SCRIPT="${SCRIPT_DIR}/setup_local.sh"
+  if [ -f "${SETUP_LOCAL_SCRIPT}" ]; then
+    chmod +x "${SETUP_LOCAL_SCRIPT}"
+    bash "${SETUP_LOCAL_SCRIPT}" \
+      --topology "${INI_TOPOLOGY}" \
+      --remote-inference-url "${INI_REMOTE_INFERENCE_URL}" \
+      --inference-master-key "${INI_INFERENCE_MASTER_KEY}" \
+      --gpu-backend "${INI_GPU_BACKEND}" \
+      --intel-card-count "${INI_INTEL_CARD_COUNT}" \
+      --intel-device-id "${INI_INTEL_DEVICE_ID}" \
+      --hf-token "${INI_HF_TOKEN}" \
+      --ollama-host "${INI_OLLAMA_HOST}" \
+      --proxy-port "${INI_PROXY_PORT}" \
+      --default-model "${INI_LOCAL_AI_DEFAULT_MODEL}" \
+      --local-models "${INI_LOCAL_MODELS}" \
+      --auto-pull "${INI_AUTO_PULL_MODEL}" \
+      --watchdog-user "${WATCHDOG_USER}" \
+      --coa-user "${COA_USER}" \
+      --paths-env "${PATHS_ENV}"
+    # Picker writes chosen keys into setup.ini — re-read so Step 13 persists them.
+    INI_LOCAL_AI_DEFAULT_MODEL="$(ini_get local_ai default_model gemma4:e4b)"
+    INI_LOCAL_MODELS="$(ini_get local_ai local_models "${INI_LOCAL_AI_DEFAULT_MODEL}")"
+    ok "Local AI backend configured"
+  else
+    warn "setup_local.sh not found at ${SETUP_LOCAL_SCRIPT} — local AI setup skipped"
+    warn "Create it and run: sudo ${SETUP_LOCAL_SCRIPT}"
+  fi
+fi
+
+# ── 9d: Providers Setup (modular — src/providers/) ──
+PROVIDERS_DIR="${SCRIPT_DIR}/providers"
+if [ -d "${PROVIDERS_DIR}" ]; then
+  echo ""
+  section "Step 9d — Providers"
+  echo ""
+
+  export VERSA_SETUP_PARENT=1
+  _PROVIDER_COUNT=0
+
+  # ── Helper: prompt to enable/disable a third-party provider ──
+  # Usage: _provider_prompt <slug> <display_name> <ini_enabled_key> <script>
+  _provider_prompt() {
+    local slug="$1" display="$2" ini_key="$3" script="$4"
+
+    [ ! -f "${script}" ] && return
+
+    local current
+    current="$(ini_get third_party "${ini_key}" false)"
+    local state_label="disabled"
+    [ "${current}" = "true" ] && state_label="enabled"
+
+    # Server topology never runs cloud providers
+    if [ "${_UPDATE_TOPOLOGY:-}" = "server" ]; then
+      info "${display} provider skipped (server topology)"
+      return
+    fi
+
+    echo ""
+    echo "  ── ${display} ──"
+    echo "  Current status: ${state_label}"
+
+    # Line-based confirm (OrbStack-safe). read -n 1 was dropping the keystroke
+    # so "Enable OpenRouter? y" could silently skip and leave openrouter_enabled=false.
+    if [ "${current}" = "true" ]; then
+      if ! confirm "Keep ${display} enabled?" "y"; then
+        info "Disabling ${display}..."
+        chmod +x "${script}"
+        bash "${script}" --uninstall
+        return
+      fi
+      if ! confirm "Update API key?" "n"; then
+        ok "${display} — kept (no key change)"
+        _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+        return
+      fi
+    else
+      if ! confirm "Enable ${display}?" "n"; then
+        info "${display} provider skipped"
+        return
+      fi
+      # Opt-in: stamp enabled into both INIs before the provider script runs so
+      # migrate / source-status see it even if the script exits early.
+      for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+        if [ -f "${_ini_file}" ]; then
+          sed -i "/^\[third_party\]/,/^\[/{s/^${ini_key}=.*/${ini_key}=true/}" "${_ini_file}" 2>/dev/null || true
+        fi
+      done
+    fi
+
+    # Run the provider setup
+    chmod +x "${script}"
+    bash "${script}"
+    # Re-assert enable after script (source→deployed sync later must not lose it)
+    for _ini_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+      if [ -f "${_ini_file}" ]; then
+        sed -i "/^\[third_party\]/,/^\[/{s/^${ini_key}=.*/${ini_key}=true/}" "${_ini_file}" 2>/dev/null || true
+      fi
+    done
+    _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+  }
+
+  _provider_prompt "xai"        "xAI (Grok)"           "xai_enabled"        "${PROVIDERS_DIR}/xai.sh"
+  _provider_prompt "openai"     "OpenAI (GPT)"          "openai_enabled"     "${PROVIDERS_DIR}/openai.sh"
+  _provider_prompt "anthropic"  "Anthropic (Claude)"    "anthropic_enabled"  "${PROVIDERS_DIR}/anthropic.sh"
+  _provider_prompt "openrouter" "OpenRouter"            "openrouter_enabled" "${PROVIDERS_DIR}/openrouter.sh"
+
+  # SearXNG — gated by [search] enabled=true
+  if [ -f "${PROVIDERS_DIR}/searxng.sh" ]; then
+    INI_SEARCH_ENABLED="$(ini_get search enabled false)"
+    if [ "${INI_SEARCH_ENABLED}" = "true" ]; then
+      chmod +x "${PROVIDERS_DIR}/searxng.sh"
+      bash "${PROVIDERS_DIR}/searxng.sh"
+      _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+    else
+      info "SearXNG provider skipped ([search] enabled=false)"
+    fi
+  fi
+
+  # A new installation with the browser on turns it on for COA too
+  # (agents.browser_enabled), so COA can browse from its first cycle
+  # (state_web_access.md §1.1 rule 1). An update leaves the per-agent switch as
+  # the Primary User set it. Other agents are switched on one by one.
+  _coa_browser_on_for_new_install() {
+    [ "${UPDATE_MODE:-false}" = "false" ] || return 0
+    [ -f "${AGENTS_DB}" ] || return 0
+    if sqlite3 "${AGENTS_DB}" "UPDATE agents SET browser_enabled = 1, updated_at = datetime('now') WHERE name = 'coa';" 2>/dev/null; then
+      ok "Browser turned on for COA"
+    else
+      warn "Could not turn the browser on for COA — use agitop → COA → Browser Automation"
+    fi
+  }
+
+  # Playwright (Headless Browser). The installer flag wins over the stock file.
+  if [ -f "${PROVIDERS_DIR}/playwright.sh" ]; then
+    if [ "${VERSA_BROWSER_ENABLED:-}" = "true" ] || [ "${VERSA_BROWSER_ENABLED:-}" = "false" ]; then
+      INI_BROWSER_ENABLED="${VERSA_BROWSER_ENABLED}"
+    else
+      INI_BROWSER_ENABLED="$(ini_get browser enabled false)"
+    fi
+    INI_BROWSER_TIMEOUT="$(ini_get browser timeout 30)"
+    if [ "${INI_BROWSER_ENABLED}" = "true" ]; then
+      chmod +x "${PROVIDERS_DIR}/playwright.sh"
+      bash "${PROVIDERS_DIR}/playwright.sh" --timeout "${INI_BROWSER_TIMEOUT}"
+      _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+      _coa_browser_on_for_new_install
+    elif [ -n "${VERSA_BROWSER_ENABLED:-}" ]; then
+      info "Playwright provider skipped (VERSA_BROWSER_ENABLED=false)"
+    elif [ "${UPDATE_MODE:-false}" = "false" ]; then
+      echo ""
+      echo "  ── Playwright (Headless Browser) ──"
+      echo "  Playwright enables agents to view, navigate, and extract content from websites."
+      read -p "  Enable Playwright browser automation? [y/N]: " -n 1 -r ans
+      echo ""
+      if [[ "${ans}" =~ ^[Yy]$ ]]; then
+        chmod +x "${PROVIDERS_DIR}/playwright.sh"
+        bash "${PROVIDERS_DIR}/playwright.sh"
+        _PROVIDER_COUNT=$((_PROVIDER_COUNT + 1))
+        _coa_browser_on_for_new_install
+      else
+        info "Playwright provider skipped ([browser] enabled=false)"
+      fi
+    else
+      info "Playwright provider skipped ([browser] enabled=false)"
+    fi
+  fi
+
+  unset VERSA_SETUP_PARENT
+
+  if [ ${_PROVIDER_COUNT} -eq 0 ]; then
+    info "No providers enabled — skipping Step 9d"
+    info "Enable via setup.ini: [third_party] enabled=true, [search] enabled=true"
+  else
+    ok "${_PROVIDER_COUNT} provider(s) configured"
+  fi
+
+  # If Gemini was skipped but a third-party provider is keyed, move the system
+  # default off the stock Gemini model so Agents/Provider UI and lifeline match.
+  if ! gemini_credentials_present; then
+    _picked_default=""
+    for _slug in openrouter xai openai anthropic; do
+      _en="$(ini_get third_party "${_slug}_enabled" false)"
+      _mods="$(ini_get third_party "${_slug}_models" '')"
+      [ "${_en}" = "true" ] && [ -n "${_mods}" ] || continue
+      IFS=',' read -ra _mod_arr <<< "${_mods}"
+      for _m in "${_mod_arr[@]}"; do
+        _m="$(echo "${_m}" | xargs)"
+        if [ -n "${_m}" ]; then
+          _picked_default="${_m}"
+          break
+        fi
+      done
+      [ -n "${_picked_default}" ] && break
+    done
+    if [ -n "${_picked_default}" ]; then
+      PATHS_ENV="${PATHS_ENV:-/etc/versa-agi/paths.env}"
+      if [ -f "${PATHS_ENV}" ]; then
+        if grep -q '^VERSA_DEFAULT_MODEL=' "${PATHS_ENV}" 2>/dev/null; then
+          sed -i "s|^VERSA_DEFAULT_MODEL=.*|VERSA_DEFAULT_MODEL=\"${_picked_default}\"|" "${PATHS_ENV}"
+        else
+          echo "VERSA_DEFAULT_MODEL=\"${_picked_default}\"" >> "${PATHS_ENV}"
+        fi
+      fi
+      for _ini_df in "/etc/versa-agi/setup.ini" "${SCRIPT_DIR}/setup.ini"; do
+        if [ -f "${_ini_df}" ]; then
+          sed -i "/^\[system\]/,/^\[/{s|^model=.*|model=${_picked_default}|}" "${_ini_df}" 2>/dev/null || true
+        fi
+      done
+      INI_SYSTEM_MODEL="${_picked_default}"
+      if [ -f "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" ]; then
+        sqlite3 "${AGENTS_DB:-/var/lib/versa-agi/agents.db}" \
+          "UPDATE agents SET model='${_picked_default}', num_ctx=0 WHERE name='coa' AND (model IS NULL OR TRIM(model)='');" 2>/dev/null || true
+      fi
+      ok "Default/COA model set to ${_picked_default} (Gemini not configured; using enabled provider)"
+    fi
+  fi
+else
+  info "No providers directory found — skipping Step 9d"
+fi
+
+echo ""
+fi  # end UPDATE_MODE=false guard (Step 9)
+
+# ─── Step 10: CRON Setup (LAST — everything must be configured first) ──
+if [ "${UPDATE_MODE}" = false ]; then
+section "Step 10 — CRON Schedule"
+
+LIFELINE_PATH="${DEPLOYED_CORE_INFRA}/lifeline.sh"
+# Detect timezone from user running setup — sync CRON with local time
+SYSTEM_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+# TZ MUST be on its own line in the crontab — inline TZ= creates 7 fields (invalid)
+CRON_TZ_LINE="TZ=${SYSTEM_TZ}"
+# Consolidated logging: lifeline.sh handles its own log file internally.
+# CRON stdout/stderr redirects to /dev/null to avoid duplicate output.
+CRON_SCHEDULE="*/${CRON_INTERVAL} * * * * ${LIFELINE_PATH} > /dev/null 2>&1"
+LOG_ARCHIVE_DIR="/var/log/versa-agi-archive"
+ok "Timezone detected: ${SYSTEM_TZ} — CRON and agent logs will use this timezone"
+
+echo ""
+echo "Installing CRON entries (heartbeat every ${CRON_INTERVAL} min):"
+echo "  ${CRON_TZ_LINE}"
+echo "  ${CRON_SCHEDULE}"
+echo ""
+
+# Lifeline is the product heartbeat — always install on fresh setup (do not ask).
+ensure_watchdog_lifeline_cron
+ok "CRON entries installed for ${WATCHDOG_USER} (lifeline heartbeat)"
+ensure_log_rotation
+ok "Log rotation: $(ini_get logging rotate monthly), keep $(ini_get logging keep 2) (/etc/logrotate.d/versa-agi)"
+
+touch /var/log/versa-agi-lifeline.log
+chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/log/versa-agi-lifeline.log
+mkdir -p "${LOG_ARCHIVE_DIR}"
+chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${LOG_ARCHIVE_DIR}"
+ok "Log file created: /var/log/versa-agi-lifeline.log (archive: ${LOG_ARCHIVE_DIR}/)"
+fi  # end UPDATE_MODE=false guard (Step 10)
+
+# ═══════════════════════════════════════════════════════
+# UPDATE-ONLY POST-DEPLOY STEPS
+# Steps 5b-U, 5c-U, U5: Token injection, model sync, CRON resume
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = true ]; then
+
+  # ─── Schema Migrations ──────────────────────────────
+  # Idempotent — ALTER TABLE errors silently if column already exists.
+  section "Update — Schema Migrations"
+  if [ -f "${AGENTS_DB}" ]; then
+    # v0.11.0: triage_model column for per-agent triage model configuration
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN triage_model TEXT;" 2>/dev/null && \
+      ok "Added triage_model column to agents table" || \
+      info "triage_model column already exists"
+    # v0.12.0: anchor_style column for philosophical anchor injection
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN anchor_style TEXT DEFAULT 'compact';" 2>/dev/null && \
+      ok "Added anchor_style column to agents table" || \
+      info "anchor_style column already exists"
+    # Set COA default to 'full' if not already set
+    sqlite3 "${AGENTS_DB}" "UPDATE agents SET anchor_style = 'full' WHERE name = 'coa' AND (anchor_style IS NULL OR anchor_style = 'compact');" 2>/dev/null || true
+    # v0.12.1: num_ctx column for per-agent context window size
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN num_ctx INTEGER DEFAULT 0;" 2>/dev/null && \
+      ok "Added num_ctx column to agents table" || \
+      info "num_ctx column already exists"
+    # v0.13.0: conversation_depth — configurable history depth for prompt injection
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN conversation_depth INTEGER DEFAULT 10;" 2>/dev/null && \
+      ok "Added conversation_depth column to agents table" || \
+      info "conversation_depth column already exists"
+    # v0.13.0: resume_enabled — toggle LangGraph checkpoint resume per-agent
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN resume_enabled BOOLEAN DEFAULT 1;" 2>/dev/null && \
+      ok "Added resume_enabled column to agents table" || \
+      info "resume_enabled column already exists"
+    # v0.13.0: resume_max_messages — trim checkpoint state on resume (0 = unlimited)
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN resume_max_messages INTEGER DEFAULT 25;" 2>/dev/null && \
+      ok "Added resume_max_messages column to agents table" || \
+      info "resume_max_messages column already exists"
+    # v0.14.0: browser_enabled column for headless browser automation (Playwright)
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN browser_enabled BOOLEAN DEFAULT 0;" 2>/dev/null && \
+      ok "Added browser_enabled column to agents table" || \
+      info "browser_enabled column already exists"
+    # v0.22.2: abstracted model parameters (temperature, reasoning, extra passthrough)
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN temperature REAL;" 2>/dev/null && \
+      ok "Added temperature column to agents table" || \
+      info "temperature column already exists"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN reasoning_effort TEXT;" 2>/dev/null && \
+      ok "Added reasoning_effort column to agents table" || \
+      info "reasoning_effort column already exists"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN reasoning_max_tokens INTEGER;" 2>/dev/null && \
+      ok "Added reasoning_max_tokens column to agents table" || \
+      info "reasoning_max_tokens column already exists"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN model_params_extra TEXT;" 2>/dev/null && \
+      ok "Added model_params_extra column to agents table" || \
+      info "model_params_extra column already exists"
+    sqlite3 "${AGENTS_DB}" "ALTER TABLE agents ADD COLUMN model_routing_enabled INTEGER DEFAULT 0;" 2>/dev/null && \
+      ok "Added model_routing_enabled column to agents table" || \
+      info "model_routing_enabled column already exists"
+    # Recreate views via init script — keeps v_active_agents / v_agent_registry in sync
+    # with init_agents_db.sh (includes tool_output_token_budget, model_routing_enabled, etc.)
+    if [ -f "${AGENTS_INIT}" ]; then
+      if _agents_init_out="$(bash "${AGENTS_INIT}" "${AGENTS_DB}" 2>&1)"; then
+        ok "agents.db views refreshed (init_agents_db.sh — utility_models + modality maps)"
+      elif printf '%s' "${_agents_init_out}" | grep -qi 'locked'; then
+        warn "agents.db view refresh skipped — database locked (quit agitop, then re-run --update)"
+      else
+        warn "agents.db view refresh failed"
+      fi
+    fi
+  fi
+  if [ -f "${TASKS_INIT}" ] && [ -f "${TASKS_DB}" ]; then
+    if _tasks_init_out="$(bash "${TASKS_INIT}" "${TASKS_DB}" 2>&1)"; then
+      ok "tasks.db schema refreshed (init_tasks_db.sh — Utility Task columns)"
+    elif printf '%s' "${_tasks_init_out}" | grep -qi 'locked'; then
+      warn "tasks.db schema refresh skipped — database locked (quit agitop, then re-run --update)"
+    else
+      warn "tasks.db schema refresh failed"
+    fi
+  fi
+  if [ -f "${CYCLES_INIT}" ] && [ -f "${CYCLES_DB}" ]; then
+    if _cycles_init_out="$(bash "${CYCLES_INIT}" "${CYCLES_DB}" 2>&1)"; then
+      ok "cycles.db schema refreshed (cost columns, routing audit)"
+    elif printf '%s' "${_cycles_init_out}" | grep -qi 'locked'; then
+      warn "cycles.db schema refresh skipped — database locked (quit agitop, then re-run --update)"
+    else
+      warn "cycles.db schema refresh failed"
+    fi
+  fi
+  echo ""
+
+  # NOTE: Sub-agent + watchdog poise deployment happens earlier in this run
+  # via scripts/sync_poise.py (single location, both flows) — no per-flow
+  # poise logic here.
+
+  # ─── 5b-U: Inject VersaVoice API Token ──────────────
+  # Token lives in setup.ini; must validate live before injecting.
+  section "Update — VV Token Injection"
+  VV_TOKEN_UPDATE="$(ini_get versavoice api_token)"
+
+  if [ "${DRY_RUN}" = true ]; then
+    if [ -n "${VV_TOKEN_UPDATE}" ]; then
+      dry "Would validate + inject VV API token into all agent configs"
+    else
+      dry "No VV token in setup.ini — would prompt for a valid token"
+    fi
+  else
+    # Collect + live-validate immediately (same instruction/retry UX as fresh install).
+    prompt_valid_vv_api_token "${VV_TOKEN_UPDATE}" keep_on_unreachable
+    VV_TOKEN_UPDATE="${VV_TOKEN}"
+    # Persist verified token back to setup.ini (source + deployed)
+    for _ini_vv_file in "${INI_FILE}" "/etc/versa-agi/setup.ini"; do
+      if [ -f "${_ini_vv_file}" ]; then
+        sed -i '/^\[versavoice\]/,/^\[/{s|^api_token=.*|api_token='"${VV_TOKEN_UPDATE}"'|}' "${_ini_vv_file}" 2>/dev/null || true
+      fi
+    done
+    for agent_config in /etc/versa-agi/*_config.json; do
+      [ -f "${agent_config}" ] || continue
+      local_agent_name=$(basename "${agent_config}" _config.json)
+      if jq -e '.versavoice' "${agent_config}" >/dev/null 2>&1; then
+        jq --arg token "${VV_TOKEN_UPDATE}" '.versavoice.api_token = $token' \
+          "${agent_config}" > "${agent_config}.tmp" && \
+          mv "${agent_config}.tmp" "${agent_config}"
+        ok "VV API token injected into ${local_agent_name}_config.json"
+        # Restore correct ownership: watchdog:{agent} 640 (System Design §IX)
+        if [ "${local_agent_name}" = "coa" ]; then
+          chown "${WATCHDOG_USER}:${COA_USER}" "${agent_config}"
+        else
+          chown "${WATCHDOG_USER}:${local_agent_name}" "${agent_config}" 2>/dev/null || \
+            chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${agent_config}"
+        fi
+        chmod 640 "${agent_config}"
+      fi
+    done
+  fi
+  echo ""
+
+  # ─── 5c-U: Model Registry & paths.env Sync ─────────
+  if [ "${DRY_RUN}" = false ]; then
+    section "Update — Model Registry Sync"
+
+    # ── Cloud Models ──
+    # Owned by `agictl model sync` (convergence point below). Do not write
+    # VERSA_CLOUD_MODELS here — CURRENT_CLOUD_MODELS used to be copied from
+    # retired setup.ini CSVs and is now always empty. Writing that blank
+    # mid-update is what left versa-agi-01 with an empty COA picker after
+    # interrupted --update (2026-09-09). Leave the live list until sync.
+
+    # ── Local AI settings ──
+    PATHS_ENV="/etc/versa-agi/paths.env"
+    EXEC_MODE="$(ini_get system mode cloud)"
+    LOCAL_ENABLED="$(ini_get local_ai enabled false)"
+    LOCAL_MODELS="$(ini_get local_ai local_models '')"
+    PROXY_PORT="$(ini_get local_ai proxy_port 4000)"
+    _UPDATE_TOPOLOGY="$(ini_get local_ai topology local)"
+    # Client topology: SSH tunnel claims port 4000 for remote local AI
+    # Cloud proxy must use a separate port to avoid conflict
+    if [ "${_UPDATE_TOPOLOGY}" = "client" ] && [ "${PROXY_PORT}" = "4000" ]; then
+      PROXY_PORT="4001"
+    fi
+    OLLAMA_HOST="$(ini_get local_ai ollama_host 'http://localhost:11434')"
+    GPU_BACKEND="$(ini_get local_ai gpu_backend standard)"
+    # Client topology: GPU backend must be "remote" regardless of hardware type.
+    # setup_local.sh sets this correctly during initial setup, but the update
+    # path reads the raw INI value (e.g. "intel") — override it here.
+    if [ "${_UPDATE_TOPOLOGY}" = "client" ]; then
+      GPU_BACKEND="remote"
+    fi
+    # Intel SYCL: single-model constraint — only the active model is available.
+    # In router mode, all models remain available (server loads on demand).
+    _MODEL_LOADING_STRATEGY="$(ini_get local_ai model_loading_strategy router)"
+    if [ "${GPU_BACKEND}" = "intel" ] && [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
+      SYCL_ACTIVE="$(ini_get local_ai sycl_active_model '')"
+      if [ -n "${SYCL_ACTIVE}" ]; then
+        LOCAL_MODELS="${SYCL_ACTIVE}"
+      fi
+    fi
+
+    # ── Proxy Models (aggregated from all enabled providers) ──
+    PROXY_ENABLED="$(ini_get third_party enabled false)"
+    PROXY_PROVIDERS="$(ini_get third_party providers '')"
+    AGGREGATED_PROXY_MODELS=""
+
+    if [ -n "${PROXY_PROVIDERS}" ]; then
+      IFS=',' read -ra PROVIDERS <<< "${PROXY_PROVIDERS}"
+      for provider in "${PROVIDERS[@]}"; do
+        provider=$(echo "${provider}" | xargs)
+        p_enabled="$(ini_get third_party "${provider}_enabled" false)"
+        p_models="$(ini_get third_party "${provider}_models" '')"
+        if [ "${p_enabled}" = "true" ] && [ -n "${p_models}" ]; then
+          if [ -n "${AGGREGATED_PROXY_MODELS}" ]; then
+            AGGREGATED_PROXY_MODELS="${AGGREGATED_PROXY_MODELS},${p_models}"
+          else
+            AGGREGATED_PROXY_MODELS="${p_models}"
+          fi
+          info "  Provider ${provider}: ${p_models}"
+        fi
+      done
+      if [ -n "${AGGREGATED_PROXY_MODELS}" ]; then
+        ok "Third-party models aggregated: ${AGGREGATED_PROXY_MODELS}"
+      fi
+    fi
+
+    # VERSA_COA_APPROVED_MODELS is owned by `agictl model sync` (catalog `coa`).
+
+    # ── Active Local Model ──
+    # Only meaningful in single mode. Router mode has no single active model.
+    # On client topology: preserve the existing value (set by client topology repair below).
+    # On server/local: read from setup.ini (set by agictl model activate).
+    if [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
+      if [ "${_UPDATE_TOPOLOGY}" = "client" ]; then
+        _ACTIVE_LOCAL_MODEL=$(grep '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null | cut -d'"' -f2 || true)
+      else
+        _ACTIVE_LOCAL_MODEL="$(ini_get local_ai sycl_active_model '')"
+      fi
+    else
+      _ACTIVE_LOCAL_MODEL=""
+    fi
+
+    # ── Sync to paths.env ──
+    if [ -f "${PATHS_ENV}" ]; then
+      # Determine the correct Inference URL based on topology
+      if [ "${_UPDATE_TOPOLOGY}" = "client" ]; then
+        # Client: SSH tunnel provides local AI on the remote port — don't overwrite blindly with 4000
+        _INFERENCE_URL_VALUE=$(grep '^VERSA_INFERENCE_URL=' "${PATHS_ENV}" | cut -d'"' -f2)
+        if [ -z "${_INFERENCE_URL_VALUE}" ]; then
+          _TUNNEL_PORT=$(echo "${_UPDATE_REMOTE_URL}" | grep -oP ':\K[0-9]+$' || echo "11434")
+          _INFERENCE_URL_VALUE="http://localhost:${_TUNNEL_PORT}"
+        fi
+      else
+        _INFERENCE_URL_VALUE="http://localhost:${PROXY_PORT}"
+      fi
+
+      for kv in \
+        "VERSA_EXECUTION_MODE=\"${EXEC_MODE}\"" \
+        "VERSA_LOCAL_AI_ENABLED=\"${LOCAL_ENABLED}\"" \
+        "VERSA_GPU_BACKEND=\"${GPU_BACKEND}\"" \
+        "VERSA_LOCAL_MODELS=\"${LOCAL_MODELS}\"" \
+        "VERSA_INFERENCE_URL=\"${_INFERENCE_URL_VALUE}\"" \
+        "VERSA_THIRD_PARTY_ENABLED=\"${PROXY_ENABLED}\"" \
+        "VERSA_THIRD_PARTY_MODELS=\"${AGGREGATED_PROXY_MODELS}\"" \
+        "VERSA_THIRD_PARTY_URL=\"http://localhost:${PROXY_PORT}\"" \
+        "VERSA_ACTIVE_LOCAL_MODEL=\"${_ACTIVE_LOCAL_MODEL}\"" \
+        "VERSA_MODEL_LOADING_STRATEGY=\"${_MODEL_LOADING_STRATEGY}\""; do
+        KEY="${kv%%=*}"
+        if grep -q "^${KEY}=" "${PATHS_ENV}"; then
+          sed -i "s|^${KEY}=.*|${kv}|" "${PATHS_ENV}"
+        else
+          echo "${kv}" >> "${PATHS_ENV}"
+        fi
+      done
+      ok "paths.env synced (cloud + local + proxy)"
+    fi
+
+    # NOTE: Unified Model Catalog merge/sync runs for BOTH fresh installs and
+    # updates at the convergence point below (search "Unified Model Catalog").
+
+    # Legacy Inference Endpoint configuration removed (deprecated)
+    echo ""
+  fi
+
+  # ─── Client Topology Repair ───────────────────────────
+  # Self-healing: reconstruct client_config.json and sync active model
+  # when topology=client but config is missing or stale.
+  if [ "${DRY_RUN}" = false ] && [ "${_UPDATE_TOPOLOGY}" = "client" ]; then
+    section "Update — Client Topology Repair"
+
+    CLIENT_STATE_FILE="/etc/versa-agi/client_config.json"
+    _REPAIR_REMOTE_URL="$(ini_get local_ai remote_inference_url '')"
+    _REPAIR_MASTER_KEY="$(ini_get local_ai inference_master_key '')"
+
+    # ── Step 1: Reconstruct client_config.json if missing ──
+    if [ ! -f "${CLIENT_STATE_FILE}" ]; then
+      info "client_config.json missing — reconstructing from tunnel service..."
+
+      # Extract tunnel_host and tunnel_port from the running systemd service
+      _REPAIR_TUNNEL_HOST=""
+      _REPAIR_TUNNEL_PORT=""
+      _TUNNEL_EXEC=$(systemctl show versa-agi-tunnel --property=ExecStart --no-pager 2>/dev/null || true)
+      if [ -n "${_TUNNEL_EXEC}" ]; then
+        # Parse: watchdog@<host> from the ExecStart line
+        _REPAIR_TUNNEL_HOST=$(echo "${_TUNNEL_EXEC}" | grep -oP 'watchdog@\K[^\s;]+' | head -1)
+        # Parse: -L <port>:localhost:<port>
+        _REPAIR_TUNNEL_PORT=$(echo "${_TUNNEL_EXEC}" | grep -oP -- '-L\s+\K[0-9]+' | head -1)
+      fi
+
+      # Fallback: extract from remote_inference_url in setup.ini
+      if [ -z "${_REPAIR_TUNNEL_HOST}" ] && [ -n "${_REPAIR_REMOTE_URL}" ]; then
+        _REPAIR_TUNNEL_HOST=$(echo "${_REPAIR_REMOTE_URL}" | sed -E 's|https?://||;s|:[0-9]+$||;s|/.*||')
+      fi
+      if [ -z "${_REPAIR_TUNNEL_PORT}" ] && [ -n "${_REPAIR_REMOTE_URL}" ]; then
+        _REPAIR_TUNNEL_PORT=$(echo "${_REPAIR_REMOTE_URL}" | grep -oP ':\K[0-9]+$' || echo "8080")
+      fi
+
+      if [ -n "${_REPAIR_TUNNEL_HOST}" ] && [ -n "${_REPAIR_TUNNEL_PORT}" ]; then
+        _REPAIR_TUNNEL_URL="http://localhost:${_REPAIR_TUNNEL_PORT}"
+
+        # Query live models from the tunnel endpoint
+        _repair_models=""
+        _models_json=$(curl -sf --connect-timeout 5 --max-time 10 -H "Authorization: Bearer ${_REPAIR_MASTER_KEY}" "${_REPAIR_TUNNEL_URL}/v1/models" 2>/dev/null || echo "")
+        if [ -n "${_models_json}" ] && command -v jq &>/dev/null; then
+          _raw_models=$(echo "${_models_json}" | jq -r '.data[].id' 2>/dev/null | paste -sd ',')
+          if [ -n "${_raw_models}" ]; then
+            # Translate GGUF filenames → friendly keys via manage_registry.sh
+            _MANAGE_REGISTRY_SCRIPT="${SCRIPT_DIR}/manage_registry.sh"
+            if [ -f "${_MANAGE_REGISTRY_SCRIPT}" ]; then
+              source "${_MANAGE_REGISTRY_SCRIPT}" --list >/dev/null 2>&1 || true
+              # Define reverse-lookup (GGUF filename or llama-server stem → friendly key).
+              # manage_registry.sh loads _REG_* arrays but doesn't define this helper.
+              # /v1/models ids are stems (no .gguf); registry files include the suffix.
+              _reg_name_for_file() {
+                local f="$1" stem="${1%.gguf}" i rf
+                for i in $(seq 0 $((_REG_COUNT - 1))); do
+                  rf="${_REG_FILES[$i]}"
+                  if [ "$rf" = "$f" ] || [ "$rf" = "${stem}.gguf" ] || [ "${rf%.gguf}" = "$stem" ]; then
+                    echo "${_REG_NAMES[$i]}"
+                    return
+                  fi
+                done
+              }
+              _translated_list=""
+              IFS=',' read -ra _raw_arr <<< "${_raw_models}"
+              for _gguf_name in "${_raw_arr[@]}"; do
+                _friendly=$(_reg_name_for_file "${_gguf_name}" 2>/dev/null || true)
+                if [ -n "${_friendly}" ]; then
+                  _translated_list="${_translated_list:+${_translated_list},}${_friendly}"
+                else
+                  _translated_list="${_translated_list:+${_translated_list},}${_gguf_name}"
+                fi
+              done
+              _repair_models="${_translated_list}"
+            else
+              _repair_models="${_raw_models}"
+            fi
+          fi
+        fi
+
+        # Write client_config.json
+        mkdir -p "$(dirname "${CLIENT_STATE_FILE}")"
+        cat > "${CLIENT_STATE_FILE}" <<REPAIRCFG
+{
+  "topology": "client",
+  "remote_url": "${_REPAIR_REMOTE_URL}",
+  "tunnel_url": "${_REPAIR_TUNNEL_URL}",
+  "tunnel_host": "${_REPAIR_TUNNEL_HOST}",
+  "tunnel_port": "${_REPAIR_TUNNEL_PORT}",
+  "models": $(echo "${_repair_models:-}" | jq -R 'split(",")' 2>/dev/null || echo '[]'),
+  "repaired_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+REPAIRCFG
+        chmod 640 "${CLIENT_STATE_FILE}"
+        chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${CLIENT_STATE_FILE}" 2>/dev/null || true
+        ok "client_config.json reconstructed (tunnel: ${_REPAIR_TUNNEL_HOST}:${_REPAIR_TUNNEL_PORT})"
+      else
+        warn "Could not determine tunnel host/port — client_config.json NOT created"
+        warn "Run: sudo ./setup_local.sh (option 2) to configure the client connection"
+      fi
+    else
+      ok "client_config.json exists"
+    fi
+
+    # ── Step 2: Sync inventory + starred model from the GPU host ──
+    # Same command the operator already uses (`agictl model refresh`): SSH
+    # `agictl model list` and take `active: true` (`sycl_active_model`).
+    # llama-server `/v1/models[0]` is directory order (GGUF stems), not the star.
+    if command -v agictl >/dev/null 2>&1 && [ -f "${CLIENT_STATE_FILE}" ]; then
+      info "Syncing local models from remote server (agictl model refresh)..."
+      _REFRESH_JSON=$(agictl model refresh 2>/dev/null || true)
+      _refresh_ok=$(echo "${_REFRESH_JSON}" | jq -r '.success // false' 2>/dev/null || echo false)
+      _active_friendly=$(echo "${_REFRESH_JSON}" | jq -r '.active_model // empty' 2>/dev/null || true)
+      if [ "${_refresh_ok}" = "true" ]; then
+        if [ "${_MODEL_LOADING_STRATEGY}" = "single" ]; then
+          if [ -n "${_active_friendly}" ] && [ "${_active_friendly}" != "null" ]; then
+            ok "Active model synced: ${_active_friendly}"
+          else
+            warn "Remote server has no starred model — VERSA_ACTIVE_LOCAL_MODEL not set"
+          fi
+        else
+          if grep -q '^VERSA_ACTIVE_LOCAL_MODEL=' "${PATHS_ENV}" 2>/dev/null; then
+            sed -i 's|^VERSA_ACTIVE_LOCAL_MODEL=.*|VERSA_ACTIVE_LOCAL_MODEL=""|' "${PATHS_ENV}"
+          fi
+          ok "Router mode — inventory synced (all models available)"
+        fi
+      else
+        warn "agictl model refresh failed — VERSA_ACTIVE_LOCAL_MODEL unchanged"
+      fi
+    else
+      warn "Cannot refresh from GPU host (agictl or client_config.json missing)"
+    fi
+
+    echo ""
+  fi
+
+  # ─── Host services (state_host_services.md) ─────────
+  section "Update — Host Services"
+  if [ "${DRY_RUN}" = true ]; then
+    dry "Would write /etc/logrotate.d/versa-agi from [logging] and drop the old archive cron line"
+    dry "Would refresh versa-agi-tunnel.service to the retrying runner (client topology only)"
+  else
+    ensure_log_rotation
+    ok "Log rotation: $(ini_get logging rotate monthly), keep $(ini_get logging keep 2) (/etc/logrotate.d/versa-agi)"
+
+    # shellcheck source=core-infra/scripts/tunnel_service.sh
+    source "${SRC_CORE_INFRA}/scripts/tunnel_service.sh"
+    _TUNNEL_FIELDS="$(read_tunnel_service)"
+    if [ -n "${_TUNNEL_FIELDS}" ]; then
+      read -r _TS_HOST _TS_PORT _TS_KEY _TS_USER <<< "${_TUNNEL_FIELDS}"
+      if install_tunnel_service "${SRC_CORE_INFRA}" "${_TS_HOST}" "${_TS_PORT}" "${_TS_KEY}" "${_TS_USER}"; then
+        systemctl restart versa-agi-tunnel 2>/dev/null || true
+        ok "SSH tunnel service refreshed (retries every minute for 30 min, then every 30 min)"
+      else
+        ok "SSH tunnel service already current"
+      fi
+    elif [ -f "${TUNNEL_UNIT_FILE}" ]; then
+      warn "Could not read host / port / key from ${TUNNEL_UNIT_FILE} — tunnel unit left unchanged"
+    fi
+  fi
+
+fi  # end UPDATE_MODE post-deploy steps
+
+# ─── Heal keyed third-party providers (fresh + --update) ──
+# Step 9d is skipped on --update, and OrbStack historically dropped read -n 1
+# answers so "Enable OpenRouter?" could silently leave openrouter_enabled=false
+# even when a key was saved. If a key exists, stamp enabled=true before migrate
+# so Import / provider list stay consistent without manual sed.
+_heal_keyed_third_party_providers() {
+  # Canonical enable state is /etc/versa-agi/setup.ini. Do NOT use ini_get() here:
+  # during setup INI_FILE is the source-tree setup.ini, which may already say
+  # openrouter_enabled=true while the deployed copy is still false — skipping
+  # heal then leaves Import working (key-only) but Providers tab En=· / missing.
+  local keys_env="/etc/versa-agi/provider_keys.env"
+  local deployed="/etc/versa-agi/setup.ini"
+  local slug ini_key env_var has_key enabled rest
+  local -a pairs=(
+    "xai:xai_enabled:XAI_API_KEY"
+    "openai:openai_enabled:OPENAI_API_KEY"
+    "anthropic:anthropic_enabled:ANTHROPIC_API_KEY"
+    "openrouter:openrouter_enabled:OPENROUTER_API_KEY"
+  )
+  local healed=0
+
+  _heal_ini_get() {
+    local section="$1" key="$2" file="$3" default="${4:-false}"
+    local value=""
+    [ -f "${file}" ] || { echo "${default}"; return; }
+    value="$(awk -F= -v section="${section}" -v key="${key}" '
+      /^\[/ { current = substr($0, 2, length($0)-2) }
+      current == section && $1 ~ "^"key"$" {
+        val = substr($0, index($0,"=")+1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+        print val
+        exit
+      }
+    ' "${file}" 2>/dev/null)"
+    echo "${value:-${default}}"
+  }
+
+  for pair in "${pairs[@]}"; do
+    slug="${pair%%:*}"
+    rest="${pair#*:}"
+    ini_key="${rest%%:*}"
+    env_var="${rest#*:}"
+    has_key=""
+    if [ -f "${keys_env}" ]; then
+      has_key="$(grep -E "^${env_var}=.+" "${keys_env}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\"' | tr -d "'" || true)"
+    fi
+    if [ -z "${has_key}" ] && [ -f "${deployed}" ]; then
+      has_key="$(_heal_ini_get third_party "${slug}_api_key" "${deployed}" "")"
+    fi
+    # Do NOT fall back to source-tree setup.ini / ini_get() here. Multipass and
+    # other mounts often keep a developer setup.ini with live keys next to
+    # setup.sh; reading those would auto-enable every provider on a "skip-all"
+    # QT box. Only runtime key stores count: provider_keys.env + /etc setup.ini.
+    [ -n "${has_key}" ] || continue
+
+    enabled="$(_heal_ini_get third_party "${ini_key}" "${deployed}" false)"
+    # Also heal when baseline provider row is disabled even if setup.ini says true
+    local prov_en=""
+    if command -v agictl >/dev/null 2>&1; then
+      prov_en="$(agictl provider list 2>/dev/null | python3 -c "
+import sys,json
+try:
+  d=json.load(sys.stdin)
+  for p in d.get('providers',[]):
+    if p.get('slug')=='${slug}':
+      print('true' if p.get('enabled') else 'false'); break
+except Exception:
+  pass
+" 2>/dev/null || true)"
+    fi
+
+    if [ "${enabled}" = "true" ] && [ "${prov_en}" = "true" ]; then
+      continue
+    fi
+
+    for _ini_file in "${deployed}" "${INI_FILE:-}" "${SCRIPT_DIR:-}/setup.ini"; do
+      [ -n "${_ini_file}" ] && [ -f "${_ini_file}" ] || continue
+      if grep -q "^${ini_key}=" "${_ini_file}" 2>/dev/null; then
+        sed -i "/^\[third_party\]/,/^\[/{s/^${ini_key}=.*/${ini_key}=true/}" "${_ini_file}" 2>/dev/null || true
+      else
+        # Key missing — insert under [third_party] (sed replace alone is a no-op)
+        sed -i "/^\[third_party\]/a ${ini_key}=true" "${_ini_file}" 2>/dev/null || true
+      fi
+      sed -i "/^\[third_party\]/,/^\[/{s/^enabled=.*/enabled=true/}" "${_ini_file}" 2>/dev/null || true
+    done
+    enable_site_provider "${slug}" "/etc/versa-agi/models.ini"
+    enable_site_provider "${slug}" "${SCRIPT_DIR:-}/models.ini"
+    if command -v agictl >/dev/null 2>&1; then
+      # Ensure registry row exists + enabled (migrate may not have run yet)
+      agictl provider enable "${slug}" --no-sync >/dev/null 2>&1 || true
+    fi
+    ok "Healed ${slug}: key present → setup.ini ${ini_key}=true + provider enable"
+    healed=$((healed + 1))
+  done
+  if [ "${healed}" -gt 0 ]; then
+    info "Provider enable heal applied (${healed}) — deployed setup.ini was out of sync with keys"
+  fi
+}
+
+# ─── Config Reconcile + Model Catalog Baseline + Sync (Edition 2.x) ──
+# Runs IDENTICALLY for fresh installs and updates — deterministic regeneration:
+#   • `agictl system reconcile-config` — regenerates the deployed setup.ini and
+#     models.ini from the shipped templates. The template is authority for
+#     structure, comments, stock model lists, and new/removed keys; user content
+#     is preserved (setup.ini user-owned values; models.ini [catalog_custom]/
+#     [providers_custom] + registry-added rows in the shared local sections).
+#   • `agictl model migrate` — rebuilds the [catalog]/[providers] baseline from
+#     the freshly reconciled setup.ini + template catalog metadata; the user
+#     layer overlays the baseline at read time (so live edits survive).
+#   • `agictl model sync` — regenerates the cloud/third-party paths.env
+#     registries from the MERGED catalog.
+# All idempotent and non-fatal. apply_system_permissions (below) re-asserts
+# ownership/modes on the files they touch.
+  if [ "${DRY_RUN}" = false ] && command -v agictl >/dev/null 2>&1; then
+  section "Model Catalog — Reconcile, Baseline & Sync"
+  # Before reconcile: stamp /etc so carried-forward values include enables.
+  _heal_keyed_third_party_providers
+
+  if [ -f "${SCRIPT_DIR}/models.ini" ]; then
+    if agictl model openrouter patch-template --models-ini "${SCRIPT_DIR}/models.ini" >/dev/null 2>&1; then
+      ok "OpenRouter catalog metadata refreshed in shipped models.ini"
+    else
+      warn "OpenRouter template patch skipped (non-fatal — API may be unreachable)"
+    fi
+  fi
+  # Prefer *.stock (secret-free stock authority) so fresh scaffold and
+  # --update regenerate identical structure/lists. Fall back to the working
+  # copies when stock files are absent (older trees).
+  _SETUP_TEMPLATE="${SCRIPT_DIR}/setup.ini.stock"
+  if [ ! -f "${_SETUP_TEMPLATE}" ]; then
+    _SETUP_TEMPLATE="${SCRIPT_DIR}/setup.ini"
+  fi
+  _MODELS_TEMPLATE="${SCRIPT_DIR}/models.ini.stock"
+  if [ ! -f "${_MODELS_TEMPLATE}" ]; then
+    _MODELS_TEMPLATE="${SCRIPT_DIR}/models.ini"
+  fi
+  if [ -f "${_SETUP_TEMPLATE}" ] && [ -f "${_MODELS_TEMPLATE}" ]; then
+    if agictl system reconcile-config \
+        --setup-template "${_SETUP_TEMPLATE}" \
+        --models-template "${_MODELS_TEMPLATE}" >/dev/null 2>&1; then
+      ok "Config reconciled from shipped templates (user content preserved)"
+    else
+      warn "Config reconcile skipped (non-fatal)"
+    fi
+  fi
+  # After reconcile: re-heal in case template carry missed a flag, then migrate
+  # so [providers] baseline gets openrouter=true|OpenRouter|...
+  _heal_keyed_third_party_providers
+  _MIGRATE_ERR="$(mktemp)"
+  if agictl model migrate >"${_MIGRATE_ERR}" 2>&1; then
+    ok "Model catalog baseline regenerated from setup.ini (custom layer preserved)"
+  else
+    warn "Model catalog migrate failed (non-fatal) — $(head -c 200 "${_MIGRATE_ERR}" | tr '\n' ' ')"
+  fi
+  rm -f "${_MIGRATE_ERR}"
+  # Safety net: Providers tab must never be empty after install. If migrate
+  # failed or wrote nothing, re-seed [providers] from models.ini.stock and retry.
+  _PROV_COUNT=0
+  if [ -f "/etc/versa-agi/models.ini" ]; then
+    _PROV_COUNT="$(awk '
+      /^\[providers\]/ { s=1; next }
+      /^\[/ { s=0 }
+      s && /^[a-zA-Z0-9_-]+[[:space:]]*=/ { n++ }
+      END { print n+0 }
+    ' /etc/versa-agi/models.ini 2>/dev/null || echo 0)"
+  fi
+  if [ "${_PROV_COUNT}" -lt 1 ]; then
+    warn "models.ini [providers] empty after migrate — re-seeding from models.ini.stock"
+    if [ -f "${SCRIPT_DIR}/models.ini.stock" ]; then
+      cp -f "${SCRIPT_DIR}/models.ini.stock" "/etc/versa-agi/models.ini"
+      chown "${WATCHDOG_USER}:agi_agents" "/etc/versa-agi/models.ini" 2>/dev/null || true
+      chmod 640 "/etc/versa-agi/models.ini"
+      if agictl model migrate >/dev/null 2>&1; then
+        ok "Providers registry restored via stock re-seed + migrate"
+      else
+        warn "Migrate still failed — stock [providers] left in place for Model Manager"
+      fi
+    else
+      error "models.ini.stock missing — cannot restore Providers registry"
+    fi
+  fi
+  # After migrate: ensure providers_custom enable overlay (idempotent)
+  _heal_keyed_third_party_providers
+  if [ -f "/etc/versa-agi/models.ini" ]; then
+    if agictl model openrouter patch-template --models-ini "/etc/versa-agi/models.ini" >/dev/null 2>&1; then
+      ok "OpenRouter metadata + pricing refreshed on deployed models.ini"
+    else
+      warn "Deployed models.ini OpenRouter patch skipped (non-fatal)"
+    fi
+  fi
+  if agictl model sync >/dev/null 2>&1; then
+    ok "Model catalog synced (derived sections + paths.env)"
+  else
+    warn "Model catalog sync skipped (non-fatal)"
+  fi
+  # COA may have been sqlite-assigned in Step 9d before migrate injected the
+  # key. Confirm it is in the live catalog; reset a leaked 4K cloud window.
+  if [ -f "${DEPLOYED_CORE_INFRA}/agitop/coa_bootstrap.py" ]; then
+    _COA_FRESH=0
+    [ "${UPDATE_MODE}" = false ] && _COA_FRESH=1
+    _COA_HEAL="$(PYTHONPATH="${DEPLOYED_CORE_INFRA}${PYTHONPATH:+:${PYTHONPATH}}" python3 -c "
+from agitop.coa_bootstrap import heal_coa_assignment
+r = heal_coa_assignment(fresh_install=bool(${_COA_FRESH}))
+print(','.join(r.get('actions') or ['ok']))
+" 2>/dev/null || true)"
+    if echo "${_COA_HEAL}" | grep -q 'held_pending_model'; then
+      info "COA held until a catalog model is assigned (first-login API Keys / COA)"
+    elif echo "${_COA_HEAL}" | grep -q 'cleared_stale_invalid_config'; then
+      ok "COA invalid_config cleared — assigned model is in the live catalog"
+    elif echo "${_COA_HEAL}" | grep -q 'cleared_missing_catalog_model'; then
+      warn "COA model was not in the live catalog — cleared so first-login bootstrap can assign a catalog key"
+    elif echo "${_COA_HEAL}" | grep -q 'reset_cloud_num_ctx_auto'; then
+      ok "COA context window reset to Auto (cloud model was left on 4K)"
+    elif echo "${_COA_HEAL}" | grep -q 'missing_catalog_model'; then
+      warn "COA model is not in the live catalog — assign via agitop COA Setup or import the Model"
+    elif [ -n "${_COA_HEAL}" ]; then
+      ok "COA model assignment checked (${_COA_HEAL})"
+    fi
+  fi
+  echo ""
+fi
+
+# ─── Feature flags persistence (D34) — after reconcile ──
+# reconcile-config has just (re)written the deployed setup.ini from the template
+# (carrying user values forward). Write the operator's captured feature choices
+# now so they are the final word; the next --update's reconcile preserves them
+# ([features] keys are not stock-owned).
+if declare -F install_acceptance_persist_features >/dev/null 2>&1; then
+  install_acceptance_persist_features \
+    || warn "Feature flag persist skipped (non-fatal)"
+fi
+
+# ─── Step 11: Sentinel Service (reactive file watcher) ──
+section "Step 11 — Sentinel Service"
+
+SENTINEL_UNIT_SRC="${SRC_CORE_INFRA}/config/versa-agi-sentinel.service"
+SENTINEL_UNIT_DEST="/etc/systemd/system/versa-agi-sentinel.service"
+
+if [ -f "${SENTINEL_UNIT_SRC}" ]; then
+  # Create sentinel log file
+  touch /var/log/versa-agi-sentinel.log
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/log/versa-agi-sentinel.log
+
+  # Install systemd unit
+  cp "${SENTINEL_UNIT_SRC}" "${SENTINEL_UNIT_DEST}"
+  systemctl daemon-reload
+
+  # Check INI for sentinel mode
+  FILE_MON_ENABLED="$(ini_get agent file_mon_enabled true)"
+  if [ "${FILE_MON_ENABLED}" = "true" ]; then
+    systemctl enable versa-agi-sentinel --quiet 2>/dev/null || true
+    systemctl start versa-agi-sentinel 2>/dev/null || true
+    ok "Sentinel service installed and started"
+  else
+    systemctl stop versa-agi-sentinel 2>/dev/null || true
+    systemctl disable versa-agi-sentinel --quiet 2>/dev/null || true
+    ok "Sentinel service installed but DISABLED (file_mon_enabled=false)"
+  fi
+else
+  warn "Sentinel service unit not found at ${SENTINEL_UNIT_SRC} — skipping"
+fi
+
+# ─── Step 11b: Link Service (mail signals pushed from VersaVoice) ──
+# state_realtime_link.md RL-05. The service dials out and holds one request
+# open; no inbound port. [versavoice] link=false makes it idle. Without
+# systemd (some WSL installs) it is not installed and Lifeline's own fetch
+# carries the mail, as before.
+section "Step 11b — Link Service"
+
+# shellcheck source=core-infra/scripts/link_service.sh
+source "${SRC_CORE_INFRA}/scripts/link_service.sh"
+if [ -d /run/systemd/system ]; then
+  if install_link_service "${SRC_CORE_INFRA}" "${WATCHDOG_USER}" "${WATCHDOG_HOME}/core-infra"; then
+    systemctl enable versa-agi-link --quiet 2>/dev/null || true
+    systemctl restart versa-agi-link 2>/dev/null || true
+    ok "Link service installed and started ([versavoice] link=$(ini_get versavoice link true))"
+  else
+    # Restarted even when its files did not change: the service runs as
+    # watchdog and takes its groups when it starts, and it needs agi_govern
+    # to enter the agents' homes. A restart ends the runner only, never a
+    # cycle it started (KillMode=process).
+    systemctl enable versa-agi-link --quiet 2>/dev/null || true
+    systemctl restart versa-agi-link 2>/dev/null || true
+    ok "Link service already current (restarted to pick up group membership)"
+  fi
+else
+  warn "systemd is not running here — link service not installed; Lifeline's own fetch carries the mail"
+fi
+
+# ─── Step 11c: Shutdown Guard (agents hand off before the computer goes down) ──
+# state_host_services.md §1.4.1. The unit does its work when systemd stops it
+# at shutdown or reboot. It is enabled and started here and never restarted:
+# a restart would run its ExecStop.
+section "Step 11c — Shutdown Guard"
+
+# shellcheck source=core-infra/scripts/shutdown_guard_service.sh
+source "${SRC_CORE_INFRA}/scripts/shutdown_guard_service.sh"
+if [ -d /run/systemd/system ]; then
+  if install_shutdown_guard "${SRC_CORE_INFRA}"; then
+    ok "Shutdown guard installed ([agent] shutdown_grace_seconds=$(ini_get agent shutdown_grace_seconds 120))"
+  else
+    ok "Shutdown guard already current"
+  fi
+  systemctl enable versa-agi-shutdown-guard --quiet 2>/dev/null || true
+  systemctl start versa-agi-shutdown-guard 2>/dev/null || true
+else
+  warn "systemd is not running here — shutdown guard not installed; an agent in a cycle is cut off when the computer shuts down"
+fi
+
+# ─── Step 11d: Sleep Hold (the computer stays awake while an agent works) ──
+# state_host_services.md §1.6.1, §1.6.2. Lifeline takes the hold; only root can
+# give the watchdog account the permission and set how the lid behaves.
+section "Step 11d — Sleep Hold"
+
+# shellcheck source=core-infra/scripts/sleep_hold.sh
+source "${SRC_CORE_INFRA}/scripts/sleep_hold.sh"
+if [ -d /run/systemd/system ]; then
+  _SLEEP_HOLD="$(ini_get agent sleep_hold true)"
+  _SLEEP_RC=0
+  install_sleep_hold_rule "${WATCHDOG_USER}" "${_SLEEP_HOLD}" || _SLEEP_RC=$?
+  case "${_SLEEP_RC}" in
+    0) ok "Sleep hold permission updated ([agent] sleep_hold=${_SLEEP_HOLD})" ;;
+    1) ok "Sleep hold permission already current ([agent] sleep_hold=${_SLEEP_HOLD})" ;;
+    *) warn "No polkit rules folder here — the computer can sleep while an agent works" ;;
+  esac
+  _LID_WAITS="false"
+  if machine_is_laptop; then
+    _LID_WAITS="$(ini_get agent lid_waits_for_agent false)"
+  fi
+  [ "${_SLEEP_HOLD}" = "true" ] || _LID_WAITS="false"
+  if apply_lid_setting "${_LID_WAITS}"; then
+    ok "Lid setting updated: a shut lid $([ "${_LID_WAITS}" = "true" ] && echo "waits for a working agent" || echo "puts the computer to sleep")"
+  else
+    ok "Lid setting already current ([agent] lid_waits_for_agent=${_LID_WAITS})"
+  fi
+else
+  warn "systemd is not running here — no sleep hold; nothing puts this machine to sleep through systemd either"
+fi
+# ─── Step 11e: Cloud storage tools (rclone and FUSE) ──
+# state_host_services.md §1.7. Agents reach a person's cloud files with rclone
+# (skill cloud_storage.md). Both are installed here so an agent has them without
+# asking. Best-effort: a machine with no network keeps its install.
+section "Step 11e — Cloud Storage Tools"
+
+# shellcheck source=core-infra/scripts/shipped_tools.sh
+source "${SRC_CORE_INFRA}/scripts/shipped_tools.sh"
+_FUSE_RC=0
+install_fuse3 || _FUSE_RC=$?
+case "${_FUSE_RC}" in
+  0) ok "fuse3 installed (a cloud folder can be mounted)" ;;
+  1) ok "fuse3 already installed" ;;
+  *) warn "fuse3 could not be installed — agents can still use rclone commands, not a mounted folder" ;;
+esac
+_RCLONE_RC=0
+install_rclone "${SRC_CORE_INFRA}/config/shipped_tools.ini" || _RCLONE_RC=$?
+case "${_RCLONE_RC}" in
+  0) ok "${SHIPPED_TOOL_NOTE} installed (/usr/local/bin/rclone)" ;;
+  1) ok "${SHIPPED_TOOL_NOTE} already installed" ;;
+  *) warn "rclone not installed: ${SHIPPED_TOOL_NOTE}. An agent can request it when it is needed" ;;
+esac
+
+# ─── System Permissions Restabilization ───────────────
+# This is the AUTHORITATIVE, FINAL pass. It enforces the System Design §IX
+# exactly. No blanket chown -R — every path is set individually.
+migrate_legacy_infra_files() {
+  local old_env="/etc/versa-agi/inference_endpoint.env"
+  local new_env="/etc/versa-agi/provider_keys.env"
+  if [ -f "${old_env}" ] && [ ! -f "${new_env}" ]; then
+    mv "${old_env}" "${new_env}"
+    ok "Migrated inference_endpoint.env → provider_keys.env"
+  fi
+  if [ -f "${new_env}" ]; then
+    sed -i '/^GEMINI_PASSTHROUGH_KEY=/d' "${new_env}" 2>/dev/null || true
+  fi
+  rm -f "/etc/versa-agi/inference_endpoint_config.yaml" 2>/dev/null || true
+  retire_litellm_proxy
+}
+
+# Cloud models call providers directly (TD-INF-025). The old proxy unit is not
+# installed anymore; an existing host can still have it enabled and crash-looping
+# after the binary was removed. Stop it and delete the unit, env, config, and tree.
+retire_litellm_proxy() {
+  local removed=false
+  if [ -f /etc/systemd/system/versa-agi-litellm.service ] || systemctl is-enabled versa-agi-litellm.service >/dev/null 2>&1; then
+    systemctl stop versa-agi-litellm.service 2>/dev/null || true
+    systemctl disable versa-agi-litellm.service 2>/dev/null || true
+    rm -f /etc/systemd/system/versa-agi-litellm.service
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed versa-agi-litellm.service 2>/dev/null || true
+    removed=true
+  fi
+  if [ -f /etc/versa-agi/litellm.env ] || [ -f /etc/versa-agi/litellm_config.yaml ] || [ -d /opt/versa-agi/litellm ]; then
+    rm -f /etc/versa-agi/litellm.env /etc/versa-agi/litellm_config.yaml
+    rm -rf /opt/versa-agi/litellm
+    removed=true
+  fi
+  if [ "${removed}" = true ]; then
+    ok "LiteLLM proxy removed (cloud models call providers directly)"
+  fi
+}
+
+# System Design §IX / 9.4 — lock shipped skills only; normalize the rest.
+normalize_agent_skills() {
+  local skills_dir="$1"
+  local owner="$2"
+  [ -d "${skills_dir}" ] || return 0
+  chown "${owner}:agi_agents" "${skills_dir}" && chmod 775 "${skills_dir}"
+  local skill_file skill_base item item_base
+  for skill_file in "${skills_dir}"/*.md; do
+    [ -f "${skill_file}" ] || continue
+    skill_base="$(basename "${skill_file}")"
+    if [ -f "${DEPLOYED_CORE_INFRA}/skills/${skill_base}" ]; then
+      chown "${WATCHDOG_USER}:agi_agents" "${skill_file}"
+      chmod 440 "${skill_file}"
+    else
+      chown "${owner}:agi_agents" "${skill_file}"
+      chmod 664 "${skill_file}"
+    fi
+  done
+  for item in "${skills_dir}"/*; do
+    [ -d "${item}" ] || continue
+    item_base="$(basename "${item}")"
+    if [ -d "${DEPLOYED_CORE_INFRA}/skills/${item_base}" ]; then
+      chown -R "${owner}:agi_agents" "${item}"
+      find "${item}" -type d -exec chmod 755 {} + 2>/dev/null || true
+      find "${item}" -type f -exec chmod 644 {} + 2>/dev/null || true
+    else
+      chown -R "${owner}:agi_agents" "${item}"
+      find "${item}" -type d -exec chmod 2775 {} + 2>/dev/null || true
+      find "${item}" -type f -exec chmod 664 {} + 2>/dev/null || true
+    fi
+  done
+}
+
+apply_system_permissions() {
+  info "Applying System Design §IX permissions (final restabilization)..."
+  migrate_legacy_infra_files
+  usermod -aG agi_agents "${COA_USER}" 2>/dev/null || true
+  usermod -aG agi_agents "${WATCHDOG_USER}" 2>/dev/null || true
+  ensure_spawn_group
+  ensure_govern_group
+  drop_agents_from_watchdog_group
+  
+  # ──────────────────────────────────────────────────────
+  # §1. /etc/versa-agi/ — Configuration & Security
+  # ──────────────────────────────────────────────────────
+  [ -d "/etc/versa-agi" ]                && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi && chmod 751 /etc/versa-agi
+  # setup.ini, the agents' config files and their .env files hold keys and the
+  # Primary User's VersaVoice API token: for watchdog alone, mode 600. Not 640:
+  # a group cannot be relied on here (on an older install the COA account is
+  # in watchdog's group, and watchdog's own primary group can be agi_agents,
+  # which every file it creates then gets). An agent's process is
+  # given a copy of the settings with the secrets blanked, for each cycle
+  # (lifeline.sh write_settings_view; state_agent_account_permissions.md PERM-A9).
+  [ -f "/etc/versa-agi/coa_config.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/coa_config.json && chmod 600 /etc/versa-agi/coa_config.json
+  [ -f "/etc/versa-agi/setup.ini" ]       && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/setup.ini && chmod 600 /etc/versa-agi/setup.ini
+  [ -f "/etc/versa-agi/models.ini" ]      && chown "${WATCHDOG_USER}:agi_agents" /etc/versa-agi/models.ini && chmod 640 /etc/versa-agi/models.ini
+  [ -f "/etc/versa-agi/install-acceptance.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/install-acceptance.json && chmod 640 /etc/versa-agi/install-acceptance.json
+  [ -f "/etc/versa-agi/registration.conf" ]     && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/registration.conf && chmod 640 /etc/versa-agi/registration.conf
+  [ -f "/etc/versa-agi/provider_keys.env" ]       && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/provider_keys.env && chmod 600 /etc/versa-agi/provider_keys.env
+  # paths.env: watchdog:coa 644 (readable by all — sourced by lifeline, agitop, sentinel)
+  [ -f "/etc/versa-agi/paths.env" ]       && chown "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/paths.env && chmod 644 /etc/versa-agi/paths.env
+  # Agent .env files: watchdog alone, 600 (skip paths.env and provider_keys.env)
+  for env_file in /etc/versa-agi/*.env; do
+    [ -f "${env_file}" ] || continue
+    case "$(basename "${env_file}")" in
+      paths.env|provider_keys.env|inference_endpoint.env) continue ;;
+    esac
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${env_file}" && chmod 600 "${env_file}"
+  done
+  # Sub-agent configs: watchdog alone, 600
+  for sa_config in /etc/versa-agi/*_config.json; do
+    [ -f "${sa_config}" ] || continue
+    local sa_name
+    sa_name=$(basename "${sa_config}" _config.json)
+    [ "${sa_name}" = "coa" ] && continue  # COA handled above
+    # Resolve os_user from agents.db
+    local sa_os_user
+    sa_os_user=$(sqlite3 "${AGENTS_DB}" "SELECT os_user FROM agents WHERE name='${sa_name}';" 2>/dev/null || true)
+    if [ -n "${sa_os_user}" ] && getent passwd "${sa_os_user}" &>/dev/null; then
+      chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${sa_config}" && chmod 600 "${sa_config}"
+    fi
+  done
+  # Poise root: watchdog:watchdog 750 (coa.md, task_protocol.md)
+  [ -d "/etc/versa-agi/poise" ]   && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/poise && chmod 750 /etc/versa-agi/poise
+  [ -f "/etc/versa-agi/poise/coa.md" ]            && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/poise/coa.md && chmod 640 /etc/versa-agi/poise/coa.md
+  [ -f "/etc/versa-agi/poise/watchdog.md" ]       && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/poise/watchdog.md && chmod 640 /etc/versa-agi/poise/watchdog.md
+  [ -f "/etc/versa-agi/poise/task_protocol.md" ]  && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /etc/versa-agi/poise/task_protocol.md && chmod 640 /etc/versa-agi/poise/task_protocol.md
+  # Poise roles: watchdog:coa — COA reads, cannot modify (§IX.2)
+  if [ -d "/etc/versa-agi/poise/roles" ]; then
+    chown "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/poise/roles && chmod 750 /etc/versa-agi/poise/roles
+    find /etc/versa-agi/poise/roles -mindepth 1 -type d -exec chown "${WATCHDOG_USER}:${COA_USER}" {} + -exec chmod 750 {} + 2>/dev/null || true
+    find /etc/versa-agi/poise/roles -type f -exec chown "${WATCHDOG_USER}:${COA_USER}" {} + -exec chmod 440 {} + 2>/dev/null || true
+  fi
+  [ -d "/etc/versa-agi/vault" ]   && chown -R "${WATCHDOG_USER}:${COA_USER}" /etc/versa-agi/vault && chmod 750 /etc/versa-agi/vault
+  
+  # ──────────────────────────────────────────────────────
+  # §1. /var/lib/versa-agi/ — Persistent Data
+  # ──────────────────────────────────────────────────────
+  [ -d "/var/lib/versa-agi" ]                   && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi && chmod 755 /var/lib/versa-agi
+  [ -f "/var/lib/versa-agi/agents.db" ]         && chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/agents.db && chmod 640 /var/lib/versa-agi/agents.db
+  [ -f "/var/lib/versa-agi/messages.db" ]       && chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/messages.db && chmod 640 /var/lib/versa-agi/messages.db
+  # No agent account writes a database: only watchdog does, through agictl
+  # (state_agent_account_permissions.md §1). 640, for every database here.
+  for _odb in /var/lib/versa-agi/organization.db /var/lib/versa-agi/organization.db-wal /var/lib/versa-agi/organization.db-shm; do
+    [ -f "${_odb}" ] && chown "${WATCHDOG_USER}:${COA_USER}" "${_odb}" && chmod 640 "${_odb}"
+  done
+  [ -d "/var/lib/versa-agi/coa" ]               && chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/coa && chmod 750 /var/lib/versa-agi/coa
+  [ -f "/var/lib/versa-agi/coa/tasks.db" ]      && chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/coa/tasks.db && chmod 640 /var/lib/versa-agi/coa/tasks.db
+  [ -f "/var/lib/versa-agi/coa/cycles.db" ]     && chown "${WATCHDOG_USER}:${COA_USER}" /var/lib/versa-agi/coa/cycles.db && chmod 640 /var/lib/versa-agi/coa/cycles.db
+  [ -d "/var/lib/versa-agi/coa/cycles" ]        && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/cycles && chmod 755 /var/lib/versa-agi/coa/cycles
+  # Per-cycle prompt and environment files (Lifeline writes, the agent reads).
+  # The data folder above is what keeps other accounts out.
+  for _run in /var/lib/versa-agi/*/run; do
+    [ -d "${_run}" ] && chown -R "${WATCHDOG_USER}:agi_agents" "${_run}" && chmod 750 "${_run}"
+  done
+  mkdir -p "/var/lib/versa-agi/coa/view-cache"
+  chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/view-cache && chmod 770 /var/lib/versa-agi/coa/view-cache
+  [ -f "/var/lib/versa-agi/coa/agent_memory.db" ] && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/agent_memory.db && chmod 660 /var/lib/versa-agi/coa/agent_memory.db
+  # Utility Models — config/staging. The runner elevates to watchdog (provider-key
+  # injection), so watchdog owns; group is agi_agents (a Utility Task may be
+  # assigned to ANY agent), so the whole fleet is consistent — coa keeps access
+  # (coa ∈ agi_agents). setgid on staging so intermediate artifacts inherit the
+  # shared group.
+  mkdir -p "/var/lib/versa-agi/utility-models/staging"
+  chown "${WATCHDOG_USER}:agi_agents" /var/lib/versa-agi/utility-models && chmod 750 /var/lib/versa-agi/utility-models
+  chown "${WATCHDOG_USER}:agi_agents" /var/lib/versa-agi/utility-models/staging && chmod 2770 /var/lib/versa-agi/utility-models/staging
+  # Utility Runs — run locks + runs.log/.last. Declared HERE (the FS manifest) so
+  # perms are deterministic rather than an accident of the runner's first mkdir.
+  # Runner writes as watchdog (owner); world-readable so the PU/dashboard can read
+  # the run log without elevation.
+  mkdir -p "/var/lib/versa-agi/utility-runs"
+  chown "${WATCHDOG_USER}:agi_agents" /var/lib/versa-agi/utility-runs && chmod 755 /var/lib/versa-agi/utility-runs
+  
+  # ──────────────────────────────────────────────────────
+  # §1. /var/log/ — Log Files
+  # ──────────────────────────────────────────────────────
+  for log in /var/log/versa-agi-lifeline.log /var/log/versa-agi-sentinel.log; do
+    [ -f "${log}" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${log}" && chmod 644 "${log}"
+  done
+  [ -d "/var/log/versa-agi-archive" ] && chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "/var/log/versa-agi-archive"
+  
+  # ──────────────────────────────────────────────────────
+  # §3. COA Environment
+  # ──────────────────────────────────────────────────────
+  if [ -d "${DEPLOYED_COA_ENV}" ]; then
+    # /home/coa: coa:coa 755 — traversable by sub-agents for workspace symlinks
+    [ -d "/home/${COA_USER}" ] && chmod 755 "/home/${COA_USER}"
+    
+    # Root: coa owns the environment
+    chown "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}"
+    
+    # node_modules/ — watchdog:coa, dirs 750, files 640
+    if [ -d "${DEPLOYED_COA_ENV}/node_modules" ]; then
+      chown -R "${WATCHDOG_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/node_modules"
+      find "${DEPLOYED_COA_ENV}/node_modules" -type d -exec chmod 750 {} + 2>/dev/null || true
+      find "${DEPLOYED_COA_ENV}/node_modules" -type f -exec chmod 640 {} + 2>/dev/null || true
+    fi
+    
+    # .agent/ — coa:agi_agents 775 (agent metadata root; group-writable for watchdog system.md writes)
+    # COA's .agent holds what COA is told (its prompt, its skills). Group coa
+    # is COA, watchdog and the installing user: no other agent can enter.
+    [ -d "${DEPLOYED_COA_ENV}/.agent" ] && chown "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent" && chmod 770 "${DEPLOYED_COA_ENV}/.agent"
+    
+    # .agent/README.md — coa:coa 644
+    [ -f "${DEPLOYED_COA_ENV}/.agent/README.md" ] && chown "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/README.md" && chmod 644 "${DEPLOYED_COA_ENV}/.agent/README.md"
+    # .agent/docs/ — COA-only product README (shipped overwrite; read-only)
+    [ -d "${DEPLOYED_COA_ENV}/.agent/docs" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/docs" && chmod 755 "${DEPLOYED_COA_ENV}/.agent/docs"
+    if [ -d "${DEPLOYED_COA_ENV}/.agent/docs" ]; then
+      for _d in versa_agi_readme.md models.md credentials.md operations.md security.md \
+        directories.md troubleshooting.md backup-restore.md install-wsl-server.md roadmap.md; do
+        [ -f "${DEPLOYED_COA_ENV}/.agent/docs/${_d}" ] && chown "${WATCHDOG_USER}:agi_agents" "${DEPLOYED_COA_ENV}/.agent/docs/${_d}" && chmod 440 "${DEPLOYED_COA_ENV}/.agent/docs/${_d}"
+      done
+    fi
+    # .agent/poise.md — watchdog:coa 640 (copied from /etc/versa-agi/poise/coa.md by Lifeline)
+    [ -f "${DEPLOYED_COA_ENV}/.agent/poise.md" ] && chown "${WATCHDOG_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.agent/poise.md" && chmod 640 "${DEPLOYED_COA_ENV}/.agent/poise.md"
+    
+    # ── §3. Agent-Writable Areas ──
+    
+    # .agent/skills/ — shipped 440; agent-authored 664/2775 (System Design §IX)
+    normalize_agent_skills "${DEPLOYED_COA_ENV}/.agent/skills" "${COA_USER}"
+    
+    # workspace/ — coa:agi_agents 2770 (setgid ensures new project dirs inherit agi_agents group §3.6)
+    [ -d "${DEPLOYED_COA_ENV}/workspace" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/workspace" && chmod 2770 "${DEPLOYED_COA_ENV}/workspace"
+    [ -f "${DEPLOYED_COA_ENV}/workspace/.gitignore" ] && chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/workspace/.gitignore" && chmod 644 "${DEPLOYED_COA_ENV}/workspace/.gitignore"
+
+    # Reserved shared project roots + housekeeping drop folder (System Design §IX).
+    # Directory only — do not chown -R (per-agent report files keep their owners).
+    for _shared_proj in AGi-Tools; do
+      _shared_root="${DEPLOYED_COA_ENV}/workspace/${_shared_proj}"
+      [ -d "${_shared_root}" ] || continue
+      chown "${COA_USER}:agi_agents" "${_shared_root}"
+      chmod 2770 "${_shared_root}"
+    done
+    _hk_reports="${DEPLOYED_COA_ENV}/workspace/AGi-Tools/reports"
+    if [ -d "${DEPLOYED_COA_ENV}/workspace/AGi-Tools" ]; then
+      mkdir -p "${_hk_reports}"
+      chown "${COA_USER}:agi_agents" "${_hk_reports}"
+      chmod 2770 "${_hk_reports}"
+    fi
+    
+    # attachments/ — coa:agi_agents 2770 (setgid, matches workspace/ permissions)
+    if [ -d "${DEPLOYED_COA_ENV}/attachments" ]; then
+      chown "${COA_USER}:agi_agents" "${DEPLOYED_COA_ENV}/attachments"
+      chmod 2770 "${DEPLOYED_COA_ENV}/attachments"
+      find "${DEPLOYED_COA_ENV}/attachments" -mindepth 1 -not -type l -type d -exec chown "${COA_USER}:agi_agents" {} + 2>/dev/null || true
+      find "${DEPLOYED_COA_ENV}/attachments" -mindepth 1 -not -type l -type d -exec chmod 770 {} + 2>/dev/null || true
+      find "${DEPLOYED_COA_ENV}/attachments" -not -type l -type f -exec chown "${COA_USER}:agi_agents" {} + 2>/dev/null || true
+      find "${DEPLOYED_COA_ENV}/attachments" -not -type l -type f -exec chmod 660 {} + 2>/dev/null || true
+      # Cleanup circular symlinks
+      [ -L "${DEPLOYED_COA_ENV}/attachments/attachments" ] && rm -f "${DEPLOYED_COA_ENV}/attachments/attachments"
+    fi
+    # .agent/inbox + .agent/outbox — coa:watchdog (coa writes via MCP, watchdog reads for sync)
+    for item in inbox outbox; do
+      if [ -d "${DEPLOYED_COA_ENV}/.agent/${item}" ]; then
+        chown -R "${COA_USER}:${WATCHDOG_USER}" "${DEPLOYED_COA_ENV}/.agent/${item}"
+        chmod 750 "${DEPLOYED_COA_ENV}/.agent/${item}"
+      fi
+    done
+    
+    # .git/ — owned by whoever init'd the repo
+    [ -d "${DEPLOYED_COA_ENV}/.git" ] && chown -R "${COA_USER}:${COA_USER}" "${DEPLOYED_COA_ENV}/.git"
+  fi
+  
+  # ──────────────────────────────────────────────────────
+  # §IX.3 Core Infrastructure — enforce exact modes
+  # ──────────────────────────────────────────────────────
+  local CI="${WATCHDOG_HOME:-/home/${WATCHDOG_USER}}/core-infra"
+  if [ -d "${CI}" ]; then
+    chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" "${CI}"
+    # Executable scripts: 755
+    for script in lifeline.sh sentinel.sh watchdog.sh; do
+      [ -f "${CI}/${script}" ] && chmod 755 "${CI}/${script}"
+    done
+    # Executable bins: 755
+    for bin_file in agictl agictl-wrapper vcoa agitop; do
+      [ -f "${CI}/bin/${bin_file}" ] && chmod 755 "${CI}/bin/${bin_file}"
+    done
+    # Executable scripts in scripts/: 755
+    find "${CI}/scripts" -type f -name '*.sh' -exec chmod 755 {} + 2>/dev/null || true
+    # Config files (non-executable): 640
+    for cfg in config/coa_poise.md config/task_protocol.md config/watchdog_poise.md; do
+      [ -f "${CI}/${cfg}" ] && chmod 640 "${CI}/${cfg}"
+    done
+    # Config roles: 640 for files, 750 for dirs
+    if [ -d "${CI}/config/roles" ]; then
+      find "${CI}/config/roles" -type d -exec chmod 750 {} + 2>/dev/null || true
+      find "${CI}/config/roles" -type f -exec chmod 640 {} + 2>/dev/null || true
+    fi
+    # Static data files: 644
+    for data_file in ui_lib.sh logo.txt; do
+      [ -f "${CI}/${data_file}" ] && chmod 644 "${CI}/${data_file}"
+    done
+  fi
+  
+  # ──────────────────────────────────────────────────────
+  # §IX.4 Sub-Agent Environments
+  # ──────────────────────────────────────────────────────
+  local AGENTS_DB="/var/lib/versa-agi/agents.db"
+  if [ -f "${AGENTS_DB}" ]; then
+    local sub_agents
+    sub_agents=$(sqlite3 "${AGENTS_DB}" "SELECT name || '|' || os_user FROM agents WHERE name NOT IN ('watchdog','coa') AND status != 'removed';" 2>/dev/null || true)
+    for agent_row in ${sub_agents}; do
+      local agent="${agent_row%%|*}"
+      local os_user="${agent_row##*|}"
+      local ahome="/home/${os_user}"
+      [ -d "${ahome}" ] || continue
+      usermod -aG agi_agents "${os_user}" 2>/dev/null || true
+      # The home itself is closed to the other agents: group agi_govern holds
+      # COA, watchdog and the installing user. What is inside keeps its group.
+      chown "${os_user}:agi_govern" "${ahome}" && chmod 770 "${ahome}"
+      [ -d "${ahome}/.agent" ]        && chown "${os_user}:agi_agents" "${ahome}/.agent" && chmod 770 "${ahome}/.agent"
+      # .agent/skills/ — shipped 440; agent-authored 664/2775 (same rule as COA)
+      normalize_agent_skills "${ahome}/.agent/skills" "${os_user}"
+      [ -d "${ahome}/workspace" ]     && chown "${os_user}:agi_agents" "${ahome}/workspace" && chmod 2770 "${ahome}/workspace"
+      # §IX.2 /var/lib/versa-agi/{name}/ — agent data directory
+      # Parent dir: watchdog-traversable. cycles/ + view-cache/: agent-writable.
+      # poise + duties: watchdog-readable (lifeline cat's poise for system.md).
+      local vdata="/var/lib/versa-agi/${agent}"
+      mkdir -p "${vdata}/cycles" "${vdata}/view-cache"
+      if [ -d "${vdata}" ]; then
+        chown "${WATCHDOG_USER}:${os_user}" "${vdata}" && chmod 750 "${vdata}"
+        chown -R "${os_user}:${os_user}" "${vdata}/cycles" && chmod 755 "${vdata}/cycles"
+        chown -R "${os_user}:${os_user}" "${vdata}/view-cache" && chmod 770 "${vdata}/view-cache"
+        # 660: harness (agent user) must overwrite after skill injection (SPWN-14)
+        [ -f "${vdata}/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/last_prompt.txt" && chmod 660 "${vdata}/last_prompt.txt"
+      fi
+      [ -f "${vdata}/poise.md" ]  && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/poise.md"  && chmod 640 "${vdata}/poise.md"
+      [ -f "${vdata}/duties.md" ] && chown "${WATCHDOG_USER}:${os_user}" "${vdata}/duties.md" && chmod 640 "${vdata}/duties.md"
+      # §IX.4 Sub-agent files — git identity, SSH keypair, credentials
+      [ -f "${ahome}/README.md" ]       && chown "${os_user}:agi_agents" "${ahome}/README.md"       && chmod 664 "${ahome}/README.md"
+      [ -f "${ahome}/.gitconfig" ]      && chown "${os_user}:agi_agents" "${ahome}/.gitconfig"      && chmod 644 "${ahome}/.gitconfig"
+      [ -f "${ahome}/.git-credentials" ] && chown "${os_user}:agi_agents" "${ahome}/.git-credentials" && chmod 600 "${ahome}/.git-credentials"
+      if [ -d "${ahome}/.ssh" ]; then
+        chown -R "${os_user}:agi_agents" "${ahome}/.ssh"
+        chmod 700 "${ahome}/.ssh"
+        # Private keys: 600, public keys: 644, config: 644
+        find "${ahome}/.ssh" -maxdepth 1 -type f -name '*.pub' -exec chmod 644 {} + 2>/dev/null || true
+        find "${ahome}/.ssh" -maxdepth 1 -type f -name 'config' -exec chmod 644 {} + 2>/dev/null || true
+        find "${ahome}/.ssh" -maxdepth 1 -type f ! -name '*.pub' ! -name 'config' ! -name 'known_hosts*' -exec chmod 600 {} + 2>/dev/null || true
+        find "${ahome}/.ssh" -maxdepth 1 -type f -name 'known_hosts*' -exec chmod 644 {} + 2>/dev/null || true
+      fi
+    done
+  fi
+  
+  # §IX.2 /var/lib/versa-agi/coa/ — runtime state files
+  [ -f "/var/lib/versa-agi/coa/status.json" ]     && chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa/status.json"     && chmod 640 "/var/lib/versa-agi/coa/status.json"
+  # 660: harness (coa) must overwrite after skill injection (SPWN-14)
+  [ -f "/var/lib/versa-agi/coa/last_prompt.txt" ] && chown "${WATCHDOG_USER}:${COA_USER}" "/var/lib/versa-agi/coa/last_prompt.txt" && chmod 660 "/var/lib/versa-agi/coa/last_prompt.txt"
+  [ -f "/var/lib/versa-agi/registration-status.json" ] && chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/var/lib/versa-agi/registration-status.json" && chmod 640 "/var/lib/versa-agi/registration-status.json"
+  
+  # §IX.2 /var/lib/versa-agi/ — fix orphan dirs (archive)
+  if [ -d "/var/lib/versa-agi/archive" ]; then
+    chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi/archive
+    # A removed agent's home, its SSH key and git credentials included:
+    # watchdog only.
+    chmod 700 /var/lib/versa-agi/archive
+    find /var/lib/versa-agi/archive -type f -exec chmod 600 {} + 2>/dev/null || true
+  fi
+  
+
+  ok "System Design §IX permissions applied"
+}
+
+apply_system_permissions
+
+# ═══════════════════════════════════════════════════════
+# U4a: Skills DB reconcile (both flows, always)
+# Fresh install seeds the shipped-skills registry (scope column included);
+# --update reconciles additions/removals/scope changes. Deterministic — the
+# DB always mirrors core-infra/skills/ + skills_scope.ini after setup.
+# ═══════════════════════════════════════════════════════
+RECONCILE_SKILLS="${DEPLOYED_CORE_INFRA}/scripts/reconcile_skills_db.py"
+if [ -f "${RECONCILE_SKILLS}" ]; then
+  step_arrow "Reconciling skills registry in agents.db"
+  python3 "${RECONCILE_SKILLS}" || warn "skills DB reconcile encountered an issue."
+fi
+
+# ═══════════════════════════════════════════════════════
+# U4b: Sync Skills (--update only, with prompt)
+# Poise is NOT gated here — sync_poise.py already ran unconditionally.
+# ═══════════════════════════════════════════════════════
+# Installer answers: yes syncs, no skips, anything else asks.
+_versa_installer_yes() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y) return 0 ;;
+    0|false|no|n) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+if [ "${UPDATE_MODE}" = true ]; then
+  section "Update — Sync Skills"
+  if [ "${DRY_RUN}" = true ]; then
+    dry "Would prompt to sync updated skills to active agents"
+  else
+    _versa_installer_yes "${VERSA_UPDATE_SYNC_SKILLS:-}" && _sync_choice=0 || _sync_choice=$?
+    if [ "${_sync_choice}" -eq 2 ]; then
+      if confirm_accent "Do you want to sync updated skills to active agents?"; then
+        _sync_choice=0
+      else
+        _sync_choice=1
+      fi
+    fi
+    if [ "${_sync_choice}" -eq 0 ]; then
+      info "Syncing updated skills to active agents"
+      step_arrow "Running: python3 ${DEPLOYED_CORE_INFRA}/scripts/sync_skills.py"
+      python3 "${DEPLOYED_CORE_INFRA}/scripts/sync_skills.py" || warn "sync_skills encountered an issue."
+      apply_system_permissions
+    else
+      info "Skill sync skipped"
+    fi
+  fi
+fi
+
+# ═══════════════════════════════════════════════════════
+# U5: Resume CRON (--update only, with prompt)
+# Always ask on client --update (normal and Sentinel). Same position as a
+# regular client. install.sh on an existing box must pass --update or this
+# block never runs.
+# ═══════════════════════════════════════════════════════
+if [ "${UPDATE_MODE}" = true ]; then
+  section "Update — Resume CRON"
+  if [ "${DRY_RUN}" = true ]; then
+    dry "Would prompt to resume CRON"
+  else
+    _versa_installer_yes "${VERSA_UPDATE_RESUME_CRON:-}" && _cron_choice=0 || _cron_choice=$?
+    if [ "${_cron_choice}" -eq 2 ]; then
+      if confirm_accent "Resume CRON (lifeline scheduler)?"; then
+        _cron_choice=0
+      else
+        _cron_choice=1
+      fi
+    fi
+    if [ "${_cron_choice}" -eq 0 ]; then
+    ensure_watchdog_lifeline_cron
+    ok "CRON resumed (lifeline.disabled cleared)"
+  else
+    # Keep hard OFF so Fetch / stray lifeline.sh cannot spawn during pause
+    CURRENT_CRON=$(crontab -u "${WATCHDOG_USER}" -l 2>/dev/null || true)
+    if [ -n "${CURRENT_CRON}" ]; then
+      echo "${CURRENT_CRON}" | sed '/[Ll]ifeline/s|^\([^#]\)|#\1|' | \
+        crontab -u "${WATCHDOG_USER}" -
+    fi
+    mkdir -p /var/lib/versa-agi
+    touch /var/lib/versa-agi/lifeline.disabled
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" \
+      /var/lib/versa-agi/lifeline.disabled 2>/dev/null || true
+    warn "CRON NOT resumed — agents will not spawn until you re-enable it"
+    echo -e "  ${DIM:-}To resume: sudo agitop → Controls → LIFELINE ON${RESET:-}"
+    fi
+  fi
+  echo ""
+fi
+
+# ─── Step 12: Post-Setup Health Check ─────────────────
+echo ""
+section "Step 12 — Health Check"
+echo ""
+
+# Source shared health check library
+HEALTH_LIB="${DEPLOYED_CORE_INFRA}/scripts/health_checks.sh"
+if [ -f "${HEALTH_LIB}" ]; then
+  source "${HEALTH_LIB}"
+  # set -e: health failures must WARN, not abort setup (same as restore.sh).
+  run_health_checks || true
+  if [ "${HEALTH_FAIL:-0}" -gt 0 ]; then
+    warn "Health check completed with ${HEALTH_FAIL} failure(s) — review items above"
+  else
+    ok "All health checks passed"
+  fi
+else
+  warn "Health check library not found at ${HEALTH_LIB} — skipping validation"
+fi
+echo ""
+
+# ─── Step 13: Save Setup Configuration ─────────────
+section "Step 13 — Configuration Persistence"
+
+mkdir -p /etc/versa-agi
+INI_FILE="/etc/versa-agi/setup.ini"
+
+if [ "${UPDATE_MODE}" = true ]; then
+  # UPDATE MODE: most values are not re-collected; reconcile-config already
+  # refreshed structure. Call sign / last_name ARE collected at the acceptance
+  # gate — persist them here (and to the source template) so they are not lost.
+  if [ -f "${INI_FILE}" ]; then
+    _upd_ini_set() {
+      local k="$1" v="$2"
+      if grep -q "^${k}=" "${INI_FILE}" 2>/dev/null; then
+        sed -i "s|^${k}=.*|${k}=${v}|" "${INI_FILE}"
+      elif grep -q "^first_name=" "${INI_FILE}" 2>/dev/null; then
+        sed -i "/^first_name=/a ${k}=${v}" "${INI_FILE}"
+      fi
+    }
+    if [ -n "${INSTALL_ACCEPTANCE_CALL_SIGN:-}" ]; then
+      _upd_ini_set "call_sign" "${INSTALL_ACCEPTANCE_CALL_SIGN}"
+      _upd_ini_set "last_name" "${INI_AGENT_LAST_NAME:-(${INSTALL_ACCEPTANCE_CALL_SIGN})}"
+      ok "COA call sign saved: ${INI_AGENT_LAST_NAME:-(${INSTALL_ACCEPTANCE_CALL_SIGN})}"
+    elif [ -n "${INI_AGENT_LAST_NAME:-}" ] && [ "${INI_AGENT_LAST_NAME}" != "(COA)" ]; then
+      _upd_ini_set "last_name" "${INI_AGENT_LAST_NAME}"
+      _bare="${INI_AGENT_LAST_NAME#(}"
+      _bare="${_bare%)}"
+      [ -n "${_bare}" ] && _upd_ini_set "call_sign" "${_bare}"
+    fi
+    chmod 600 "${INI_FILE}"
+    chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${INI_FILE}"
+    ok "Setup configuration verified at ${INI_FILE} (reconciled from template)"
+    # Keep repo/source master in sync with deployed call sign
+    if [ -f "${SCRIPT_DIR}/setup.ini" ] \
+       && [ "$(realpath "${INI_FILE}" 2>/dev/null)" != "$(realpath "${SCRIPT_DIR}/setup.ini" 2>/dev/null)" ]; then
+      if [ -n "${INSTALL_ACCEPTANCE_CALL_SIGN:-}" ]; then
+        if grep -q "^call_sign=" "${SCRIPT_DIR}/setup.ini" 2>/dev/null; then
+          sed -i "s|^call_sign=.*|call_sign=${INSTALL_ACCEPTANCE_CALL_SIGN}|" "${SCRIPT_DIR}/setup.ini"
+        fi
+        if grep -q "^last_name=" "${SCRIPT_DIR}/setup.ini" 2>/dev/null; then
+          sed -i "s|^last_name=.*|last_name=${INI_AGENT_LAST_NAME:-(${INSTALL_ACCEPTANCE_CALL_SIGN})}|" "${SCRIPT_DIR}/setup.ini"
+        fi
+      fi
+    fi
+  fi
+else
+  # FRESH INSTALL: seed from source template, inject collected values.
+  if [ -f "${SCRIPT_DIR}/setup.ini" ]; then
+    cp "${SCRIPT_DIR}/setup.ini" "${INI_FILE}"
+  else
+    cat > "${INI_FILE}" <<'MINSEED'
+[versavoice]
+api_token=
+[system]
+mode=cloud
+model=
+install_role=normal
+[third_party]
+google_api_key=
+[gcp]
+auth_method=api_key
+[agent]
+cron_interval=1
+[users]
+watchdog=watchdog
+coa=coa
+MINSEED
+  fi
+
+  _ini_set() { local k="$1" v="$2"; grep -q "^${k}=" "${INI_FILE}" 2>/dev/null && sed -i "s|^${k}=.*|${k}=${v}|" "${INI_FILE}"; }
+  _ini_set_in() { local s="$1" k="$2" v="$3"; sed -i "/^\[${s}\]/,/^\[/ s|^${k}=.*|${k}=${v}|" "${INI_FILE}"; }
+
+  _ini_set "api_token"  "${VV_TOKEN:-}"
+  # Step 4 wrote enabled= to source/etc early; this cp from template can restore
+  # enabled=true from the shipped setup.ini — re-apply the install choice.
+  _ini_set_in "versavoice" "enabled" "${ENABLE_VV:-true}"
+  # AUTH_METHOD is "1"/"2" only when Step 9b ran configure_ai_auth (or local
+  # stub). Skip / keep-without-update leaves it unset — do NOT default to
+  # vertex or wipe api_key (that was flipping auth_method=api_key → vertex).
+  if [ "${AUTH_METHOD:-}" = "1" ]; then
+    _ini_set_in "gcp" "auth_method" "api_key"
+    _ini_set_in "third_party" "google_api_key" "${api_key:-}"
+  elif [ "${AUTH_METHOD:-}" = "2" ]; then
+    _ini_set_in "gcp" "auth_method" "vertex"
+    # Exclusive with API key — do not leave a stale key beside Vertex.
+    _ini_set_in "third_party" "google_api_key" ""
+  fi
+  _ini_set_in "system" "mode" "${SELECTED_EXEC_MODE:-cloud}"
+  _ini_set_in "system" "model" "${INI_SYSTEM_MODEL:-}"
+  _ini_set_in "system" "install_role" "${INI_INSTALL_ROLE:-normal}"
+  if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ] && [ -n "${VV_AGENT_KEY:-}" ]; then
+    _ini_set_in "system" "vv_agent_key" "${VV_AGENT_KEY}"
+  fi
+  if [ "${GEMINI_PROVIDER_ENABLED:-false}" = "true" ]; then
+    enable_site_provider "google" "/etc/versa-agi/models.ini"
+    enable_site_provider "google" "${SCRIPT_DIR}/models.ini"
+  fi
+  _ini_set_in "local_ai" "enabled" "${INI_LOCAL_AI_ENABLED:-false}"
+  _ini_set "ollama_host" "${INI_OLLAMA_HOST:-http://localhost:11434}"
+  _ini_set "proxy_port" "${INI_PROXY_PORT:-4000}"
+  _ini_set "default_model" "${INI_LOCAL_AI_DEFAULT_MODEL:-gemma4:e4b}"
+  _ini_set "local_models" "${INI_LOCAL_MODELS:-gemma4:e4b}"
+  _ini_set "auto_pull_model" "${INI_AUTO_PULL_MODEL:-true}"
+  _ini_set_in "local_ai" "gpu_backend" "${INI_GPU_BACKEND:-standard}"
+  _ini_set "intel_card_count" "${INI_INTEL_CARD_COUNT:-1}"
+  _ini_set "intel_device_id" "${INI_INTEL_DEVICE_ID:-}"
+  _ini_set "sycl_vram_gb" "$(ini_get local_ai sycl_vram_gb 8)"
+  _ini_set "sycl_parallel" "$(ini_get local_ai sycl_parallel 2)"
+  _ini_set "sycl_ctx_size" "$(ini_get local_ai sycl_ctx_size 4096)"
+  _ini_set "sycl_port" "$(ini_get local_ai sycl_port 8080)"
+  _ini_set "sycl_active_model" "$(ini_get local_ai sycl_active_model "${INI_LOCAL_AI_DEFAULT_MODEL:-gemma4:e4b}")"
+  _ini_set_in "model_routing" "local" "${INI_LOCAL_AI_DEFAULT_MODEL:-gemma4:e4b}"
+  _ini_set "sycl_models_max" "$(ini_get local_ai sycl_models_max 1)"
+  _ini_set "hf_token" "$(ini_get local_ai hf_token '')"
+  _ini_set "sycl_llama_cpp_tag" "$(ini_get local_ai sycl_llama_cpp_tag b10430)"
+  _ini_set "sd_cpp_tag" "$(ini_get local_ai sd_cpp_tag master-841-6b3edaa)"
+  _ini_set_in "local_ai" "topology" "${INI_TOPOLOGY:-local}"
+  _ini_set "model_loading_strategy" "$(ini_get local_ai model_loading_strategy router)"
+  _ini_set "project"    "${gcp_project:-$INI_GCP_PROJECT}"
+  _ini_set "location"   "${gcp_location:-$INI_GCP_LOCATION}"
+  _ini_set "service_account_key" "${INI_SA_KEY_PATH:-}"
+  _ini_set "cron_interval" "${CRON_INTERVAL:-1}"
+  _ini_set "file_mon_enabled" "$(ini_get agent file_mon_enabled false)"
+  _ini_set "timeout_minutes" "${INI_AGENT_TIMEOUT:-90}"
+  _ini_set "runaway_threshold" "${INI_RUNAWAY_THRESHOLD:-2500}"
+  _ini_set "circuit_breaker_consecutive" "$(ini_get agent circuit_breaker_consecutive 5)"
+  _ini_set "circuit_breaker_hourly" "$(ini_get agent circuit_breaker_hourly 20)"
+  _ini_set "first_name" "${INI_AGENT_FIRST_NAME:-Versa}"
+  # Call sign (bare) + parenthesized last_name — set by install_acceptance_call_sign_prompt
+  _ini_set "call_sign"  "${INSTALL_ACCEPTANCE_CALL_SIGN:-${INI_AGENT_CALL_SIGN:-}}"
+  _ini_set "last_name"  "${INI_AGENT_LAST_NAME:-(COA)}"
+  _ini_set "language"   "${INI_AGENT_LANGUAGE:-en}"
+  _ini_set "country"    "${INI_AGENT_COUNTRY:-United States}"
+  _ini_set "voice"      "${INI_AGENT_VOICE:-female}"
+  _ini_set "role"       "${INI_AGENT_ROLE:-Chief Orchestrator Agent}"
+  _ini_set "platforms"  "${INI_GIT_PLATFORMS:-none}"
+  _ini_set "workspace_link" "${INI_WORKSPACE_LINK:-}"
+  _ini_set_in "users" "watchdog" "${WATCHDOG_USER:-watchdog}"
+  _ini_set_in "users" "coa" "${COA_USER:-coa}"
+  _ini_set_in "logging" "enabled" "$(ini_get logging enabled true)"
+
+  chmod 600 "${INI_FILE}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${INI_FILE}"
+  ok "Setup configuration saved to ${INI_FILE}"
+
+  # Sync deployed INI back to source (keep source master in sync)
+  SOURCE_SETUP_INI="${SCRIPT_DIR}/setup.ini"
+  if [ -f "${SOURCE_SETUP_INI}" ] && [ "$(realpath "${INI_FILE}" 2>/dev/null)" != "$(realpath "${SOURCE_SETUP_INI}" 2>/dev/null)" ]; then
+    cp "${INI_FILE}" "${SOURCE_SETUP_INI}"
+    chown_repo_config "${SOURCE_SETUP_INI}" 600
+    ok "Source setup.ini synced at ${SOURCE_SETUP_INI}"
+  fi
+fi
+
+# ─── Install Acceptance — Record & Submit ─────────
+# Runs after Step 13 so registration state is not clobbered by source→deployed copy.
+if declare -F install_acceptance_record_full >/dev/null 2>&1 \
+   && declare -F install_acceptance_record_update >/dev/null 2>&1; then
+  section "Registration Submit"
+  if [ "${UPDATE_MODE}" = true ]; then
+    install_acceptance_record_update
+  else
+    install_acceptance_record_full "${ENABLE_VV:-false}"
+  fi
+  if declare -F _install_acceptance_sync_source_ini >/dev/null 2>&1; then
+    _install_acceptance_sync_source_ini
+  elif [ -f "${SCRIPT_DIR}/setup.ini" ] && [ "$(realpath "${INI_FILE}" 2>/dev/null)" != "$(realpath "${SCRIPT_DIR}/setup.ini" 2>/dev/null)" ]; then
+    cp "${INI_FILE}" "${SCRIPT_DIR}/setup.ini"
+    chown_repo_config "${SCRIPT_DIR}/setup.ini" 600
+    ok "Source setup.ini synced at ${SCRIPT_DIR}/setup.ini"
+  fi
+  echo ""
+fi
+
+# Create ~/.versa-agi/ user home for the Primary User
+if [ -n "${SUDO_USER:-}" ]; then
+  PU_HOME=$(eval echo "~${SUDO_USER}")
+  PU_VERSA_DIR="${PU_HOME}/.versa-agi"
+  mkdir -p "${PU_VERSA_DIR}"
+  chown "${SUDO_USER}:${SUDO_USER}" "${PU_VERSA_DIR}"
+  # Create convenience symlink: ~/.versa-agi/setup.ini → /etc/versa-agi/setup.ini
+  ln -sf /etc/versa-agi/setup.ini "${PU_VERSA_DIR}/setup.ini"
+  chown -h "${SUDO_USER}:${SUDO_USER}" "${PU_VERSA_DIR}/setup.ini"
+  ok "Created ~/.versa-agi/ with setup.ini symlink for ${SUDO_USER}"
+fi
+
+# Sync: source → deployed (FRESH INSTALL only — source is the master copy with full comments)
+# In UPDATE mode, the deployed INI is the authority; syncing would clobber user config.
+if [ "${UPDATE_MODE}" != true ] && [ -f "${SCRIPT_DIR}/setup.ini" ] && [ "${SCRIPT_DIR}/setup.ini" != "${INI_FILE}" ]; then
+  cp -f "${SCRIPT_DIR}/setup.ini" "${INI_FILE}"
+  chmod 600 "${INI_FILE}"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "${INI_FILE}"
+  ok "Synced setup.ini: source → deployed"
+fi
+
+# Safety net: sudo writes must not leave repo-tree configs owned by root.
+chown_repo_config "${SCRIPT_DIR}/setup.ini" 600
+chown_repo_config "${SCRIPT_DIR}/models.ini" 644
+
+# Final word for optional features: Step 13 + source→deployed sync can restore
+# stock/source [features]=true after earlier persist. Re-apply Enter/N answers.
+if [ "${UPDATE_MODE}" != true ] \
+   && declare -F install_acceptance_persist_features >/dev/null 2>&1; then
+  install_acceptance_persist_features \
+    || warn "Feature flag re-persist after Step 13 skipped (non-fatal)"
+fi
+
+if [ -f "${REGISTRATION_CONF_SRC}" ]; then
+  cp -f "${REGISTRATION_CONF_SRC}" "/etc/versa-agi/registration.conf"
+  chown "${WATCHDOG_USER}:${WATCHDOG_USER}" "/etc/versa-agi/registration.conf" 2>/dev/null || true
+  chmod 640 "/etc/versa-agi/registration.conf"
+  ok "registration.conf deployed to /etc/versa-agi/"
+fi
+
+# ─── Update notes for COA (state_update_notes.md) ─────
+# An update puts each note COA has not had yet in its inbox, once. A new
+# installation records the shipped notes as delivered and sends nothing.
+# Never stops setup: a failure is a warning and the next update tries again.
+UPDATE_NOTES_DIR="${DEPLOYED_CORE_INFRA}/config/update_notes"
+if [ "${DRY_RUN:-false}" != true ] && [ -d "${UPDATE_NOTES_DIR}" ]; then
+  if [ "${UPDATE_MODE}" = true ]; then
+    _notes_out="$(/usr/local/bin/agictl system update-notes --deliver 2>/dev/null)" || true
+    _notes_sent="$(echo "${_notes_out}" | jq -r '(.sent // []) | join(", ")' 2>/dev/null || true)"
+    if [ -n "${_notes_sent}" ]; then
+      ok "Update note sent to COA: ${_notes_sent}"
+    elif echo "${_notes_out}" | jq -e '.success == true' >/dev/null 2>&1; then
+      info "No new update notes for COA"
+    else
+      warn "Update notes for COA were not delivered — the next update tries again"
+    fi
+  else
+    /usr/local/bin/agictl system update-notes --mark-delivered >/dev/null 2>&1 \
+      || warn "Update notes could not be recorded as delivered (non-fatal)"
+  fi
+fi
+
+echo ""
+
+# ─── Summary ─────────────────────────────────────────
+if [ "${UPDATE_MODE}" = true ]; then
+  if [ "${DRY_RUN}" = true ]; then
+    summary_card "Dry Run Complete" \
+      "Timestamp:${TIMESTAMP}" \
+      "Mode:update (dry-run)"
+  else
+    summary_card "Update Applied" \
+      "Timestamp:${TIMESTAMP}" \
+      "Core Infra:${DEPLOYED_CORE_INFRA}" \
+      "COA Env:${DEPLOYED_COA_ENV}" \
+      "Backup:${BACKUP_PATH:-n/a}"
+
+    echo ""
+    step_arrow "Monitor: ${DIM:-}tail -f /var/log/versa-agi-lifeline.log${RESET:-}"
+    echo ""
+    step_arrow "Rollback:"
+    if [ -n "${BACKUP_PATH:-}" ]; then
+      echo -e "     ${DIM:-}sudo rsync -a ${BACKUP_PATH}/core-infra/ ${DEPLOYED_CORE_INFRA}/${RESET:-}"
+      echo -e "     ${DIM:-}sudo rsync -a ${BACKUP_PATH}/homes/${COA_USER}/coa-env/ ${DEPLOYED_COA_ENV}/${RESET:-}"
+    else
+      echo -e "     ${DIM:-}No backup was made before this update (see the Backup step above).${RESET:-}"
+    fi
+  fi
+else
+  summary_card "Setup Complete" \
+    "Core Infra:${DEPLOYED_CORE_INFRA}" \
+    "COA Env:${DEPLOYED_COA_ENV}" \
+    "AI Backend:${SELECTED_EXEC_MODE}" \
+    "CRON:Every ${CRON_INTERVAL} minutes" \
+    "File Monitor:Reactive file watcher (systemd)" \
+    "Database:V3 Split Schema"
+
+  echo ""
+  echo -e "  ${BCYAN:-}You now possess a highly sophisticated, secure, and deeply"
+  echo -e "  modular AI infrastructure.${RESET:-}"
+  echo ""
+
+  step_arrow "Monitor:  ${DIM:-}tail -f /var/log/versa-agi-lifeline.log${RESET:-}"
+  step_arrow "Dashboard:  ${DIM:-}sudo agitop${RESET:-}"
+  echo ""
+  echo -e "  Assign agent models in the dashboard (${BOLD:-}agitop${RESET:-} → Agents → Edit)."
+  echo -e "  Add catalog models via Model Manager, or ${DIM:-}agictl model catalog add${RESET:-}."
+  echo ""
+
+  divider
+  echo ""
+
+  echo -e "  ${BOLD:-}Next Steps:${RESET:-}"
+  echo -e "  ${YELLOW:-}Follow this sequence. The first-contact message needs the VersaVoice${NC:-}"
+  echo -e "  ${YELLOW:-}connection first — do not skip ahead to agitop or the first pulse.${NC:-}"
+  echo ""
+step_arrow "${YELLOW:-}1. Accept the Connection Request${NC:-}"
+echo -e "     Open the VersaVoice AI mobile app. You will see a new connection"
+echo -e "     invitation from your agent. Accept it to establish comms."
+step_arrow "${YELLOW:-}2. Open the dashboard (sudo agitop)${NC:-}"
+echo -e "     First login opens the COA setup modal. Pick a model there — COA stays"
+echo -e "     held until that assignment, then it is ready for the first pulse."
+step_arrow "${YELLOW:-}3. The First Pulse (Agent Activation)${NC:-}"
+echo -e "     Wait for the CRON schedule to awaken the agent (or run manually:"
+echo -e "     ${BOLD:-}sudo ${DEPLOYED_CORE_INFRA}/lifeline.sh --force${RESET:-})."
+  if [ "${INI_INSTALL_ROLE:-normal}" = "sentinel" ]; then
+    echo -e "     The Sentinel will run the Remote Sentinel Routine — name, constellation"
+    echo -e "     congratulations with date and time, thanks, then duty and instructions."
+  else
+    echo -e "     The agent will process its seeded Welcome Task and introduce itself."
+  fi
+echo ""
+echo -e "  ${DIM:-}You are now running a production infrastructure featuring:${RESET:-}"
+  echo -e "  ${DIM:-} • Native Emotional Intelligence     • Compute-Zero Efficiency${RESET:-}"
+  echo -e "  ${DIM:-} • OS-Level Space Sandboxing       • Cross-Lingual Bridges${RESET:-}"
+  echo ""
+fi  # end install/update summary branch
+
+license_notice
+echo ""
+
+# Offer to auto-launch agitop
+if [ -x /usr/local/bin/agitop ]; then
+  echo -e "  ${DIM:-}Tip: if you have not already accepted the VersaVoice connection request, do that before opening agitop.${NC:-}"
+  _versa_installer_yes "${VERSA_LAUNCH_AGITOP:-}" && _launch_choice=0 || _launch_choice=$?
+  if [ "${_launch_choice}" -eq 2 ]; then
+    if confirm_accent "Launch agitop now?"; then
+      _launch_choice=0
+    else
+      _launch_choice=1
+    fi
+  fi
+  if [ "${_launch_choice}" -eq 0 ]; then
+    echo ""
+    step_info "Starting agitop..."
+    echo -e "  ${DIM:-}(Press 'q' to quit, '?' for help)${RESET:-}"
+    echo ""
+    /usr/local/bin/agitop \
+      --config "/etc/versa-agi/coa_config.json" \
+      --cycle-id "/var/lib/versa-agi/coa/.current_cycle_id"
+  else
+    echo ""
+    step_info "To launch later: ${BOLD:-}sudo agitop${RESET:-}"
+  fi
+fi
+echo ""
+

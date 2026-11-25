@@ -1,0 +1,1223 @@
+"""Projects panel — projects with member management from tasks.db."""
+
+import os
+import sys
+_CORE_INFRA = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CORE_INFRA not in sys.path:
+    sys.path.insert(0, _CORE_INFRA)
+import db_connect  # noqa: E402
+import local_time  # noqa: E402
+
+import json
+import os
+import sqlite3
+import subprocess
+from typing import Optional
+from textual import on
+from textual.app import ComposeResult
+from textual.screen import ModalScreen
+from textual.containers import Vertical, VerticalScroll, Horizontal
+from textual.widgets import DataTable, Static, Button, Input, Select, TabbedContent, TabPane, TextArea
+from textual.widget import Widget
+
+from agitop.data import TasksReader
+from agitop.widgets import FlexDataTable
+from agitop import zone_heading
+
+try:
+    from project_workspace import (
+        COA_WORKSPACE_BASE,
+        allocate_project_dir,
+        collect_taken_project_dirs,
+        is_reserved_system_project,
+        project_dir_from_workspace_path,
+        slugify_project_dir,
+    )
+except ImportError:
+    COA_WORKSPACE_BASE = "/home/coa/coa-env/workspace"
+    RESERVED = {"AGi-Tools", "Versa-BusinessAdmin"}
+
+    def is_reserved_system_project(name: str) -> bool:
+        return name in RESERVED
+
+    def project_dir_from_workspace_path(workspace_path: Optional[str]) -> str:
+        return os.path.basename((workspace_path or "").rstrip(os.sep))
+
+    def slugify_project_dir(name: str) -> str:
+        import re
+        s = (name or "").strip().lower()
+        s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+        return s or "project"
+
+    def allocate_project_dir(preferred, taken, *, allow_increment=True):
+        return preferred
+
+    def collect_taken_project_dirs(conn, workspace_base=COA_WORKSPACE_BASE):
+        return set()
+
+
+STATUS_COLORS = {
+    "active": "green",
+    "paused": "yellow",
+    "archived": "dim",
+}
+
+MEMBER_TYPE_ICONS = {
+    "agent": "🤖",
+    "connection": "👤",
+}
+
+
+def _tasks_db() -> str:
+    return os.getenv("AGICTL_TASKS_DB", "/var/lib/versa-agi/coa/tasks.db")
+
+
+def _preview_directory(display_name: str) -> tuple[str, str]:
+    """Return (directory_slug, full_coa_workspace_path) for Create preview."""
+    base = slugify_project_dir(display_name)
+    try:
+        conn = db_connect.connect_compat(_tasks_db(), timeout=2)
+        conn.row_factory = sqlite3.Row
+        taken = collect_taken_project_dirs(conn, COA_WORKSPACE_BASE)
+        conn.close()
+        slug = allocate_project_dir(base, taken, allow_increment=True)
+    except Exception:
+        slug = base
+    return slug, os.path.join(COA_WORKSPACE_BASE, slug)
+
+
+def _utc_to_local(utc_str: str) -> str:
+    """Stored UTC time → local 'YYYY-MM-DD HH:MM'. Empty → "--"."""
+    if not utc_str:
+        return "--"
+    return local_time.show(utc_str, zone=False)
+
+
+def _truncate(text: str, limit: int = 60) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _run_agictl(args: list[str], timeout: int = 30) -> tuple[bool, dict, str]:
+    """Run `sudo agictl <args>` and parse the trailing JSON line."""
+    try:
+        proc = subprocess.run(
+            ["sudo", "agictl"] + args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, {}, "command timed out"
+    except Exception as e:
+        return False, {}, str(e)
+
+    data = {}
+    if proc.stdout:
+        for line in reversed(proc.stdout.strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    data = json.loads(line)
+                    break
+                except Exception:
+                    continue
+    ok = bool(data.get("success")) if data else (proc.returncode == 0)
+    err = ""
+    if not ok:
+        err = data.get("error") or (proc.stderr.strip() or "Unknown error")
+    return ok, data, err
+
+
+class ProjectAssignAgentModal(ModalScreen[Optional[str]]):
+    """Pick an agent to assign — provisions workspace via agictl project assign."""
+
+    CSS = """
+    ProjectAssignAgentModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #project-assign-dialog {
+        width: 56;
+        height: auto;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $surface;
+    }
+    #project-assign-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #project-assign-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(self, project_name: str, agent_options: list[tuple[str, str]], **kwargs):
+        super().__init__(**kwargs)
+        self.project_name = project_name
+        self.agent_options = agent_options
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="project-assign-dialog"):
+            yield Static(
+                f"[bold]Assign agent to {self.project_name}[/]\n\n"
+                "[dim]Git projects: clone into workspace/<project> and create an agent branch.\n"
+                "Local projects: symlink the COA workspace into the agent workspace.[/]"
+            )
+            if not self.agent_options:
+                yield Static("[yellow]No unassigned agents available[/]")
+            else:
+                yield Static("[b]Agent[/b]")
+                yield Select(self.agent_options, id="project-assign-agent", allow_blank=False)
+            with Horizontal(id="project-assign-actions"):
+                yield Button("Assign", variant="success", id="btn-project-assign-confirm")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-project-assign-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "btn-project-assign-confirm":
+            if not self.agent_options:
+                self.dismiss(None)
+                return
+            agent = self.query_one("#project-assign-agent", Select).value
+            self.dismiss(str(agent) if agent else None)
+        else:
+            self.dismiss(None)
+
+
+class ProjectUnassignAgentModal(ModalScreen[bool]):
+    """Confirm agent removal — freezes tasks and cleans workspace via agictl."""
+
+    CSS = """
+    ProjectUnassignAgentModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #project-unassign-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $warning;
+        background: $surface;
+    }
+    #project-unassign-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #project-unassign-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(self, project_name: str, agent_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self.project_name = project_name
+        self.agent_name = agent_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="project-unassign-dialog"):
+            yield Static(
+                f"[bold yellow]Remove {self.agent_name} from {self.project_name}?[/]\n\n"
+                "This will:\n"
+                "· Freeze and unassign their active tasks on this project\n"
+                "· Remove the project workspace directory or symlink\n"
+                "· Delete their project membership and project memory\n\n"
+                "[bold]This cannot be undone.[/]"
+            )
+            with Horizontal(id="project-unassign-actions"):
+                yield Button("Unassign agent", variant="error", id="btn-project-unassign-confirm")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-project-unassign-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "btn-project-unassign-confirm")
+
+
+class ProjectSaveFirstModal(ModalScreen):
+    """Explain that Members/Memory tabs require saving the project first."""
+
+    CSS = """
+    ProjectSaveFirstModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #project-save-first-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $surface-lighten-2;
+        background: $surface;
+    }
+    #project-save-first-actions {
+        margin-top: 1;
+        height: auto;
+    }
+    #project-save-first-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        height: 3;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="project-save-first-dialog"):
+            yield Static(
+                "[bold]Save Project First[/]\n\n"
+                "Members and Project Memory are available after the project is created.\n\n"
+                "Complete the [bold]General[/] tab and press [bold]Save[/], then reopen this project to "
+                "assign agents or edit memory."
+            )
+            with Horizontal(id="project-save-first-actions"):
+                yield Button("Close", classes="dismiss-btn", variant="default", id="btn-project-save-first-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+
+
+class ProjectMembersModal(ModalScreen):
+    """Modal showing project details, members, and per-agent project memory."""
+
+    def __init__(self, project: dict, tasks_reader: Optional[TasksReader], **kwargs):
+        super().__init__(**kwargs)
+        self._project = project
+        self._tasks_reader = tasks_reader
+        self._is_new = not project.get("id")
+        self._name_locked = False
+        self._member_rows: dict[str, dict] = {}
+        self._memory_rows: dict[str, dict] = {}
+        self.selected_memory_agent: Optional[str] = None
+
+    def compose(self) -> ComposeResult:
+        proj = self._project
+        pid = proj.get("id", "?")
+        name = proj.get("name", "Unnamed") if not self._is_new else ""
+        desc = proj.get("description") or ""
+        status = proj.get("status", "active")
+        workspace = proj.get("workspace_path") or "--"
+        proj_type = proj.get("type") or "local"
+        self._name_locked = (not self._is_new) and is_reserved_system_project(name)
+        if self._is_new:
+            dir_slug, workspace = _preview_directory(name)
+        else:
+            dir_slug = project_dir_from_workspace_path(workspace) or "--"
+
+        color = STATUS_COLORS.get(status, "white")
+
+        type_options = [("git", "git"), ("local", "local")]
+        platform_options = [("-- None --", ""), ("github", "github"), ("gitlab", "gitlab")]
+
+        with Vertical(id="project-dialog"):
+            game_id = proj.get("game_id")
+            game_label = ""
+            if game_id and self._tasks_reader:
+                game_name = self._tasks_reader.get_game_name(game_id)
+                game_label = f"  │  🎯 {game_name}"
+
+            yield Static(
+                f"[bold]{'New Project' if self._is_new else f'#{pid}'}[/]  "
+                + (f"[{color}]{status}[/]{game_label}" if not self._is_new else "[green]new[/]"),
+                id="project-dialog-title",
+            )
+
+            with TabbedContent(initial="project-general-tab", id="project-tabs"):
+                with TabPane("General", id="project-general-tab"):
+                    with Vertical(id="project-general-pane"):
+                        with VerticalScroll(id="project-general-scroll"):
+                            yield Static("", classes="modal-tab-spacer")
+                            yield Static("[b]Name[/b]", classes="modal-form-label")
+                            yield Input(
+                                value=name,
+                                placeholder="Project name",
+                                id="project-edit-name",
+                                disabled=self._name_locked,
+                            )
+                            if self._name_locked:
+                                yield Static(
+                                    "[dim]System project — name cannot be changed.[/]",
+                                    id="project-name-lock-hint",
+                                )
+                            yield Static(
+                                "[b]Directory Name[/]",
+                                classes="modal-form-label modal-form-label-spaced",
+                            )
+                            yield Static(
+                                f"[dim]{dir_slug}[/]",
+                                id="project-directory-name",
+                            )
+                            if self._is_new:
+                                yield Static(
+                                    "[dim]Auto-generated from Name (unique, filesystem-safe).[/]",
+                                    id="project-directory-hint",
+                                )
+                            yield Static("[b]Description[/b]", classes="modal-form-label modal-form-label-spaced")
+                            yield TextArea(
+                                desc,
+                                id="project-edit-desc",
+                                show_line_numbers=False,
+                            )
+                            with Horizontal(classes="project-field-row"):
+                                with Vertical(classes="project-field-col"):
+                                    yield Static("[b]Type[/b]", classes="modal-form-label")
+                                    yield Select(
+                                        type_options,
+                                        value=proj_type,
+                                        id="project-edit-type",
+                                        allow_blank=False,
+                                    )
+                                with Vertical(classes="project-field-col", id="project-platform-col"):
+                                    yield Static("[b]Platform[/b]", classes="modal-form-label")
+                                    yield Select(
+                                        platform_options,
+                                        value=proj.get("platform") or "",
+                                        id="project-edit-platform",
+                                        allow_blank=False,
+                                    )
+                            with Horizontal(classes="project-field-row"):
+                                with Vertical(classes="project-field-col"):
+                                    yield Static("[b]Remote URL[/b]", classes="modal-form-label")
+                                    yield Input(
+                                        value=proj.get("remote_url") or "",
+                                        placeholder="https://github.com/org/repo.git",
+                                        id="project-edit-remote",
+                                    )
+                                with Vertical(classes="project-field-col"):
+                                    yield Static("[b]Access Token[/] [dim](hidden)[/]", classes="modal-form-label")
+                                    yield Input(
+                                        value=proj.get("access_token") or "",
+                                        placeholder="ghp_... or glpat-...",
+                                        id="project-edit-token",
+                                        password=True,
+                                    )
+                            with Horizontal(classes="project-field-row"):
+                                with Vertical(classes="project-field-col"):
+                                    yield Static("[b]Branch[/b]", classes="modal-form-label")
+                                    yield Input(
+                                        value=proj.get("branch") or "",
+                                        placeholder="main",
+                                        id="project-edit-branch",
+                                    )
+                                with Vertical(classes="project-field-col"):
+                                    yield Static("[b]COA Workspace[/]", classes="modal-form-label")
+                                    yield Static(f"[dim]{workspace}[/]", id="project-coa-workspace")
+
+                            yield Static("", id="project-edit-error")
+                        with Horizontal(classes="task-dialog-buttons"):
+                            yield Button("Save", variant="success", id="project-dialog-save")
+                            yield Button("Close", variant="default", id="project-dialog-close", classes="dismiss-btn")
+
+                with TabPane("Members", id="project-members-tab"):
+                    with Vertical(id="project-members-pane"):
+                        yield Static("", classes="modal-tab-spacer")
+                        yield Static(
+                            "[bold cyan]Members[/]",
+                            id="project-members-header",
+                        )
+                        yield Static(
+                            "[dim]Agents and connections assigned to this project.[/]"
+                        )
+                        with VerticalScroll(id="project-members-scroll"):
+                            yield DataTable(id="members-table", cursor_type="row")
+                        yield Static("", id="project-members-hint")
+                        with Horizontal(classes="project-members-actions"):
+                            yield Button(
+                                "Assign agent", variant="primary",
+                                id="project-member-assign", disabled=self._is_new,
+                            )
+                            yield Button(
+                                "Unassign agent", variant="warning",
+                                id="project-member-remove", disabled=self._is_new,
+                            )
+                            yield Button(
+                                "Close", variant="default",
+                                id="project-members-close", classes="dismiss-btn",
+                            )
+
+                with TabPane("Memory", id="project-memory-tab"):
+                    with Vertical(id="project-memory-pane"):
+                        yield Static("", classes="modal-tab-spacer")
+                        yield Static(
+                            "[bold cyan]Project Memory[/]",
+                            id="project-memory-header",
+                        )
+                        yield Static(
+                            "[dim]Per-agent memory for this project — phase, decisions, blockers, next steps.[/]"
+                        )
+                        with VerticalScroll(id="project-memory-scroll"):
+                            yield DataTable(id="project-memory-table", cursor_type="row")
+                        yield Static("", id="project-memory-hint")
+                        with Horizontal(classes="btn-grid-row"):
+                            yield Button(
+                                "Edit Selected", variant="primary",
+                                id="btn-project-mem-edit", disabled=True, classes="panel-btn",
+                            )
+                            yield Button(
+                                "Remove Selected", variant="error",
+                                id="btn-project-mem-remove", disabled=True, classes="panel-btn",
+                            )
+                            yield Button(
+                                "Close", variant="default",
+                                id="project-memory-close", classes="panel-btn dismiss-btn",
+                            )
+
+    def on_mount(self) -> None:
+        if self._is_new:
+            self.query_one("#project-tabs").add_class("project-new-mode")
+        self._sync_platform_visibility()
+        self._refresh_members_table()
+        mem_table = self.query_one("#project-memory-table", DataTable)
+        mem_table.add_columns(
+            "Agent", "Phase", "Decisions", "Blockers", "Next Steps", zone_heading.heading("Updated"),
+        )
+        self.refresh_project_memory_table()
+
+    def _refresh_directory_preview(self) -> None:
+        if not self._is_new:
+            return
+        try:
+            name = self.query_one("#project-edit-name", Input).value
+            slug, path = _preview_directory(name)
+            self.query_one("#project-directory-name", Static).update(f"[dim]{slug}[/]")
+            self.query_one("#project-coa-workspace", Static).update(f"[dim]{path}[/]")
+        except Exception:
+            pass
+
+    @on(Input.Changed, "#project-edit-name")
+    def on_name_changed(self, event: Input.Changed) -> None:
+        self._refresh_directory_preview()
+
+    def _sync_platform_visibility(self) -> None:
+        try:
+            proj_type = self.query_one("#project-edit-type", Select).value
+            platform_col = self.query_one("#project-platform-col")
+            platform_col.display = proj_type == "git"
+        except Exception:
+            pass
+
+    @on(Select.Changed, "#project-edit-type")
+    def on_type_changed(self, event: Select.Changed) -> None:
+        self._sync_platform_visibility()
+
+    @on(TabbedContent.TabActivated, "#project-tabs")
+    def _on_project_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if not self._is_new:
+            return
+        if event.tab.id in ("project-members-tab", "project-memory-tab"):
+            self.query_one("#project-tabs", TabbedContent).active = "project-general-tab"
+            self.app.push_screen(ProjectSaveFirstModal())
+
+    def _refresh_members_table(self) -> None:
+        table = self.query_one("#members-table", DataTable)
+        table.cursor_type = "row"
+        if not table.columns:
+            table.add_columns("", "Name", "Type", "Roles", "Branch", zone_heading.heading("Assigned"))
+        table.clear()
+        self._member_rows = {}
+
+        if not self._tasks_reader:
+            return
+
+        members = self._tasks_reader.get_project_members(self._project.get("id", 0))
+        for m in members:
+            member_type = str(m.get("member_type") or "?")
+            member_id = str(m.get("member_id") or "")
+            row_key = f"{member_type}:{member_id}"
+            self._member_rows[row_key] = m
+            icon = MEMBER_TYPE_ICONS.get(member_type, "?")
+            table.add_row(
+                icon,
+                str(m.get("display_name") or member_id or "?"),
+                member_type,
+                str(m.get("roles") or "contributor"),
+                str(m.get("branch") or "--"),
+                _utc_to_local(str(m.get("assigned_at") or "")),
+                key=row_key,
+            )
+        if not members:
+            table.add_row("", "[dim]No members assigned[/]", "", "", "", "")
+
+        count = len(self._member_rows)
+        pname = self._project.get("name") or f"#{self._project.get('id', '?')}"
+        try:
+            self.query_one("#project-members-header", Static).update(
+                f"[bold cyan]Members — {pname} ({count})[/]"
+                if count else f"[bold cyan]Members — {pname}[/] [dim](none)[/]"
+            )
+            self.query_one("#project-members-hint", Static).update(
+                "[dim]Select an agent row to unassign.[/]" if count else ""
+            )
+        except Exception:
+            pass
+
+    def refresh_project_memory_table(self) -> None:
+        table = self.query_one("#project-memory-table", DataTable)
+        table.clear()
+        self._memory_rows = {}
+        self.selected_memory_agent = None
+        self.query_one("#btn-project-mem-edit", Button).disabled = True
+        self.query_one("#btn-project-mem-remove", Button).disabled = True
+        self.query_one("#project-memory-hint", Static).update(
+            "[dim]Select a row to edit or remove.[/]"
+        )
+
+        pid = self._project.get("id")
+        if pid is None:
+            return
+
+        try:
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM agent_memory_project WHERE project_id=? ORDER BY updated_at DESC",
+                (pid,),
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            self.query_one("#project-memory-header", Static).update(
+                f"[bold cyan]Project Memory[/] [red](error: {e})[/]"
+            )
+            return
+
+        for r in rows:
+            row = dict(r)
+            agent = row.get("agent_name") or "?"
+            table.add_row(
+                agent,
+                _truncate(row.get("current_phase") or "", 20) or "--",
+                _truncate(row.get("key_decisions") or "", 36) or "--",
+                _truncate(row.get("blockers") or "", 28) or "--",
+                _truncate(row.get("next_steps") or "", 28) or "--",
+                _utc_to_local(row.get("updated_at") or ""),
+                key=agent,
+            )
+            self._memory_rows[agent] = row
+
+        count = len(self._memory_rows)
+        pname = self._project.get("name") or f"#{pid}"
+        self.query_one("#project-memory-header", Static).update(
+            f"[bold cyan]Project Memory — {pname} ({count})[/]"
+            if count else f"[bold cyan]Project Memory — {pname}[/] [dim](none)[/]"
+        )
+
+    @on(DataTable.RowHighlighted, "#project-memory-table")
+    def on_memory_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is None:
+            return
+        self.selected_memory_agent = event.row_key.value
+        self.query_one("#btn-project-mem-edit", Button).disabled = False
+        self.query_one("#btn-project-mem-remove", Button).disabled = False
+        self.query_one("#project-memory-hint", Static).update(
+            f"[bold cyan]Selected:[/] {self.selected_memory_agent}"
+        )
+
+    @on(DataTable.RowSelected, "#project-memory-table")
+    def on_memory_selected(self, event: DataTable.RowSelected) -> None:
+        row = self._memory_rows.get(event.row_key.value)
+        if row:
+            self.selected_memory_agent = row.get("agent_name")
+            self.app.push_screen(EditProjectMemoryModal(row, self))
+
+    def _get_selected_member(self) -> Optional[dict]:
+        table = self.query_one("#members-table", DataTable)
+        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        key = str(row_key.value) if row_key and row_key.value else ""
+        return self._member_rows.get(key)
+
+    def _assign_agent(self) -> None:
+        if not self._tasks_reader:
+            return
+        project_id = self._project.get("id")
+        if not project_id:
+            return
+
+        assigned = {
+            m.get("member_id")
+            for m in self._tasks_reader.get_project_members(self._project.get("id", 0))
+            if m.get("member_type") == "agent"
+        }
+        options = [
+            (name, name)
+            for name in self._tasks_reader.get_agent_names()
+            if name not in assigned and name.lower() != "watchdog"
+        ]
+
+        def _on_pick(agent_name: Optional[str]) -> None:
+            if not agent_name:
+                return
+            ok, data, err = _run_agictl(
+                ["project", "assign", str(project_id), "--agent", agent_name],
+                timeout=150,
+            )
+            if ok:
+                ws = data.get("workspace", "")
+                branch = data.get("branch", "")
+                detail = f" · {branch}" if branch else ""
+                if ws:
+                    detail += f" · {ws}"
+                self.app.notify(f"Assigned {agent_name}{detail}", title="agitop")
+                self._refresh_members_table()
+                self.refresh_project_memory_table()
+                try:
+                    self.app.query_one(ProjectsPanel).refresh_data()
+                except Exception:
+                    pass
+            else:
+                self.app.notify(err or "Assign failed", severity="error")
+
+        self.app.push_screen(
+            ProjectAssignAgentModal(self._project.get("name") or "", options),
+            _on_pick,
+        )
+
+    def _remove_agent(self) -> None:
+        member = self._get_selected_member()
+        if not member:
+            self.app.notify("Select a member row first", severity="warning")
+            return
+        if member.get("member_type") != "agent":
+            self.app.notify("Only agent members can be removed here", severity="warning")
+            return
+
+        agent_name = str(member.get("member_id") or "")
+        roles = str(member.get("roles") or "")
+        if "owner" in roles:
+            self.app.notify("Cannot remove project owner — transfer ownership first", severity="warning")
+            return
+
+        project_id = self._project.get("id")
+        project_name = self._project.get("name") or ""
+
+        def _on_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            ok, data, err = _run_agictl(
+                ["project", "unassign", str(project_id), "--agent", agent_name],
+                timeout=60,
+            )
+            if ok:
+                frozen = data.get("tasks_frozen", 0)
+                msg = f"Removed {agent_name}"
+                if frozen:
+                    msg += f" · {frozen} task(s) frozen and unassigned"
+                self.app.notify(msg, title="agitop")
+                self._refresh_members_table()
+                self.refresh_project_memory_table()
+                try:
+                    self.app.query_one(ProjectsPanel).refresh_data()
+                except Exception:
+                    pass
+            else:
+                self.app.notify(err or "Remove failed", severity="error")
+
+        self.app.push_screen(
+            ProjectUnassignAgentModal(project_name, agent_name),
+            _on_confirm,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id in (
+            "project-dialog-close",
+            "project-members-close",
+            "project-memory-close",
+        ):
+            self.app.pop_screen()
+        elif event.button.id == "project-dialog-save":
+            self._save()
+        elif event.button.id == "project-member-assign":
+            self._assign_agent()
+        elif event.button.id == "project-member-remove":
+            self._remove_agent()
+        elif event.button.id == "btn-project-mem-edit" and self.selected_memory_agent:
+            row = self._memory_rows.get(self.selected_memory_agent)
+            if row:
+                self.app.push_screen(EditProjectMemoryModal(row, self))
+        elif event.button.id == "btn-project-mem-remove" and self.selected_memory_agent:
+            pid = self._project.get("id")
+            if pid is not None:
+                self.app.push_screen(
+                    RemoveProjectMemoryModal(
+                        self.selected_memory_agent, int(pid), self,
+                    )
+                )
+
+    def _save(self) -> None:
+        pid = self._project.get("id")
+        error_label = self.query_one("#project-edit-error", Static)
+        new_name = self.query_one("#project-edit-name", Input).value.strip()
+        new_remote = self.query_one("#project-edit-remote", Input).value.strip()
+        new_branch = self.query_one("#project-edit-branch", Input).value.strip()
+        new_desc = self.query_one("#project-edit-desc", TextArea).text.strip()
+        new_type = self.query_one("#project-edit-type", Select).value
+        new_platform = (
+            self.query_one("#project-edit-platform", Select).value
+            if new_type == "git"
+            else ""
+        )
+        new_token = self.query_one("#project-edit-token", Input).value.strip()
+
+        if not new_name:
+            error_label.update("[bold red]Project name cannot be empty[/]")
+            return
+
+        if not pid:
+            args = ["project", "add", "--name", new_name]
+            if new_desc:
+                args.extend(["--desc", new_desc])
+            if new_remote:
+                args.extend(["--remote", new_remote])
+            elif new_type == "git":
+                args.append("--git-init")
+            ok, data, err = _run_agictl(args, timeout=150)
+            if not ok:
+                error_label.update(f"[bold red]{err}[/]")
+                return
+            new_id = data.get("project_id")
+            if new_id and self._tasks_reader:
+                post: dict = {}
+                if new_branch:
+                    post["branch"] = new_branch
+                if new_platform:
+                    post["platform"] = new_platform
+                if new_token:
+                    post["access_token"] = new_token
+                if post:
+                    self._tasks_reader.update_project(int(new_id), post)
+            self.app.notify(f"Project '{new_name}' created", severity="information")
+            try:
+                self.app.query_one(ProjectsPanel).refresh_data()
+            except Exception:
+                pass
+            self.app.pop_screen()
+            return
+
+        old_name = self._project.get("name") or ""
+        if getattr(self, "_name_locked", False) and new_name != old_name:
+            error_label.update(
+                f"[bold red]'{old_name}' is a protected system project and cannot be renamed[/]"
+            )
+            return
+
+        updates = {}
+        old_remote = self._project.get("remote_url") or ""
+        old_branch = self._project.get("branch") or ""
+        old_desc = self._project.get("description") or ""
+        old_type = self._project.get("type") or "local"
+        old_platform = self._project.get("platform") or ""
+        old_token = self._project.get("access_token") or ""
+
+        if new_name != old_name:
+            updates["name"] = new_name
+
+        if new_remote != old_remote:
+            updates["remote_url"] = new_remote if new_remote else None
+        if new_branch != old_branch:
+            updates["branch"] = new_branch if new_branch else None
+        if new_desc != old_desc:
+            updates["description"] = new_desc if new_desc else None
+        if new_type != old_type:
+            updates["type"] = new_type
+            if new_type != "git":
+                updates["platform"] = None
+        if new_type == "git" and new_platform != old_platform:
+            updates["platform"] = new_platform if new_platform else None
+        if new_token != old_token:
+            updates["access_token"] = new_token if new_token else None
+
+        if not updates:
+            self.app.pop_screen()
+            return
+
+        if self._tasks_reader and self._tasks_reader.update_project(pid, updates):
+            self.app.notify(f"Project updated", severity="information")
+            try:
+                self.app.query_one(ProjectsPanel).refresh_data()
+            except Exception:
+                pass
+            self.app.pop_screen()
+        else:
+            if "name" in updates:
+                error_label.update(
+                    "[bold red]Failed to save — name may be reserved, empty, or already in use[/]"
+                )
+            else:
+                error_label.update("[bold red]Failed to save changes[/]")
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+
+
+class EditProjectMemoryModal(ModalScreen):
+    """PU editor for a project memory row (scoped to agent + project)."""
+
+    CSS = """
+    EditProjectMemoryModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #proj-memory-edit-dialog {
+        width: 86;
+        height: auto;
+        max-height: 85%;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $surface;
+    }
+    #proj-mem-phase {
+        height: 3;
+        margin: 1 0;
+    }
+    #proj-mem-decisions,
+    #proj-mem-blockers,
+    #proj-mem-next-steps {
+        height: 5;
+        margin: 1 0;
+    }
+    #proj-memory-edit-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #proj-memory-edit-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(self, row: dict, parent: ProjectMembersModal, **kwargs):
+        super().__init__(**kwargs)
+        self.row = row
+        self.parent_modal = parent
+        self.agent_name = row.get("agent_name") or "?"
+
+    def compose(self) -> ComposeResult:
+        pid = self.row.get("project_id", "?")
+        with Vertical(id="proj-memory-edit-dialog"):
+            yield Static(
+                f"[bold]Edit Project Memory[/]\n"
+                f"[dim]{self.agent_name} · project #{pid}[/]"
+            )
+            yield Static("[cyan]Current phase[/]")
+            yield TextArea(self.row.get("current_phase") or "", id="proj-mem-phase")
+            yield Static("[cyan]Key decisions[/]")
+            yield TextArea(self.row.get("key_decisions") or "", id="proj-mem-decisions")
+            yield Static("[cyan]Blockers[/]")
+            yield TextArea(self.row.get("blockers") or "", id="proj-mem-blockers")
+            yield Static("[cyan]Next steps[/]")
+            yield TextArea(self.row.get("next_steps") or "", id="proj-mem-next-steps")
+            with Horizontal(id="proj-memory-edit-actions"):
+                yield Button("Save", variant="success", id="btn-proj-mem-save")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-proj-mem-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "btn-proj-mem-cancel":
+            self.app.pop_screen()
+            return
+        pid = self.row.get("project_id")
+        try:
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
+            conn.execute(
+                """UPDATE agent_memory_project SET
+                   current_phase=?, key_decisions=?, blockers=?, next_steps=?,
+                   updated_at=CURRENT_TIMESTAMP
+                   WHERE agent_name=? AND project_id=?""",
+                (
+                    self.query_one("#proj-mem-phase", TextArea).text.strip() or None,
+                    self.query_one("#proj-mem-decisions", TextArea).text.strip() or None,
+                    self.query_one("#proj-mem-blockers", TextArea).text.strip() or None,
+                    self.query_one("#proj-mem-next-steps", TextArea).text.strip() or None,
+                    self.agent_name,
+                    pid,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            self.app.notify(f"Updated {self.agent_name} memory for project #{pid}", severity="information")
+            self.parent_modal.refresh_project_memory_table()
+            self.app.pop_screen()
+        except Exception as e:
+            self.app.notify(f"Error saving: {e}", severity="error")
+
+
+class RemoveProjectMemoryModal(ModalScreen):
+    """Confirm removal of a project memory row."""
+
+    CSS = """
+    RemoveProjectMemoryModal {
+        align: center middle;
+        background: $surface 80%;
+    }
+    #proj-memory-remove-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: heavy $error;
+        background: $surface;
+    }
+    #proj-memory-remove-actions {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    #proj-memory-remove-actions Button {
+        width: 1fr;
+        margin: 0 1;
+        min-width: 16;
+        height: 3;
+    }
+    """
+
+    def __init__(self, agent_name: str, project_id: int, parent: ProjectMembersModal, **kwargs):
+        super().__init__(**kwargs)
+        self.agent_name = agent_name
+        self.project_id = project_id
+        self.parent_modal = parent
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="proj-memory-remove-dialog"):
+            yield Static("[bold red]Remove project memory?[/]\n")
+            yield Static(
+                f"[dim]{self.agent_name} · project #{self.project_id}[/]\n\n"
+                "[bold]This cannot be undone.[/]"
+            )
+            with Horizontal(id="proj-memory-remove-actions"):
+                yield Button("Remove", variant="error", id="btn-proj-mem-remove")
+                yield Button("Cancel", classes="dismiss-btn", variant="default", id="btn-proj-mem-remove-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "btn-proj-mem-remove-cancel":
+            self.app.pop_screen()
+            return
+        try:
+            conn = db_connect.connect_compat(_tasks_db(), timeout=5)
+            conn.execute(
+                "DELETE FROM agent_memory_project WHERE agent_name=? AND project_id=?",
+                (self.agent_name, self.project_id),
+            )
+            conn.commit()
+            conn.close()
+            self.app.notify(
+                f"Removed {self.agent_name} memory for project #{self.project_id}",
+                severity="information",
+            )
+            self.parent_modal.refresh_project_memory_table()
+        except Exception as e:
+            self.app.notify(f"Error removing: {e}", severity="error")
+        self.app.pop_screen()
+
+
+class DeleteProjectModal(ModalScreen):
+    """Confirmation modal for deleting an archived project."""
+
+    def __init__(self, project_id: str, project_name: str, tasks_reader: TasksReader, **kwargs):
+        super().__init__(**kwargs)
+        self.project_id = int(project_id)
+        self.project_name = project_name
+        self.tasks_reader = tasks_reader
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="msg-dialog"):
+            yield Static(
+                f"[bold red]Delete Project[/]\n\n"
+                f"Permanently delete archived project [bold]{self.project_name}[/] (ID: {self.project_id})?\n\n"
+                f"[dim]Any tasks linked to this project will be unlinked (not deleted).[/]",
+                id="msg-dialog-header"
+            )
+            yield Button("Delete", variant="error", id="confirm-delete")
+            yield Button("Cancel", classes="dismiss-btn", variant="default", id="cancel-delete")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "confirm-delete":
+            success, msg = self.tasks_reader.delete_project(self.project_id)
+            self.app.pop_screen()
+            if success:
+                self.app.notify(msg, severity="information")
+            else:
+                self.app.notify(msg, severity="error")
+            # Refresh the projects panel
+            try:
+                self.app.query_one(ProjectsPanel).refresh_data()
+            except Exception:
+                pass
+        else:
+            self.app.pop_screen()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+
+
+class ProjectsPanel(Widget):
+    """Projects list with extending table and New/Edit/Delete actions."""
+
+    def __init__(self, tasks_reader: Optional[TasksReader], **kwargs):
+        super().__init__(**kwargs)
+        self.tasks_reader = tasks_reader
+        self._project_data: dict[str, dict] = {}
+        self.table = FlexDataTable(
+            id="projects-table",
+            flex_keys=["desc"],
+            min_flex_width=24,
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="projects-panel-body", classes="work-tab-body"):
+            yield self.table
+            with Horizontal(classes="work-tab-actions"):
+                yield Button("New", variant="success", id="btn-projects-new")
+                yield Button("Edit", variant="primary", id="btn-projects-edit", disabled=True)
+                yield Button("Delete", variant="error", id="btn-projects-delete", disabled=True)
+                yield Button("Quit", variant="default", id="btn-projects-quit", classes="btn-quit")
+
+    def on_mount(self) -> None:
+        self.table.cursor_type = "row"
+        self._update_title()
+        self.table.add_column("ID", width=5, key="id")
+        self.table.add_column("Name", width=24, key="name")
+        self.table.add_column("Desc", width=24, key="desc")
+        self.table.add_column("Status", width=10, key="status")
+        self.table.add_column("Type", width=8, key="type")
+        self.table.add_column("Platform", width=10, key="platform")
+        self.table.add_column("Branch", width=12, key="branch")
+        self.table.add_column("Game", width=16, key="game")
+        self.table.add_column("Members", width=12, key="members")
+        self.table.apply_flex_widths()
+        self.refresh_data()
+
+
+    def _update_title(self) -> None:
+        count = len(self._project_data)
+        self.table.border_title = (
+            f"Projects ({count})  │  ENTER for details  │  DEL to delete archived"
+        )
+
+    def _selected_project_id(self) -> str | None:
+        try:
+            row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+            if row_key and row_key.value:
+                return str(row_key.value)
+        except Exception:
+            pass
+        return None
+
+    def _update_action_buttons(self) -> None:
+        has_row = bool(self._selected_project_id())
+        try:
+            self.query_one("#btn-projects-edit", Button).disabled = not has_row
+            self.query_one("#btn-projects-delete", Button).disabled = not has_row
+        except Exception:
+            pass
+
+    @on(DataTable.RowHighlighted, "#projects-table")
+    def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self._update_action_buttons()
+
+    @on(Button.Pressed)
+    def _on_action_button(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-projects-new":
+            self.app.push_screen(ProjectMembersModal({}, self.tasks_reader))
+        elif event.button.id == "btn-projects-edit":
+            pid = self._selected_project_id()
+            proj = self._project_data.get(pid or "", {})
+            if proj:
+                self.app.push_screen(ProjectMembersModal(proj, self.tasks_reader))
+        elif event.button.id == "btn-projects-delete":
+            self._try_delete_selected()
+        elif event.button.id == "btn-projects-quit":
+            self.app.exit()
+
+    def refresh_data(self) -> None:
+        """Refresh project data from SQLite."""
+        projects = self.tasks_reader.get_all_projects() if self.tasks_reader else []
+        self.table.clear()
+        self._project_data.clear()
+
+        for proj in projects:
+            status = proj.get("status", "active")
+            color = STATUS_COLORS.get(status, "white")
+            s_formatted = f"[{color}]{status}[/]"
+            pid = str(proj.get("id") or "")
+
+            self._project_data[pid] = proj
+
+            members_summary = "--"
+            if self.tasks_reader and pid:
+                members_summary = self.tasks_reader.get_project_member_summary(int(pid))
+
+            game_name = "--"
+            game_id = proj.get("game_id")
+            if game_id and self.tasks_reader:
+                game_name = self.tasks_reader.get_game_name(game_id)
+
+            desc = str(proj.get("description") or "--")
+            desc_truncated = desc[:300] + "..." if len(desc) > 303 else desc
+
+            self.table.add_row(
+                pid,
+                str(proj.get("name") or "Unnamed"),
+                desc_truncated,
+                s_formatted,
+                str(proj.get("type") or "local"),
+                str(proj.get("platform") or "--"),
+                str(proj.get("branch") or "--"),
+                game_name,
+                members_summary,
+                key=pid,
+            )
+        self._update_title()
+        self._update_action_buttons()
+
+    def on_key(self, event) -> None:
+        if event.key in ("delete", "backspace"):
+            self._try_delete_selected()
+
+    def _try_delete_selected(self) -> None:
+        """Attempt to delete the currently selected project row."""
+        if not self.tasks_reader:
+            return
+        row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+        pid = str(row_key.value) if row_key else None
+        if not pid or pid not in self._project_data:
+            return
+
+        proj = self._project_data[pid]
+        status = proj.get("status", "")
+        name = proj.get("name", "?")
+
+        if status != "archived":
+            self.app.notify(
+                f"Only archived projects can be deleted ('{name}' is {status}) — "
+                "archive via agictl or COA first.",
+                severity="warning",
+            )
+            return
+
+        self.app.push_screen(DeleteProjectModal(pid, name, self.tasks_reader))
+
+    @on(DataTable.RowSelected, "#projects-table")
+    def on_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Launch project members modal on row select."""
+        row_key = event.row_key.value
+        proj = self._project_data.get(row_key, {})
+        if proj:
+            self.app.push_screen(ProjectMembersModal(proj, self.tasks_reader))

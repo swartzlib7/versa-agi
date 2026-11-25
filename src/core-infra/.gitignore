@@ -1,0 +1,14 @@
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state
+*.lock
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Environment files
+.env

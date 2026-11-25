@@ -1,0 +1,6 @@
+#!/bin/bash
+# vcoa — Shortcut for agictl with COA agent context
+# Usage: vcoa msg history --limit 5
+#        vcoa stats
+#        vcoa task list
+exec sudo bash -c "AGICTL_DB=/var/lib/versa-agi/coa/agent_memory.db AGICTL_AGENT_DIR=/home/coa/coa-env/.agent AGICTL_CONFIG=/etc/versa-agi/coa_config.json /usr/local/bin/agictl \$*" _ "$@"

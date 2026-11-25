@@ -1,0 +1,1018 @@
+# Changelog
+
+> Versa AGi (Agentic General infrastructure)
+
+All notable changes to this project are documented here. This changelog follows release milestones — for detailed engineering notes, see internal documentation.
+
+From 3.5.24 on, each heading is the Versa AGi product version, the same number `agictl --version` and the installer show. Entries up to 0.15.0 used a separate milestone number.
+
+## [Unreleased]
+
+### Versa Desktop
+
+#### Added
+- **The lid, as a setting** — Settings has "When the lid closes" and "When the lid closes with another screen attached": Sleep, Lock or Nothing for each. They start as Ubuntu has them (Sleep, and Nothing with another screen). Sleep locks the session first, so the computer wakes to the lock.
+- **A program can hold sleep back, and the lock says so** — When a program has asked the system not to sleep, a lid set to Sleep and "Sleep after locked for" wait for it. The lock screen shows "Sleep is waiting for" and the program's name and reason, and the computer sleeps once the hold ends.
+- **Sleep after the lock** — "Sleep after locked for" puts the computer to sleep once it has been locked for the time you set. It starts as Never. Sleep stops everything on the computer, your agents included, until it wakes.
+
+#### Changed
+- **The Super button is in the top left corner** — The running-apps button is now a round symbol at the far left of the top bar. Push the pointer into the corner and click to open the overlay. The keyboard, mouse, screen and sound symbols are centred in the room it left.
+- **Settings is easier to read** — Each group is in a box of its own with a symbol and a larger name. "Lock now" is a filled button with a lock symbol on the first line of "Screen, lock and sleep".
+- **An app with several windows shows the one you had before** — When the window an app's box shows is closed, the box goes back to the window shown before it, not to the last one in the row.
+
+## [3.10.5] — 2026-11-24
+
+### Security
+
+#### Fixed
+- **An agent could act as the system** — An agent's account was allowed to start `agictl` in a way that skipped the step recording who was calling. `agictl` then treated the caller as the Primary User, and could be made to run a command as the system account, and from there as root or as the person who installed. `agictl` now takes its caller from the operating system's own record, an agent can no longer pass settings of its own to it, the system account reaches root for a short list of commands only, and it can run commands as agents only.
+- **The lead agent's account could write the databases** — The database files were writable by the lead agent's account. They are now read-only to every agent account. Agents change data through `agictl`, as before; nothing an agent does through its tools changes.
+- **Agents could read and change each other's files** — Every agent could enter every other agent's home, and the lead agent's skills folder. Each agent's home is now closed to the other agents. The lead agent can still enter them, and the shared workspace (AGi-Tools and shared projects) works as before.
+- **Agents could read your VersaVoice API token** — The settings file, which every agent could read, and each agent's own config file held your VersaVoice API token and the provider keys. Both are now readable by the system account only. For each cycle an agent is given a copy of the settings with every key and token blanked. A cycle still receives the provider keys it needs to call its model. If you read `/etc/versa-agi/setup.ini` yourself, you now need `sudo`.
+- **The lead agent's account no longer belongs to the system account's group** — On an older install that membership let it read the system account's home and the behaviour templates. An update removes it.
+- **An agent could read your VersaVoice API token through its own tool** — `agictl system config get`, a command every agent is shown, printed the agent's whole configuration with the token in it. Keys and tokens are now shown as `[hidden]` to an agent, and an agent cannot change its VersaVoice account or who its Primary User is.
+- **Prompts and keys in a shared folder** — Each cycle's prompt and environment files were written where any account on the machine could read them. They are now in the agent's own data folder and removed when the cycle ends. The archive made when an agent is removed, which holds its SSH key, is now readable by the system account only.
+
+#### Changed
+- **A package request shows in the app sooner** — When an agent requests a package, the request is sent to the VersaVoice app within about a minute. Before, it waited for the next sync, up to an hour by default.
+- **Installing an approved package** — The rule that let the system account run `apt-get install` with any arguments is removed. An approved package is installed by one command that checks the approved list itself.
+- **A file sent between agents while VersaVoice is off** — The recipient now gets its own copy. Before, it was given the sender's file path.
+
+### Skills
+
+#### Fixed
+- **Agents acted on half a skill** — An agent told to load a skill read it through a shell command, which is cut at 5,000 characters, and most skills are longer. Agents now load a skill with a tool of its own, `agictl_load_skill`, and receive all of it.
+- **Commands in the skills that were refused** — 48 commands shown to agents in the skills, the prompts and the tool descriptions could not run as written: a command or option that does not exist, an argument too many, or a task created without its project and due date. They are corrected, and a test now checks every command the shipped text shows.
+- **A blocked task woke its agent on every pass** — The scheduling skill said a blocked task does not wake the agent. It does, once its due date has passed. The skill now says to block and then snooze.
+- **"Added to the security watch list"** — The security skill had an agent tell you a contact was added to a watch list. No such list exists. The agent now records the attempts in its memory of that contact and reports what happened.
+- **A memory note could be taken over by another agent** — Two agents that saved a system-memory note under the same key overwrote each other, and the first lost its note. The second is now refused and told to pick another key.
+
+#### Changed
+- **A contact who asks for more than their work** — When you put an agent in touch with a person for a project or a task and that person asks for something else, or for something the system is not meant to do, the agent does not do it. It declines politely and tells the lead agent, who decides from what you have already agreed, asks you when unsure and remembers your answer for similar requests. Anything suspicious is always reported to you. The skill that covered this used task statuses that do not exist, so it could not be followed.
+- **Project and git skills** — An agent no longer asks you to run a command to set up git: its key exists from the start, and it sends you the public key to add to the repository. Cloning is done by the project commands, and a further agent works on its own branch.
+
+### Live calls
+
+#### Fixed
+- **The call stayed open after the goodbye** — Sometimes the voice said goodbye, or said it was ending the call, and the call stayed open until you asked again. Now, when the line stays quiet for about 6 seconds after the voice has answered you by itself, the Chief Orchestrator Agent is asked what to do and closes the call if you were done.
+
+### Versa Business Admin
+
+#### Changed
+- **Agents design VBA changes from VBA's own design documents** — When you ask an agent to plan something new for Versa Business Admin, it now reads the design decisions that ship with VBA, and the parts VBA already has, before it writes the plan. Where its plan disagrees with a decision, it says so and asks you.
+- **Agents follow Versa Business Admin 1.0.20** — Scripts that feed statistics use an access token (email and password sign-in for scripts was removed). When you ask for a public VBA install, the agent uses the reverse-proxy templates that ship with VBA.
+
+## [3.10.4] — 2026-11-21
+
+### Updates
+
+#### Changed
+- **The backup an update makes is complete** — Before it deploys, every update backs up the databases, the settings and every agent's folder, as well as the code. Before, it held the code and the Chief Orchestrator Agent's folder only. Each database is copied in a way that stays consistent even while an agent is still writing.
+- **It lives in `/var/backups/versa-agi/`** — Root only, outside every account's folder. The full backup (`versa-agi-backup`) no longer picks it up, and agents cannot reach it. Backups earlier versions left in `/home/watchdog/backups/` are removed once the new one exists.
+- **One backup is kept** — Each update replaces the previous backup after the new one is complete. Before, five full copies were held.
+- **Caches and installed dependencies are left out** — The same folders the full backup leaves out. Git history is now included.
+
+#### Added
+- **A free-space check, and a message when there was no room** — The disk needed is measured before the backup. If there is not enough, the update goes ahead without a new backup, the earlier backup stays, and Lifeline sends you a message that says how much room was needed and how much was free.
+
+## [3.10.3] — 2026-11-21
+
+### Updates
+
+#### Fixed
+- **Sudo access granted but reported as missing** — On a server that keeps its sudo settings folder readable by root only, the Chief Orchestrator Agent said sudo access had not been granted, and its sudo commands were refused, although you had switched it on in VersaVoice or agitop. The grant was written correctly; the system looked for it in a folder that only root can read. It now asks the operating system directly. Switching the grant on again from VersaVoice also rewrites it if it is missing.
+
+## [3.10.2] — 2026-11-19
+
+### Updates
+
+#### Added
+- **Gemini 4 Neon and Gemini 4 Argon** — Both can be assigned to any agent, with a Google key or through OpenRouter. Neon reasons at low, medium or high (xhigh through OpenRouter); Argon at low, medium or high, medium by default. Google does not offer either on its free tier, so a Google key must be a paid one.
+- **Cloud storage** — Ask an agent to reach your Google Drive, OneDrive, Dropbox or other cloud files from the machine and reorganise them: read the whole structure, rename and move files and folders, make folders, add files. It asks what you want done, then picks the lightest way: a folder mapped to your cloud files (nothing is stored on the machine for files it only reads), commands that work on the provider's side, or a two-way copy when there is disk for it. The agent does the setup on the machine itself. Your part is a one-time setup in your Google account, which it walks you through, and a sign-in.
+- **rclone and FUSE are installed with Versa AGi** — Setup installs rclone 1.76.0 (rclone's own build, checked against its published checksum before it is installed) and the operating system's `fuse3`. A machine with no network at update time is not held up; an agent can still request them.
+- **GPT-6.2 Astra** — OpenAI's flagship, with an OpenAI key or through OpenRouter. It always reasons (low to max, medium by default) and is not offered to model routing in stock, as it costs the same as Claude Fable 5.2.
+
+#### Fixed
+- **Changing an agent from Gemini on a Google key to Grok or an OpenRouter model** — An agent that had worked on a Gemini 4 model with a Google key failed on every cycle after its model was changed to Grok with an xAI key, or to any model through OpenRouter (the provider refused the stored conversation). The conversation now carries over.
+
+#### Changed
+- **Python packages are installed at fixed versions** — Setup used to install the newest version of each Python package on the day of the install, so two machines could end up with different library versions. It now installs the exact versions this release was tested with, and an update brings an existing install to them. Where a machine cannot take a pinned version, setup installs without the pins and says so. The versions, with every other program setup installs, are listed in one file (`src/core-infra/config/shipped_tools.ini`).
+- **GPT-6.1 Sol starts at medium reasoning** — Its stock reasoning level is now medium, OpenAI's own default (it was high). An agent that has its own reasoning level keeps it.
+
+## [3.10.1] — 2026-11-19
+
+### Updates
+
+#### Added
+- **Ask your agent about Live Chat** — The Chief Orchestrator Agent can tell you whether Live Chat is on, what the listening time is, and whether Live Link is on and connected. It can change the listening time (Off, 5, 10, 15 or 30 minutes) and switch Live Link when you ask. Before, these were changed in agitop only. Other agents can look but cannot change them. Command line: `agictl system live-chat`.
+
+#### Changed
+- **Resume Max Messages takes effect again** — An agent's Resume Max Messages (agitop → agent → Technical Setup) is the number of recent messages a cycle starts with. Since September the system ignored it and sized the history from the model, which meant 200 messages on a large model. The model's size is now only an upper limit. Set it to 0 to let the model's size decide.
+- **Older conversation is summarized, not dropped** — When a cycle starts with more history than Resume Max Messages, the older part is written up as a summary frame first, and the agent starts with its summaries followed by the recent messages. Before, the older part was dropped. The summary is written by the Compaction Model (agitop → System Settings → General); when that is blank the agent's own model writes it, so a small model there keeps it cheap. If the summary cannot be written, nothing is cut at your setting for that cycle.
+- **Summaries in the prompt are held to a size** — An agent carries its newest summary frames, up to about 40,000 characters. Older ones stay searchable.
+
+#### Fixed
+- **Looking at several photos in a row no longer multiplies the cost** — With a Claude model, each photo an agent viewed after the first made the provider bill most of the conversation again at the full price. A photo now stays in the conversation until the cycle ends, and the next cycle carries only a note of what was viewed.
+- **Agent history files no longer grow without limit** — Each agent keeps a file of saved conversation steps. Lifeline was meant to keep the newest 50 steps of each thread and never did, so the file only grew (8.5 GB for one agent after a week). It is trimmed after every cycle now. The first cycle after this update takes a few minutes longer to finish while the file is cleaned.
+
+## [3.10.0] — 2026-11-18
+
+### Updates
+
+#### Added
+- **Live Link (optional) — messages reach agents at once** — With Live Link on, your machine keeps one outbound request open to the VersaVoice AI API and is told the moment an agent has a new message. A resting agent starts waking at once instead of at the next minute, and an agent in a chat reads a new message at once instead of within 10 seconds. The machine still accepts no connection from outside; if the link is down, messages arrive by the regular fetch. Off by default: setup asks **Enable Live Link?**, and agitop has the switch under System Settings → Live Chat.
+- **Link state in agitop** — The System column shows `LINK: up`, `down` with the reason, or `off`.
+- **The computer stays awake while an agent works** — Sleep waits until the agent's cycle has ended; in a chat, until it has been quiet for the listening time. Between cycles the machine sleeps as usual. Turn it off with `sleep_hold=false` under `[agent]` in `setup.ini`.
+- **Lid question on laptops** — Setup detects a laptop, says so, and asks whether a shut lid should also wait for a working agent. The default is No: a shut lid puts the laptop to sleep.
+- **Agents are told when their last cycle was interrupted** — After a power cut, a stop at shutdown, a stall or a crash, the agent's next wake says its last cycle did not close itself and tells it to check the last thing it was doing before it carries on.
+- **Agents hand off before the computer shuts down** — When you shut down or restart the machine while an agent is working or in a chat, the agent is told, gets up to 2 minutes to hand off and close its cycle, and carries on at its next start. A shutdown can take that much longer while an agent is busy. Change the time with `shutdown_grace_seconds` under `[agent]` in `setup.ini` (30 to 300 seconds; `0` turns it off). Such a cycle shows as **Shutdown** on the agent card.
+
+#### Changed
+- **More agents in a chat at once** — Up to 20 of your agents can stay in a chat at the same time while Live Link is up. It was 5, and stays 5 where Live Link is down or off.
+
+#### Fixed
+- **agitop saves the Live Chat settings again** — Saving the Live Chat tab (chat listening minutes) ended in an error since 3.7.0.
+- **A network outage no longer fails cycles** — When your machine cannot reach VersaVoice AI, Lifeline holds agents on cloud models instead of starting cycles that would fail and count toward the circuit breaker. It logs one line when the outage starts and one when it ends. Agents on local models keep working.
+- **API token no longer visible to other accounts** — Lifeline passed your VersaVoice API token as a command argument, where any account on the machine could read it while the command ran. It now travels in the environment, which only the same account can read.
+- **Received attachments are checked** — A received file is saved under its plain file name inside the message's attachments folder, whatever path the name carried, and is fetched from an `https` address only.
+- **The app no longer shows an agent that is not there** — After the machine was turned off with an agent in a chat, the VersaVoice app kept showing the agent as here, then working, for up to the rest of its time limit. Now it shows resting at once after a shutdown, and within about 3 minutes after a power cut or a lost network. Needs the VersaVoice app update released with 3.10.0.
+- **A cycle cut by a power loss is closed out** — Its record used to stay open, the agent stayed marked active, and the VersaVoice app's statistics missed it. On the next pass Lifeline now closes the record with the time the cycle stopped, sets the agent back to idle, and reports the end to VersaVoice AI. Such a cycle shows as **Shutdown** on the agent card.
+- **A sleeping computer is no longer read as a stalled agent** — Time the machine spent asleep counted toward the stall timer, so an agent could be stopped the moment the machine woke, and that counted toward the circuit breaker.
+- **Uninstall removes the link service** — `versa-agi-uninstall` left the link service's unit behind. It now stops and removes it, and backup captures it.
+- **Restarting the link service no longer ends a cycle** — An agent woken by a new message runs under the link service. An update, or a crash of that service, could have stopped the agent in the middle of its cycle. Only the service itself is restarted now.
+
+### Versa Desktop
+
+#### Changed
+- **Computer use and the clipboard list's two Clear buttons** — The clipboard list now has "Clear All" and a Clear for the tab that is open ("Clear Text", "Clear Images", "Clear Files", "Clear Screenshots"). The agent's skill knows both, so "clear my copied images" removes only those.
+
+## [3.9.3] — 2026-11-17
+
+### Updates
+
+#### Added
+- **Claude Sonnet 5.5 and Claude Sonnet 5** — Both can be assigned to any agent, with an Anthropic key or through OpenRouter.
+- **More Live Call models** — Claude Sonnet 5.5, Gemini 4 Hydrogen, Claude Opus 5.5, Claude Sonnet 5 and Claude Opus 4.8 join Grok 4.6 and Gemini 3.7 Flash. Setup and agitop suggest the best one you have a key for, and the provider's own key ahead of OpenRouter.
+- **Ask COA to change the call model** — Your Chief Orchestrator Agent can switch the Live Call model, and how much it reasons on a call, when you ask.
+- **Reasoning on a call** — A new Live Call setting: Auto, Low, Medium or High.
+- **Live Call models table** — The Models page lists the shipped call models, best first, with their keys and the reasoning level each uses on Auto.
+
+#### Changed
+- **The call model reasons before it answers** — On a call your agent now thinks at a level measured for each shipped model, so it does the work properly and still answers quickly. Before, it used the lowest level the model had.
+
+#### Fixed
+- **An agent on Claude could stop after a web search** — With an Anthropic key, a search the model ran from a code step made every later cycle of that conversation fail, and after five failures the agent was paused. The conversation is now sent back correctly, and a conversation that was stopped this way works again after the update. If the agent was paused, clear its circuit breaker once.
+- **You are now told when an agent is paused** — When repeated failed cycles pause an agent, you get a message saying which agent, why (in plain words, such as "the cycle ended with an error" or "the cycle stalled"), and how to bring it back. That message, and the two token budget warnings, were never delivered before. If the message cannot be sent at that moment, it is tried again until it goes.
+
+## [3.9.2] — 2026-11-16
+
+### Updates
+
+#### Added
+- **Update note for 3.9.2** — After this update your COA tells you that code now arrives as an attachment, that agents can send files, and that a message never goes out without its attachment.
+- **Agents can send files** — An agent can now attach a PDF, a Word or Excel file, CSV, JSON, INI, TXT, Markdown or a ZIP, up to 20 MB each: the same kinds the VersaVoice AI app sends. Before, only pictures could be uploaded.
+
+#### Changed
+- **Code and commands arrive as attachments** — Agents are told, at the point of sending, that code, commands and logs never go in the text of a message, typed or spoken. They attach them as a document you can open, copy from and save.
+- **Which attachment for what** — Agents get one table: a picture goes as an image, something to read or copy (code, a log, a report) as a document written in Markdown, a file to keep or open elsewhere as the file itself, a web page as a link. The file name is what you see, so agents are told to name it for what it is.
+- **A message goes with every attachment or not at all** — If a file is missing, the wrong kind or too large, the message is not sent and the agent is told why. More than 10 attachments is refused; before, the extras were dropped.
+
+#### Fixed
+- **"See attached" with nothing attached** — When a file could not be attached, the message was still sent without it. Agents were also told they could attach audio, which cannot be sent.
+- **Links lost with VersaVoice off** — On an install that routes messages inside the machine, links an agent attached were dropped. They now appear under the message text.
+- **Attachment flag named wrongly in agent instructions** — The always-present messaging rules told agents to attach files with `--markdown-paths`; the command is `--markdown`. An agent following the rule got an error. The instructions are corrected and the old spelling now works too.
+
+## [3.9.1] — 2026-11-16
+
+### Updates
+
+#### Added
+- **Update note for 3.9.1** — After this update your COA tells you about the IDE mode loop, and to reload an IDE window that was open before the update.
+- **Leave a loop running in IDE mode** — Your Chief Orchestrator Agent can check for work on a timer while the IDE chat stays open, for example every 15 minutes for a working day. One command tells it whether new messages or due tasks are waiting. You choose how the loop ends: after a number of hours, after a number of quiet checks in a row, or both. When it runs out, your agent writes down what it did, sends you one message and turns IDE mode off, unless you asked it to leave the mode on. If the loop stops ticking, or ends without the mode going off, Lifeline sends you a message. See [IDE mode](ide-mode.md).
+
+#### Changed
+- **IDE mode reads its session file once** — at the start of a chat, not on every message. Later messages start with one short check.
+- **IDE mode notices old rules** — A chat left open across an update kept following the rules it had loaded. The rules file now carries a version, and the agent is told at the start of a chat when its copy is old.
+
+## [3.9.0] — 2026-11-14
+
+### Updates
+
+#### Added
+- **Update note for 3.9.0** — After this update your COA tells you about the six new models, web search being on, and what Claude Fable 5.2 needs from your provider account.
+
+### Models
+
+#### Added
+- **Six new models** — Claude Fable 5.2, Claude Opus 5.5, Gemini 4 Carbon, Gemini 4 Hydrogen, GPT-6.1 Sol and GPT-6 Sol are offered beside the current models, each with its provider's own key and through OpenRouter. They can read images. The Claude and Gemini models and GPT-6.1 Sol always reason: you choose how much, not whether.
+- **Web search by the model itself** — A model can look things up on the web through its provider and list the pages it used. It is on for every model that has it, and the provider charges for each search on top of tokens. Turn it off per model in agitop → Models → Edit → Web search. Available for Claude and Gemini models through OpenRouter, for Claude models with an Anthropic key, and for GPT-5.6 and later with an OpenAI key.
+- **A declined request is handled** — When a provider's safety check stops a reply, the agent is told and can carry on another way or tell whoever asked. If the model declines again, the cycle is closed with the reason, the agent rests for 15 minutes, and you get a message. Before, it looked like an empty reply.
+- **Suggested models** for the Chief Orchestrator Agent at setup: Opus 5.5 with an Anthropic or OpenRouter key, Grok 4.7 with an xAI key, GPT-6.1 Sol with an OpenAI key, Gemini 4 Carbon with a Google key.
+- **Lower cost for Claude models** — Claude bills repeated input at a cached price only when a request asks for it; the other providers do it by themselves. Versa AGi now asks, with an Anthropic key and through OpenRouter. From the second step of a cycle, about 99% of the input was read from the cache in our tests, at about 5% of the input price on Opus 5.5 (2.5% on Fable 5.2, 10% on Opus 4.8). While a chat waits for your next message the cache is kept alive, so a quiet stretch does not cost a rewrite. A tool run or a call longer than 5 minutes still does, once. See [Models](models.md#cached-input).
+- **Cached input is counted** — A cycle's record now holds how many input tokens were billed at the cached price, for every provider, and its cost estimate uses that. The cycle log ends with a `CACHE:` line.
+- **Agents write down their plan** — Before work that takes several steps, an agent writes a sentence or two on what it is going to do and why. It keeps the plan in its conversation and you can read it in the cycle log. Grok with an xAI key does not write one.
+- **Time limit starts at 90 minutes** — On a new installation an agent's time limit is 90 minutes (was 45). Agents on an installation that is updated keep the limit they have.
+- **Ask your Chief Orchestrator Agent to change a time limit** — It can set its own or a sub-agent's time limit (30 to 240 minutes) when you ask, and explain how long a chat can last. The new limit holds from the agent's next cycle. Sub-agents cannot change a time limit.
+- **An agent keeps its conversation when its model changes** — A conversation started on one provider continues on another, including after a web search.
+
+#### Fixed
+- **GPT-5.6 models with an OpenAI key failed at every reasoning level except none.** OpenAI takes tools and reasoning together on a newer endpoint only; Versa AGi now uses it for GPT-5.6 and later.
+- **Claude Opus 4.8 with an Anthropic key was cut off at about 4,000 tokens per reply**, shared between its thinking and its answer. It now has room for long replies.
+- **The reasoning level had no effect on Gemini 3.7 Flash with a Google key**: the model ran at Google's default whatever you chose. Your setting now applies.
+- **Reasoning was lost between tool steps through OpenRouter** for Claude and Gemini models. The model now continues the same line of reasoning across a task's steps.
+- **A long reply is no longer stopped as stalled** on the new models and on Claude with an Anthropic key: the reply is streamed, and the 10-minute stall check counts from its last piece.
+
+## [3.8.2] — 2026-11-13
+
+### Updates
+
+#### Added
+- **Update note for 3.8.2** — After this update your COA checks whether you ever asked it to delete or clear local messages when that was not possible, and asks you whether you still want it done.
+
+### Messages
+
+#### Added
+- **COA can delete local messages** — Ask your Chief Orchestrator Agent and it deletes messages from your machine, for itself or for any sub-agent: the messages between agents, the local copies of VersaVoice messages from you or other people, or both (`agictl message delete-local`). Unread messages are kept unless you ask otherwise. Nothing is deleted in VersaVoice: your app and the other person's copy are not affected.
+
+#### Changed
+- **`agictl message delete` on a local message** — It now says the message is local and names `delete-local`, without calling VersaVoice.
+
+#### Fixed
+- **A new contact's first message** — The agent's prompt left out the contact's profile (language, dialect, voice) and any memory of them when they had no earlier messages. Both are now included from the first message.
+- **`agictl message count-unprocessed` time window** — The seconds argument was accepted and ignored. A value above 0 now counts only messages received in that window; `0` still counts all of them.
+
+## [3.8.1] — 2026-11-13
+
+### Time
+
+#### Changed
+- **Local time everywhere** — Times are stored in UTC and now shown in the machine's time zone on every surface: agitop, `agictl` output (`2026-11-13 11:30 EST`), and everything agents are given in their prompts (task due dates, task progress, message times).
+- **Due dates are typed in local time** — `agictl task add … --due-date "2026-11-13 11:30"` means 11:30 local time, and `--due-date now` means this moment. The reply shows the time that was understood. A value that is not a date is refused.
+- **Monthly token totals follow the local month** — They used to roll over at the UTC month.
+- **`agictl organization` times** — `get` and `list` show `created_at` and `updated_at` in local time. Invoice, estimate and transaction dates are calendar dates and are unchanged. A script that needs the stored UTC value adds `--stored`.
+
+#### Fixed
+- **Tasks firing hours early** — A due date an agent typed in local time was stored unconverted and fired early by the UTC offset (five hours in US Eastern time). Agents were also told two different things about time zones. They are now told one: times are local in and out.
+- **agitop task editor across a daylight-saving change** — A due date typed for a date on the other side of a clock change was stored one hour off.
+- **agitop headings after a clock change** — A column heading that names the time zone, such as `Due (EST)`, kept the old name across a daylight-saving change until agitop was reopened. It now changes with the clock.
+- **agitop fields that showed UTC** — Project members "Assigned", System Memory "Updated", Packages "Requested At", Utility Runs log, Summary Frames, and the Organization tables.
+
+### Updates
+
+#### Added
+- **Update notes for your COA** — After an update the COA gets a one-time note for each release: the maintenance the update needs on your instance, such as checking data a fixed fault could have left wrong, and the points marked for it to tell you. It handles a note once and closes it. Notes are included for 3.8.0 and 3.8.1.
+
+### IDE mode
+
+#### Changed
+- **Claude Code and other agent tools** — IDE mode now works out two things: which IDE the window is (Cursor, Antigravity, VS Code), then which tool is running the chat (the editor's own agent, or an extension such as Claude Code). The optional same-chat loop follows the tool: it is offered with the Cursor agent and with Claude Code in any of the three IDEs, on the same terms. Every other rule is the same for every tool.
+
+#### Fixed
+- **Claude Code in Cursor read as VS Code** — With an extension running the chat, the agent could not tell which IDE it was in and declined a loop the tool supports.
+
+### Versa Desktop
+
+#### Changed
+- **Computer use reads Networking** — The Chief Orchestrator Agent's desktop skill now covers the connection symbols on the top bar (Wi-Fi, Bluetooth, Ethernet, airplane mode), the Networking box's sections, its lists of networks and devices, and the question a Bluetooth pairing asks. The agent joins, forgets and pairs only what you ask for, and cannot type a Wi-Fi password: only you can.
+- **Computer use and the clipboard list's numbers** — The number you see on an entry now counts from 1 on each tab, and choosing an entry no longer moves it. The agent's skill maps "the second text entry" to the right copy.
+- **Computer use knows a floating box** — A part of the Computer opened from the top bar while an app shows now floats over the app. The agent sees that the app is covered and is told to close the box first if it aims a step at the app.
+- **Computer use sees what you were just told** — A line shown under the date, such as a file saved to Downloads, is part of what the agent reads.
+
+## [3.8.0] — 2026-11-13
+
+### Long-running cycles
+
+#### Added
+- **Time limit up to 4 hours** — An agent's time limit can be set from 30 to 240 minutes (default 45). agitop → agent → Technical, or `agictl agent set-timeout <name> <minutes>`.
+- **Cycles are closed at the limit, not killed** — When an agent reaches its time limit, the harness closes the cycle with a summary and a handoff, and the agent carries on in the same thread on its next spawn. Token counts and the end time are recorded.
+- **Stall timer** — A cycle whose model has not answered for 10 minutes (20 on a local model) is stopped and retried. Repeated stalls trip the circuit breaker.
+- **Repeated calls are caught** — An agent that makes the same tool call with the same result is told at the third time and stopped at the sixth.
+- **Check-in every 30 minutes** — In a long cycle the agent is asked to record where each task stands, and a line with time, steps and tokens is added to the cycle log.
+- **Stall and Repeated call on the agent card** — In the VersaVoice app, a cycle stopped by the stall timer shows as **Stall** and one stopped for repeating a call as **Repeated call**, in place of **Crash**. Needs the matching VersaVoice app and cloud update; until then both show as Crash.
+
+#### Changed
+- **Time warnings fit the agent's speed** — Warnings come at about 15 and 8 minutes before the limit (were 10 and 5), and earlier for an agent whose steps are slow, such as a local model.
+- **Runaway check looks at the last 15 minutes** — The runaway thresholds now measure output in the last 15 minutes, so a long healthy cycle is not halted for its total.
+- **Live chat closes at the last time warning** — About 8 minutes before the limit (was 5).
+
+### Agents
+
+#### Added
+- **Reset one agent's history** — agitop → agent → Threads → **Drain All**, then Cycle Logs → **Purge All Logs**, then System → **VACUUM**. The agent keeps its tasks, memory, messages and instructions.
+
+#### Changed
+- **Drain also deletes summary frames** — Draining a thread deletes its summary frames with it. They cannot be recovered.
+- **Purge All Logs also clears the agent's cycle history** — Besides the log files, it deletes that agent's cycle records: summaries, handoffs, token counts. Other agents are not affected.
+- **Confirmations show what will be deleted** — Drain and Purge All Logs list what goes and what stays, with the number of frames, files and records.
+
+#### Fixed
+- **Agents had lost their project and contact memory at wake** — Project memory, what an agent remembers about each contact, and contact profiles (language, voice) were not being given to agents when they woke. They are again.
+- **Agents with similar names** — An agent whose name begins another agent's name (for example `web` and `web-dev`) could be counted with the other's failed cycles, token totals and last-cycle note. Each agent now only sees its own.
+- **Summaries of long conversations** — An agent's earlier turns were summarized more than once and with the wrong times. Each turn is now summarized once.
+- **Recent turns lost after a time warning** — In a long conversation, a time warning or a new message could leave the model without its recent turns.
+- **Cycle history** — One `cycle end` could overwrite several unfinished cycle records, and a stopped cycle showed the token count of an earlier one.
+
+### Web access
+
+#### Changed
+- **Search uses more engines** — The local SearXNG also asks Google, Bing, Qwant and Yahoo, and is refreshed on every update.
+- **Browser reads the whole page** — `agictl browser goto` returns the full page text, waits for scripts to finish, and reads long pages in parts with `--offset`. Agents can set a user agent with `--user-agent`.
+
+#### Added
+- **Read a page without a browser** — `agictl search read "<url>"` returns a page's readable text in a fraction of a second. Agents search, then read, and open the browser only when a page needs it. A new `web_research` skill teaches the order.
+- **Optional search API keys** — Brave Search and Exa keys add official search APIs inside SearXNG. Enter them in agitop → **API Keys**, or give one to COA and ask it to turn on better search. `[search] contact_url` in `setup.ini` turns on Wikipedia and Wikidata.
+- **Search status** — `agictl search status` shows which engines answer and whether a key is set.
+
+- **New installations: browser on for COA** — With the headless browser turned on at install, COA can use it from its first cycle. Other agents are still switched on one by one.
+
+#### Fixed
+- **Search returned nothing** — With its two default engines blocked, search had no other source.
+- **Browser returned one line** — `browser goto` and `browser click` returned only the first line of a page.
+
+## [3.7.0] — 2026-11-09
+
+### Live Chat
+
+#### Added
+- **Agents stay in the chat** — After a person writes to an agent in VersaVoice, the agent's cycle stays open once it has replied and answers new messages within seconds. When nobody has written for the listening time, the agent writes its handoff and rests; the next message wakes it again.
+- **Chat listening setting** — agitop System Settings → **Live Chat** → **Chat listening (minutes)**: Off, 5, 10, 15 or 30 (default 15). Off answers once per cycle, as before.
+- **The Primary User comes first** — When you write to an agent that is chatting with someone else, it tells them it will be right back, answers you, then returns to them.
+- **Several people at once** — More than one person can chat with the same agent in one session. You can ask an agent to bring someone in, and their replies reach the same session.
+- **End chat** — agitop → agent → General → **💤 End chat**, or `agictl agent chat-close <name>`, closes an agent's live chat. The agent finishes its reply, hands off, and rests until the next message. Nothing is halted.
+
+#### Changed
+- **Due tasks wait for the chat** — Tasks that fall due while an agent is chatting wait until the chat ends; Lifeline wakes the agent for them afterwards.
+- **Chats end before the time limit** — At 10 minutes before an agent's Timeout it is told to keep chatting; at 5 minutes before, the chat closes and the agent hands off. A chat turn that reaches the agent's hard step limit ends the cycle; the next message starts a new one.
+- **At most 5 listening agents** — Up to 5 of a Primary User's agents can listen at once. Any others answer once per cycle.
+- **Calls near the time limit** — A live call placed late in a work cycle (including during a chat) is limited to the time left before the Timeout, less 3 minutes; with under 5 minutes left the agent offers to call later.
+
+### Agent status in VersaVoice
+
+#### Added
+- **Every cycle reports its start and end** — Lifeline tells VersaVoice when each agent's cycle starts and ends, and how it ended. No message text or summaries are sent.
+- **Status line in agent chats** — Above the recording box: resting, waking (six moving dots, right after you send), working, or "{Agent} is here" while the agent is listening. Every person who chats with the agent sees it in their own chat.
+- **Status icon on agent cards** — Each card on the Versa AGi screen shows resting, working, or here.
+- **ACTIVITY on agent cards** — Above Projects: all-time cycle count, a 48-hour busy graph, the last 20 cycles (tap one to see when it ran, how long, what woke it and how it ended), how cycles ended (ok, timeout, runaway, step limit, crash), what woke the agent (messages, tasks, forced), and cycle lengths (average, longest, spread).
+- **Agent colours** — The ACTIVITY section takes the agent's colour and mark: gold with the star for the Chief Orchestrator Agent, silver for sub-agents. In the agents list, that mark now replaces the name's first letter, so agents look different from contacts and their names have more room.
+- **Past activity filled in** — After the update, each agent's past cycles on the machine are sent once, so the charts show history and not only new cycles.
+
+### Agent limits
+
+#### Changed
+- **Timeout is 30–60 minutes** — An agent's Timeout must be between 30 and 60 minutes (default 45). agitop and `agictl agent set-timeout` refuse other values; the update moves values outside the range to the nearest end of it.
+- **Time warnings** — An agent is told at 10 minutes and at 5 minutes before its Timeout to wrap up and hand off. Nothing is said earlier.
+- **Live call length** — The longest call is 5, 10, 15 or 25 minutes (default 15). An older setting is moved to the nearest choice.
+
+#### Added
+- **Five-minute notice on calls** — On calls longer than 5 minutes, the voice tells the person when about five minutes are left, then carries on.
+
+#### Fixed
+- **Limit defaults** — When an agent had no limits set, Lifeline used old defaults (60 minutes, 300 lines, 512 KB). It now uses the shipped defaults: 45 minutes, 2500 lines, 2048 KB.
+
+## [3.6.5] — 2026-11-07
+
+### Setup
+
+#### Fixed
+- **Updates no longer create a second VersaVoice account** — If an update ran with another person's VersaVoice token, it could not see this machine's account. It then registered a new one under that person and sent them a connection request. Now an update stops instead and explains what to check. The machine keeps its existing account.
+- **Waiting connection requests** — If this machine's account is still waiting for the Primary User to accept it, setup now says so and keeps the account. Before, it said the token was refused.
+
+#### Changed
+- **Setup shows whose token it uses** — Identity setup prints the name and email of the VersaVoice account that owns the API token. A connection request message names who received it.
+
+## [3.6.4] — 2026-11-06
+
+### Setup
+
+#### Fixed
+- **Updates keep your settings** — Running the installer again on a machine that already has Versa AGi, or updating from the Versa AGI installer, now starts from the machine's own settings. Before, the update started from blank defaults: it asked for the VersaVoice token again, the COA lost the name of its Primary User, and a Local AI Server could take the normal update path. On a machine that uses a Local AI server on the network, that update also switched the system to cloud only and turned local AI off. Run the update again on 3.6.4 to put those settings back.
+
+## [3.6.3] — 2026-11-06
+
+### Tasks
+
+#### Changed
+- **Clearer freeze alerts** — When tasks are frozen you get one message that lists each task by name with its number in brackets, explains what frozen means, and says how to restart one. Frozen tasks stay on the list with their history; they just stop reminding the agent.
+- **Agents may restart frozen work** — An agent can unfreeze its own task when the work is still needed. It then snoozes or reschedules the task in the same cycle so it does not come straight back.
+
+#### Fixed
+- **Rescheduled tasks no longer freeze on arrival** — Moving a task to a new time after its last reminder now gives it a fresh set of reminders. Before, it could freeze the moment the new time arrived without the agent seeing it again.
+
+### Setup
+
+#### Added
+- **Startup pause after a restart** — For 5 minutes after the machine starts or wakes from sleep, Lifeline waits before starting agents or script tasks, so a restart right after power-on does not cut their work short. Messages still come in during the pause. Change it with `startup_settle_minutes` under `[agent]` in `setup.ini` (`0` turns it off). **RUN NOW** in agitop still starts work straight away.
+
+#### Fixed
+- **Lifeline log rotation** — The Lifeline and Sentinel logs now rotate into `/var/log/versa-agi-archive/`, compressed. The old weekly rotation never ran. Set the schedule and how many archives to keep in `setup.ini` under `[logging]` (`rotate=monthly`, `keep=2` by default). A log over 200 MB rotates at the next daily run.
+- **Remote inference tunnel** — When the GPU server is away, the tunnel now retries every minute for 30 minutes, then every 30 minutes, instead of restarting every 5 seconds. It reconnects on its own when the server is back. `setup.sh --update` applies this to existing installs.
+
+## [3.6.2] — 2026-11-05
+
+### Setup
+
+#### Changed
+- **Installer choices stick** — When the Versa AGI installer already chose a feature (Organization, Business Admin, Utility Models, Script Tasks, Output Routing, Live Call) or the browser, setup keeps that choice and does not ask again.
+- **Normal and Sentinel** — An update keeps the install flavor the installer set. A manual update that does not pass a flavor leaves the saved role in place. A Normal install records the Chief Orchestrator Agent role; a Sentinel install records Remote Sentinel.
+
+#### Fixed
+- **Install acceptance record** — The acceptance file is owned so agents can read it.
+
+## [3.6.1] — 2026-11-02
+
+### Setup
+
+#### Added
+- **COA gender at setup** — After the name, a fresh install asks male (X), female (Y), or reflective (the Primary User's voice). Enter keeps female unless a choice is already saved. The choice is the agent's voice.
+
+#### Fixed
+- **Home folder links** — A fresh install creates `~/agi-workspace` and `~/agi-attachments` when the workspace path was left blank. The path is saved as that user's home plus `/agi-workspace`.
+
+## [3.6.0] — 2026-10-26
+
+### Versa Desktop
+
+#### Added
+- **Versa Desktop** — A desktop built around the Perceptron: one center that shows what you are looking at. What it does sits above; what it has sits below. You load something into the center, then tap the center to run it. A stray click does not start anything.
+- **Computer use** — On that desktop, the Chief Orchestrator Agent can look, and can take the same steps you take. Each kind of access asks you on screen. You choose 15, 30, or 60 minutes, or always, and you can revoke it while it is on. Looking and controlling are separate.
+
+## [3.5.24] — 2026-10-16
+
+### Continuity between cycles
+
+Includes 3.5.23 (the same day).
+
+#### Added
+- **Handoff between cycles** — An agent ends each cycle with a short handoff: what is open, what to watch, what comes next, and which awareness entries to carry. The next wake opens with **Since your last cycle**: when the agent last worked, what woke it, any downtime since, and that handoff.
+- **Pinned conclusions** — Up to 10 standing rules per agent, shown at every wake until the agent revises, supersedes, or unpins them (`agictl awareness pin` / `unpin`).
+- **Downtime awareness** — Lifeline records any stretch longer than 30 minutes when it did not run (`[agent] outage_threshold_minutes` in `setup.ini`). After downtime, agents check dated plans against today's date. The Chief Orchestrator Agent asks you before acting on anything that may be out of date; sub-agents ask the Chief Orchestrator Agent.
+- **Wake reason in recent activity** — Each recent-cycle line shows what woke the agent.
+
+#### Changed
+- **`agictl cycle end` asks for a handoff** — Without `--handoff`, the cycle stays open and the agent is told what to add. `--no-handoff` confirms ending without one.
+
+#### Fixed
+- **Operational memory** — The block was missing from every wake. It now shows the agent's own entries, standing rules first, with a size limit and a pointer to the full list.
+
+## [3.3.x – 3.5.22] — 2026-08-11 to 2026-10-15
+
+### Catch-up: live calls, IDE mode, Eleven v4 voices
+
+One entry for the releases between 0.15.0 and 3.5.23.
+
+#### Added
+- **Live voice calls** — The Chief Orchestrator Agent can call you in the VersaVoice app (OpenAI GPT-Live). Follow-ons: either side can hang up, a limit on calls per cycle, the call screen, your account profile at call start, a greeting by your first name, and call summaries that tell your calls apart from calls with a Connection.
+- **IDE mode** — Run the Chief Orchestrator Agent inside a VS Code, Cursor, or Antigravity session over Remote-SSH (`sudo versa-agi-ide`). Lifeline does not spawn a cycle while the mode is on.
+- **Emotion in agent voice replies** — Agent voice replies move to ElevenLabs Eleven v4 (Enhanced) and v4 Turbo (Standard), with richer emotional delivery.
+- **Grok 4.7** — Added to the model catalog beside Grok 4.6.
+- **Primary User manual** — Hosted at [versavoice.ai/manual/versa-agi.html](https://versavoice.ai/manual/versa-agi.html), with a print booklet.
+- **Sentinel install flavor** — A remote client install, with promote and handover (rolling out).
+- **Versa Business Admin** — Opt-in project the Chief Orchestrator Agent can set up for you once you approve.
+- **Mid-cycle mail** — A message that arrives while an agent is working reaches that agent in the same cycle.
+- **Context compaction** — Long conversations are summarized into frames instead of being cut.
+- **Upcoming tasks** — The wake prompt lists tasks due in the next few minutes.
+- **Profile** — Country of residence and state or province reach agents; profile sync can run daily, weekly, or monthly.
+- **Workspace housekeeping skill** — Keeps shared folders tidy, with a manifest of decisions.
+- **Local AI** — Inspect a Hugging Face model before import; chat-only Intel ARC (SYCL) import.
+
+#### Changed
+- **Chief Orchestrator Agent** — The new name for the Chief of Agents across the product and docs.
+- **Autonomous mode** — Only you can turn the Chief Orchestrator Agent's sudo access on; it can turn it off itself.
+- **Frozen tasks** — When a task freezes after repeated wakes, the assigned agent is told as well as you. The last wake before a freeze says so.
+
+#### Fixed
+- **Inbox after an outage** — Sync resumes from the newest stored message, so messages are not skipped.
+- **Setup during a VersaVoice outage** — Setup keeps your token and identity.
+- **Triage** — Malformed triage output no longer stops a cycle.
+- **Updates** — An update no longer resets ownership of agent workspaces.
+- **Sub-agent mailbox** — A sub-agent no longer crashes reading mail at the start of a cycle.
+
+## [0.15.0] — 2026-08-10
+
+### Model Drivers — exact multimodal support
+
+#### Added
+- **Model Driver framework** — Non-text image/audio support is now an exact binding per catalog model (input or output), not a family-name guess. Model Manager shows ◆ when a driver is executable and ◇ when a modality is declared but not yet supported.
+- **Chat image & audio Utility output** — Utility Models can generate images and audio through the shipped chat drivers (Google native image, OpenAI-compatible image, streamed PCM16 audio).
+- **COA Model Driver Build Guide** — Evaluation recipe for adding or reusing a driver when a new catalog model needs multimodal support.
+
+#### Changed
+- **Provider routing** — Cloud clients are selected from the catalog Provider for each model (no `/` / `gpt` / `grok` name heuristics).
+- **Stock Grok defaults** — Shipped xAI / OpenRouter Grok keys are `grok-4.5` and `x-ai/grok-4.5`.
+- **Honest unsupported paths** — Models without an exact driver return a clean `no_driver` result instead of a raw provider traceback.
+
+#### Notes
+- Local (Ollama / llama.cpp) vision and dedicated image/video generator APIs remain deferred.
+- Dashboard **Image Processing** settings still control how images are prepared for agent *view* (input), not Utility image *generation* size.
+
+## [0.14.1] — 2026-06-07
+
+### System Settings UX & Keyboard Pagination Refinements
+
+#### Added
+- **`PackageInstallModal`** — Interactive modal screen that runs `sudo agictl pkg install <package>` in a background thread and streams real-time stdout/stderr lines into a scrollable terminal window, providing direct progress feedback.
+- **Keyboard-driven pagination** — Subclassed `DataTable` as `PaginatedDataTable` to intercept `PageUp` and `PageDown` key events, updating the table's active data slice.
+- **Title-embedded pagination indicators** — Set `border_title` dynamically on Skills and Packages tables to display page numbers and key navigation help, eliminating button rows to maximize vertical workspace.
+
+#### Changed
+- **Skills Registry Table height** — Increased Skills Registry DataTable height from `8` to `16` to double visible rows.
+- **System Settings layout compacting** — Removed the old button-based `.pager-row` horizontal containers from the settings dialog layout, significantly reducing vertical spacing.
+
+## [0.14.0] — 2026-06-07
+
+### Package Registry Input, Centering & Pagination Refinements
+
+#### Added
+- **`PackageRequestModal`** — Input-driven ModalScreen prompting for package name and justification when requesting new system packages. Performs regex validation on package name matching agictl constraints.
+- **Pagination controls for System Settings** — Integrated page status indicators and Prev/Next navigation buttons for both Skills Registry and System Packages & Requests tables, resolving overflow issues.
+
+#### Changed
+- **Browser Automation modal centering** — Centered `BrowserAutomationModal` on the screen using transparent modal layout rules (`align: center middle`).
+- **Browser Automation state refresh** — Refactored modal closing to use `self.dismiss(True/False)` callbacks so SystemSettingsModal dynamically reloads status label and toggle button when changed.
+
+#### Fixed
+- **Confirm disable feedback** — Resolved issue where confirming browser automation disable did not visually refresh the active status banner in System Settings.
+
+## [0.12.4] — 2026-06-07
+
+### System Package Registry & Browser Automation UX
+
+#### Added
+- **`system_packages` SQLite table** — Registry for system-level packages (apt) with `status` ('requested', 'approved', 'denied'), `requested_by`, `resolved_at`, and `notified_at` columns. Schema migration for existing databases.
+- **`agictl pkg` command group** — 7 subcommands: `list`, `request`, `add` (PU-only), `approve` (PU-only), `deny` (PU-only), `remove` (PU-only), `install` (any user, approved-gate enforced). Shell injection guard via strict regex validation on package names.
+- **Sudoers rule: `versa_agi_pkg_installer`** — Allows watchdog to run `/usr/bin/apt-get install -y *` as root. Agent → agictl-wrapper → watchdog → Python (approval check) → sudo apt-get → root.
+- **Lifeline package notification** — One-shot `PKG_NOTICE` block injected into agent system prompt when approved packages are pending (`notified_at IS NULL`). Sets `notified_at` immediately after injection to prevent re-notification.
+- **`BrowserAutomationModal`** — New `ModalScreen` in system settings following the `SyclActivationModal` pattern. Shows current status, target action, real-time Playwright provisioning feedback, and auto-closes on completion.
+- **System Packages UI** — Collapsible DataTable in system settings with Approve, Deny, Install, Add/Request, and Remove action buttons. Contextual actions via row selection.
+- **`system_packages.md` skill** — Agent-facing skill documenting the request→approve→install workflow, privilege boundaries, one-shot Lifeline notification, and usage patterns.
+
+#### Changed
+- **Browser Automation (System Settings)** — Replaced checkbox with status-aware button (`Enable`/`Disable`) that opens `BrowserAutomationModal` with live feedback. Browser timeout remains in Save handler.
+- **Browser Automation (Agent Settings)** — Replaced "Browser Usage" Select list with "Browser Automation" status-aware button. Toggle is immediate (DB update + background Playwright install/cleanup), not deferred to Save.
+- **Skills Registry** — Wrapped in `Collapsible` widget for cleaner settings layout.
+- **CLI Reference updates** — Both `cli_reference.md` (COA) and `cli_reference_agent.md` (sub-agents) updated with `agictl pkg` command documentation. COA command group count updated to 17.
+- **Triage catalog** — `system_packages.md` added to the fallback skills catalog and triage reason mapping.
+
+## [0.12.3] — 2026-06-07
+
+### Headless Browser Automation (Playwright)
+
+#### Added
+- **`agictl browser` command group** — 5 subcommands (`goto`, `click`, `fill`, `screenshot`, `extract`) for headless Chromium page interaction. Each command spawns a fresh browser context as the calling agent's OS user for full process isolation. URL validation blocks `file://`, `javascript:`, and `data:` schemes.
+- **`agictl browser enable/disable` (COA delegation)** — Protected-agent-only commands to toggle `browser_enabled` on sub-agents and trigger Chromium provisioning/cleanup.
+- **`agictl_browser` LangGraph tool** — Harness wrapper conditionally registered at startup based on `setup.ini [browser] enabled`. Per-agent `browser_enabled` flag checked at CLI layer.
+- **`setup.ini [browser]` section** — System-wide `enabled` flag and `timeout` (default 30s) for page load control.
+- **`browser_enabled` column in agents.db** — Per-agent toggle with schema migration for existing databases. Added to `v_agent_registry` and `v_active_agents` views.
+- **`providers/playwright.sh`** — Provider script for system-wide Playwright/Chromium dependency verification and per-agent binary installation/cleanup.
+- **agitop Agent Settings: Browser toggle** — `Enabled/Disabled` select in `AgentEditModal` (non-protected agents only). On save: enabling triggers `playwright install chromium` for the agent user; disabling triggers `~/.cache/ms-playwright/` cleanup.
+- **agitop System Settings: Browser section** — `Enabled` checkbox and `Page Load Timeout (seconds)` input. Reads/writes `setup.ini` via the existing INI management pipeline.
+- **`browser_automation.md` skill** — Agent-facing skill documenting usage patterns, security guardrails, return format, and COA delegation commands.
+- **CLI Reference updates** — Both `cli_reference.md` (COA) and `cli_reference_agent.md` (sub-agents) updated with browser command documentation. Command group count updated to 16.
+
+#### Changed
+- **`requirements.txt`** — Added `playwright>=1.40.0` to the harness Python dependencies.
+
+#### Fixed
+- **Playwright installation script crash** — Removed invalid `local` variable declaration at script scope within the interactive Playwright prompt check in `setup.sh`.
+- **Missing Authorization headers in setup/repair curl requests** — Added explicit `Authorization: Bearer <key>` headers to all curl connectivity tests querying `/v1/models` in `setup_local.sh` and `setup.sh` (client repair routines). Fixes connection test failures (HTTP 401 Unauthorized) when querying authenticated inference servers during client-remote topology configuration.
+- **Automated master key injection for Intel SYCL** — Added detection of the remote inference URL's port (`:8080` for Intel SYCL) to auto-inject the default master key `versa-sk` with a terminal notice. Prevents prompting the user for a master key unless they are using Ollama or a custom port.
+
+## [0.12.2] — 2026-06-05
+
+### Configuration Cleanup
+
+#### Removed
+- **`[agent] mode` flag** — Non-functional `development`/`production` toggle purged from `setup.ini`, `setup.sh` (INI load, Step 5 prompt, system_config.json write, INI persist, summary card), `config_reader.py` (`get_mode()`), and agitop system panel (`#m-mode` widget). The mode concept was never implemented — monitoring and approval workflows are managed via `agictl` status and agent database states.
+
+#### Changed
+- **`sentinel_enabled` → `file_mon_enabled`** — Renamed across `setup.ini`, `setup.sh` (service installer, INI persist), and all documentation (System Design config table, Sentinel Observation Guide, Debug Mode Controls). Formalizes "Sentinel" as reserved for the planned remote monitoring service, distinguishing it from the parked CRON-based file watcher.
+
+## [0.12.1] — 2026-06-05
+
+### SYCL Model Controls Hardening
+
+#### Added
+- **Automated SYCL Model Activation** — `SyclActivationModal` now executes `agictl model activate` automatically via background thread instead of displaying manual CLI instructions. Client topology triggers SSH execution on the remote server (as watchdog), followed by local `model refresh`. Local/server topology runs activation directly. Modal shows live status feedback (◐/◑ spinner), retry on failure, and CRON pause/resume lifecycle.
+- **Topology-Aware SSH Accessors** — `SystemReader.get_tunnel_host()` reads from `/etc/versa-agi/client_config.json`, `SystemReader.get_watchdog_ssh_key()` returns the watchdog SSH key path. Used by the activation modal for remote command execution.
+- **Sudoers Provisioning for Remote Activation** — `setup_local.sh` (server mode) now writes `/etc/sudoers.d/versa-agi-model-activate` granting the watchdog user passwordless `sudo agictl model activate *`. Includes `visudo` syntax validation with auto-rollback on failure.
+- **Model Loading Strategy Config** — `setup.ini [local_ai] model_loading_strategy=single` key added. Written to `paths.env` as `VERSA_MODEL_LOADING_STRATEGY`. Prepares for future Router Mode (`--models-dir`) without changing current behavior.
+
+#### Changed
+- **Triage Model Dropdown — Cloud/Third-Party Only** — `TechnicalSetupModal` triage model `Select` now filters out all local models (🖥 prefix). Only cloud (☁) and third-party (🔀) models are selectable for triage. Use "Use agent model" (blank) to inherit the agent's own model.
+- **SYCL Triage Guard Removed** — The runtime guard that blocked saving when a local triage model didn't match the active VRAM-resident model is removed. The dropdown-level restriction makes it architecturally unnecessary.
+
+## [0.12.0] — 2026-06-05
+
+### Environmental Awareness Framework (Awareness-First Cognitive Model)
+
+#### Added
+- **Games Table** — `games` table in `tasks.db` with `postulate`, `posture` (exploratory/steady/aggressive/defensive), `autonomy` (advisory/collaborative/autonomous), `freedoms_summary`, `barriers_summary`, `milestones`, and `environment_assessed_at`. Default "Life" game seeded on new installations.
+- **Agent Awareness Table** — `agent_awareness` table in `tasks.db` with typed entries (`conclusion`/`action`), subject scoping (`connection`/`project`/`game`/`system`/`self`), `action_conclusion_id` FK for tracing actions to parent conclusions, and lifecycle statuses (`active`/`revised`/`superseded`/`completed`). Indexed for agent, type+status, and subject queries.
+- **Project Opponents Table** — `project_opponents` table for competitive intelligence tracking per project. Supports opponent types (`person`/`agent`/`business`/`association`), sourced intelligence, and assessment notes.
+- **`agictl game` command group** — `add`, `update`, `show`, `list`, `assign-project` for managing the Game of Life strategic containers.
+- **`agictl game opponent` subgroup** — `add`, `list`, `update`, `delete` for managing competitive intelligence per project.
+- **`agictl awareness` command group** — `add`, `revise`, `complete`, `list`, `get` for managing cognitive state. `add action` enforces FK linkage to parent conclusions. `revise` creates a new entry and marks the old one `superseded`.
+- **`agictl_game` LangGraph tool** — Harness wrapper enabling agents to invoke game management via the LangGraph tool interface.
+- **`agictl_awareness` LangGraph tool** — Harness wrapper enabling agents to invoke awareness management via the LangGraph tool interface.
+- **Awareness Enforcement Gate** — `session_start_ts` and `last_awareness_ts` columns added to `cycles.db`. `cycle_start` sets `session_start_ts`. `cycle_end` checks if `last_awareness_ts` is newer than `session_start_ts` and emits an advisory warning if no awareness was logged.
+- **Environmental Awareness injection in Lifeline** — Active games and active awareness entries are queried from `tasks.db` and injected into the system prompt. COA receives the full game board + all active awareness. Sub-agents receive read-only game context (via project membership) + their own awareness entries.
+- **COA Poise: SYSTEM PURPOSE** — New section defining Postulates (visionary faculty) and Creation (executive faculty) as the twin foundations of Versa AGi.
+- **COA Poise: ENVIRONMENTAL AWARENESS — GAME OF LIFE** — New section with the 4-element awareness model (Freedom, Barriers, Purposes, Choice), posture definitions, and the Awareness Discipline mandate.
+- **COA Poise: ASSESS ENVIRONMENT step (2.5)** — New work cycle step requiring COA to review game posture and revise stale conclusions before processing messages.
+- **COA Poise: PURPOSE ALIGNMENT** — Added to DECIDE step: "Does this work advance a postulate?"
+- **Sub-Agent Poise: AWARENESS section** — Added to all 10 role templates with compact awareness mandate.
+- **Task Protocol: Purpose Alignment** — New core directive: consider which Game a task advances.
+- **Task Protocol: Awareness at Exit** — New core directive: persist at least one conclusion before ending a cycle.
+
+#### Changed
+- **Memory Management Skill** — Rewritten as the 5-step Awareness-First procedure (Reflect → Conclude → Act → Profile → Verify) with dimensional guidance (System, User, Intention, Reason).
+- **Memory Management: Always-Injected** — `memory_management.md` hardcoded into the `always_injected` set and the prompt injection block in `agent_harness.py`. Now injected for all agents (not just COA), bypassing triage-based gating.
+- **CLI Reference** — Both `cli_reference.md` (COA) and `cli_reference_agent.md` (sub-agents) updated with `game`, `opponent`, and `awareness` command documentation. Command groups count updated from 8 to 11.
+- **Sub-Agent Work Cycle** — Step 5 "End cycle" replaced with a 2-step "Persist + End cycle" sequence including awareness add and memory update commands.
+- **ALL_TOOLS Registry** — `agictl_game` and `agictl_awareness` registered in the harness tool list between `agictl_memory` and `agictl_identity`.
+- **Team Players Schema** — `participation` and `comm_channels` columns added to `project_members`. `comm_preferences` added to `connections`. Safe ALTER TABLE migration for existing databases.
+
+### Multi-Provider Aggregation & Model Registry
+
+#### Fixed
+- **Dashboard model picklist missing third-party models** — `setup.sh` fresh-install `paths.env` generation wrote an empty `VERSA_THIRD_PARTY_MODELS` instead of aggregating all enabled providers (xAI, OpenAI, Anthropic). Only the `--update` path had correct aggregation logic. Both paths now use the same provider iteration loop.
+- **Dashboard showing inactive local models** — Intel SYCL backend can only load one model at a time (`sycl_active_model`), but `paths.env` exported the full `local_models` list. `VERSA_LOCAL_MODELS` is now restricted to the active SYCL model when `gpu_backend=intel` or `remote`.
+- **`xai.sh` clobbering other providers' models** — Provider aggregation loop only iterated its own `xai` slug, overwriting models from OpenAI/Anthropic. Now iterates all configured provider slugs from `setup.ini [cloud_models] providers=`.
+- **Orphaned `qwen3:32b` registry entry** — Removed from `models.ini [local_models]` and `[context_windows]`. Had no SYCL registry entry and was not in `setup.ini local_models`.
+
+#### Added
+- **API key update prompt** — `setup.sh --update` now asks "Update API key?" for each enabled provider, preventing unnecessary re-entry of valid credentials during routine updates.
+
+
+### Skills Scope, Overrides & Local AI Concurrency Gate
+
+#### Added
+- **Skill Scope System** — `scope` column (`all` | `coa_only`) on the `skills` table. COA-only skills are excluded from sub-agent deployments at three levels: rsync deployment (`--exclude`), triage catalog filtering, and harness always-inject blocks. Schema migration applied inline with error suppression for existing instances.
+- **Skill Overrides** — `agictl skill override <name>` creates `{name}_override.md` pre-populated from the shipped version. The harness resolves overrides at injection time — if `{name}_override.md` exists in the agent's skills directory, it replaces the shipped `{name}.md`. Overrides propagate via rsync. Withdrawing an override (deleting the file) reverts agents to the shipped version on the next sync.
+- **Skill Authoring Skill** — New COA-exclusive always-inject skill (`skill_authoring.md`) documenting the full skill lifecycle: creation, scoping, overriding, distribution, and withdrawal.
+- **Local AI Concurrency Gate** — Lifeline now caps concurrent local-model agent spawns per tick to the `sycl_parallel` slot count from `setup.ini`. Hoisted `IS_LOCAL_MODEL` detection out of the spawn subshell so the gate can enforce slot limits before fork. Cloud and third-party agents are unaffected.
+- **`agictl skill new --scope`** — New `--scope` option (`all` | `coa_only`, default: `all`) for skill creation.
+- **`agictl skill override`** — New command for creating shipped skill overrides.
+- **`agictl skill list` scope column** — Skill list now displays the `scope` column with `coa_only` highlighted in magenta.
+- **`rsync` prerequisite** — Added as a mandatory system dependency in `setup.sh`.
+
+#### Changed
+- **Skill deployment pipeline** — Replaced `shutil.copy` loop with `rsync -a --delete`. Skills removed from the source are now automatically pruned from sub-agent directories. COA-only skills dynamically excluded via DB query.
+- **Triage scope filtering** — `load_skills_catalog()` now accepts `agent_name` and filters `coa_only` skills from sub-agent triage catalogs via read-only DB query.
+- **Harness always-inject block** — Extended to inject `skill_authoring.md` for COA. Added override resolution: before injecting any triage-selected skill, checks for `{name}_override.md` and injects it instead.
+- **Agent onboarding skill** — Updated to reference DB-driven skill management (`agictl skill new/status/override`) instead of manual file copy.
+
+## [0.11.6] — 2026-05-25
+
+### Cascading Project Deletions & Database Cleanup
+
+- **Cascading Project Deletions**: Hard-deleting an archived project via `TasksReader.delete_project` (triggered from the `agitop` dashboard) now cascades and permanently deletes all associated memories from `agent_memory_project` and member assignments from `project_members` (preventing orphaned records and auto-increment ID memory contamination).
+- **Database Cleanup Migration**: Appended automated cleanup queries to `init_tasks_db.sh` so that running a standard system update (`sudo ./setup.sh --update` or `sudo versa-agi-update`) automatically purges any legacy orphaned memories and memberships from the production database.
+- **Tasks Unlinking Safety**: Confirmed and preserved task-unlinking behavior — tasks referencing a deleted project are safely unlinked (their `project_id` is set to `NULL`) instead of being deleted.
+- **System Design Documentation**: Documented the cascading deletion lifecycle and constraints in the system architecture files.
+
+## [0.11.5] — 2026-05-24
+
+### Dynamic SYCL Model Registry
+
+- **Centralized Registry**: All SYCL model metadata (HF repo, GGUF filename, size) consolidated into `models.ini [sycl_models]` — replacing hardcoded maps in `setup_local.sh` and `cli.py`.
+- **`manage_registry.sh`**: New interactive script for SYCL model CRUD. Can be run standalone or sourced by `setup_local.sh` via `--inline` mode for setup-time registry management.
+- **`agictl model registry`**: New CLI subcommand group (`list`, `add`, `update`, `remove`) for programmatic registry management. Writes to both deployed and source `models.ini`.
+- **Dynamic Setup Menu**: `setup_local.sh` Step 6 now generates model selection dynamically from the registry instead of hardcoded `case` statements.
+- **Context Window Ceiling**: Dashboard `num_ctx` picklist now capped to the server's `sycl_ctx_size` for Intel/remote backends, preventing invalid context allocations.
+- **Server-to-Client Sync**: `agictl model activate` writes `server_config.json` with inference parameters. `agictl model refresh` (client topology) fetches and stores these values locally.
+- **GGUF Filename Fix**: Corrected `gemma4:e4b` GGUF filename from `gemma-4-12B-A2B-it-UD-Q4_K_M.gguf` to `gemma-4-E4B-it-Q4_K_M.gguf` (HuggingFace-verified).
+
+## [0.11.4] — 2026-05-23
+
+### Intel GPU Auto-Detection & Concurrency
+
+- **GPU Auto-Detection**: `setup_local.sh` now uses `lspci` to auto-detect Intel GPUs and presents them as numbered options during Intel SYCL configuration. Manual entry remains available as a fallback. Card count is auto-detected by matching the selected device ID.
+- **Concurrency Configuration**: New `sycl_parallel`, `sycl_ctx_size`, and `sycl_vram_gb` fields in `setup.ini` enable multi-slot inference. The setup calculates recommended parallel slots based on available VRAM and model size, with full formula commentary in `setup.ini`.
+- **Model Activate Recalculation**: `agictl model activate` now automatically recalculates concurrency when switching models, adjusting `--parallel` and `--ctx-size` passed to the Docker SYCL container.
+- **Reconfigure Fix**: Server reconfiguration now always re-prompts for GPU device ID, card count, VRAM, and concurrency (previously skipped when values were pre-loaded from `setup.ini`).
+- **Hardware Update**: Updated defaults from Intel ARC Pro B50 (dual 16GB) to Intel ARC Pro B70 (single 32GB). Documentation updated across GEMINI.md, README.md, and System Design.
+
+## [0.11.3] — 2026-05-21
+
+### Backup v2.0 (Manifest-Governed)
+
+#### Added
+- **Backup FS Path Manifest** — `design/Versa AGi - Backup Manifest.md` now governs all backup capture and exclusion decisions. The backup script references this document as its authoritative source of truth.
+- **Global exclude list** — unified exclusion patterns applied to all home directory captures: `.ollama/`, `.gemini/`, `.cache/`, `.npm/`, `node_modules/`, `__pycache__/`, `.local/`, `venv/`, `.vagrant/`, `.vagrant.d/`, `VirtualBox VMs/`. Previously, each capture group had inconsistent ad-hoc exclusions (COA notably missing `.ollama/` and `.gemini/`).
+- **200MB size gate** — each home directory is measured after excludes. If over 200MB, displays top 5 largest subdirectories and prompts for confirmation. Declining aborts the entire backup with instructions to investigate.
+- **Sudoers capture** — `/etc/sudoers.d/versa_agi_watchdog` and `/etc/sudoers.d/versa_agi_agictl` now included.
+- **CRON tab capture** — `crontab -u watchdog -l` saved to `cron_watchdog.txt` in the archive.
+- **SSH tunnel service capture** — `versa-agi-tunnel.service` included for client topology.
+- **Post-restore warning** — summary card now displays mandatory `sudo ./setup.sh` requirement.
+
+#### Changed
+- **Backup version** — bumped from `1.0` to `2.0`.
+- **Sub-agent excludes** — previously had zero exclusions; now uses the same global exclude list as all other homes.
+- **`/usr/local/lib/versa-agi/` capture** — now excludes `venv/` (LangGraph harness Python environment, rebuilt by `setup.sh`).
+- **Summary card redesigned** — CRON pause warning and post-restore instructions now embedded in the card border instead of separate text.
+
+#### Fixed
+- **8GB backup bloat** — root cause: COA and sub-agent homes captured `.ollama/` (model blobs) and `.gemini/` (session caches) without exclusion. Typical backup size now < 500MB.
+
+---
+
+## [0.11.2] — 2026-05-20
+
+### Agent Halt (Manual Cycle Control)
+
+#### Added
+- **`agictl agent kill <name>`** — terminates a running sub-agent's harness process and sets `status='halted'` + `inactive=1` to prevent re-spawning. COA-only command (protected agents immune). Recovery via `agictl agent activate` or agitop. Checkpoint-safe — agent resumes from last `SqliteSaver` state on re-activation.
+- **Lifeline `halted` gate** — agents with `status='halted'` are blocked from spawning alongside `circuit_breaker`. Log message: `BLOCKED: {name} — status 'halted'`.
+- **agitop ✋ Halt Agent button** — Agent Prompt Menu shows a halt button for non-protected active agents. Calls `agictl agent kill` and displays success/failure notification.
+- **agitop ▶ Re-activate Agent button** — shown for halted agents (reuses circuit breaker recovery path via `agictl agent activate`).
+- **agitop system alert** — system panel shows `✋ HALTED: N agent(s) manually stopped` when any agents are halted.
+- **COA poise rule 6** — agent cycle control capability documented as hard constraint. COA can halt sub-agents on Primary User request.
+
+#### Changed
+- **`agictl agent activate`** — now clears both `circuit_breaker` and `halted` statuses (shared recovery path).
+- **Agent Settings modal** — removed non-functional status picklist (`online`, `working`, `idle`, `paused`, `error`). All statuses are system-managed.
+
+---
+
+## [0.11.1] — 2026-05-17
+
+### Server Setup Fix
+
+#### Fixed
+- **`agictl model add` HuggingFace CLI not found on server topology** — `setup.sh` Installation Type 3 (Server) only installed `click` as a Python dependency for `agictl`. The `agictl model add` command on Intel SYCL backend also requires `huggingface-hub[cli]` for GGUF downloads. Now installed alongside `click` during server setup.
+- **`agictl model add` HuggingFace CLI PATH resolution under sudo** — `shutil.which()` fails to locate pip-installed binaries under `sudo` due to PATH stripping. Added explicit search in `/usr/local/bin/`, `~/.local/bin/`, and `SUDO_USER`'s `~/.local/bin/` as fallbacks before failing.
+
+---
+
+## [0.11.0] — 2026-05-16
+
+### Edition 2: LangGraph Agent Harness
+
+#### Added
+- **LangGraph Agent Harness** — replaced `@google/gemini-cli` with a custom Python-native LangGraph orchestration engine. 11 typed Pydantic tool schemas, `stream()` execution model, cross-cycle checkpointing via `SqliteSaver`, and structured telemetry output.
+- **Task Triage Node** — lightweight pre-agent classification with a 10-signal decision matrix. Routes work to the correct project thread and selects relevant skills before the main agent runs.
+- **Dynamic Skill Injection** — 18 system skills injected on-demand based on triage classification. Agents only load skills relevant to their current work — reducing prompt size by ~10KB/cycle.
+- **Context Window Management** — `pre_model_hook` with `trim_messages` enforces a rolling context window (~32k tokens). Full history preserved in checkpoint; only the LLM input is trimmed.
+- **Thread Manager** — visual inspection and management of cross-cycle checkpoint threads per agent via agitop.
+- **Anchor Style** — per-agent `anchor_style` setting (`compact`/`full`) controls philosophical preamble injection from `/etc/versa-agi/poise/anchor_full.md`.
+- **Budget Warnings** — step budget warnings injected as genuine `HumanMessage` objects at 80%/95% thresholds, with hard termination at 100%.
+
+#### Changed
+- **Poise deployment** — flat-copy deployment (no symlinks). Canonical path: `/etc/versa-agi/poise/{agent}.md`. No fallback resolution.
+- **Native LangChain integrations** — decommissioned Inference Server proxy layer. All model routing now uses native LangChain classes: `ChatGoogleGenerativeAI` (cloud), `ChatOllama` (local), `ChatOpenAI` (xAI/SYCL).
+- **Token telemetry** — extracted natively from LangChain `usage_metadata` and `response_metadata`, supporting all providers. Per-cycle telemetry written to `cycle_telemetry.json` and persisted to `cycles.db`.
+- **agitop modal reorganization** — 3×3 button grid: Agent Settings, Technical Setup, View Memory / Poise Template, Last System Prompt, Cycle Log / Request Removal, Close, Manage Threads.
+- **System prompt restructuring** — layered neural trajectory with ~45% poise reduction, 5W1H extraction to on-demand skill, INSTRUCTIONS consolidation (~65% reduction).
+
+#### Fixed
+- **Lifeline `set -e` in spawn subshell** — removed `set -e` re-entries within the backgrounded spawn subshell. The `kill` against an already-dead runaway monitor caused premature exit under `set -e`, silently skipping post-spawn token extraction. Added `|| true` to `kill`/`wait` for idempotent cleanup.
+
+#### Documentation
+- **README.md** — restructured "Implemented ✅" list into 6 categories (Agent Engine, Infrastructure, Safety, Observability, Communication, Operations). Updated stale Gemini CLI references.
+- **Versa AGi.md** — updated efficiency section, observability commands, dependencies, agents.db ER diagram with all current columns.
+- **System Design** — comprehensive rewrite: removed Inference Server/MCP server references, updated model routing to native LangChain, updated technical debt (TD-001–004 resolved), added Ensure 15–16, updated permissions manifests.
+- **Production Plan** — Iteration 14 marked complete, Phase 3b/3c/4 roadmap statuses updated.
+
+---
+
+## [0.10.2] — 2026-05-10
+
+### Distributed Topology Hardening
+
+#### Added
+- **SSH tunnel for client topology** — `setup_local.sh` (client remote flow) now provisions `versa-agi-tunnel.service`, an SSH tunnel (`ssh -N -L {port}:localhost:{port}`) that forwards local traffic to the remote inference server. Gemini CLI enforces HTTPS for non-localhost URLs; the tunnel satisfies the localhost exemption while providing encrypted transport. Includes: watchdog SSH key generation, interactive public key display for manual server authorization, SSH connectivity test, and systemd service with auto-restart.
+- **Remote backend authentication** — `lifeline.sh` now reads `LITELLM_MASTER_KEY` from `/etc/versa-agi/litellm.env` when `VERSA_GPU_BACKEND=remote`. Previously used dummy key `sk-versa-local` which only works for localhost LiteLLM (no auth). Agents connecting to a remote LiteLLM server would silently fail with 401 Unauthorized.
+- **Cloud proxy port separation** — On client topology, the SSH tunnel claims port 4000 for remote local AI. Cloud proxy now auto-overrides to port 4001. Lifeline uses `VERSA_PROXY_LITELLM_URL` for proxy model routing (falls back to `VERSA_LITELLM_URL` on non-client topologies).
+- **Intel SYCL support in `--update` mode** — `setup.sh --update` now detects Intel GPU backend and generates correct LiteLLM config with `openai/` model prefix and `api_base: http://localhost:8080/v1`.
+
+#### Fixed
+- **Gemini CLI internal models 500 on local AI** — Gemini CLI uses cloud models internally (e.g., `gemini-2.5-flash-lite` for tool output summarization) even when the agent's main model is local. The `gemini-*` wildcard passthrough in `litellm_config.yaml` was gated on `PROXY_ENABLED`, which is `false` on server topology. Now always included when local AI is enabled. Key sourcing falls back from `coa.env` → `setup.ini [gemini] api_key` for server topology (no coa.env).
+- **`openssh-server` auto-install for server topology** — `setup_local.sh` now installs and enables `openssh-server` if sshd is not running on server topology (required for client SSH tunnels). Also auto-fixes watchdog shell from `nologin` to `/bin/bash` for SSH compatibility.
+- **Tunnel health check false failure** — `setup_local.sh` tunnel verification now passes `Authorization: Bearer` header. LiteLLM rejects unauthenticated `/health` requests when master key is configured, causing a false "server may not be running" warning.
+- **`restart_litellm()` was a no-op** — `litellm_helpers.sh` used `systemctl start` which does nothing for already-running services. Changed to `systemctl restart` so config changes take effect.
+- **Server mode leaking cloud proxy models** — `setup_local.sh` now forces `[cloud_proxy] enabled=false` in `setup.ini` when running in `server` topology. `setup.sh --update` also purges cloud proxy models from LiteLLM config on server topology.
+- **INSTALL_TYPE=2 bypassed hybrid mode** — `setup.sh` now auto-sets `SELECTED_EXEC_MODE=hybrid` when installation type is "Client + Local AI", skipping the redundant execution mode prompt.
+- **Session file permissions (setgid)** — `.gemini/tmp/` and `.gemini/history/` subdirectories now use `2770` (setgid) instead of `770`. Without setgid, new session files created by agents inherited the user's primary group instead of `agi_agents`, preventing watchdog from managing them.
+- **SYCL model registry mismatches** — `cli.py` `SYCL_MODEL_MAP` corrections: `gemma4:e4b` repo changed from non-existent `unsloth/gemma-4-12B-A2B-it-GGUF` to `unsloth/gemma-4-E4B-it-GGUF`; `gemma4:31b` filename changed from `gemma-4-31B-it-UD-Q4_K_M.gguf` to `gemma-4-31B-it-Q4_K_M.gguf` (no `UD-` prefix in actual repo).
+- **`agictl model add` HuggingFace CLI resolution** — Added fallback to LiteLLM venv path (`/opt/versa-agi/litellm/bin/hf`) when running as root, where `huggingface-cli` is not in PATH.
+
+---
+
+## [0.10.1] — 2026-04-28
+
+### Backup & Restore Hardening
+
+#### Added
+- **Interactive prerequisite installer** — `restore.sh` Step 2 now offers to install missing system packages (git, sqlite3, jq, inotify-tools, Node.js v22 via NodeSource, Gemini CLI via npm) instead of simply aborting. Mirrors `setup.sh` behavior.
+- **`--yes` flag** — `restore.sh` auto-accepts all prerequisite installs without prompting (for unattended restores).
+- **Node.js version validation** — restore now checks Node.js major version (≥ v22) and offers NodeSource upgrade when outdated.
+- **Gemini CLI version validation** — restore checks minimum version (≥ v0.35.1) and offers upgrade. Checks both `/usr/local/bin/` and `/usr/bin/` paths.
+
+#### Fixed
+- **Python venv incomplete packages** — restore venv rebuild now installs the full dependency set (`click`, `rich`, `textual`, `psutil`). Previously only installed `textual`, causing `agictl` to fail with `ModuleNotFoundError: No module named 'click'`.
+- **Circular workspace symlink** — `ln -sf` follows existing symlinks to directories, creating `workspace/workspace`. Changed to `ln -sfn` which replaces the symlink itself.
+- **CRON prefixes break agitop toggle** — backup paused CRON with `# BACKUP_PAUSED:` prefix, but `toggle_cron()` only strips `# `. Normalized to simple `# ` comments in both `backup.sh` and `restore.sh`.
+
+#### Changed
+- **Documentation** — clarified `system_config.json` (template with null runtime fields) vs `coa_config.json` (authoritative runtime config with API tokens) distinction in System Design, Product Specification, and README.
+
+---
+
+## [0.10.0] — 2026-04-26
+
+### System Backup & Restore
+
+#### Added
+- **`versa-agi-backup`** — complete system-level backup utility. Captures all databases, configuration, agent workspaces, system binaries, CRON, sudoers, and systemd units into a single compressed archive at `~/.versa-agi/backups/`.
+- **`restore.sh`** — self-contained restore script embedded in every backup archive. Recreates OS users from manifest, restores all data to original paths, rebuilds Python venvs, fixes permissions, runs health checks.
+- **`manifest.json`** — embedded metadata including hostname, OS, kernel, agent registry, OS user UIDs/GIDs/groups, and Primary User symlinks for faithful system reproduction.
+- **`capture()` exclude support** — optional 3rd argument for rsync exclusions (used to prevent recursive backup nesting).
+- **Persisted admin tooling** — `backup.sh`, `uninstall.sh`, `patch_wrapper.sh`, `rekey.sh` now deployed to `/usr/local/lib/versa-agi/` with convenience symlinks at `/usr/local/bin/versa-agi-*`.
+
+#### Changed
+- **`setup.ini` canonical path** — migrated from source-tree-relative to `/etc/versa-agi/setup.ini` as the single source of truth. All scripts updated with fallback search order: `/etc/` → `${SCRIPT_DIR}` → parent dir.
+- **`install.sh` ownership scoping** — `chown -R` now targets only `~/.versa-agi/repo/` (was over-scoped to entire `~/.versa-agi/`).
+
+#### Fixed
+- **`set -e` compatibility** — replaced `[ -n ] && action` patterns with explicit `if` blocks and `return 0` to prevent silent script termination when paths don't exist.
+
+---
+
+## [0.9.1] — 2026-04-06
+
+### Local AI Hardening & Context Injection Fixes
+
+#### Fixed
+- **Uninstall mode reset** — `uninstall_local.sh` now resets execution mode from both `hybrid` and `local` back to `cloud` (previously only reset `local`, leaving `hybrid` dangling).
+- **Conversation history blank for sub-agents** — Internal messages use `to_user_id=agent_name` (not VV UID). Added `--agent-name` to `conversation-context` command; all queries now match both VV UID and agent name.
+- **Project memory leaking across agents** — Sub-agents were seeing ALL projects with active tasks. Now COA sees all (orchestrator visibility), sub-agents see only projects where they are explicitly assigned.
+- **`setup_local.sh` source-of-truth sync** — Now updates `setup.ini [local_ai] enabled=true` in addition to `paths.env`. Previously, running `patch.sh` after install would revert the enabled flag to false.
+- **`/opt/versa-agi/litellm/` ownership** — Aligned to `root:root 755` (consistent with the `venv/` directory). The systemd service runs as `watchdog` but only needs read+execute access.
+
+#### Changed
+- **Pip install spinner** — `setup_local.sh` now shows an animated Braille spinner during the slow `litellm[proxy]` installation step.
+- **CLI guidance** — Removed non-existent `agictl agent set` commands from setup/uninstall output. Model assignment is via the Dashboard only.
+
+---
+
+## [0.9.0] — 2026-04-06
+
+### Local AI Backend (TD-001)
+
+#### Added
+- **Hybrid execution modes** — `cloud`, `local`, or `hybrid` via `setup.ini [gemini] mode=`. Local-only mode allows air-gapped operation without a Gemini API key.
+- **`setup_local.sh`** — Standalone installer for Ollama + LiteLLM proxy. Creates a Python venv at `/opt/versa-agi/litellm/`, generates systemd service, pulls default model, and updates `paths.env`.
+- **`uninstall_local.sh`** — Clean removal: stops LiteLLM service, deactivates agents assigned to local models, resets `setup.ini [local_ai] enabled=false`.
+- **Backend resolution in `lifeline.sh`** — Model-driven dispatch: agents with local models get `GOOGLE_GEMINI_BASE_URL` pointed to the LiteLLM proxy. Invalid configs (local model + disabled backend, unknown model, cloud model in local-only mode) set `status=invalid_config` and skip the agent.
+- **`setup.ini [local_ai]` section** — `enabled`, `ollama_host`, `proxy_port`, `default_model`, `local_models`, `auto_pull_model`.
+- **`setup.ini [gemini] cloud_models`** — Tracked cloud model registry, auto-updated by `patch.sh`.
+- **Dashboard: LITELLM + LOCAL AI indicators** — `SystemPanel` shows real-time LiteLLM daemon status and current execution mode.
+- **Dashboard: Config error alerts** — Persistent `⚠ AGENT CONFIG ERROR` banner when any agents have `invalid_config` status.
+- **Dashboard: Backend icons** — ☁ (cloud), 🖥 (local), ⚠ (invalid) shown per agent in the agents table.
+- **Dashboard: Mode-aware model picker** — `AgentEditModal` filters available models by execution mode. Cloud models prefixed ☁, local models prefixed 🖥.
+- **Dashboard: COA soft warning** — Yellow ⚠ indicator when COA is assigned a local model.
+
+#### Changed
+- **`setup.sh` Step 9** — Execution mode selection prompt with conditional Gemini API key validation (skipped in local-only mode).
+- **`patch.sh` Step 5c** — Auto-syncs cloud model registry + local AI settings from `setup.ini` into `paths.env` on every patch.
+- **`patch.sh` INI backfill** — Now includes `[local_ai]` in expected sections.
+- **`paths.env`** — New environment variables: `VERSA_EXECUTION_MODE`, `VERSA_CLOUD_MODELS`, `VERSA_LOCAL_AI_ENABLED`, `VERSA_LOCAL_MODELS`, `VERSA_LITELLM_URL`.
+
+---
+
+## [0.8.0] — 2026-04-06
+
+### WSL Hardening, Fast-Start Poise, Quota Resilience
+
+#### Added
+- **First-boot exception** — Lifeline forces a wake cycle when the Initial Welcome Sequence task is still `planned`, bypassing the 60-second staleness guard and daily overdue marker that could strand the agent after its first quota-exhausted cycle.
+- **Two-tier API quota cooldown** — Daily quota exhaustion (`TerminalQuotaError`, `free_tier_requests`) triggers a 1-hour cooldown (was 3 min). Temporary 429s retain the existing 5-minute cooldown. Prevents ~20 futile retries/hour on exhausted free-tier limits.
+- **`toggle_cron()` method** — `SystemReader` now provides a Python-native CRON toggle using `subprocess.run()`, replacing the `os.system()` + sed pipeline that failed silently on WSL.
+- **`kill_agents()` method** — `SystemReader` now targets all registered agent OS users (COA + sub-agents), not just the hardcoded COA user.
+- **Poise message command reference** — Essential `agictl message` commands (`get --unread`, `send`, `mark-processed`, conversation history) embedded directly in the COA poise to eliminate discovery overhead.
+- **Skills deployment in `setup.sh`** — System skills from `core-infra/skills/` are now copied into `.agent/skills/` during initial setup (previously only deployed by `patch.sh`).
+
+#### Changed
+- **Poise fast-start** — Removed redundant `agictl system whoami` and `agictl task list` from the work cycle (both are pre-loaded in spawn prompt). Eliminated ~10 wasted tool calls per cycle.
+- **agitop WSL compatibility** — Replaced all `os.system()` calls with `subprocess.run(capture_output=True)` to prevent terminal conflicts with Textual's TUI on WSL.
+
+#### Fixed
+- **Python venv validation** — `setup.sh` now validates that required packages (`click`, `rich`, `textual`, `psutil`) are importable inside the venv on every run, rather than just checking directory existence. Prevents phantom venv from a failed first-run on minimal Ubuntu/WSL images.
+- **`python3-pip` auto-install** — Added to the Step 2 prerequisite block alongside `python3-venv` for minimal images that strip pip.
+
+---
+
+## [0.7.0] — 2026-03-29
+
+### Hardening: Runaway Monitor, Role Registry, Poise Refactor
+
+#### Added
+- **3-trigger runaway detection** — monitors result file line count, result file size, and session file size. Each configurable per-agent via the `agitop` dashboard.
+- **Directory-based role registry** — roles at `config/roles/{role_id}/` with `poise.md` (behavioral template) and `role.ini` (metadata + model override).
+- **Per-role model selection** — each role can specify a Gemini model in `role.ini`. Lightweight roles (e.g., `sysmon`) can use cheaper models.
+- **`agent_onboarding.md` skill** — dedicated sub-agent provisioning workflow with role registry awareness.
+- **`gemini-3.1-flash-lite-preview`** — added to supported model reference.
+
+#### Changed
+- **COA poise refactored** — 256 → 169 lines. Monolithic 14-step work cycle replaced with a skill-routing decision tree.
+- **Enriched sentinel format** — runaway sentinel now contains `trigger:diagnostics` for clear system notifications.
+- **`agictl list-roles`** — now parses `role.ini` for description and model display.
+- **`agictl agent add`** — auto-populates agent model from role configuration.
+- **Skills split** — mid-work inbox check and conversational context recovery moved from poise into `communication.md` skill.
+
+---
+
+## [0.6.0] — 2026-03-27
+
+### Stabilization: CLI Alignment, Dashboard, Profile Sync
+
+#### Added
+- **Profile enrichment pipeline** — schema migration (`city`, `chromosome`, `profile_synced_at`), `agictl system sync-profiles`, 7-day lifeline staleness check.
+- **`agitop` deployed via `patch.sh`** — prevents launcher staleness.
+- **TD-SEC-012** — Trusted-User Simplified Security Protocol (planned).
+
+#### Changed
+- **Skills deployed read-only (440)** — agents can create their own writable skills, but system skills are immutable.
+- **Effort calibration protocol** — prevents agents from burning cycles on exaggerated requests.
+- **One recurring task, rolled forward** — prevents scheduling pollution.
+
+---
+
+## [0.5.0] — 2026-03-25
+
+### V3 Gateway Hardening
+
+#### Added
+- **Watchdog Sentinel kill-switch** — `sentinel_enabled` flag in `setup.ini`.
+- **Configurable agent timeouts** — database-backed, editable via `agitop`.
+- **`agictl task` full data payloads** — eliminated hallucination loops from incomplete CLI responses.
+
+#### Changed
+- **SQLite-centric configuration** — eliminated legacy JSON runtime files.
+- **Permission regressions** — fixed persistent deployment pipeline permission issues.
+- **Agent workspace documentation** — updated to reflect V3 architecture.
+
+---
+
+## [0.4.0] — 2026-03-22
+
+### V3 Architectural Baseline
+
+#### Added
+- **4-database schema** — `agents.db`, `messages.db`, `tasks.db`, `cycles.db` with strict separation of concerns.
+- **Python-native `agictl` CLI** — Click-based, replaces bash prototype.
+- **`agitop` Mission Control Dashboard** — Textual-based TUI with agent monitoring, task overview, and cycle telemetry.
+- **REST-first communication** — native VersaVoice AI REST API integration (replacing MCP stdio for system operations).
+- **Token usage tracking** — per-session extraction from Gemini CLI JSON session files.
+
+#### Changed
+- **Agent execution model** — per-agent OS user isolation with `agi_agents` group.
+- **Poise framework** — precision instrument model, not personality simulation.
+
+---
+
+## [0.3.0] — 2026-03-14
+
+### Identity & Automation
+
+#### Added
+- **Persistent agent identity** — survives reinstallation via database storage.
+- **`init_vv_identity.sh`** — automated VersaVoice sub-account provisioning.
+- **`agictl system whoami`** — identity verification command.
+
+#### Changed
+- **Sensitive tokens removed from Git** — API keys now exclusively in `setup.ini` (gitignored).
+
+---
+
+## [0.2.0] — 2026-03-12
+
+### Communication Foundation
+
+#### Added
+- **VersaVoice MCP integration** — agent messaging through VersaVoice AI platform.
+- **Inbox pre-fetch policy** — Lifeline syncs messages before spawning agents.
+- **Skills library** — `security_protocol.md`, `communication.md`, `memory_management.md`.
+
+---
+
+## [0.1.0] — 2026-03-08
+
+### Prototype (POC)
+
+#### Added
+- Core infrastructure skeleton: `lifeline.sh`, `watchdog.sh`, agent registry.
+- COA environment with poise framework, work cycle, and VersaVoice identity.
+- CRON-based 1-minute Lifeline pulse.
+- Interactive `setup.sh` installer with branded CLI output.
+- `uninstall.sh` clean teardown.
+
+#### Confirmed
+- Gemini CLI auto-terminates in headless mode (`-p`).
+- Exit codes are meaningful (0, 1, 42, 53).
+- `--yolo` mode exits after task completion.
+
+---
+
+*For installation, see [README.md](../README.md). For architecture details, see [architecture.md](architecture.md).*
