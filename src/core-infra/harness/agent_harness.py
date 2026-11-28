@@ -925,6 +925,7 @@ def agictl_search(command: str = "", query: str = "", count: int = 5) -> str:
     Order of use: search to find pages, read to read one, the browser tool only when a page needs it.
     Examples:
       - 'search web "<query>" --count 5' — find pages: title, URL, snippet
+        (a repeat within a few minutes is answered from the last answer, marked "cached": true; add --fresh to ask again)
       - 'search read "<url>"' — the readable text of one page (documentation, articles, references)
       - 'search read "<url>" --offset 8000' — read on when the reply says truncated (use its next_offset)
       - 'search read "<url>" --links' — also list the page's links
@@ -1000,11 +1001,15 @@ def agictl_browser(command: str) -> str:
       - 'browser goto "https://example.com" --offset 8000' — read on when the reply says truncated (use its next_offset)
       - 'browser goto "https://example.com" --screenshot' — load + screenshot
       - 'browser click "https://example.com" "button.submit"' — click an element
-      - 'browser fill "https://example.com" "#email" "user@test.com"' — fill a form field
+      - 'browser run "https://example.com/login" --steps \'[{"do":"fill","selector":"#email","value":"me@test.com"},{"do":"click","selector":"button[type=submit]"}]\'' — several steps on one page (fill a form AND send it, sign in). Steps: fill, click, press, select, check, uncheck, wait_for, goto
+      - 'browser fill "https://example.com" "#email" "user@test.com"' — fill one field (nothing is submitted; use run to send a form)
       - 'browser screenshot "https://example.com" --full-page' — full-page screenshot
       - 'browser extract "https://example.com" --selector "h1"' — extract text from selector
       - 'browser extract "https://example.com" --selector "a" --attribute "href"' — extract attribute
     Any command takes --user-agent "<text>" to set the user agent for that call.
+    Any command takes --session <name>: the cookies and sign-in it ends with are kept under that name
+    and loaded by the next command that names it (without it, every command starts a clean browser).
+    'browser session list' and 'browser session clear <name>' manage them. Load browser_automation.md before signing in anywhere.
     """
     return _run_agictl(command)
 

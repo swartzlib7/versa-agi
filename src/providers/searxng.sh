@@ -9,8 +9,9 @@
 # Requirements: Docker Engine (auto-installed on Ubuntu/Debian if missing)
 # Listens on: http://127.0.0.1:8888 (local only)
 #
-# Runs on install and on every `setup.sh --update`: writes settings.yml again,
-# pulls the image, and recreates the container when either changed.
+# Runs on install (setup.sh Step 9d) and on every `setup.sh --update`
+# (refresh_search_on_update, from 3.10.7): writes settings.yml again, pulls the
+# image, and recreates the container when either changed.
 # Optional keyed engines: [search] brave_api_key / exa_api_key in setup.ini.
 #
 # Usage:

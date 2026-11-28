@@ -1,4 +1,4 @@
-# Skill: Browser Automation — Headless Chromium
+# Skill: Browser Automation — a real browser for pages that need one: click, fill in and send a form, sign in and stay signed in, screenshots
 
 > **Trigger**: Use this skill when a page needs a real browser: it builds its content with scripts, or you need to click, fill a form, or capture a screenshot. To simply read a page (documentation, an article, a reference), use `agictl search read "<url>"` first: it is faster and starts no browser (see the `web_research` skill). All operations here use a sandboxed headless Chromium browser running as your agent user.
 
@@ -21,7 +21,8 @@ agictl browser goto "<url>" --max-chars 20000         # Return more per call (li
 agictl browser goto "<url>" --selector "<css>"        # Text of one part of the page
 agictl browser goto "<url>" --screenshot              # Load page + save screenshot
 agictl browser click "<url>" "<selector>"             # Navigate then click an element
-agictl browser fill "<url>" "<selector>" "<value>"    # Navigate then fill a form field
+agictl browser run "<url>" --steps '<json list>'      # Several steps on one page: fill a form and send it, sign in
+agictl browser fill "<url>" "<selector>" "<value>"    # Fill one field. Nothing is submitted: the page closes with the command
 agictl browser screenshot "<url>"                     # Capture visible viewport
 agictl browser screenshot "<url>" --full-page         # Capture full scrollable page
 agictl browser extract "<url>"                        # Extract all text content
@@ -66,11 +67,48 @@ agictl browser screenshot "https://status.example.com" --full-page
 ```
 
 ### Form Interaction
+
+Each command opens the page, acts and closes it. A field filled by one command is gone in the next, so a form is filled **and sent in one command**, with `browser run`:
+
 ```bash
-# Fill and submit a search form
-agictl browser fill "https://example.com/search" "#query" "versa agi documentation"
-agictl browser click "https://example.com/search" "button[type=submit]"
+agictl browser run "https://example.com/search" --steps '[{"do":"fill","selector":"#query","value":"versa agi documentation"},{"do":"click","selector":"button[type=submit]"}]'
 ```
+
+The reply is the page as it is after the last step (`title`, `current_url`, `content`, with the same paging as `goto`).
+
+| Step (`"do"`) | Fields | What it does |
+|---|---|---|
+| `fill` | `selector`, `value` | Types into a field (an empty value clears it) |
+| `click` | `selector` | Clicks, then waits for the page to settle |
+| `press` | `selector`, `key` | Presses a key in that element, for example `Enter` |
+| `select` | `selector`, `value` | Chooses an option of a drop-down |
+| `check` / `uncheck` | `selector` | Ticks or clears a box |
+| `wait_for` | `selector` | Waits until that element is there |
+| `goto` | `url` | Opens another page in the same browser |
+
+- At most 20 steps, and the whole command has about 100 seconds. Split longer work into several `run` commands that share a session (below).
+- If a step fails, the reply says which one (`failed_step`) and holds the page as it was at that point. Read it before you try again.
+
+## Sessions: staying signed in between commands
+
+Without a session every command starts a clean browser. Add `--session <name>` and the cookies and site storage the command ends with are kept under that name, and loaded by the next command that names it. Any browser command takes it.
+
+```bash
+# Sign in once
+agictl browser run "https://app.example.com/login" --session example --steps '[{"do":"fill","selector":"#email","value":"<email>"},{"do":"fill","selector":"#password","value":"<password>"},{"do":"click","selector":"button[type=submit]"}]'
+# Later commands, also in a later cycle, are still signed in
+agictl browser goto "https://app.example.com/orders" --session example
+agictl browser session list
+agictl browser session clear example
+```
+
+- **One name per site and account** (`example`, `example-billing`). A name is lower-case letters, digits, `-` and `_`.
+- **A session is yours alone.** It lives in your own home and no other agent can use it.
+- **Sign in only with an account the Primary User gave you for that purpose.** Never ask a person for their password in a message, and never sign in to someone's personal account because you could.
+- **A password in `--steps` is a secret.** Do not copy it into a task, memory, a message or a summary.
+- **If the page shows the sign-in again,** the site ended the session: sign in again with `run`. A reply with `session_reset` means the saved session could not be read and was started again.
+- **Clear a session** when the work that needed it is finished, or when the Primary User asks.
+- A run that fails part-way leaves the session as it was before the command.
 
 ### Page Verification
 ```bash
@@ -106,8 +144,8 @@ On failure:
 
 ## Limitations
 
-- No persistent browser sessions — each command spawns a fresh Chromium instance
-- No cookie/session management across commands
+- Each command starts its own browser and closes it. Cookies and sign-ins carry over only with `--session`; a half-filled form never does (use `browser run`)
+- A site that asks for a code sent to a phone or an app each time cannot be signed in to without the person
 - A page that keeps loading past the settle time is read as it is at that moment
 - A user agent does not pass a CAPTCHA or a login wall. If a page shows one, report it and use another source
 - Cannot interact with browser devtools or modify browser settings

@@ -8,6 +8,7 @@
 - Public key must be added to the Git hosting platform (GitHub, GitLab, etc.) by the Primary User
 - If your key file is missing, `agictl project git-setup` makes it again. You run it yourself; it needs no `sudo`
 - COA registers projects (`project add`). A further agent asks COA for a project or for access to one
+- Issues, pull requests, build results and releases on GitHub are not git: load `github_cli.md`
 
 ## Authentication Methods
 

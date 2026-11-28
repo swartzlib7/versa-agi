@@ -165,3 +165,96 @@ class TestProviderFlow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefreshOnUpdate(unittest.TestCase):
+    """`setup.sh --update` refreshes a search service that is already there (WEB-13).
+
+    Until 3.10.7 the SearXNG provider ran only in the install branch of setup,
+    so an update never wrote the settings again. The function is cut out of
+    setup.sh and run in bash with stand-ins for docker and the provider script.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(SRC, "setup.sh"), encoding="utf-8") as handle:
+            cls.setup = handle.read()
+        start = cls.setup.index("# ── search refresh: begin ──")
+        cls.block = cls.setup[start:cls.setup.index("# ── search refresh: end ──")]
+
+    def _run(self, *, enabled="true", docker=True, container=True, settings=False, dry=False, fails=False):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "providers"))
+            marker = os.path.join(tmp, "ran")
+            with open(os.path.join(tmp, "providers", "searxng.sh"), "w", encoding="utf-8") as fh:
+                fh.write(f'echo "parent=${{VERSA_SETUP_PARENT:-}}" > "{marker}"\n' + ("exit 3\n" if fails else ""))
+            settings_file = os.path.join(tmp, "settings.yml")
+            if settings:
+                with open(settings_file, "w", encoding="utf-8"):
+                    pass
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            if docker:
+                with open(os.path.join(bin_dir, "docker"), "w", encoding="utf-8") as fh:
+                    fh.write("#!/bin/bash\n" + ('echo searxng\n' if container else "exit 0\n"))
+                os.chmod(os.path.join(bin_dir, "docker"), 0o755)
+            script = (
+                "set -euo pipefail\n"
+                f'SCRIPT_DIR="{tmp}"; SEARXNG_SETTINGS_FILE="{settings_file}"; DRY_RUN={"true" if dry else "false"}\n'
+                f'PATH="{bin_dir}:/usr/bin:/bin"\n'
+                + ("" if docker else "hash -r\n")
+                + f'ini_get() {{ echo "{enabled}"; }}\n'
+                'info() { echo "INFO $*"; }; warn() { echo "WARN $*"; }; dry() { echo "DRY $*"; }\n'
+                + self.block + "\nrefresh_search_on_update\necho END\n"
+            )
+            out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+            ran = ""
+            if os.path.exists(marker):
+                with open(marker, encoding="utf-8") as fh:
+                    ran = fh.read().strip()
+            return out, ran
+
+    def test_an_existing_container_is_refreshed_without_questions(self):
+        out, ran = self._run()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(ran, "parent=1")          # the script asks nothing when setup is its parent
+
+    def test_an_existing_settings_file_is_enough(self):
+        out, ran = self._run(container=False, settings=True)
+        self.assertEqual(ran, "parent=1", out.stdout + out.stderr)
+
+    def test_search_switched_off_is_left_alone(self):
+        out, ran = self._run(enabled="false")
+        self.assertEqual(ran, "")
+        self.assertIn("Web search is off", out.stdout)
+
+    def test_an_update_never_installs_docker_or_a_first_container(self):
+        which = subprocess.run(["bash", "-c", "PATH=/usr/bin:/bin command -v docker"], capture_output=True)
+        if which.returncode != 0:                  # no system docker to leak through the stand-in PATH
+            out, ran = self._run(docker=False)
+            self.assertEqual(ran, "")
+            self.assertIn("Docker is not installed", out.stdout)
+        out, ran = self._run(container=False, settings=False)
+        self.assertEqual(ran, "")
+        self.assertIn("no SearXNG container here", out.stdout)
+
+    def test_a_dry_run_changes_nothing(self):
+        out, ran = self._run(dry=True)
+        self.assertEqual(ran, "")
+        self.assertIn("DRY Would refresh SearXNG", out.stdout)
+
+    def test_a_failed_refresh_does_not_stop_the_update(self):
+        out, ran = self._run(fails=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("SearXNG refresh failed", out.stdout)
+        self.assertIn("END", out.stdout)
+
+    def test_it_is_called_on_an_update_and_outside_the_install_only_step(self):
+        install_only_ends = self.setup.index("fi  # end UPDATE_MODE=false guard (Step 9)")
+        call = self.setup.index('  section "Update — Web Search"\n  refresh_search_on_update\n')
+        self.assertGreater(call, install_only_ends)
+        guard = self.setup.rfind('if [ "${UPDATE_MODE}" = true ]; then', 0, call)
+        self.assertEqual(self.setup[guard:call].count("\n"), 1)   # the call sits directly under the update guard
+        # The provider scripts are in place before the refresh runs them.
+        self.assertLess(self.setup.index('cp "${SCRIPT_DIR}/providers/${provider_script}"'), call)

@@ -172,6 +172,7 @@ def _format_routing_appendix(routing: dict, agent_name: str = "coa") -> str:
 # Fallback hardcoded catalog used when no catalog file exists
 _FALLBACK_SKILLS_CATALOG = """- "communication.md" — Message crafting and response protocols
 - "git_operations.md" — Git operations (clone, commit, push, branch management)
+- "github_cli.md" — GitHub CLI (gh): issues, pull requests, build results, releases and repository search on GitHub; connecting to a GitHub account
 - "project_management.md" — Project setup, assignment, workspace management
 - "task_scheduling.md" — Task management (create, update, snooze, prioritize)
 - "task_routing.md" — A contact asks for something outside the work you were assigned with them, or something suspicious: decline, tell COA, the Primary User decides

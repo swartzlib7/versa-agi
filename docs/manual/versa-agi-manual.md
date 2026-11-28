@@ -8,7 +8,7 @@ title: Versa AGi Manual
 <p class="cover-motto">&#45; built to fulfill expectations &#45;</p>
 <h1 class="cover-title">Your agents.<br>Your machine.</h1>
 <p class="cover-sub">The manual for the Primary User: the person who owns the machine, sponsors the agents, and stays in charge.</p>
-<p class="cover-meta">Training and reference edition · Version 3.10.6 · November 2026</p>
+<p class="cover-meta">Training and reference edition · Version 3.10.7 · November 2026</p>
 </div>
 
 ## At a glance
@@ -318,6 +318,8 @@ Each wake picks up where the last one stopped. Before it ends a cycle, an agent 
 A skill is a markdown playbook the agent loads when the work matches. Core references are always there. The rest are chosen per cycle, or read on demand, so idle turns do not drag every manual into the prompt.
 
 One shipped skill covers cloud storage: ask an agent to reach your Google Drive, OneDrive or Dropbox from the machine, and it asks what you want done before it sets anything up, then uses rclone, an existing tool, rather than writing its own connection. For Google Drive it walks you through a one-time setup in your Google account.
+
+Another covers GitHub. Agents already clone and push with git. With GitHub's own command-line tool, which Versa AGi installs, an agent can also read and open issues and pull requests, see why a build failed, and publish a release. To connect it, ask the agent: it tells you how to make a token in your GitHub account that is limited to the repositories and actions you choose, and you send it that token. Delete the message afterwards. The agent does not merge, delete or change settings unless you ask for exactly that.
 
 You can add skills; shipped ones are read-only. The Chief Orchestrator Agent creates, distributes, and withdraws them.
 
@@ -679,6 +681,10 @@ Public engines sometimes block automated searches. If results stop coming, you c
 - In **API Keys**, enter it under **Brave Search API Key** or **Exa API Key** and save. Saving refreshes search and can take a minute or two.
 - Or send the key to your COA and ask it to turn on better search. It sets the key and does not keep or repeat it.
 
+A search that was asked a few minutes ago is not sent again: the agent gets the earlier answer. This keeps the search engines from blocking the machine for asking too often. The time is ten minutes and is set with `cache_minutes` under `[search]` in the settings file; 0 turns it off.
+
+An agent can stay signed in to a website. When you give an agent an account for a site, it signs in once and keeps that sign-in for later visits, also on another day. Each agent's sign-ins are kept in its own folder, where no other agent can reach them. Ask the agent to forget a sign-in when the work is done. A site that asks for a code from your phone each time still needs you.
+
 Enter `off` in place of a key to remove it.
 
 Three stops end a single cycle that has gone wrong. Each counts as a failed cycle for the circuit breaker:
@@ -882,5 +888,5 @@ versa-agi-backup
 <p class="back-name">Versa AGi</p>
 <p class="back-tagline">Your agents. Your machine.</p>
 <p class="back-links">versa-agi.com · github.com/swartzlib7/versa-agi · business@versavoice.ai</p>
-<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.10.6, November 2026.</p>
+<p class="back-fine">© 2026 Versa AGi. Patent pending. Features as of version 3.10.7, November 2026.</p>
 </div>

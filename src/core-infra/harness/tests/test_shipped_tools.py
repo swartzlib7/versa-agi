@@ -129,6 +129,106 @@ class TestInstallRclone(unittest.TestCase):
         self.assertFalse(os.path.exists(self.asked))
 
 
+def _fake_gh(version):
+    return f'#!/bin/bash\necho "gh version {version} (2026-01-01)"\necho "https://github.com/cli/cli/releases/tag/v{version}"\n'
+
+
+class TestInstallGh(unittest.TestCase):
+    """The GitHub CLI, installed the same way as rclone (skill github_cli.md)."""
+
+    def setUp(self):
+        import io
+        import tarfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.tmp = self._dir.name
+        self.dest = os.path.join(self.tmp, "bin", "gh")
+        os.mkdir(os.path.dirname(self.dest))
+        self.archive = os.path.join(self.tmp, "download.tar.gz")
+        with tarfile.open(self.archive, "w:gz") as archive:
+            for name, text, mode in (("gh_9.9.9_linux_amd64/LICENSE", "docs", 0o644),
+                                     ("gh_9.9.9_linux_amd64/share/man/man1/gh.1", "man", 0o644),
+                                     ("gh_9.9.9_linux_amd64/bin/gh", _fake_gh("9.9.9"), 0o755)):
+                data = text.encode()
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = len(data), mode
+                archive.addfile(info, io.BytesIO(data))
+        with open(self.archive, "rb") as handle:
+            self.sum = hashlib.sha256(handle.read()).hexdigest()
+        self.asked = os.path.join(self.tmp, "asked")
+        self.curl = os.path.join(self.tmp, "curl")
+        with open(self.curl, "w", encoding="utf-8") as out:
+            out.write('#!/bin/bash\nwhile [ $# -gt 0 ]; do case "$1" in -o) dest="$2"; shift ;; http*) url="$1" ;; esac; shift; done\n'
+                      f'echo "$url" >> "{self.asked}"\n[ -n "${{FAKE_CURL_FAIL:-}}" ] && exit 22\ncp "{self.archive}" "$dest"\n')
+        os.chmod(self.curl, 0o755)
+
+    def _ini(self, checksum=None):
+        path = os.path.join(self.tmp, "tools.ini")
+        with open(path, "w", encoding="utf-8") as out:
+            out.write("[rclone]\nversion = v1.0.0\n\n[gh]\nversion = 9.9.9\n"
+                      "url = https://example.invalid/v{version}/gh_{version}_linux_{arch}.tar.gz\n"
+                      f"sha256_amd64 = {checksum or self.sum}\nsha256_arm64 = {checksum or self.sum}\n")
+        return path
+
+    def _run(self, ini, machine="x86_64", fail=False):
+        env = dict(os.environ, VERSA_GH_DEST=self.dest, VERSA_CURL_BIN=self.curl, VERSA_TOOLS_MACHINE=machine)
+        if fail:
+            env["FAKE_CURL_FAIL"] = "1"
+        done = subprocess.run(
+            ["bash", "-c", f'source "{SCRIPT}"; install_gh "{ini}"; rc=$?; echo "NOTE=${{SHIPPED_TOOL_NOTE}}"; exit $rc'],
+            env=env, capture_output=True, text=True,
+        )
+        return done.returncode, done.stdout.strip().split("NOTE=", 1)[-1]
+
+    def _installed(self):
+        if not os.path.isfile(self.dest):
+            return ""
+        return subprocess.run([self.dest, "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+
+    def test_installs_the_pinned_version_when_gh_is_missing(self):
+        rc, note = self._run(self._ini())
+        self.assertEqual((rc, note), (0, "gh 9.9.9"))
+        self.assertTrue(self._installed().startswith("gh version 9.9.9"))
+        self.assertEqual(oct(os.stat(self.dest).st_mode & 0o777), "0o755")
+        with open(self.asked, encoding="utf-8") as handle:
+            self.assertEqual(handle.read().strip(), "https://example.invalid/v9.9.9/gh_9.9.9_linux_amd64.tar.gz")
+
+    def test_arm_machines_ask_for_the_arm_build(self):
+        self._run(self._ini(), machine="aarch64")
+        with open(self.asked, encoding="utf-8") as handle:
+            self.assertIn("linux_arm64.tar.gz", handle.read())
+
+    def test_nothing_is_downloaded_when_the_pinned_version_is_there(self):
+        self._run(self._ini())
+        os.remove(self.asked)
+        self.assertEqual(self._run(self._ini()), (1, "gh 9.9.9"))
+        self.assertFalse(os.path.exists(self.asked))
+
+    def test_an_older_gh_is_replaced_by_the_pinned_one(self):
+        with open(self.dest, "w", encoding="utf-8") as out:
+            out.write(_fake_gh("2.45.0"))
+        os.chmod(self.dest, 0o755)
+        self.assertEqual(self._run(self._ini())[0], 0)
+        self.assertTrue(self._installed().startswith("gh version 9.9.9"))
+
+    def test_a_download_that_does_not_match_its_checksum_is_not_installed(self):
+        with open(self.dest, "w", encoding="utf-8") as out:
+            out.write(_fake_gh("2.45.0"))
+        os.chmod(self.dest, 0o755)
+        rc, note = self._run(self._ini(checksum="0" * 64))
+        self.assertEqual(rc, 2)
+        self.assertIn("does not match its checksum", note)
+        self.assertTrue(self._installed().startswith("gh version 2.45.0"))   # what was there stays
+
+    def test_no_network_and_an_unpinned_machine_are_reported_and_setup_carries_on(self):
+        rc, note = self._run(self._ini(), fail=True)
+        self.assertEqual(rc, 2)
+        self.assertIn("could not be downloaded", note)
+        rc, note = self._run(self._ini(), machine="riscv64")
+        self.assertEqual(rc, 2)
+        self.assertIn("not pinned for this kind of machine", note)
+
+
 class TestInstallFuse(unittest.TestCase):
     def _run(self, have_fusermount, apt_works):
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +270,15 @@ class TestShippedVersions(unittest.TestCase):
             self.assertRegex(rclone[f"sha256_{arch}"], r"^[0-9a-f]{64}$", arch)
         self.assertNotEqual(rclone["sha256_amd64"], rclone["sha256_arm64"])
         self.assertRegex(rclone["checked"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_gh_is_pinned_with_a_checksum_for_each_machine_type(self):
+        ini = configparser.ConfigParser()
+        ini.read(INI)
+        self.assertRegex(ini.get("gh", "version"), r"^\d+\.\d+\.\d+$")       # no "v": the url adds it
+        self.assertIn("v{version}/gh_{version}_linux_{arch}.tar.gz", ini.get("gh", "url"))
+        self.assertTrue(ini.get("gh", "url").startswith("https://github.com/cli/cli/releases/download/"))
+        for arch in ("amd64", "arm64"):
+            self.assertRegex(ini.get("gh", f"sha256_{arch}"), r"^[0-9a-f]{64}$")
 
     def test_the_bash_reader_reads_what_configparser_reads(self):
         for key in ("version", "url", "sha256_amd64", "sha256_arm64"):
@@ -336,9 +445,21 @@ class TestSetupStep(unittest.TestCase):
         self.assertIn('source "${SRC_CORE_INFRA}/scripts/shipped_tools.sh"', self.step)
         self.assertIn("install_fuse3 || _FUSE_RC=$?", self.step)
         self.assertIn('install_rclone "${SRC_CORE_INFRA}/config/shipped_tools.ini" || _RCLONE_RC=$?', self.step)
+        self.assertIn('install_gh "${SRC_CORE_INFRA}/config/shipped_tools.ini" || _GH_RC=$?', self.step)
+
+    def test_the_step_runs_on_an_update_too(self):
+        """Not inside the install-only part of setup (the fault WEB-13 was)."""
+        with open(os.path.join(SRC, "setup.sh"), encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertGreater(text.index("# ─── Step 11e: Cloud storage tools"),
+                           text.index("fi  # end UPDATE_MODE=false guard (Step 9)"))
+        before = text[:text.index("# ─── Step 11e: Cloud storage tools")]
+        # The last install-only block opened before the step is closed before it.
+        opened = before.rindex('\nif [ "${UPDATE_MODE}" = false ]; then')
+        self.assertIn("\nfi", before[opened:])
 
     def test_a_failure_is_a_warning_and_never_ends_setup(self):
-        self.assertEqual(len(re.findall(r"\*\) warn ", self.step)), 2)
+        self.assertEqual(len(re.findall(r"\*\) warn ", self.step)), 3)
         self.assertNotIn("exit ", self.step)
         self.assertNotIn("fail ", self.step)
 

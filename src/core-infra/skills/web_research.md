@@ -23,7 +23,12 @@
 agictl search web "<query>"                 # 5 results
 agictl search web "<query>" --count 10      # up to 10
 agictl search web "<query>" --categories science
+agictl search web "<query>" --fresh         # ask the engines again, not the answer kept from a few minutes ago
 ```
+
+A reply with `"cached": true` is the answer the same query got a few minutes ago (`cached_age_seconds` says how old). That keeps the search engines from suspending this machine for asking too often. Use `--fresh` only when you need results that may have changed in those minutes. An answer with no results is never kept, so a search that was blocked is asked again by itself.
+
+A page behind a sign-in is read with the browser and a session: see `browser_automation.md`, *Sessions*.
 
 - Put the exact terms in the query: product name, version, error text in quotes.
 - If the results are off, change the query. Sending the same query again returns the same results.

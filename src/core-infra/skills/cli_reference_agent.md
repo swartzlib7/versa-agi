@@ -298,6 +298,7 @@ agictl awareness get <entry_id>
 agictl search web "<query>"                           # Find pages: title, URL, snippet, engine
 agictl search web "<query>" --count 10                # Return up to 10 results (default: 5)
 agictl search web "<query>" --categories science      # Filter by search category (default: general)
+agictl search web "<query>" --fresh                   # Ask again; a repeat within a few minutes is answered from the last answer ("cached": true)
 agictl search read "<url>"                            # Read one page as text, no browser (first 8000 characters)
 agictl search read "<url>" --offset <next_offset>     # Read on from where the last reply stopped
 agictl search read "<url>" --max-chars 20000          # Return more per call (limit 20000)
@@ -339,7 +340,11 @@ agictl browser goto "<url>"                           # Load page, return text c
 agictl browser goto "<url>" --offset <next_offset>    # Read on when the reply says "truncated": true
 agictl browser goto "<url>" --screenshot              # Load page + save screenshot
 agictl browser click "<url>" "<selector>"             # Navigate then click an element
-agictl browser fill "<url>" "<selector>" "<value>"    # Navigate then fill a form field
+agictl browser run "<url>" --steps '<json list>'      # Several steps on one page: fill a form and send it, sign in (browser_automation.md)
+agictl browser fill "<url>" "<selector>" "<value>"    # Fill one field; nothing is submitted
+agictl browser goto "<url>" --session <name>          # Any browser command: keep cookies and sign-in under a name for later commands
+agictl browser session list                           # Your saved sessions
+agictl browser session clear <name>                   # Forget one
 agictl browser screenshot "<url>"                     # Capture visible viewport
 agictl browser screenshot "<url>" --full-page         # Capture full scrollable page
 agictl browser extract "<url>"                        # Extract all text content

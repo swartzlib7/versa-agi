@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Sourced by setup.sh.
 # What setup installs at a shipped version (config/shipped_tools.ini,
-# state_host_services.md §1.7): rclone, FUSE, and the Python packages. Nothing here may stop an install or an update:
+# state_host_services.md §1.7): rclone, FUSE, the GitHub CLI, and the Python packages. Nothing here may stop an install or an update:
 # every function reports and returns, and setup carries on.
 #
 # The VERSA_* variables exist for the tests.
 
 SHIPPED_TOOLS_INI="${SHIPPED_TOOLS_INI:-}"
 RCLONE_DEST="${VERSA_RCLONE_DEST:-/usr/local/bin/rclone}"
+GH_DEST="${VERSA_GH_DEST:-/usr/local/bin/gh}"
 
 # shipped_tool_value <ini> <section> <key>
 shipped_tool_value() {
@@ -149,5 +150,73 @@ install_rclone() {
   fi
   rm -rf "${tmp}"
   SHIPPED_TOOL_NOTE="rclone ${version}"
+  return 0
+}
+
+# install_gh <shipped_tools.ini>
+# Installs GitHub's own build of its command-line tool at the pinned version,
+# after its checksum matches. Returns 0 installed now, 1 already at that
+# version, 2 not installed. SHIPPED_TOOL_NOTE says what happened.
+install_gh() {
+  local ini="$1" version url arch sum have tmp archive got unpacked
+  SHIPPED_TOOL_NOTE=""
+  version=$(shipped_tool_value "${ini}" gh version)
+  url=$(shipped_tool_value "${ini}" gh url)
+  arch=$(shipped_tools_arch)
+  if [ -z "${version}" ] || [ -z "${url}" ]; then
+    SHIPPED_TOOL_NOTE="no gh version in ${ini}"
+    return 2
+  fi
+  if [ -z "${arch}" ]; then
+    SHIPPED_TOOL_NOTE="gh is not pinned for this kind of machine ($(uname -m))"
+    return 2
+  fi
+  sum=$(shipped_tool_value "${ini}" gh "sha256_${arch}")
+  if [ -z "${sum}" ]; then
+    SHIPPED_TOOL_NOTE="no checksum for gh ${version} on ${arch}"
+    return 2
+  fi
+  if [ -x "${GH_DEST}" ]; then
+    # "gh version 2.106.0 (2026-11-25)"
+    have=$("${GH_DEST}" --version 2>/dev/null | head -1 | awk '{print $3}')
+    if [ "${have}" = "${version}" ]; then
+      SHIPPED_TOOL_NOTE="gh ${version}"
+      return 1
+    fi
+  fi
+  url="${url//\{version\}/${version}}"
+  url="${url//\{arch\}/${arch}}"
+  tmp=$(mktemp -d) || { SHIPPED_TOOL_NOTE="no temporary folder"; return 2; }
+  archive="${tmp}/gh.tar.gz"
+  if ! "${VERSA_CURL_BIN:-curl}" -fsSL --max-time 180 -o "${archive}" "${url}" 2>/dev/null; then
+    rm -rf "${tmp}"
+    SHIPPED_TOOL_NOTE="gh ${version} could not be downloaded from ${url}"
+    return 2
+  fi
+  got=$(sha256sum "${archive}" 2>/dev/null | awk '{print $1}')
+  if [ "${got}" != "${sum}" ]; then
+    rm -rf "${tmp}"
+    SHIPPED_TOOL_NOTE="gh ${version}: the download does not match its checksum, so it was not installed"
+    return 2
+  fi
+  mkdir -p "${tmp}/out"
+  if ! tar -xzf "${archive}" -C "${tmp}/out" > /dev/null 2>&1; then
+    rm -rf "${tmp}"
+    SHIPPED_TOOL_NOTE="gh ${version}: the download could not be unpacked"
+    return 2
+  fi
+  unpacked=$(find "${tmp}/out" -type f -path "*/bin/gh" | head -1)
+  if [ -z "${unpacked}" ]; then
+    rm -rf "${tmp}"
+    SHIPPED_TOOL_NOTE="gh ${version}: no gh program in the download"
+    return 2
+  fi
+  if ! install -m 755 "${unpacked}" "${GH_DEST}" 2>/dev/null; then
+    rm -rf "${tmp}"
+    SHIPPED_TOOL_NOTE="gh ${version} could not be written to ${GH_DEST}"
+    return 2
+  fi
+  rm -rf "${tmp}"
+  SHIPPED_TOOL_NOTE="gh ${version}"
   return 0
 }

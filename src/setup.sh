@@ -70,7 +70,7 @@ fi
 
 # Product semver — do not name this VERSION. detect_os / install_acceptance
 # source /etc/os-release which sets Ubuntu's VERSION= (e.g. "24.04.4 LTS …").
-PRODUCT_VERSION="3.10.6"
+PRODUCT_VERSION="3.10.7"
 _VERSION_FILE="${SCRIPT_DIR_EARLY}/core-infra/VERSION"
 if [ -f "${_VERSION_FILE}" ]; then
   PRODUCT_VERSION="$(tr -d '[:space:]' < "${_VERSION_FILE}")"
@@ -4437,11 +4437,12 @@ if [ -d /run/systemd/system ]; then
 else
   warn "systemd is not running here — no sleep hold; nothing puts this machine to sleep through systemd either"
 fi
-# ─── Step 11e: Cloud storage tools (rclone and FUSE) ──
+# ─── Step 11e: Cloud storage tools (rclone and FUSE) and the GitHub CLI ──
 # state_host_services.md §1.7. Agents reach a person's cloud files with rclone
-# (skill cloud_storage.md). Both are installed here so an agent has them without
+# (skill cloud_storage.md) and GitHub's issues, pull requests and releases with
+# gh (skill github_cli.md). They are installed here so an agent has them without
 # asking. Best-effort: a machine with no network keeps its install.
-section "Step 11e — Cloud Storage Tools"
+section "Step 11e — Agent Tools (cloud storage, GitHub)"
 
 # shellcheck source=core-infra/scripts/shipped_tools.sh
 source "${SRC_CORE_INFRA}/scripts/shipped_tools.sh"
@@ -4458,6 +4459,13 @@ case "${_RCLONE_RC}" in
   0) ok "${SHIPPED_TOOL_NOTE} installed (/usr/local/bin/rclone)" ;;
   1) ok "${SHIPPED_TOOL_NOTE} already installed" ;;
   *) warn "rclone not installed: ${SHIPPED_TOOL_NOTE}. An agent can request it when it is needed" ;;
+esac
+_GH_RC=0
+install_gh "${SRC_CORE_INFRA}/config/shipped_tools.ini" || _GH_RC=$?
+case "${_GH_RC}" in
+  0) ok "${SHIPPED_TOOL_NOTE} installed (/usr/local/bin/gh)" ;;
+  1) ok "${SHIPPED_TOOL_NOTE} already installed" ;;
+  *) warn "GitHub CLI not installed: ${SHIPPED_TOOL_NOTE}. Agents keep plain git; setup tries again on the next update" ;;
 esac
 
 # ─── System Permissions Restabilization ───────────────
@@ -4618,6 +4626,9 @@ apply_system_permissions() {
   for _run in /var/lib/versa-agi/*/run; do
     [ -d "${_run}" ] && chown -R "${WATCHDOG_USER}:agi_agents" "${_run}" && chmod 2750 "${_run}"
   done
+  # Web search answers kept for a few minutes (agictl search web; watchdog only).
+  mkdir -p /var/lib/versa-agi/search-cache
+  chown -R "${WATCHDOG_USER}:${WATCHDOG_USER}" /var/lib/versa-agi/search-cache && chmod 700 /var/lib/versa-agi/search-cache
   mkdir -p "/var/lib/versa-agi/coa/view-cache"
   chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/view-cache && chmod 770 /var/lib/versa-agi/coa/view-cache
   [ -f "/var/lib/versa-agi/coa/agent_memory.db" ] && chown "${COA_USER}:${COA_USER}" /var/lib/versa-agi/coa/agent_memory.db && chmod 660 /var/lib/versa-agi/coa/agent_memory.db
@@ -4917,6 +4928,47 @@ if [ "${UPDATE_MODE}" = true ]; then
     echo -e "  ${DIM:-}To resume: sudo agitop → Controls → LIFELINE ON${RESET:-}"
     fi
   fi
+  echo ""
+fi
+
+# ─── Update: web search settings and image ───────────
+# Step 9d runs the SearXNG provider on a new install only (it sits inside the
+# UPDATE_MODE=false guard of Step 9). Until 3.10.7 nothing ran it on an update,
+# so an existing install kept the search settings it was installed with: the
+# engine changes of 3.8.0 never reached it (state_web_access.md WEB-13).
+#
+# On an update the same script refreshes a search service that is already
+# there: settings.yml is written again, the image is pulled, and the container
+# is recreated when either changed. It does not install Docker or a first
+# container from here: that is the install step, or `sudo providers/searxng.sh`.
+# ── search refresh: begin ──
+refresh_search_on_update() {
+  local script="${SCRIPT_DIR}/providers/searxng.sh"
+  local settings="${SEARXNG_SETTINGS_FILE:-/etc/searxng/settings.yml}"
+  [ -f "${script}" ] || return 0
+  if [ "$(ini_get search enabled false)" != "true" ]; then
+    info "Web search is off ([search] enabled=false) — SearXNG left as it is"
+    return 0
+  fi
+  if ! command -v docker &>/dev/null; then
+    warn "Web search is on but Docker is not installed — to install it: sudo ${script}"
+    return 0
+  fi
+  if [ ! -f "${settings}" ] && ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^searxng$'; then
+    warn "Web search is on but there is no SearXNG container here — to install it: sudo ${script}"
+    return 0
+  fi
+  if [ "${DRY_RUN:-false}" = true ]; then
+    dry "Would refresh SearXNG: settings.yml, image, container"
+    return 0
+  fi
+  VERSA_SETUP_PARENT=1 bash "${script}" \
+    || warn "SearXNG refresh failed — web search keeps its earlier settings. Try: sudo ${script}"
+}
+# ── search refresh: end ──
+if [ "${UPDATE_MODE}" = true ]; then
+  section "Update — Web Search"
+  refresh_search_on_update
   echo ""
 fi
 

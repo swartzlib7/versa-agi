@@ -342,6 +342,10 @@ workspace_link=
 enabled=true
 engine=searxng
 searxng_url=http://localhost:8888
+# The same query asked again within this many minutes is answered from the last
+# answer and not sent to the search engines again (they suspend a client that
+# asks too often). 0 = always ask. An agent can ask again with --fresh.
+cache_minutes=10
 # SearXNG reads the public pages of Google, Bing, DuckDuckGo, Brave, Qwant and
 # Yahoo. Those sites block automated readers from time to time. The two keys
 # below add engines that use an official API instead, inside the same SearXNG.

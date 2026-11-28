@@ -14504,6 +14504,8 @@ def _get_search_config():
         "enabled": config.get("search", "enabled", fallback="false").lower() == "true",
         "engine": config.get("search", "engine", fallback="searxng"),
         "searxng_url": config.get("search", "searxng_url", fallback="http://localhost:8888"),
+        # state_web_access.md §1.2 rule 10
+        "cache_minutes": config.get("search", "cache_minutes", fallback=""),
     }
 
 
@@ -14517,19 +14519,32 @@ def search():
 @click.argument("query")
 @click.option("--count", "-n", default=5, help="Number of results to return (default: 5)")
 @click.option("--categories", "-c", default="general", help="Search categories (default: general)")
-def search_web(query, count, categories):
+@click.option("--fresh", is_flag=True, help="Ask the search engines again even when this query was answered a few minutes ago")
+def search_web(query, count, categories, fresh):
     """Search the web using the local SearXNG instance.
 
     Returns top N results with title, URL, and snippet as JSON.
     Requires SearXNG to be installed and enabled in setup.ini [search].
+
+    The same query asked again within [search] cache_minutes (default 10) is
+    answered from the last answer, marked "cached": true. --fresh asks again.
     """
     import urllib.request
     import urllib.parse
+    from agictl import search_cache
 
     config = _get_search_config()
     if not config["enabled"]:
         json_response(False, error="Web search is disabled. Enable it in setup.ini [search] enabled=true and install SearXNG via setup_providers.sh")
         sys.exit(1)
+
+    cache_minutes = search_cache.minutes_setting(config.get("cache_minutes"))
+    if not fresh:
+        kept, age = search_cache.get(query, categories, cache_minutes)
+        if kept:
+            json_response(True, query=query, results=kept[:count], count=len(kept[:count]),
+                          cached=True, cached_age_seconds=age)
+            return
 
     base_url = config["searxng_url"].rstrip("/")
     params = urllib.parse.urlencode({
@@ -14550,14 +14565,16 @@ def search_web(query, count, categories):
         json_response(False, error=f"Search failed: {e}")
         sys.exit(1)
 
-    results = []
-    for item in data.get("results", [])[:count]:
-        results.append({
+    found = []
+    for item in data.get("results", [])[:search_cache.KEEP_RESULTS]:
+        found.append({
             "title": item.get("title", ""),
             "url": item.get("url", ""),
             "snippet": item.get("content", ""),
             "engine": item.get("engine", ""),
         })
+    search_cache.put(query, categories, found, cache_minutes)
+    results = found[:count]
 
     if not results:
         unresponsive = [
@@ -14879,20 +14896,30 @@ def browser():
     pass
 
 
-def _browser_setup(user_agent):
+def _browser_setup(user_agent, session=None):
     """Access check + per-call settings shared by every browser command.
 
     User agent order: the command's --user-agent, then [browser] user_agent,
-    then the script's default (state_web_access.md §1.1 rule 4).
+    then the script's default (state_web_access.md §1.1 rule 4). With a
+    session and no --user-agent, the session keeps the one it started with
+    (§1.4), so the [browser] setting is not forced on it.
     """
     from agictl import browser_script
     config = _check_browser_access()
-    chosen = (user_agent or "").strip() or config["user_agent"]
+    session = (session or "").strip()
+    problem = browser_script.session_error(session)
+    if problem:
+        json_response(False, error=problem)
+        sys.exit(1)
+    config["session"] = session
+    given = (user_agent or "").strip()
+    chosen = given or config["user_agent"]
     problem = browser_script.user_agent_error(chosen)
     if problem:
         json_response(False, error=problem)
         sys.exit(1)
-    config["user_agent"] = chosen
+    config["user_agent"] = given if session else chosen
+    config["session_first_user_agent"] = chosen if session else ""
     config["settle_ms"] = browser_script.settle_ms(config["settle_seconds"], config["timeout"])
     return config
 
@@ -14902,13 +14929,27 @@ def _browser_run(body: str, config: dict):
     from agictl import browser_script
     script = browser_script.build_script(
         body, user_agent=config["user_agent"], timeout_ms=config["timeout"],
-        settle_wait_ms=config["settle_ms"],
+        settle_wait_ms=config["settle_ms"], session=config.get("session", ""),
+        fallback_user_agent=config.get("session_first_user_agent", ""),
     )
-    success, output = _run_playwright_script(script, config["timeout"] + config["settle_ms"])
+    success, output = _run_playwright_script(
+        script, config.get("run_timeout_ms") or (config["timeout"] + config["settle_ms"]))
     return success, browser_script.parse_output(output) if success else {}, output
 
 
+def _session_fields(result: dict, found: dict, config: dict) -> None:
+    """Say which session a reply used, and when its saved state could not be read."""
+    if config.get("session"):
+        result["session"] = config["session"]
+        if found.get("session_reset"):
+            result["session_reset"] = True
+            result["note"] = ("The saved state of this session could not be read, so the "
+                              "command started it again: sign in again if the page asks.")
+
+
 _USER_AGENT_HELP = "User agent for this call (default: [browser] user_agent, else desktop Chrome)"
+_SESSION_HELP = ("Name of a session to use: its cookies and sign-ins are loaded, and kept again "
+                 "when the command ends (default: a clean browser)")
 
 
 @browser.command("goto")
@@ -14919,10 +14960,11 @@ _USER_AGENT_HELP = "User agent for this call (default: [browser] user_agent, els
 @click.option("--max-chars", "max_chars", default=None, type=int,
               help="Most characters to return (default 8000, limit 20000)")
 @click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
-def browser_goto(url, take_screenshot, selector, offset, max_chars, user_agent):
+@click.option("--session", "session", default=None, help=_SESSION_HELP)
+def browser_goto(url, take_screenshot, selector, offset, max_chars, user_agent, session):
     """Navigate to a URL and return page content."""
     from agictl import browser_script
-    config = _browser_setup(user_agent)
+    config = _browser_setup(user_agent, session)
     _validate_browser_url(url)
     agent_name = get_agent_name()
 
@@ -14943,7 +14985,7 @@ def browser_goto(url, take_screenshot, selector, offset, max_chars, user_agent):
         "    emit(\"TITLE\", page.title())\n"
         f"    emit(\"CONTENT\", page.locator({repr(selector or 'body')}).inner_text(timeout=TIMEOUT_MS))\n"
         f"{screenshot_lines}"
-        "    browser.close()\n"
+        "    finish(browser, page)\n"
     )
     success, found, output = _browser_run(body, config)
     if not success:
@@ -14951,6 +14993,7 @@ def browser_goto(url, take_screenshot, selector, offset, max_chars, user_agent):
         return
 
     result = {"url": url}
+    _session_fields(result, found, config)
     if "title" in found:
         result["title"] = found["title"]
     if "content" in found:
@@ -14968,10 +15011,11 @@ def browser_goto(url, take_screenshot, selector, offset, max_chars, user_agent):
 @click.argument("url")
 @click.argument("selector")
 @click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
-def browser_click(url, selector, user_agent):
+@click.option("--session", "session", default=None, help=_SESSION_HELP)
+def browser_click(url, selector, user_agent, session):
     """Navigate to URL and click an element."""
     from agictl import browser_script
-    config = _browser_setup(user_agent)
+    config = _browser_setup(user_agent, session)
     _validate_browser_url(url)
 
     body = (
@@ -14982,7 +15026,7 @@ def browser_click(url, selector, user_agent):
         "    emit(\"TITLE\", page.title())\n"
         "    emit(\"URL\", page.url)\n"
         "    emit(\"CONTENT\", page.locator(\"body\").inner_text(timeout=TIMEOUT_MS))\n"
-        "    browser.close()\n"
+        "    finish(browser, page)\n"
     )
     success, found, output = _browser_run(body, config)
     if not success:
@@ -14990,6 +15034,7 @@ def browser_click(url, selector, user_agent):
         return
 
     result = {"url": url, "selector": selector, "action": "click"}
+    _session_fields(result, found, config)
     if "title" in found:
         result["title"] = found["title"]
     if "url" in found:
@@ -15004,9 +15049,14 @@ def browser_click(url, selector, user_agent):
 @click.argument("selector")
 @click.argument("value")
 @click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
-def browser_fill(url, selector, value, user_agent):
-    """Navigate to URL and fill a form field."""
-    config = _browser_setup(user_agent)
+@click.option("--session", "session", default=None, help=_SESSION_HELP)
+def browser_fill(url, selector, value, user_agent, session):
+    """Navigate to URL and fill a form field.
+
+    The page is closed when the command ends, so what was filled in is not
+    submitted. To fill a form and send it, use `browser run` with steps.
+    """
+    config = _browser_setup(user_agent, session)
     _validate_browser_url(url)
 
     body = (
@@ -15015,14 +15065,17 @@ def browser_fill(url, selector, value, user_agent):
         f"    page.locator({repr(selector)}).fill({repr(value)}, timeout=TIMEOUT_MS)\n"
         "    emit(\"FILLED\", \"true\")\n"
         "    emit(\"TITLE\", page.title())\n"
-        "    browser.close()\n"
+        "    finish(browser, page)\n"
     )
     success, found, output = _browser_run(body, config)
     if not success:
         json_response(False, error=f"Fill failed: {output}")
         return
 
-    result = {"url": url, "selector": selector, "value": value, "action": "fill"}
+    result = {"url": url, "selector": selector, "value": value, "action": "fill",
+              "note": "Nothing was submitted: the page closed with the command. "
+                      "Use `browser run` with steps to fill a form and send it."}
+    _session_fields(result, found, config)
     if "title" in found:
         result["title"] = found["title"]
     if "filled" in found:
@@ -15035,9 +15088,10 @@ def browser_fill(url, selector, value, user_agent):
 @click.option("--path", "save_path", default=None, help="Save path (default: agent workspace)")
 @click.option("--full-page", "full_page", is_flag=True, help="Capture full page (not just viewport)")
 @click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
-def browser_screenshot(url, save_path, full_page, user_agent):
+@click.option("--session", "session", default=None, help=_SESSION_HELP)
+def browser_screenshot(url, save_path, full_page, user_agent, session):
     """Navigate to URL and take a screenshot."""
-    config = _browser_setup(user_agent)
+    config = _browser_setup(user_agent, session)
     _validate_browser_url(url)
     agent_name = get_agent_name()
 
@@ -15059,7 +15113,7 @@ def browser_screenshot(url, save_path, full_page, user_agent):
         f"    page.screenshot(path=save_path, full_page={repr(bool(full_page))})\n"
         "    emit(\"SCREENSHOT\", save_path)\n"
         "    emit(\"TITLE\", page.title())\n"
-        "    browser.close()\n"
+        "    finish(browser, page)\n"
     )
     success, found, output = _browser_run(body, config)
     if not success:
@@ -15067,6 +15121,7 @@ def browser_screenshot(url, save_path, full_page, user_agent):
         return
 
     result = {"url": url, "action": "screenshot", "full_page": full_page}
+    _session_fields(result, found, config)
     if "screenshot" in found:
         result["path"] = found["screenshot"]
     if "title" in found:
@@ -15079,9 +15134,10 @@ def browser_screenshot(url, save_path, full_page, user_agent):
 @click.option("--selector", default="body", help="CSS selector (default: body)")
 @click.option("--attribute", default=None, help="Element attribute to extract (default: text content)")
 @click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
-def browser_extract(url, selector, attribute, user_agent):
+@click.option("--session", "session", default=None, help=_SESSION_HELP)
+def browser_extract(url, selector, attribute, user_agent, session):
     """Extract structured content from a page."""
-    config = _browser_setup(user_agent)
+    config = _browser_setup(user_agent, session)
     _validate_browser_url(url)
 
     if attribute:
@@ -15094,7 +15150,7 @@ def browser_extract(url, selector, attribute, user_agent):
         f"    browser, page = open_page(p, {repr(url)})\n"
         f"    emit(\"EXTRACT\", {extract_expr})\n"
         "    emit(\"TITLE\", page.title())\n"
-        "    browser.close()\n"
+        "    finish(browser, page)\n"
     )
     success, found, output = _browser_run(body, config)
     if not success:
@@ -15102,6 +15158,7 @@ def browser_extract(url, selector, attribute, user_agent):
         return
 
     result = {"url": url, "selector": selector, "action": "extract"}
+    _session_fields(result, found, config)
     if "extract" in found:
         result["data"] = found["extract"]
     if "title" in found:
@@ -15109,6 +15166,112 @@ def browser_extract(url, selector, attribute, user_agent):
     if attribute:
         result["attribute"] = attribute
     json_response(True, **result)
+
+
+# One tool call may run 120 seconds (harness AGICTL_TOOL_TIMEOUT_SECONDS). A
+# run of several steps is stopped a little before that, so the agent gets an
+# answer it can act on instead of a tool timeout.
+BROWSER_RUN_LIMIT_MS = 105_000
+
+
+@browser.command("run")
+@click.argument("url")
+@click.option("--steps", "steps_json", required=True,
+              help='JSON list of steps done in order on one page, e.g. '
+                   '\'[{"do":"fill","selector":"#user","value":"me"},{"do":"click","selector":"button[type=submit]"}]\'. '
+                   'Actions: goto (url), fill (selector, value), click (selector), press (selector, key), '
+                   'select (selector, value), check, uncheck, wait_for (selector). At most 20.')
+@click.option("--session", "session", default=None, help=_SESSION_HELP)
+@click.option("--screenshot", "take_screenshot", is_flag=True, help="Take a screenshot after the last step")
+@click.option("--offset", default=0, type=int, help="Start of the returned text (use next_offset to read on)")
+@click.option("--max-chars", "max_chars", default=None, type=int,
+              help="Most characters to return (default 8000, limit 20000)")
+@click.option("--user-agent", "user_agent", default=None, help=_USER_AGENT_HELP)
+def browser_run(url, steps_json, session, take_screenshot, offset, max_chars, user_agent):
+    """Open a page and do several steps on it in one go (fill a form and send it,
+    sign in, click through). Returns the page as it is after the last step.
+
+    With --session the sign-in this leaves behind is kept for later commands
+    (state_web_access.md §1.4).
+    """
+    from agictl import browser_script
+    config = _browser_setup(user_agent, session)
+    _validate_browser_url(url)
+    steps, problem = browser_script.parse_steps(steps_json)
+    if problem:
+        json_response(False, error=problem)
+        sys.exit(1)
+
+    per_step = config["timeout"] + config["settle_ms"]
+    config["run_timeout_ms"] = min(BROWSER_RUN_LIMIT_MS, per_step * (len(steps) + 1))
+    screenshot_dir = _get_screenshot_dir(get_agent_name()) if take_screenshot else ""
+    body = browser_script.run_body(url, steps, screenshot_dir=screenshot_dir)
+    success, found, output = _browser_run(body, config)
+    if not success:
+        json_response(False, error=f"Run failed: {output}")
+        return
+
+    result = {"url": url, "action": "run", "steps": len(steps),
+              "steps_done": int(found.get("steps_done") or 0)}
+    failed = found.get("step_failed")
+    if "title" in found:
+        result["title"] = found["title"]
+    if "url" in found:
+        result["current_url"] = found["url"]
+    if "content" in found:
+        result.update(browser_script.page_slice(
+            browser_script.tidy_text(found["content"]), offset,
+            max_chars if max_chars is not None else browser_script.DEFAULT_MAX_CHARS,
+        ))
+    if "screenshot" in found:
+        result["screenshot"] = found["screenshot"]
+    if failed:
+        result["failed_step"] = failed
+        if config.get("session"):
+            result["session"] = config["session"]
+            result["session_saved"] = False
+        json_response(False, error=(f"Step {failed.get('step')} ({failed.get('do')}) failed: {failed.get('error')}. "
+                                    "The page as it was at that point is in this reply."), **result)
+        return
+    _session_fields(result, found, config)
+    json_response(True, **result)
+
+
+@browser.group("session")
+def browser_session():
+    """Named browser sessions: the cookies and sign-ins kept between commands."""
+    pass
+
+
+@browser_session.command("list")
+def browser_session_list():
+    """List this agent's saved browser sessions."""
+    from agictl import browser_script
+    _check_browser_access()
+    success, output = _run_playwright_script(browser_script.SESSIONS_LIST_SCRIPT, 10_000)
+    found = browser_script.parse_output(output) if success else {}
+    if not success or "sessions" not in found:
+        json_response(False, error=f"Could not list sessions: {output}")
+        return
+    json_response(True, sessions=found["sessions"], count=len(found["sessions"]))
+
+
+@browser_session.command("clear")
+@click.argument("name")
+def browser_session_clear(name):
+    """Forget a session: its cookies and sign-ins are deleted."""
+    from agictl import browser_script
+    _check_browser_access()
+    problem = browser_script.session_error(name) or ("" if name else "Name the session to clear.")
+    if problem:
+        json_response(False, error=problem)
+        sys.exit(1)
+    success, output = _run_playwright_script(browser_script.session_clear_script(name), 10_000)
+    found = browser_script.parse_output(output) if success else {}
+    if not success or "cleared" not in found:
+        json_response(False, error=f"Could not clear the session: {output}")
+        return
+    json_response(True, session=name, cleared=found["cleared"] == "yes")
 
 
 @browser.command("enable")

@@ -11,6 +11,7 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 ### Versa Desktop
 
 #### Added
+- **Running apps from the bottom edge** — While an app is running, a thin line shows at the bottom centre of the primary screen, under the app's box. Rest the pointer on it and the running apps come up; click one to show it, or drag it to another screen. Move the pointer away and they go. There is no line while an app is at full screen.
 - **The lid, as a setting** — Settings has "When the lid closes" and "When the lid closes with another screen attached": Sleep, Lock or Nothing for each. They start as Ubuntu has them (Sleep, and Nothing with another screen). Sleep locks the session first, so the computer wakes to the lock.
 - **A program can hold sleep back, and the lock says so** — When a program has asked the system not to sleep, a lid set to Sleep and "Sleep after locked for" wait for it. The lock screen shows "Sleep is waiting for" and the program's name and reason, and the computer sleeps once the hold ends.
 - **Sleep after the lock** — "Sleep after locked for" puts the computer to sleep once it has been locked for the time you set. It starts as Never. Sleep stops everything on the computer, your agents included, until it wakes.
@@ -19,6 +20,30 @@ From 3.5.24 on, each heading is the Versa AGi product version, the same number `
 - **The Super button is in the top left corner** — The running-apps button is now a round symbol at the far left of the top bar. Push the pointer into the corner and click to open the overlay. The keyboard, mouse, screen and sound symbols are centred in the room it left.
 - **Settings is easier to read** — Each group is in a box of its own with a symbol and a larger name. "Lock now" is a filled button with a lock symbol on the first line of "Screen, lock and sleep".
 - **An app with several windows shows the one you had before** — When the window an app's box shows is closed, the box goes back to the window shown before it, not to the last one in the row.
+
+## [3.10.7] — 2026-11-27
+
+### GitHub
+
+#### Added
+- **The GitHub CLI is installed with Versa AGi** — Setup installs GitHub's own `gh` 2.106.0, checked against its published checksum first. A new skill, `github_cli`, lets an agent work with issues, pull requests, build results and releases, which git alone cannot reach. An agent signs in with a token you make in your GitHub account, limited to the repositories and actions you choose; each agent's sign-in is its own.
+
+### Browser
+
+#### Added
+- **Staying signed in** — Any browser command can take `--session <name>`. The cookies and sign-in it ends with are kept under that name and loaded by the next command that names it, also in a later cycle. Each agent's sessions are in its own home and no other agent can use them. `agictl browser session list` and `session clear` manage them.
+- **Several steps on one page** — `agictl browser run "<url>" --steps '[…]'` fills fields, clicks, presses keys and waits, in order, in one visit, and returns the page as it is afterwards. This is how an agent fills a form and sends it, or signs in.
+
+#### Fixed
+- **A form could be filled but never sent** — Each browser command opens a page and closes it, so a field filled by one command was empty again in the next. The skill's own example did this. It now uses `browser run`.
+
+### Web search
+
+#### Added
+- **A repeated search is not sent again** — The same query asked again within ten minutes is answered from the last answer, marked `cached`. Search engines suspend a machine that asks too often; this keeps repeats from counting. `[search] cache_minutes` sets the time (0 turns it off) and `--fresh` asks again.
+
+#### Fixed
+- **Search settings never reached an existing install** — The search improvements of 3.8.0 (more engines, the optional Brave and Exa keys applied on update, a newer SearXNG image) were written only when Versa AGi was first installed. `setup.sh --update` did not run that step, so an install older than 3.8.0 kept its first settings and could return no results. An update now refreshes the search service that is already there.
 
 ## [3.10.6] — 2026-11-25
 
